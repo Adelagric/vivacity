@@ -195,10 +195,16 @@ pub async fn install(
     }
 
     // Layout: remove the old version, then clone from the store.
-    for p in &to_install {
+    // Packages land in disjoint directories → fan-out where parallel I/O
+    // pays (Linux: sylius vendor/ wiped 3.75 s -> 1.68 s on ext4/WSL2);
+    // sequential where it does not (APFS clonefile is metadata-bound and
+    // contends: 607 ms -> 635 ms on an M4 Max). Each package stays atomic
+    // (remove-before-clone); only the inter-package order changes, which
+    // affects nothing but mtimes. `VIVACITY_PARALLEL_IO=0|1` overrides.
+    let place = |p: &&LockPackage| -> Result<bool> {
         let (Some(pkg_root), Some(dest)) = (layout.package_root(p.name()), layout.abs(p.name()))
         else {
-            continue;
+            return Ok(false);
         };
         // Always start again from an empty package root (target-dir included).
         if pkg_root.exists() {
@@ -206,17 +212,46 @@ pub async fn install(
         }
         let src = store.entry_path(p.name(), p.version(), p.dist_reference());
         crate::clone::clone_tree(&src, &dest)?;
-        report.installed += 1;
-    }
+        Ok(true)
+    };
+    let placed: Vec<bool> = if crate::platform::parallel_io() {
+        use rayon::prelude::*;
+        to_install.par_iter().map(place).collect::<Result<_>>()?
+    } else {
+        to_install.iter().map(place).collect::<Result<_>>()?
+    };
+    let installed: usize = placed.into_iter().filter(|placed| *placed).count();
+    report.installed += installed;
 
-    // Bin proxies: rebuilt for every wanted package, then purge of the
-    // orphaned proxies (removed packages). The `.bat` follows the resolved
-    // bin-compat (`full`, or `auto` on Windows/WSL), like Composer's
-    // BinaryInstaller — a plain Linux/macOS install writes no `.bat`.
+    // Bin proxies: rebuilt for the packages actually (re)placed
+    // (`BinaryInstaller::installBinaries` on install/update), and — like
+    // `Installer::run`'s `ensureBinariesPresence` over every installed
+    // package — written for an unchanged package only where the proxy is
+    // MISSING (`installBinaries(..., warnOnOverwrite: false)` skips an
+    // existing one): a wiped `vendor/bin` comes back on a no-op install,
+    // and a no-op install otherwise touches nothing. The purge of orphaned
+    // proxies (removed packages) runs on `wanted`. The `.bat` follows the
+    // resolved bin-compat (`full`, or `auto` on Windows/WSL), like
+    // Composer's BinaryInstaller — a plain Linux/macOS install writes no
+    // `.bat`.
     let bin_compat = crate::binproxy::resolve_bin_compat(root_manifest)?;
+    let placed: std::collections::HashSet<&str> = to_install.iter().map(|p| p.name()).collect();
     for p in &wanted {
         let bins = p.bins();
-        if let (false, Some(dir)) = (bins.is_empty(), layout.abs(p.name())) {
+        if bins.is_empty() {
+            continue;
+        }
+        let Some(dir) = layout.abs(p.name()) else {
+            continue;
+        };
+        let missing = || {
+            bins.iter().any(|b| {
+                let b = b.trim_start_matches("./");
+                let link_name = b.rsplit_once('/').map(|(_, f)| f).unwrap_or(b);
+                dir.join(b).exists() && !vendor.join("bin").join(link_name).exists()
+            })
+        };
+        if placed.contains(p.name()) || missing() {
             crate::binproxy::install_binaries(&vendor, &dir, &bins, bin_compat)?;
         }
     }
