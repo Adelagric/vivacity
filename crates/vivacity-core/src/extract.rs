@@ -124,11 +124,25 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
             let _ = std::fs::remove_file(&out);
             #[cfg(unix)]
             crate::clone::symlink_like_unzip(std::path::Path::new(&target), &out)?;
-            // Off Unix: PHP ZipArchive (what Composer uses on Windows) does
-            // not recreate symlinks — the entry becomes an ordinary file
-            // whose content is the target. Same here, after the same
-            // hostility checks.
-            #[cfg(not(unix))]
+            // Windows: Composer extracts with `unzip` or `7z` when one is on
+            // the PATH (`ZipDownloader::$unzipCommands`), which recreate the
+            // link when the process may create links (the GitHub runner);
+            // with PHP's ZipArchive the entry becomes an ordinary file whose
+            // content is the target. Same rule here: a link when such a tool
+            // is present and the link can be made, the file otherwise.
+            #[cfg(windows)]
+            {
+                let tool_present = std::env::var_os("PATH").is_some_and(|path| {
+                    std::env::split_paths(&path)
+                        .any(|dir| dir.join("unzip.exe").exists() || dir.join("7z.exe").exists())
+                });
+                let linked =
+                    tool_present && std::os::windows::fs::symlink_file(&target, &out).is_ok();
+                if !linked {
+                    std::fs::write(&out, target.as_bytes()).map_err(Error::io(&out))?;
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
             std::fs::write(&out, target.as_bytes()).map_err(Error::io(&out))?;
         } else {
             if let Some(p) = out.parent() {
