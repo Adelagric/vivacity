@@ -22,6 +22,8 @@ byte-identical-output promise are the public API.
   `$VAR` forms are refused as scope issues. `harness/vendor-dir.sh`: six
   variants on the symfony and wordpress fixtures (install, `dump -o`,
   no-op; whole project compared), in CI on Linux, macOS and Windows.
+  Corpus: 55/105 native in dev (was 50), 63/105 in `--no-dev` (was 56),
+  0 diff (`docs/corpus/2026-09-16-v0.11.md`).
 - `bench/ci-cache.sh` + `ci-cache` workflow (on demand): what a CI cache
   artifact costs, Composer's zip cache against the extracted store, and the
   install each one enables; results and reading in `bench/M7-ci-cache.md`.
