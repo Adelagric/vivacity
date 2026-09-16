@@ -1,5 +1,6 @@
 # Entries that cannot enter the corpus, and why (2026-09-16).
 magento/project-community-edition   authentication required (repo.magento.com)
+Laravel-Backpack/demo               authentication required (backpackforlaravel.com satis: Backpack PRO dists)
 ibexa/*                             authentication required beyond the OSS skeleton
 oro/*                               authentication required
 picocms/pico-composer               unsolvable on PHP 8.5 even with php ignored (create-project resolves live)
