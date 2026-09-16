@@ -537,10 +537,23 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         ignored.push("*".to_owned());
     }
     if ignored.iter().all(|p| p != "*") {
-        match vivacity_core::platform::Platform::detect()? {
-            Some(mut platform) => {
-                platform.apply_overrides(&manifest);
-                let failures = vivacity_core::platform::check(&lock, &platform, with_dev, &ignored);
+        // The full platform repository (php, extensions, libraries, the
+        // composer-*-api packages, `config.platform`), probed through php
+        // like `update` does; without php, a warning.
+        let probed = vivacity_resolver::platform::probe().ok();
+        match probed {
+            Some(probed) => {
+                let empty = serde_json::Map::new();
+                let overrides = manifest
+                    .get("config")
+                    .and_then(|c| c.get("platform"))
+                    .and_then(serde_json::Value::as_object)
+                    .unwrap_or(&empty);
+                let platform = vivacity_resolver::platform::platform_packages(&probed, overrides)
+                    .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+                let failures = vivacity_resolver::platform::check_install(
+                    &lock, &platform, with_dev, &ignored,
+                );
                 if !failures.is_empty() {
                     eprintln!("Your lock file cannot be installed on this platform:");
                     for f in &failures {

@@ -350,6 +350,101 @@ pub fn platform_packages(
     Ok(packages)
 }
 
+/// `install`'s platform verification on the full platform repository
+/// (`PlatformRepository`: php, extensions, `lib-*` libraries, the
+/// composer-*-api packages, `config.platform` overrides), the way
+/// `Installer::doInstall` checks the lock: every platform requirement of
+/// the lock's `platform`/`platform-dev` sections and of the wanted
+/// packages must be satisfied by a platform package's name, or by one of
+/// its `provide`/`replace` links (`lib-dom-libxml` through `lib-libxml`,
+/// `php-64bit` through `php`).
+pub fn check_install(
+    lock: &vivacity_core::lock::Lock,
+    platform: &[Package],
+    with_dev: bool,
+    ignored: &[String],
+) -> Vec<vivacity_core::platform::PlatformFailure> {
+    use vivacity_core::platform::{FailureReason, PlatformFailure};
+    let mut reqs: Vec<(String, String, Option<String>)> = Vec::new();
+    for (name, cons) in &lock.platform {
+        reqs.push((name.clone(), cons.clone(), None));
+    }
+    if with_dev {
+        for (name, cons) in &lock.platform_dev {
+            reqs.push((name.clone(), cons.clone(), None));
+        }
+    }
+    for p in lock.wanted_packages(with_dev) {
+        if let Some(require) = p.raw.get("require").and_then(Value::as_object) {
+            for (name, cons) in require {
+                let lname = name.to_ascii_lowercase();
+                if is_platform_package(&lname) {
+                    if let Some(c) = cons.as_str() {
+                        reqs.push((lname, c.to_owned(), Some(p.name().to_owned())));
+                    }
+                }
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    for (requirement, cons, required_by) in reqs {
+        if vivacity_core::platform::is_ignored(&requirement, ignored) {
+            continue;
+        }
+        // The package itself, else a link providing/replacing the name.
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        for p in platform {
+            if p.name == requirement {
+                candidates.push((p.version.clone(), p.pretty_version.clone()));
+            }
+            for link in p.provides.iter().chain(p.replaces.iter()) {
+                if link.target == requirement {
+                    let v = match &link.constraint {
+                        Constraint::Single {
+                            op: Op::Eq,
+                            version,
+                        } => version.clone(),
+                        _ => continue,
+                    };
+                    candidates.push((v, link.pretty_constraint.clone()));
+                }
+            }
+        }
+        if candidates.is_empty() {
+            failures.push(PlatformFailure {
+                requirement,
+                constraint: cons,
+                required_by,
+                reason: FailureReason::Missing,
+            });
+            continue;
+        }
+        let Ok(parsed) = crate::constraint::parse_constraints(&cons) else {
+            failures.push(PlatformFailure {
+                requirement,
+                constraint: cons,
+                required_by,
+                reason: FailureReason::Unsupported,
+            });
+            continue;
+        };
+        if !candidates
+            .iter()
+            .any(|(v, _)| parsed.constraint.matches_version(v))
+        {
+            failures.push(PlatformFailure {
+                requirement,
+                constraint: cons,
+                required_by,
+                reason: FailureReason::Mismatch {
+                    installed: candidates[0].1.trim_start_matches("== ").to_owned(),
+                },
+            });
+        }
+    }
+    failures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

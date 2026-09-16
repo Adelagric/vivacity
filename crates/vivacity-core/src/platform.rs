@@ -299,7 +299,8 @@ pub fn check(
     failures
 }
 
-fn is_ignored(requirement: &str, ignored: &[String]) -> bool {
+/// `--ignore-platform-req` patterns (`*`, a name, `ext-*`, a trailing `+`).
+pub fn is_ignored(requirement: &str, ignored: &[String]) -> bool {
     ignored.iter().any(|pat| {
         let pat = pat.strip_suffix('+').unwrap_or(pat);
         pat == "*"

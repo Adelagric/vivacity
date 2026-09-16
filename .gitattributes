@@ -4,3 +4,5 @@
 # everywhere, otherwise core.autocrlf=true turns the include_str! assets and
 # the reference sources into CRLF, which breaks fingerprints and parity.
 * text=auto eol=lf
+# Corpus entries are verbatim copies of other projects: no line-ending normalisation.
+fixtures/corpus/** -text
