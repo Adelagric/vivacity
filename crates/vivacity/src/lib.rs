@@ -7,6 +7,7 @@
 //! embed the commands as they are (`vivacity::run(["vivacity", "install", …])`)
 //! and get the same exit code.
 
+mod extension_installers;
 mod require;
 
 use anyhow::Context as _;
@@ -820,6 +821,22 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 &project, layout, &installed, &manifest,
             )?;
         }
+        extension_installers::phpstan(
+            &project,
+            layout,
+            local,
+            &manifest,
+            with_dev,
+            !args.no_plugins,
+        )?;
+        extension_installers::rector(
+            &project,
+            layout,
+            local,
+            &manifest,
+            with_dev,
+            !args.no_plugins,
+        )?;
     }
     let warmed = if report.store_warmed > 0 {
         format!(", store warmed for {} packages", report.store_warmed)

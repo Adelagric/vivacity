@@ -32,6 +32,14 @@ byte-identical-output promise are the public API.
   exists. Four corpus projects became native with their dev packages.
   An emulated plugin listed as `false` in `allow-plugins` is skipped,
   like Composer skips the real one.
+- **`phpstan/extension-installer` (1.4.3) and `rector/extension-installer`
+  (0.11.2) emulated**: `src/GeneratedConfig.php` — the extensions keyed
+  by name with their absolute and shortest-relative install paths,
+  `extra`, `getFullPrettyVersion()`, phpstan's `NOT_INSTALLED` list and
+  the compacted `phpstan/phpstan` constraint (`Intervals::compactConstraint`)
+  — written after the transaction like the plugins' `post-install-cmd`
+  listeners. Four corpus projects, and the sylius and rector fixtures,
+  native again with their dev packages.
 - **`BENIGN_PLUGINS` pruned on the corpus's evidence**: `phpstan/extension-installer`,
   `rector/extension-installer` and `dealerdirect/phpcodesniffer-composer-installer`
   write files under a Composer with plugins active; a project locking one

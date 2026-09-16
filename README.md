@@ -73,16 +73,15 @@ How much of the real world that covers is measured, not assumed:
 105 real PHP projects (application templates and applications with a
 committed lock, pinned — `fixtures/corpus/`). On 2026-09-16, against
 Composer 2.10.3 `--no-scripts` with its plugins active, `vivacity install`
-laid out **56 of 105 projects (53 %) natively with `--no-dev`** and 46 of
-105 (44 %) with the dev packages, byte-identical down to file modes and
+laid out **56 of 105 projects (53 %) natively with `--no-dev`** and 50 of
+105 (48 %) with the dev packages, byte-identical down to file modes and
 link targets, and **no diff in either mode**: every other project was
 handed to Composer before any write, for reasons the report ranks —
 `config.vendor-dir`, packages without a zip dist, `bin-dir`,
-`phpstan/extension-installer`, `wikimedia/composer-merge-plugin`, then
-plugins one by one. `pestphp/pest-plugin` and
-`dealerdirect/phpcodesniffer-composer-installer` headed that list a few
-hours earlier; both are emulated now, and `phpstan/extension-installer`
-is the next port. The first run also found six parity
+`wikimedia/composer-merge-plugin`, then plugins one by one. The three
+plugins that headed that list the same morning (`pestphp/pest-plugin`,
+`dealerdirect/phpcodesniffer-composer-installer`,
+`phpstan/extension-installer`) are emulated now. The first run also found six parity
 bugs that six fixtures never could; all are fixed in this release.
 
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
@@ -160,12 +159,13 @@ Packagist search behind "Did you mean …".
 
 ## Plugins and scripts
 
-Scripts are never run. Four plugins are emulated and checked against the
+Scripts are never run. Six plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
-and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`)
-and `dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
-`installed_paths`). A plugin listed as `false` in `allow-plugins` is
+and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
+`dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
+`installed_paths`), `phpstan/extension-installer` and
+`rector/extension-installer` (their `GeneratedConfig.php`). A plugin listed as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `phpstan/extension-installer`,
 …) is installed as plain libraries. `drupal/core-composer-scaffold` is not

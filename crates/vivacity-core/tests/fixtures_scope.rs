@@ -27,29 +27,14 @@ fn analyze(name: &str) -> vivacity_core::scope::ScopeReport {
 }
 
 #[test]
-fn fixtures_native_or_handed_over_as_documented() {
-    // Native: no plugin, or only plugins proven to write nothing under a
+fn all_fixtures_are_native() {
+    // No plugin, or plugins emulated or proven to write nothing under a
     // Composer with plugins active (the corpus baseline).
-    for name in ["laravel", "symfony", "wordpress"] {
+    for name in ["laravel", "symfony", "sylius", "rector", "wordpress"] {
         let report = analyze(name);
         assert!(
             report.is_native_ok(),
             "fixture {name} out of scope: {:?}",
-            report.issues
-        );
-    }
-    // Handed to Composer: the extension installers write GeneratedConfig.php
-    // (docs/corpus/2026-09-16.md); rector locks both, sylius allows rector's.
-    for (name, plugin) in [
-        ("rector", "phpstan/extension-installer"),
-        ("sylius", "rector/extension-installer"),
-    ] {
-        let report = analyze(name);
-        assert!(
-            report.issues.iter().any(
-                |i| matches!(i, vivacity_core::scope::ScopeIssue::UnknownPlugin(p) if p == plugin)
-            ),
-            "fixture {name}: expected {plugin} to be an unknown plugin, got {:?}",
             report.issues
         );
     }

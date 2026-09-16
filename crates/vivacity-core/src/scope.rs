@@ -21,6 +21,8 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "composer/installers",
     "pestphp/pest-plugin",
     "dealerdirect/phpcodesniffer-composer-installer",
+    "phpstan/extension-installer",
+    "rector/extension-installer",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose

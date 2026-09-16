@@ -44,11 +44,13 @@ the roadmap below.
   the pieces a `vcs` port reuses: the git-like version guesser
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
-- **`phpstan/extension-installer`** and its `rector/extension-installer`
-  twin, the writer plugin the corpus ranks next (`src/GeneratedConfig.php`:
-  absolute and shortest-relative install paths, `Intervals::compactConstraint`
-  of the `phpstan/phpstan` constraints, `var_export`). `pest_plugin.rs`
-  and `phpcs_installer.rs` are the pattern:
+- **`config.vendor-dir` and `bin-dir`** — the first and third fallback
+  reasons of the corpus (16 projects together): a layout with a vendor
+  directory elsewhere, and the proxies elsewhere.
+- **`wikimedia/composer-merge-plugin`** (4 corpus projects) — merges
+  `require` from other files at resolution time; on `install` from a lock
+  its listeners still fire. The emulated plugins (`pest_plugin.rs`,
+  `phpcs_installer.rs`, `extension_installers.rs`) are the pattern:
   vendor the writer under `docs/reference/plugins/`, generate at
   autoload-dump time, prove it on the corpus entries.
 - **`path` repositories on Windows** — junctions (`Filesystem::junction`,
