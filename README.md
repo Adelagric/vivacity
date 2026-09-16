@@ -40,7 +40,7 @@ Also `cargo install vivacity` (crates.io), `cargo binstall vivacity`, or
 GitHub Actions:
 
 ```yaml
-- uses: Adelagric/vivacity@v0.9.0
+- uses: Adelagric/vivacity@v0.10.0
 - run: vivacity install
 ```
 
@@ -206,7 +206,7 @@ runtime. Such a host selects the provider-agnostic backend instead and
 installs its own process-wide default provider before the first request:
 
 ```toml
-vivacity = { version = "0.9", default-features = false, features = ["rustls-tls-no-provider"] }
+vivacity = { version = "0.10", default-features = false, features = ["rustls-tls-no-provider"] }
 ```
 
 ## Development
