@@ -4,6 +4,13 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Added
+- `bench/ci-cache.sh` + `ci-cache` workflow (on demand): what a CI cache
+  artifact costs, Composer's zip cache against the extracted store, and the
+  install each one enables; results and reading in `bench/M7-ci-cache.md`.
+
 ## [0.10.0] — 2026-09-16
 
 ### Added
