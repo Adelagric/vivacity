@@ -443,7 +443,13 @@ mod tests {
             .collect();
         for (p, expected) in patterns.iter().zip(lines) {
             let mut ours = glob_dirs(p, root);
-            let mut theirs: Vec<String> = serde_json::from_str(&expected).unwrap();
+            // PHP's GLOB_MARK appends the OS separator (`\` on Windows);
+            // `getUrlMatches` turns it into `/` before anything else.
+            let mut theirs: Vec<String> = serde_json::from_str::<Vec<String>>(&expected)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.replace('\\', "/"))
+                .collect();
             // The order across brace alternatives depends on the PHP build
             // (module header): compared as sets for those patterns.
             if brace_expand(p).len() > 1 {
