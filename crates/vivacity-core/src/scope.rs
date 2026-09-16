@@ -56,6 +56,10 @@ pub enum ScopeIssue {
     Layout(String),
     /// Package without a usable zip dist (source-only, exotic dist).
     NoUsableDist(String),
+    /// A `config` key vivacity does not read and that changes the layout
+    /// (`vendor-dir`, `bin-dir`, `preferred-install: source`): Composer's
+    /// output would differ, so the lock is handed over.
+    Config(String),
 }
 
 impl std::fmt::Display for ScopeIssue {
@@ -71,6 +75,7 @@ impl std::fmt::Display for ScopeIssue {
             ScopeIssue::NoUsableDist(p) => {
                 write!(f, "package {p} has no usable dist (no zip, no path source)")
             }
+            ScopeIssue::Config(why) => write!(f, "config {why} is not supported natively"),
         }
     }
 }
@@ -105,6 +110,11 @@ pub fn analyze(
     for p in lock.wanted_packages(with_dev) {
         classify_package(project_dir, p, &mut report);
     }
+    report.issues.extend(
+        config_issues(root_manifest)
+            .into_iter()
+            .map(ScopeIssue::Config),
+    );
     match Layout::resolve(project_dir, lock, root_manifest, with_dev, plugins_enabled) {
         Ok(layout) => report.layout = Some(layout),
         Err(issues) => report
@@ -123,6 +133,42 @@ pub fn plugin_issues(lock: &Lock, with_dev: bool) -> Vec<ScopeIssue> {
         classify_plugin(p, &mut report);
     }
     report.issues
+}
+
+/// The `config` keys of the manifest (or the global config) that vivacity
+/// does not honour: `vendor-dir` other than `vendor`, `bin-dir` other than
+/// `vendor/bin`, a `preferred-install` asking for `source` anywhere.
+pub fn config_issues(root_manifest: &Value) -> Vec<String> {
+    let value = |key: &str| -> Option<Value> {
+        root_manifest
+            .get("config")
+            .and_then(|c| c.get(key))
+            .cloned()
+            .or_else(|| crate::layout::global_config_value(key))
+    };
+    let mut out = Vec::new();
+    let trimmed = |v: &Value| v.as_str().map(|s| s.trim_end_matches('/').to_owned());
+    if let Some(v) = value("vendor-dir") {
+        if trimmed(&v).as_deref() != Some("vendor") {
+            out.push(format!("vendor-dir {v}"));
+        }
+    }
+    if let Some(v) = value("bin-dir") {
+        if trimmed(&v).as_deref() != Some("vendor/bin") {
+            out.push(format!("bin-dir {v}"));
+        }
+    }
+    if let Some(v) = value("preferred-install") {
+        let wants_source = match &v {
+            Value::String(s) => s == "source",
+            Value::Object(m) => m.values().any(|x| x.as_str() == Some("source")),
+            _ => false,
+        };
+        if wants_source {
+            out.push(format!("preferred-install {v}"));
+        }
+    }
+    out
 }
 
 fn classify_package(project_dir: &Path, p: &LockPackage, report: &mut ScopeReport) {
@@ -253,6 +299,25 @@ mod tests {
             ]
         };
         assert_eq!(r.issues, expected);
+    }
+
+    #[test]
+    fn unread_config_keys_are_scope_issues() {
+        let lock = lock_with(json!([zip_pkg("a/b", "library")]));
+        let manifest = json!({"config": {"vendor-dir": "lib/", "bin-dir": "vendor/bin",
+            "preferred-install": {"acme/*": "source", "*": "dist"}}});
+        let r = analyze(&proj(), &lock, &manifest, true, true);
+        assert_eq!(
+            r.issues,
+            vec![
+                ScopeIssue::Config("vendor-dir \"lib/\"".into()),
+                ScopeIssue::Config(
+                    "preferred-install {\"acme/*\":\"source\",\"*\":\"dist\"}".into()
+                ),
+            ]
+        );
+        let manifest = json!({"config": {"vendor-dir": "vendor", "preferred-install": "auto"}});
+        assert!(analyze(&proj(), &lock, &manifest, true, true).is_native_ok());
     }
 
     #[test]
