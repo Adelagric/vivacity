@@ -378,9 +378,6 @@ pub async fn install(
         layout,
     )?;
     report.local_repository = Some(local);
-    if wanted.iter().any(|p| p.name() == "symfony/runtime") {
-        crate::runtime_stub::write_stub(&vendor, project_dir, root_manifest)?;
-    }
 
     Ok(report)
 }

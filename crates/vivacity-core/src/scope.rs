@@ -18,17 +18,18 @@ use std::path::Path;
 /// source is GPL-2.0-or-later and cannot be ported here (NOTICE.md).
 pub const EMULATED_PLUGINS: &[&str] = &["symfony/runtime", "composer/installers"];
 
-/// Plugins whose inaction is proven to have no effect on the vendor/ content
-/// needed at boot (fixtures qualified with `--no-plugins`). Installed as
-/// libraries, reported with a warning.
+/// Plugins proven to write nothing at install time under a Composer whose
+/// plugins are active (the corpus baseline, docs/corpus/): installed as
+/// libraries, reported with a note. A plugin that writes a file is either
+/// emulated (EMULATED_PLUGINS) or unknown — never listed here. Removed on
+/// the corpus's evidence (2026-09-16): pestphp/pest-plugin
+/// (vendor/pest-plugins.json), phpstan/extension-installer and
+/// rector/extension-installer (GeneratedConfig.php),
+/// dealerdirect/phpcodesniffer-composer-installer (CodeSniffer.conf).
 pub const BENIGN_PLUGINS: &[&str] = &[
     "symfony/flex",
     "composer/package-versions-deprecated",
     "php-http/discovery",
-    "dealerdirect/phpcodesniffer-composer-installer",
-    "phpstan/extension-installer",
-    "rector/extension-installer",
-    "pestphp/pest-plugin",
     // Only listens to POST_CREATE_PROJECT_CMD / POST_INSTALL_CMD to print a
     // message (MessagePlugin::getSubscribedEvents): no disk effect.
     "drupal/core-project-message",

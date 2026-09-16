@@ -49,14 +49,14 @@ for fx in wordpress laravel drupal; do
       GIT_COMMITTER_NAME=vivacity GIT_COMMITTER_EMAIL=v@v GIT_COMMITTER_DATE="2026-09-10T00:00:00Z" \
       git commit -q -m fixture)
   done
-  if jq -e '.config["allow-plugins"]["composer/installers"] == true' "$src/composer.json" >/dev/null 2>&1; then
+  if jq -e '(.config["allow-plugins"] // {}) | if type == "object" then any(.[]; . == true) else . == true end' "$src/composer.json" >/dev/null 2>&1; then
     plugin_flag=""
   else
     plugin_flag="--no-plugins"
   fi
   # Premier install de chaque côté.
   (cd "$ref" && composer install --no-interaction $plugin_flag --no-scripts --quiet)
-  (cd "$viv" && "$VIVACITY" install --offline 2>"$WORK/$fx.1.log") || { echo "FAIL $fx : premier install"; tail -5 "$WORK/$fx.1.log"; status=1; continue; }
+  (cd "$viv" && "$VIVACITY" install $plugin_flag --offline 2>"$WORK/$fx.1.log") || { echo "FAIL $fx : premier install"; tail -5 "$WORK/$fx.1.log"; status=1; continue; }
   # Le lock perd des paquets, puis second install (Composer avertit que le
   # lock n'est plus à jour : c'est attendu des deux côtés).
   # shellcheck disable=SC2046

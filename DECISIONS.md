@@ -432,7 +432,14 @@ lecture confirme : `Factory` ne coupe que `EventDispatcher::runScripts`
 `BENIGN_PLUGINS`, qualifiée contre `--no-plugins`, n'est pas « bénigne »
 sous cette référence (trois plugins écrivent des fichiers) ; le rapport
 les compte en `diff` plutôt que de les cacher, et leur émulation est le
-prochain port classé par fréquence. Les runs sont locaux et avant chaque
+prochain port classé par fréquence. Décision (même jour) : ces plugins
+sortent de la liste tant qu'ils ne sont pas émulés — un projet qui les a
+est rendu à Composer avec la raison, jamais déclaré natif avec un fichier
+manquant — et la référence des fixtures passe à plugins actifs partout où
+le manifeste en autorise (c'est la seule qui puisse qualifier une
+émulation). Prix accepté : sylius et rector quittent le natif jusqu'à
+l'émulation des extension-installers ; le corpus en dev tombe de 36 à 35
+natifs et à zéro diff. Les runs sont locaux et avant chaque
 tag ; pas de hebdo, pas d'issue automatique (entrées épinglées : seul le
 réseau bouge). Le premier run a rendu six corrections avant tout rapport
 (plateforme `lib-*`, zéros non significatifs et `dev-master` dans

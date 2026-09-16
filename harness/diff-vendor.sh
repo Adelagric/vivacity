@@ -50,10 +50,11 @@ for fx in "${FIXTURES[@]}"; do
       GIT_COMMITTER_NAME=vivacity GIT_COMMITTER_EMAIL=v@v GIT_COMMITTER_DATE="2026-09-10T00:00:00Z" \
       git commit -q -m fixture)
   done
-  # Fixture à plugin de layout émulé (composer/installers autorisé) : la
-  # référence tourne AVEC le plugin et la comparaison couvre le projet entier,
-  # puisque des paquets vivent hors vendor/.
-  if jq -e '.config["allow-plugins"]["composer/installers"] == true' "$src/composer.json" >/dev/null 2>&1; then
+  # Même régime que le corpus : dès que le manifeste autorise un plugin, la
+  # référence tourne AVEC ses plugins (ce qu'un projet obtient) et la
+  # comparaison couvre le projet entier — un plugin peut écrire hors vendor/.
+  # Sans plugin autorisé, --no-plugins des deux côtés et vendor/ seul.
+  if jq -e '(.config["allow-plugins"] // {}) | if type == "object" then any(.[]; . == true) else . == true end' "$src/composer.json" >/dev/null 2>&1; then
     plugin_flag=""; scope_ref="$ref"; scope_viv="$viv"; what="projet"
   else
     plugin_flag="--no-plugins"; scope_ref="$ref/vendor"; scope_viv="$viv/vendor"; what="vendor/"
@@ -64,8 +65,11 @@ for fx in "${FIXTURES[@]}"; do
   if ! (cd "$viv" && "$VIVACITY" install $AUTOLOAD_FLAG $plugin_flag --offline 2>"$WORK/$fx.vivacity.log"); then
     echo "FAIL $fx : vivacity install a échoué :"; tail -20 "$WORK/$fx.vivacity.log"; status=1; continue
   fi
+  # Natif ou rendu à Composer : le harness le dit, la parité vaut dans les
+  # deux cas mais seul le natif compte comme couverture.
+  how="natif"; grep -q "delegating to" "$WORK/$fx.vivacity.log" && how="fallback"
   if compare_vendor "$scope_ref" "$scope_viv" "$WORK/$fx.diff"; then
-    echo "OK   $fx : $what identique"
+    echo "OK   $fx : $what identique ($how)"
   else
     echo "FAIL $fx : $what diffère ($(wc -l < "$WORK/$fx.diff" | tr -d ' ') lignes, $WORK/$fx.diff)"
     status=1

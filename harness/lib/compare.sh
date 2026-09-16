@@ -10,13 +10,19 @@
 #     Composer l'écrit dans l'ordre d'achèvement des extractions asynchrones
 #     (non déterministe, vérifié le 2026-09-11) ; comparé trié ;
 #   - `$loader->setApcuPrefix('…')` dans autoload_real.php : préfixe aléatoire
-#     chez Composer (`bin2hex(random_bytes(10))`) ; la ligne est ignorée.
+#     chez Composer (`bin2hex(random_bytes(10))`) ; la ligne est ignorée ;
+#   - le chemin absolu du projet dans un fichier généré : remplacé par
+#     `<project>` de chaque côté avant comparaison.
 # Les modes des fichiers et les cibles des liens sont comparés par un
 # inventaire `stat` (`diff -r` ne voit ni les uns ni les autres) : une
 # extraction par `unzip` (Composer) préserve les modes du zip, vivacity aussi.
 
 # compare_vendor <scope de Composer> <scope de vivacity> [fichier de diff]
 # Renvoie 0 quand identiques ; sinon 1 et imprime les premières lignes.
+# Un fichier généré peut contenir le chemin absolu du projet (phpstan/
+# extension-installer écrit `install_path` en absolu) : les deux copies
+# vivent dans des répertoires différents, le contenu est comparé après
+# remplacement du chemin physique de chaque côté par `<project>`.
 compare_vendor() {
   local ref="$1" viv="$2" out="${3:-$(mktemp)}"
   local ip_ref="$ref/vendor/composer/include_paths.php" ip_viv="$viv/vendor/composer/include_paths.php"
@@ -25,12 +31,26 @@ compare_vendor() {
     echo "include_paths.php diffère même trié" > "$out"; diff <(sort "$ip_ref") <(sort "$ip_viv") | head >> "$out"
     head -20 "$out"; return 1
   fi
-  # `setApcuPrefix('…')` : Composer tire un préfixe aléatoire (bin2hex de
-  # 10 octets) quand `apcu-autoloader` est actif sans préfixe donné — les
-  # deux côtés en ont un, jamais le même.
-  diff -r --no-dereference -I 'setApcuPrefix' --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
-    | grep -v 'vendor/autoload_runtime.php\|vendor: autoload_runtime.php' \
-    | grep -v 'No such file or directory' > "$out" || true   # grep -v renvoie 1 sur diff vide : succès
+  local ref_real viv_real
+  ref_real="$(cd "$ref" && pwd -P)"; viv_real="$(cd "$viv" && pwd -P)"
+  : > "$out"
+  # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
+  # diffèrent — celles-ci sont recomparées normalisées.
+  diff -rq --no-dereference --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
+    | grep -v 'autoload_runtime.php' | grep -v 'No such file or directory' \
+    | while IFS= read -r line; do
+      case "$line" in
+        "Files "*" and "*" differ")
+          a="${line#Files }"; a="${a% and *}"; b="${line#* and }"; b="${b% differ}"
+          if ! diff -I 'setApcuPrefix' \
+              <(sed -e "s|$ref_real|<project>|g" -e "s|$ref|<project>|g" "$a") \
+              <(sed -e "s|$viv_real|<project>|g" -e "s|$viv|<project>|g" "$b") >/dev/null 2>&1; then
+            echo "$line"
+            diff <(sed -e "s|$ref_real|<project>|g" "$a") <(sed -e "s|$viv_real|<project>|g" "$b") | head -6
+          fi ;;
+        *) echo "$line" ;;
+      esac
+    done >> "$out"
   diff <(vendor_inventory "$ref") <(vendor_inventory "$viv") >> "$out" || true
   if [ -s "$out" ]; then head -20 "$out"; return 1; fi
   return 0
@@ -45,5 +65,5 @@ vendor_inventory() {
     find . -name .git -prune -o -print0 | xargs -0 stat -f '%Sp %N -> %Y' | sed -E 's/ -> $//'
   else
     find . -name .git -prune -o -printf '%M %p -> %l\n' | sed -E 's/ -> $//'
-  fi) | grep -v ' \./autoload_runtime\.php$' | LC_ALL=C sort
+  fi) | grep -v 'autoload_runtime\.php$' | LC_ALL=C sort
 }

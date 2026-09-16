@@ -1,6 +1,7 @@
-//! The out-of-scope detector must declare the three fixtures natively
-//! installable (that is the v1 contract: they boot without plugins), with
-//! the expected harmless plugins reported, no more, no less.
+//! The out-of-scope detector on the fixtures: native where no plugin
+//! writes anything under a Composer with plugins active, handed over where
+//! one does (the corpus baseline), the benign plugins reported, no more, no
+//! less.
 
 use std::path::{Path, PathBuf};
 
@@ -26,12 +27,30 @@ fn analyze(name: &str) -> vivacity_core::scope::ScopeReport {
 }
 
 #[test]
-fn all_fixtures_are_native() {
-    for name in ["laravel", "symfony", "sylius", "rector", "wordpress"] {
+fn fixtures_native_or_handed_over_as_documented() {
+    // Native: no plugin, or only plugins proven to write nothing under a
+    // Composer with plugins active (the corpus baseline).
+    for name in ["laravel", "symfony", "wordpress"] {
         let report = analyze(name);
         assert!(
             report.is_native_ok(),
             "fixture {name} out of scope: {:?}",
+            report.issues
+        );
+    }
+    // Handed to Composer: the extension installers write GeneratedConfig.php
+    // (docs/corpus/2026-09-16.md); rector locks both, sylius allows rector's.
+    for (name, plugin) in [
+        ("rector", "phpstan/extension-installer"),
+        ("sylius", "rector/extension-installer"),
+    ] {
+        let report = analyze(name);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| matches!(i, vivacity_core::scope::ScopeIssue::UnknownPlugin(p) if p == plugin)),
+            "fixture {name}: expected {plugin} to be an unknown plugin, got {:?}",
             report.issues
         );
     }
@@ -44,5 +63,5 @@ fn expected_benign_plugins_are_reported() {
     let sylius = analyze("sylius").skipped_plugins;
     assert!(sylius.contains(&"symfony/flex".to_owned()));
     assert!(sylius.contains(&"php-http/discovery".to_owned()));
-    assert_eq!(sylius.len(), 6, "unexpected benign list: {sylius:?}");
+    assert_eq!(sylius.len(), 3, "unexpected benign list: {sylius:?}");
 }

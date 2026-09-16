@@ -761,6 +761,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             args.ignore_platform_reqs,
             &args.ignore_platform_req,
             (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+            !args.no_plugins,
         )?;
         autoload_note = format!(", autoloader with {} classes", report.classes);
         trace("autoload dump", t0);
@@ -860,6 +861,7 @@ fn dump_autoload(
     ignore_all: bool,
     ignored: &[String],
     apcu: (bool, Option<&str>),
+    plugins_enabled: bool,
 ) -> anyhow::Result<vivacity_autoload::DumpReport> {
     let platform_check = match manifest.get("config").and_then(|c| c.get("platform-check")) {
         Some(serde_json::Value::Bool(false)) => vivacity_autoload::PlatformCheckMode::Off,
@@ -909,6 +911,16 @@ fn dump_autoload(
         },
     };
     let report = vivacity_autoload::dump(project, lock, manifest, layout, &opts)?;
+    // `symfony/runtime`'s plugin writes vendor/autoload_runtime.php on
+    // POST_AUTOLOAD_DUMP: at dump time, with plugins on, never with
+    // --no-autoloader.
+    if plugins_enabled
+        && lock
+            .wanted_packages(dev_mode)
+            .any(|p| p.name() == "symfony/runtime")
+    {
+        vivacity_core::runtime_stub::write_stub(&project.join("vendor"), project, manifest)?;
+    }
     for w in &report.warnings {
         eprintln!("{w}");
     }
@@ -974,6 +986,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         args.ignore_platform_reqs,
         &args.ignore_platform_req,
         (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+        !args.no_plugins,
     )?;
     eprintln!(
         "vivacity: autoloader generated ({} classes) in {:.2}s",
@@ -1005,7 +1018,12 @@ fn fallback_or_fail(
     };
     eprintln!("vivacity: delegating to `composer install`…");
     let mut cmd = std::process::Command::new(composer);
-    cmd.arg("install").current_dir(project);
+    // The contract holds through the fallback: vivacity never runs
+    // scripts, so Composer does not either; the plugin regime follows.
+    cmd.arg("install").arg("--no-scripts").current_dir(project);
+    if args.no_plugins {
+        cmd.arg("--no-plugins");
+    }
     if args.no_dev {
         cmd.arg("--no-dev");
     }
@@ -1017,12 +1035,6 @@ fn fallback_or_fail(
     }
     if args.classmap_authoritative {
         cmd.arg("--classmap-authoritative");
-    }
-    if args.no_scripts {
-        cmd.arg("--no-scripts");
-    }
-    if args.no_plugins {
-        cmd.arg("--no-plugins");
     }
     if args.ignore_platform_reqs {
         cmd.arg("--ignore-platform-reqs");
