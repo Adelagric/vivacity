@@ -70,12 +70,17 @@ fn full_pretty_version(p: &LockPackage) -> String {
     format!("{pretty} {reference}")
 }
 
-/// `getInstallPath($package)` as an absolute path: the physical project
-/// directory plus the layout's path.
+/// `getInstallPath($package)` as an absolute path: `Config::realpath` is
+/// the physical working directory as `getcwd()` spells it (backslashes on
+/// Windows, no `\\?\` prefix) plus `/` and the vendor path with forward
+/// slashes — the two joined verbatim, never normalised as a whole.
 fn absolute_install_path(cwd: &Path, layout: &Layout, name: &str) -> Option<String> {
     let abs = layout.abs(name)?;
     let rel = abs.strip_prefix(layout.root()).ok()?;
-    Some(normalize_path(&cwd.join(rel).to_string_lossy()))
+    let cwd = cwd.to_string_lossy();
+    let cwd = cwd.strip_prefix("\\\\?\\").unwrap_or(&cwd);
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    Some(format!("{}/{}", cwd.trim_end_matches(['/', '\\']), rel))
 }
 
 fn constraint_into_string(c: &Constraint) -> String {

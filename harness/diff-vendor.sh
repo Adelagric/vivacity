@@ -72,6 +72,7 @@ for fx in "${FIXTURES[@]}"; do
     echo "OK   $fx : $what identique ($how)"
   else
     echo "FAIL $fx : $what diffère ($(wc -l < "$WORK/$fx.diff" | tr -d ' ') lignes, $WORK/$fx.diff)"
+    head -20 "$WORK/$fx.diff"
     status=1
   fi
 done

@@ -41,8 +41,16 @@ compare_vendor() {
     echo "pest-plugins.json diffère même trié" > "$out"; diff <(sed 's/,$//' "$pp_ref" | sort) <(sed 's/,$//' "$pp_viv" | sort) | head >> "$out"
     head -20 "$out"; return 1
   fi
-  local ref_real viv_real
+  local ref_real viv_real ref_win="" viv_win="" ref_winf="" viv_winf=""
   ref_real="$(cd "$ref" && pwd -P)"; viv_real="$(cd "$viv" && pwd -P)"
+  # Windows (Git Bash) : Composer écrit le chemin sous sa forme `D:\a\…`,
+  # ou mixte `D:\a\…/vendor/x` ; les deux formes sont normalisées aussi.
+  if command -v cygpath >/dev/null 2>&1; then
+    ref_win="$(cygpath -w "$ref_real" | sed 's/\\/\\\\/g')"; viv_win="$(cygpath -w "$viv_real" | sed 's/\\/\\\\/g')"
+    ref_winf="$(cygpath -m "$ref_real")"; viv_winf="$(cygpath -m "$viv_real")"
+  fi
+  norm_ref() { sed -e "s|$ref_real|<project>|g" -e "s|$ref|<project>|g" ${ref_win:+-e "s|$ref_win|<project>|g"} ${ref_winf:+-e "s|$ref_winf|<project>|g"} "$1"; }
+  norm_viv() { sed -e "s|$viv_real|<project>|g" -e "s|$viv|<project>|g" ${viv_win:+-e "s|$viv_win|<project>|g"} ${viv_winf:+-e "s|$viv_winf|<project>|g"} "$1"; }
   : > "$out"
   # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
   # diffèrent — celles-ci sont recomparées normalisées.
@@ -52,11 +60,9 @@ compare_vendor() {
       case "$line" in
         "Files "*" and "*" differ")
           a="${line#Files }"; a="${a% and *}"; b="${line#* and }"; b="${b% differ}"
-          if ! diff -I 'setApcuPrefix' \
-              <(sed -e "s|$ref_real|<project>|g" -e "s|$ref|<project>|g" "$a") \
-              <(sed -e "s|$viv_real|<project>|g" -e "s|$viv|<project>|g" "$b") >/dev/null 2>&1; then
+          if ! diff -I 'setApcuPrefix' <(norm_ref "$a") <(norm_viv "$b") >/dev/null 2>&1; then
             echo "$line"
-            diff <(sed -e "s|$ref_real|<project>|g" "$a") <(sed -e "s|$viv_real|<project>|g" "$b") | head -6
+            diff <(norm_ref "$a") <(norm_viv "$b") | head -6
           fi ;;
         *) echo "$line" ;;
       esac
