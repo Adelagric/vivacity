@@ -46,10 +46,9 @@ fn fixtures_native_or_handed_over_as_documented() {
     ] {
         let report = analyze(name);
         assert!(
-            report
-                .issues
-                .iter()
-                .any(|i| matches!(i, vivacity_core::scope::ScopeIssue::UnknownPlugin(p) if p == plugin)),
+            report.issues.iter().any(
+                |i| matches!(i, vivacity_core::scope::ScopeIssue::UnknownPlugin(p) if p == plugin)
+            ),
             "fixture {name}: expected {plugin} to be an unknown plugin, got {:?}",
             report.issues
         );

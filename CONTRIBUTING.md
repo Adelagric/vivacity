@@ -44,6 +44,15 @@ the roadmap below.
   the pieces a `vcs` port reuses: the git-like version guesser
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
+- **The two writer plugins** the corpus ranks next, in order:
+  `dealerdirect/phpcodesniffer-composer-installer` (`CodeSniffer.conf`,
+  the `installed_paths` of `phpcodesniffer-standard` packages, written
+  through `phpcs --config-set`) and `phpstan/extension-installer` with its
+  `rector/extension-installer` twin (`src/GeneratedConfig.php`: absolute
+  and shortest-relative install paths, `Intervals::compactConstraint` of
+  the `phpstan/phpstan` constraints). `pest_plugin.rs` is the pattern:
+  vendor the writer under `docs/reference/plugins/`, generate at
+  autoload-dump time, prove it on the corpus entries.
 - **`path` repositories on Windows** — junctions (`Filesystem::junction`,
   `PathDownloader`'s Windows branch); today such a lock goes through the
   Composer fallback there.

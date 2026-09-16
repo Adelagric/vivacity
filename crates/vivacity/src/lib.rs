@@ -764,6 +764,38 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             !args.no_plugins,
         )?;
         autoload_note = format!(", autoloader with {} classes", report.classes);
+        // Plugins listening to post-autoload-dump, emulated: the local
+        // repository's order is the previous installed.json order minus
+        // the removed and updated packages, then the operations' order.
+        {
+            use vivacity_resolver::transaction::Operation;
+            let previous: Vec<&str> = present.iter().map(|&i| arena[i].name.as_str()).collect();
+            let mut gone: Vec<&str> = Vec::new();
+            let mut fresh: Vec<&str> = Vec::new();
+            for op in &transaction.operations {
+                match *op {
+                    Operation::Uninstall(p) => gone.push(arena[p].name.as_str()),
+                    Operation::Update(i, t) => {
+                        gone.push(arena[i].name.as_str());
+                        fresh.push(arena[t].name.as_str());
+                    }
+                    Operation::Install(p) => fresh.push(arena[p].name.as_str()),
+                    _ => {}
+                }
+            }
+            let order =
+                vivacity_core::pest_plugin::local_repository_order(&previous, &gone, &fresh);
+            let previously_present = previous.contains(&vivacity_core::pest_plugin::PLUGIN_NAME);
+            emulate_pest_plugin(
+                &project,
+                local,
+                &manifest,
+                with_dev,
+                &order,
+                !args.no_plugins,
+                previously_present,
+            )?;
+        }
         trace("autoload dump", t0);
     }
     let warmed = if report.store_warmed > 0 {
@@ -782,6 +814,39 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         t0.elapsed().as_secs_f32()
     );
     Ok(0)
+}
+
+/// `pestphp/pest-plugin`'s post-autoload-dump listener, emulated: with
+/// plugins on and the plugin wanted, `vendor/pest-plugins.json` from the
+/// installed packages' `extra.pest.plugins` in local-repository order
+/// (`order`, package names); the file goes when the plugin leaves.
+fn emulate_pest_plugin(
+    project: &std::path::Path,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    order: &[&str],
+    plugins_enabled: bool,
+    previously_present: bool,
+) -> anyhow::Result<()> {
+    let vendor = project.join("vendor");
+    let wanted: std::collections::BTreeMap<&str, &vivacity_core::lock::LockPackage> = local
+        .wanted_packages(with_dev)
+        .map(|p| (p.name(), p))
+        .collect();
+    if !plugins_enabled || !wanted.contains_key(vivacity_core::pest_plugin::PLUGIN_NAME) {
+        if previously_present {
+            vivacity_core::pest_plugin::remove_pest_plugins(&vendor)?;
+        }
+        return Ok(());
+    }
+    let extras: Vec<Option<&serde_json::Value>> = order
+        .iter()
+        .filter_map(|n| wanted.get(n))
+        .map(|p| p.raw.get("extra"))
+        .collect();
+    vivacity_core::pest_plugin::write_pest_plugins(&vendor, &extras, manifest.get("extra"))?;
+    Ok(())
 }
 
 /// `  - <operation><appendix>` for every operation of a real install.
@@ -975,6 +1040,14 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             return Ok(3);
         }
     }
+    let installed_order: Vec<String> = installed_packages(&project)
+        .iter()
+        .filter_map(|p| {
+            p.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
     let report = dump_autoload(
         &project,
         &lock,
@@ -988,6 +1061,19 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
         !args.no_plugins,
     )?;
+    {
+        let order: Vec<&str> = installed_order.iter().map(String::as_str).collect();
+        let previously_present = order.contains(&vivacity_core::pest_plugin::PLUGIN_NAME);
+        emulate_pest_plugin(
+            &project,
+            &lock,
+            &manifest,
+            dev_mode,
+            &order,
+            !args.no_plugins,
+            previously_present,
+        )?;
+    }
     eprintln!(
         "vivacity: autoloader generated ({} classes) in {:.2}s",
         report.classes,

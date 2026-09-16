@@ -14,6 +14,7 @@ pub mod layout;
 pub mod lock;
 pub mod path_install;
 pub mod pathutil;
+pub mod pest_plugin;
 pub mod phpjson;
 pub mod phpserialize;
 pub mod platform;

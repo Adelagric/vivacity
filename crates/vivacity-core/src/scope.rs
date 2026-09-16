@@ -16,7 +16,11 @@ use std::path::Path;
 /// composer/installers (see `layout`) is, under conditions checked before
 /// any write. drupal/core-composer-scaffold is deliberately absent: its
 /// source is GPL-2.0-or-later and cannot be ported here (NOTICE.md).
-pub const EMULATED_PLUGINS: &[&str] = &["symfony/runtime", "composer/installers"];
+pub const EMULATED_PLUGINS: &[&str] = &[
+    "symfony/runtime",
+    "composer/installers",
+    "pestphp/pest-plugin",
+];
 
 /// Plugins proven to write nothing at install time under a Composer whose
 /// plugins are active (the corpus baseline, docs/corpus/): installed as

@@ -17,6 +17,21 @@ byte-identical-output promise are the public API.
 - `config.vendor-dir`, `bin-dir` and `preferred-install: source` are scope
   issues: `install` hands such a project to Composer instead of laying it
   out differently.
+- **`pestphp/pest-plugin` emulated** (v1.0.0 to v5.0.0, one generator):
+  `vendor/pest-plugins.json` from the installed packages' `extra.pest.plugins`
+  at autoload-dump time, gone with the plugin; seven corpus projects
+  became native with their dev packages. Composer's own order in that
+  file is the completion order of its parallel extractions — the
+  harnesses compare it sorted.
+- **`BENIGN_PLUGINS` pruned on the corpus's evidence**: `phpstan/extension-installer`,
+  `rector/extension-installer` and `dealerdirect/phpcodesniffer-composer-installer`
+  write files under a Composer with plugins active; a project locking one
+  is handed to Composer until each is emulated. The fixture harnesses now
+  run Composer with plugins wherever the manifest allows one, compare the
+  whole project and say native or fallback (sylius and rector are handed
+  over until the extension installers are emulated); the Composer
+  fallback always passes `--no-scripts`; `autoload_runtime.php` is written
+  at autoload-dump time, never with `--no-autoloader`.
 - **The corpus** (`fixtures/corpus/`, 106 real projects; `harness/corpus.sh`;
   `tools/corpus-add.sh`; `tools/corpus-report.py`; `vivacity install
   --check-scope`): the measured share of real locks `install` lays out

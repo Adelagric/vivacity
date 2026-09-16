@@ -12,7 +12,10 @@
 #   - `$loader->setApcuPrefix('…')` dans autoload_real.php : préfixe aléatoire
 #     chez Composer (`bin2hex(random_bytes(10))`) ; la ligne est ignorée ;
 #   - le chemin absolu du projet dans un fichier généré : remplacé par
-#     `<project>` de chaque côté avant comparaison.
+#     `<project>` de chaque côté avant comparaison ;
+#   - vendor/pest-plugins.json : le plugin lit le dépôt local dans l'ordre
+#     d'achèvement des installations asynchrones (constaté : le petit
+#     pest-plugin-laravel finit avant pest) ; comparé trié.
 # Les modes des fichiers et les cibles des liens sont comparés par un
 # inventaire `stat` (`diff -r` ne voit ni les uns ni les autres) : une
 # extraction par `unzip` (Composer) préserve les modes du zip, vivacity aussi.
@@ -31,12 +34,19 @@ compare_vendor() {
     echo "include_paths.php diffère même trié" > "$out"; diff <(sort "$ip_ref") <(sort "$ip_viv") | head >> "$out"
     head -20 "$out"; return 1
   fi
+  # vendor/pest-plugins.json : même cause — le plugin lit le dépôt local
+  # dans l'ordre d'achèvement des installations asynchrones ; comparé trié.
+  local pp_ref="${ip_ref%composer/include_paths.php}pest-plugins.json" pp_viv="${ip_viv%composer/include_paths.php}pest-plugins.json"
+  if [ -f "$pp_ref" ] && [ -f "$pp_viv" ] && ! diff -q <(sed 's/,$//' "$pp_ref" | sort) <(sed 's/,$//' "$pp_viv" | sort) >/dev/null; then
+    echo "pest-plugins.json diffère même trié" > "$out"; diff <(sed 's/,$//' "$pp_ref" | sort) <(sed 's/,$//' "$pp_viv" | sort) | head >> "$out"
+    head -20 "$out"; return 1
+  fi
   local ref_real viv_real
   ref_real="$(cd "$ref" && pwd -P)"; viv_real="$(cd "$viv" && pwd -P)"
   : > "$out"
   # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
   # diffèrent — celles-ci sont recomparées normalisées.
-  diff -rq --no-dereference --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
+  diff -rq --no-dereference --exclude=.git --exclude=include_paths.php --exclude=pest-plugins.json "$ref" "$viv" 2>&1 \
     | grep -v 'autoload_runtime.php' | grep -v 'No such file or directory' \
     | while IFS= read -r line; do
       case "$line" in

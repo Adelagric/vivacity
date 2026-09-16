@@ -73,14 +73,15 @@ How much of the real world that covers is measured, not assumed:
 105 real PHP projects (application templates and applications with a
 committed lock, pinned — `fixtures/corpus/`). On 2026-09-16, against
 Composer 2.10.3 `--no-scripts` with its plugins active, `vivacity install`
-laid out **56 of 105 projects (53 %) natively with `--no-dev`** and 35 of
-105 (33 %) with the dev packages, byte-identical down to file modes and
+laid out **56 of 105 projects (53 %) natively with `--no-dev`** and 42 of
+105 (40 %) with the dev packages, byte-identical down to file modes and
 link targets, and **no diff in either mode**: every other project was
 handed to Composer before any write, for reasons the report ranks —
-`config.vendor-dir`, packages without a zip dist, `pestphp/pest-plugin`,
-`bin-dir`, `dealerdirect/phpcodesniffer-composer-installer`,
-`phpstan/extension-installer`, then plugins one by one. The three plugins
-are the next ports, in that order. The first run also found six parity
+`config.vendor-dir`, packages without a zip dist, `bin-dir`,
+`dealerdirect/phpcodesniffer-composer-installer`,
+`phpstan/extension-installer`, `wikimedia/composer-merge-plugin`, then
+plugins one by one. `pestphp/pest-plugin` was the first entry of that
+list; it is emulated now, and the two below it are the next ports. The first run also found six parity
 bugs that six fixtures never could; all are fixed in this release.
 
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
@@ -158,10 +159,10 @@ Packagist search behind "Did you mean …".
 
 ## Plugins and scripts
 
-Scripts are never run. Two plugins are emulated and checked against the
-real ones: `symfony/runtime` and `composer/installers` (versions
+Scripts are never run. Three plugins are emulated and checked against the
+real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
-and Drupal included). A short list of plugins that do nothing at install
+and Drupal included) and `pestphp/pest-plugin` (`vendor/pest-plugins.json`). A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `phpstan/extension-installer`,
 …) is installed as plain libraries. `drupal/core-composer-scaffold` is not
 emulated (its source is GPL-2.0-or-later, see NOTICE.md): a project that
