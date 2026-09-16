@@ -68,6 +68,22 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 `fixtures/` are all in the repo; the fixtures are downloaded by
 `fixtures/make.sh`.
 
+How much of the real world that covers is measured, not assumed:
+[docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
+105 real PHP projects (application templates and applications with a
+committed lock, pinned — `fixtures/corpus/`). On 2026-09-16, against
+Composer 2.10.3 `--no-scripts` with its plugins active, `vivacity install`
+laid out **56 of 105 projects (53 %) natively with `--no-dev`** and 36 of
+105 (34 %) with the dev packages, byte-identical down to file modes and
+link targets; the rest was handed to Composer before any write, for
+reasons the report ranks (`config.vendor-dir`, packages without a zip
+dist, `bin-dir`, then plugins one by one), except 15 dev-mode entries
+where a plugin vivacity installs as a plain library writes a file
+(`pestphp/pest-plugin`, `phpstan/extension-installer`,
+`dealerdirect/phpcodesniffer-composer-installer`) — the next ports, in
+that order. The first run also found six parity bugs that six fixtures
+never could; all are fixed in this release.
+
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
 
 ## Speed

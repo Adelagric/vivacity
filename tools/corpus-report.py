@@ -119,11 +119,20 @@ def main():
           f"({100 * len(native_pk) / len(all_pk):.0f} %)." if all_pk else "")
         p("")
         # Reasons
-        # One count per entry and reason (a Mautic lock lists forty themes).
+        # One count per entry and reason (a Mautic lock lists forty themes);
+        # the packages without a dist are one row, with their names.
         reasons = collections.Counter()
+        nodist_packages = collections.Counter()
         for r in mrows:
             if r["bucket"] == "fallback":
-                for key in {reason_key(reason) for reason in r.get("reasons", [])}:
+                keys = {reason_key(reason) for reason in r.get("reasons", [])}
+                nodist = {what for kind, what in keys if kind == "no-dist"}
+                for pkg in nodist:
+                    nodist_packages[pkg] += 1
+                keys = {k for k in keys if k[0] != "no-dist"}
+                if nodist:
+                    keys.add(("no-dist", "(packages without a zip dist)"))
+                for key in keys:
                     reasons[key] += 1
         if reasons:
             p("### Fallback reasons, ranked")
@@ -135,12 +144,18 @@ def main():
                 if kind in ("plugin", "layout-plugin") and what in PLUGIN_EVENTS:
                     note = f"listens to {PLUGIN_EVENTS[what]} (active in the baseline)"
                 elif kind == "no-dist":
-                    note = "no zip dist (a `git`/`vcs` source, asset-packagist…)"
+                    top = ", ".join(f"`{n}` ({c})" for n, c in nodist_packages.most_common(6))
+                    note = f"a `git`/`vcs`-only source or asset-packagist: {top}…"
                 p(f"| {kind} `{what}` | {n} | {note} |")
             p("")
         diffs = [r for r in mrows if r["bucket"] == "diff"]
         if diffs:
-            p("### Diffs (parity bugs)")
+            p("### Diffs")
+            p("")
+            p("A diff is a parity gap. A file written by a plugin vivacity installs as a "
+              "plain library (`BENIGN_PLUGINS`, qualified against `--no-plugins`) is "
+              "counted here too: emulating it, or handing the project to Composer, "
+              "is the decision the report asks for.")
             p("")
             for r in diffs:
                 p(f"- **{r['name']}** — `{r.get('provenance', '')}`")
