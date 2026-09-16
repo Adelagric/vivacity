@@ -4,6 +4,12 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 const VERSIONS: &[&str] = &[
+    "dev-master",
+    "dev-trunk",
+    "dev-default",
+    "DEV-MASTER",
+    "dev-main",
+    "dev-feature/x",
     "2026.04.1",
     "1.02",
     "v01.2.3",

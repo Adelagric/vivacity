@@ -132,13 +132,12 @@ impl Ord for Version {
 /// Parity held by tests/oracle_normalize.rs.
 pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
     let s = input.trim();
-    // master/trunk/default (with or without `dev-`) -> default branch.
-    let lower = s.to_ascii_lowercase();
-    let bare = lower.strip_prefix("dev-").unwrap_or(&lower);
-    if matches!(bare, "master" | "trunk" | "default") {
-        return Ok("9999999-dev".to_owned());
-    }
-    if let Some(rest) = s.strip_prefix("dev-") {
+    // composer/semver 3: a `dev-` branch stays as written (`dev-master` is
+    // `dev-master`; only `normalizeDefaultBranch`, never called here, maps
+    // it to `9999999-dev`), the prefix itself lowercased (`DEV-MASTER` ->
+    // `dev-MASTER`).
+    if s.len() >= 4 && s[..4].eq_ignore_ascii_case("dev-") {
+        let rest = &s[4..];
         if rest.is_empty() {
             return Err(UnsupportedVersion(input.to_owned()));
         }
