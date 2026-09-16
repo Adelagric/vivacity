@@ -28,6 +28,14 @@ is a case for `harness/steps.sh` — it replays a command through both tools
 on a frozen registry snapshot and compares the files, the exit code and
 stderr byte for byte.
 
+A real project that behaves differently is a corpus entry:
+`tools/corpus-add.sh git <owner/repo>` (a committed lock) or
+`tools/corpus-add.sh template <vendor/name>` (a `create-project` template,
+lock resolved once) adds it under `fixtures/corpus/`, and
+`harness/corpus.sh --only <name>` runs both tools on it. The report in
+`docs/corpus/` ranks what keeps projects on the fallback; that ranking is
+the roadmap below.
+
 ## Bigger pieces, roughly in order of impact
 
 - **`vcs` repositories** (v0.10 candidate) — `VcsRepository`, the

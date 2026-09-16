@@ -17,6 +17,23 @@ byte-identical-output promise are the public API.
 - `config.vendor-dir`, `bin-dir` and `preferred-install: source` are scope
   issues: `install` hands such a project to Composer instead of laying it
   out differently.
+- **The corpus** (`fixtures/corpus/`, 106 real projects; `harness/corpus.sh`;
+  `tools/corpus-add.sh`; `tools/corpus-report.py`; `vivacity install
+  --check-scope`): the measured share of real locks `install` lays out
+  natively, against Composer 2.10.3 `--no-scripts` with its plugins active,
+  in both dev modes, with the fallback reasons ranked. Report in
+  `docs/corpus/`.
+- Found by the corpus and fixed: `install`'s platform check now runs on
+  the full platform repository (`lib-*` libraries, `composer-runtime-api`,
+  `config.platform`, provide/replace links); `version_normalized` keeps
+  digit runs as written (`2026.04.1.0`, `RC01`) and `dev-master` as
+  `dev-master` (composer/semver 3); dist urls with `%prettyVersion%` and
+  the other `ComposerMirror` placeholders are expanded; `autoload_runtime.php`
+  comes from the installed `symfony/runtime`'s own template with
+  `extra.runtime` substituted (older runtimes, custom options — no
+  fallback any more); a `symfony-pack` is installed nowhere when Flex is
+  active; `apcu-autoloader` writes `setApcuPrefix` (random prefix like
+  Composer's, ignored by the comparison).
 
 ## [0.9.0] — 2026-09-16
 

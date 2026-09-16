@@ -413,6 +413,33 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-16 — Le corpus comme étalon de « prêt au quotidien » (v0.10)
+
+Fait : six fixtures prouvent la parité là où elle s'applique, pas la
+fréquence à laquelle elle s'applique ; « quand vivacity peut-il servir
+quotidiennement avec Composer en fallback ? » n'avait pas de chiffre.
+Décision : un corpus de projets réels épinglés (`fixtures/corpus/`, json +
+lock + arbre minimal de l'autoload, résolus une fois par Composer pour les
+gabarits `create-project` qui ne commitent pas de lock), un scan hors ligne
+(`install --check-scope`) qui décide le seau fallback sans réseau, et le
+double install seulement sur les prévus natifs, dans les deux modes dev et
+`--no-dev`, avec un inventaire des modes et des liens. La référence est
+nommée : Composer 2.10.3 `--no-scripts`, **plugins actifs** — la méta
+avait affirmé que `--no-scripts` coupe aussi les écouteurs de plugins ;
+le corpus l'a réfuté (Flex, dealerdirect, pest-plugin ont écrit), et la
+lecture confirme : `Factory` ne coupe que `EventDispatcher::runScripts`
+(les scripts de composer.json). Conséquence assumée : la liste
+`BENIGN_PLUGINS`, qualifiée contre `--no-plugins`, n'est pas « bénigne »
+sous cette référence (trois plugins écrivent des fichiers) ; le rapport
+les compte en `diff` plutôt que de les cacher, et leur émulation est le
+prochain port classé par fréquence. Les runs sont locaux et avant chaque
+tag ; pas de hebdo, pas d'issue automatique (entrées épinglées : seul le
+réseau bouge). Le premier run a rendu six corrections avant tout rapport
+(plateforme `lib-*`, zéros non significatifs et `dev-master` dans
+`version_normalized`, `%prettyVersion%` des urls de dist, le gabarit de
+`symfony/runtime`, les `symfony-pack` de Flex, `apcu-autoloader`) — le
+corpus trouve ce que six fixtures ne pouvaient pas.
+
 ## 2026-09-16 — Dépôts `path` : la capture d'abord, le miroir jusqu'aux modes (v0.9)
 
 Fait : la méta-analyse du plan (docs/plans/v0.9-path-repositories.md, §3)

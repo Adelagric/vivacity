@@ -1,0 +1,53 @@
+name: corpus
+
+# On demand only: the corpus is run locally before a tag
+# (harness/corpus.sh, docs/corpus/<date>.md). This job replays a subset on
+# a Linux runner — the GitHub zipball rate limit and the runner's disk rule
+# out the whole corpus here (docs/plans/v0.10-corpus.md, §3 finding 4).
+on:
+  workflow_dispatch:
+    inputs:
+      entries:
+        description: Comma-separated entry names (fixtures/corpus/<name>)
+        default: laravel,slim-skeleton,composer,codeigniter4-appstarter,cakephp-app,api-platform,filegator,freshrss,phan,invoiceplane,getkirby-plainkit,nette-web-project,yourls,rss-bridge,composer-satis
+      modes:
+        description: Modes (dev,no-dev)
+        default: dev,no-dev
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:2.10.3
+      - name: Composer cache (shared by both tools)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/vivacity-harness/corpus/cache
+          key: corpus-cache-${{ hashFiles('fixtures/corpus/*/composer.lock') }}
+          restore-keys: corpus-cache-
+      - name: Build
+        run: cargo build --release
+      - name: Corpus subset
+        env:
+          # A PAT raises the GitHub zipball rate limit; unset, the run
+          # still works on a small subset.
+          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+        run: harness/corpus.sh --only "${{ inputs.entries }}" --modes "${{ inputs.modes }}"
+      - name: Report
+        if: always()
+        run: |
+          mkdir -p corpus-report
+          python3 tools/corpus-report.py /tmp/vivacity-harness/corpus/results.jsonl "$(date -u +%Y-%m-%d)-ci" > corpus-report/report.md
+          cp /tmp/vivacity-harness/corpus/results.jsonl corpus-report/
+          tail -20 corpus-report/report.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-report
+          path: corpus-report/
