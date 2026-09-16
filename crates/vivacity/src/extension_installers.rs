@@ -70,17 +70,20 @@ fn full_pretty_version(p: &LockPackage) -> String {
     format!("{pretty} {reference}")
 }
 
-/// `getInstallPath($package)` as an absolute path: `Config::realpath` is
-/// the physical working directory as `getcwd()` spells it (backslashes on
-/// Windows, no `\\?\` prefix) plus `/` and the vendor path with forward
-/// slashes — the two joined verbatim, never normalised as a whole.
-fn absolute_install_path(cwd: &Path, layout: &Layout, name: &str) -> Option<String> {
+/// `getInstallPath($package)` as an absolute path: `LibraryInstaller`
+/// holds `realpath(vendor-dir)` as the OS spells it (`/private/tmp/…` on
+/// macOS, `C:\\…\\vendor` on Windows, no `\\?\\` prefix) and appends
+/// `/<name>` with forward slashes — joined verbatim, never normalised as a
+/// whole.
+fn absolute_install_path(layout: &Layout, name: &str) -> Option<String> {
     let abs = layout.abs(name)?;
-    let rel = abs.strip_prefix(layout.root()).ok()?;
-    let cwd = cwd.to_string_lossy();
-    let cwd = cwd.strip_prefix("\\\\?\\").unwrap_or(&cwd);
+    let vendor = layout.root().join("vendor");
+    let rel = abs.strip_prefix(&vendor).ok()?;
+    let real = std::fs::canonicalize(&vendor).unwrap_or(vendor);
+    let real = real.to_string_lossy();
+    let real = real.strip_prefix("\\\\?\\").unwrap_or(&real);
     let rel = rel.to_string_lossy().replace('\\', "/");
-    Some(format!("{}/{}", cwd.trim_end_matches(['/', '\\']), rel))
+    Some(format!("{}/{}", real.trim_end_matches(['/', '\\']), rel))
 }
 
 fn constraint_into_string(c: &Constraint) -> String {
@@ -94,11 +97,17 @@ fn constraint_into_string(c: &Constraint) -> String {
     )
 }
 
+/// The file lives inside a package cloned from the store — on Linux a
+/// hardlink: written through a temporary file and a rename (a new inode),
+/// never in place, or the store entry would carry one project's paths
+/// into the next (the rector fixture's file surfaced in sylius's warm run).
 fn write_if_changed(path: &Path, contents: &str) -> Result<()> {
     if std::fs::read_to_string(path).ok().as_deref() == Some(contents) {
         return Ok(());
     }
-    std::fs::write(path, contents)?;
+    let tmp = path.with_extension("php.vivacity-tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -118,7 +127,6 @@ fn fill(template: &str, args: &[String]) -> String {
 
 /// phpstan's `Plugin::process` (post-autoload-dump).
 pub fn phpstan(
-    project: &Path,
     layout: &Layout,
     local: &Lock,
     manifest: &Value,
@@ -132,7 +140,6 @@ pub fn phpstan(
     {
         return Ok(());
     }
-    let cwd = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let Some(own) = layout.abs(PHPSTAN) else {
         return Ok(());
     };
@@ -141,7 +148,7 @@ pub fn phpstan(
         return Ok(());
     }
     let generated_dir = normalize_path(
-        &absolute_install_path(&cwd, layout, PHPSTAN)
+        &absolute_install_path(layout, PHPSTAN)
             .map(|p| format!("{p}/src"))
             .unwrap_or_default(),
     );
@@ -174,7 +181,7 @@ pub fn phpstan(
         if ignore.contains(&p.name()) {
             continue;
         }
-        let Some(install_path) = absolute_install_path(&cwd, layout, p.name()) else {
+        let Some(install_path) = absolute_install_path(layout, p.name()) else {
             continue;
         };
         let mut phpstan_constraint: Option<Constraint> = None;
@@ -249,7 +256,6 @@ pub fn phpstan(
 
 /// rector's `PluginInstaller::install` (post-install-cmd).
 pub fn rector(
-    project: &Path,
     layout: &Layout,
     local: &Lock,
     manifest: &Value,
@@ -263,7 +269,6 @@ pub fn rector(
     {
         return Ok(());
     }
-    let cwd = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let Some(own) = layout.abs(RECTOR) else {
         return Ok(());
     };
@@ -272,7 +277,7 @@ pub fn rector(
         return Ok(());
     }
     let generated_dir = normalize_path(
-        &absolute_install_path(&cwd, layout, RECTOR)
+        &absolute_install_path(layout, RECTOR)
             .map(|p| format!("{p}/src"))
             .unwrap_or_default(),
     );
@@ -282,7 +287,7 @@ pub fn rector(
         if p.package_type() != "rector-extension" && extra_rector.is_none() {
             continue;
         }
-        let Some(install_path) = absolute_install_path(&cwd, layout, p.name()) else {
+        let Some(install_path) = absolute_install_path(layout, p.name()) else {
             continue;
         };
         let mut entry = serde_json::Map::new();

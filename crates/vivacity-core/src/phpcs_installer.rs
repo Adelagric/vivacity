@@ -209,7 +209,11 @@ fn write_config(conf: &Path, config: &[(String, String)]) -> Result<()> {
     }
     let exported = crate::runtime_stub::php_var_export(&Value::Object(map), 0);
     let text = format!("<?php\n $phpCodeSnifferConfig = {exported};\n?>");
-    std::fs::write(conf, text).map_err(Error::io(conf))
+    // Inside a package cloned from the store (a hardlink on Linux): a new
+    // inode through a temporary file and a rename, never an in-place write.
+    let tmp = conf.with_extension("conf.vivacity-tmp");
+    std::fs::write(&tmp, text).map_err(Error::io(&tmp))?;
+    std::fs::rename(&tmp, conf).map_err(Error::io(conf))
 }
 
 #[cfg(test)]
