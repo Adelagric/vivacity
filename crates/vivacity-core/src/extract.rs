@@ -319,12 +319,21 @@ mod tests {
         assert!(meta.file_type().is_symlink());
         #[cfg(not(unix))]
         {
-            // Like PHP ZipArchive: an ordinary file containing the target.
-            assert!(meta.file_type().is_file());
-            assert_eq!(
-                std::fs::read(d.path().join("sub/link")).expect("read"),
-                b"../real.txt"
-            );
+            // A link when unzip/7z is on the PATH and links may be created
+            // (the GitHub runner), else — like PHP ZipArchive — an ordinary
+            // file containing the target.
+            if meta.file_type().is_symlink() {
+                assert_eq!(
+                    std::fs::read_link(d.path().join("sub/link")).expect("target"),
+                    std::path::PathBuf::from("../real.txt")
+                );
+            } else {
+                assert!(meta.file_type().is_file());
+                assert_eq!(
+                    std::fs::read(d.path().join("sub/link")).expect("read"),
+                    b"../real.txt"
+                );
+            }
         }
 
         for target in ["../../etc/passwd", "/etc/passwd", "../../../x"] {
