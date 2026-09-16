@@ -59,7 +59,9 @@ for fx in "${FIXTURES[@]}"; do
     plugin_flag="--no-plugins"; scope_ref="$ref/vendor"; scope_viv="$viv/vendor"; what="vendor/"
   fi
   (cd "$ref" && composer install --no-interaction $plugin_flag --no-scripts $AUTOLOAD_FLAG --quiet)
-  if ! (cd "$viv" && "$VIVACITY" install $AUTOLOAD_FLAG --offline 2>"$WORK/$fx.vivacity.log"); then
+  # Même régime de plugins des deux côtés : la référence tourne --no-plugins
+  # sauf pour les fixtures à composer/installers ; vivacity aussi.
+  if ! (cd "$viv" && "$VIVACITY" install $AUTOLOAD_FLAG $plugin_flag --offline 2>"$WORK/$fx.vivacity.log"); then
     echo "FAIL $fx : vivacity install a échoué :"; tail -20 "$WORK/$fx.vivacity.log"; status=1; continue
   fi
   if compare_vendor "$scope_ref" "$scope_viv" "$WORK/$fx.diff"; then

@@ -28,7 +28,7 @@ compare_vendor() {
   # `setApcuPrefix('…')` : Composer tire un préfixe aléatoire (bin2hex de
   # 10 octets) quand `apcu-autoloader` est actif sans préfixe donné — les
   # deux côtés en ont un, jamais le même.
-  diff -r --no-dereference -I "setApcuPrefix('" --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
+  diff -r --no-dereference -I 'setApcuPrefix' --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
     | grep -v 'vendor/autoload_runtime.php\|vendor: autoload_runtime.php' \
     | grep -v 'No such file or directory' > "$out" || true   # grep -v renvoie 1 sur diff vide : succès
   diff <(vendor_inventory "$ref") <(vendor_inventory "$viv") >> "$out" || true
