@@ -55,6 +55,33 @@ impl LockPackage {
         self.raw.get("dist")?.get("url")?.as_str()
     }
 
+    /// `Package::getDistUrls`: a dist url holding `%` goes through
+    /// `ComposerMirror::processUrl` — `%package%`, `%version%` (normalized),
+    /// `%reference%`, `%type%` and `%prettyVersion%` are substituted (a
+    /// `package` repository entry such as
+    /// `https://host/archive/%prettyVersion%.zip`).
+    pub fn dist_url_expanded(&self) -> Option<String> {
+        let url = self.dist_url()?;
+        if !url.contains('%') {
+            return Some(url.to_owned());
+        }
+        let version = crate::version::normalize_pretty(self.version())
+            .unwrap_or_else(|_| self.version().to_owned());
+        let kind = self
+            .raw
+            .get("dist")
+            .and_then(|d| d.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        Some(
+            url.replace("%package%", self.name())
+                .replace("%version%", &version)
+                .replace("%reference%", self.dist_reference().unwrap_or(""))
+                .replace("%type%", kind)
+                .replace("%prettyVersion%", self.version()),
+        )
+    }
+
     pub fn dist_reference(&self) -> Option<&str> {
         self.raw.get("dist")?.get("reference")?.as_str()
     }
@@ -208,5 +235,22 @@ mod tests {
     fn empty_platform_as_array() {
         let lock = Lock::parse(r#"{"packages":[],"platform":[]}"#).expect("parse");
         assert!(lock.platform.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn dist_url_placeholders_like_composer_mirror() {
+        let p = LockPackage {
+            raw: serde_json::from_str(r#"{"name": "ssddanbrown/asserthtml", "version": "v3.2.0",
+                "dist": {"type": "zip", "url": "https://codeberg.org/api/v1/repos/%package%/archive/%prettyVersion%.zip?r=%reference%&t=%type%&v=%version%", "reference": "0811b5c"}}"#).unwrap(),
+        };
+        assert_eq!(
+            p.dist_url_expanded().unwrap(),
+            "https://codeberg.org/api/v1/repos/ssddanbrown/asserthtml/archive/v3.2.0.zip?r=0811b5c&t=zip&v=3.2.0.0"
+        );
     }
 }

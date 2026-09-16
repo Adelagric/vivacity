@@ -181,15 +181,12 @@ pub async fn install(
             warm_names.contains(p.name()) && !to_install.iter().any(|q| q.name() == p.name());
         let (name, version) = (p.name().to_owned(), p.version().to_owned());
         let dist_ref = p.dist_reference().map(str::to_owned);
-        let url = p
-            .dist_url()
-            .ok_or_else(|| Error::Http {
-                url: name.clone(),
-                message:
-                    "package without a dist url (the scope detector should have routed to the fallback)"
-                        .to_owned(),
-            })?
-            .to_owned();
+        let url = p.dist_url_expanded().ok_or_else(|| Error::Http {
+            url: name.clone(),
+            message:
+                "package without a dist url (the scope detector should have routed to the fallback)"
+                    .to_owned(),
+        })?;
         let shasum = p.dist_shasum().map(str::to_owned);
         let (store, fetcher, sem) = (store.clone(), fetcher.clone(), sem.clone());
         let offline = opts.offline || warm_only;
