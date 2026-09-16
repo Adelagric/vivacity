@@ -94,7 +94,8 @@ pub fn normalize_path(path: &str) -> String {
 }
 
 /// PHP `dirname()` on a normalised Unix path.
-fn php_dirname(p: &str) -> String {
+/// PHP `dirname()` on a normalised Unix path.
+pub fn php_dirname(p: &str) -> String {
     match p.rfind('/') {
         None => ".".to_owned(),
         Some(0) => "/".to_owned(),

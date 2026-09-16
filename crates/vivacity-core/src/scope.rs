@@ -20,6 +20,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "symfony/runtime",
     "composer/installers",
     "pestphp/pest-plugin",
+    "dealerdirect/phpcodesniffer-composer-installer",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose

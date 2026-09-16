@@ -126,6 +126,10 @@ run_one() { # nom, mode, ligne JSON du scan
   t_viv=$(( $(date +%s) - t0 ))
   if [ "$ref_code" != 0 ]; then
     bucket="unavailable"; detail="$(tail -5 "$WORK/$n.$mode.composer.err")"
+  elif grep -q "Failed to set PHP CodeSniffer" "$WORK/$n.$mode.composer.log"; then
+    # Le plugin de référence a échoué sur cette machine (phpcs lui-même,
+    # sous le PHP local) : Composer n'a pas écrit ce qu'il aurait écrit.
+    bucket="unavailable"; detail="reference plugin failed: $(grep -m1 "Failed to set PHP CodeSniffer" "$WORK/$n.$mode.composer.log")"
   elif [ "$viv_code" = 3 ]; then
     bucket="fallback"; detail="$(grep -E '^  - ' "$WORK/$n.$mode.vivacity.err")"
   elif [ "$viv_code" != 0 ]; then

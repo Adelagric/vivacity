@@ -798,6 +798,29 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         }
         trace("autoload dump", t0);
     }
+    // `dealerdirect/phpcodesniffer-composer-installer` listens to
+    // post-install-cmd: after the transaction and the dump, plugins on.
+    if !args.no_plugins {
+        let local = report.local_repository.as_ref().unwrap_or(&lock);
+        let installed: Vec<&vivacity_core::lock::LockPackage> =
+            local.wanted_packages(with_dev).collect();
+        let allowed = matches!(
+            vivacity_core::layout::plugin_allowed(
+                &manifest,
+                vivacity_core::phpcs_installer::PLUGIN_NAME
+            ),
+            vivacity_core::layout::PluginVerdict::Allowed
+        );
+        if allowed
+            && installed
+                .iter()
+                .any(|p| p.name() == vivacity_core::phpcs_installer::PLUGIN_NAME)
+        {
+            vivacity_core::phpcs_installer::register_standards(
+                &project, layout, &installed, &manifest,
+            )?;
+        }
+    }
     let warmed = if report.store_warmed > 0 {
         format!(", store warmed for {} packages", report.store_warmed)
     } else {
@@ -834,7 +857,13 @@ fn emulate_pest_plugin(
         .wanted_packages(with_dev)
         .map(|p| (p.name(), p))
         .collect();
-    if !plugins_enabled || !wanted.contains_key(vivacity_core::pest_plugin::PLUGIN_NAME) {
+    // Like Composer: a plugin listed as `false` in allow-plugins is skipped.
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, vivacity_core::pest_plugin::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if !plugins_enabled || !allowed || !wanted.contains_key(vivacity_core::pest_plugin::PLUGIN_NAME)
+    {
         if previously_present {
             vivacity_core::pest_plugin::remove_pest_plugins(&vendor)?;
         }
@@ -983,6 +1012,10 @@ fn dump_autoload(
         && lock
             .wanted_packages(dev_mode)
             .any(|p| p.name() == "symfony/runtime")
+        && matches!(
+            vivacity_core::layout::plugin_allowed(manifest, "symfony/runtime"),
+            vivacity_core::layout::PluginVerdict::Allowed
+        )
     {
         vivacity_core::runtime_stub::write_stub(&project.join("vendor"), project, manifest)?;
     }

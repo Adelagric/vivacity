@@ -23,6 +23,15 @@ byte-identical-output promise are the public API.
   became native with their dev packages. Composer's own order in that
   file is the completion order of its parallel extractions — the
   harnesses compare it sorted.
+- **`dealerdirect/phpcodesniffer-composer-installer` emulated** (0.7.2 to
+  1.2.1): the `ruleset.xml` search in the `phpcodesniffer-standard`
+  packages (and in the project when it is one), the paths made relative
+  to `squizlabs/php_codesniffer` with `findShortestPath`, sorted and
+  written as `installed_paths` into `<phpcs>/CodeSniffer.conf` in phpcs's
+  own var_export format; existing entries kept while their directory
+  exists. Four corpus projects became native with their dev packages.
+  An emulated plugin listed as `false` in `allow-plugins` is skipped,
+  like Composer skips the real one.
 - **`BENIGN_PLUGINS` pruned on the corpus's evidence**: `phpstan/extension-installer`,
   `rector/extension-installer` and `dealerdirect/phpcodesniffer-composer-installer`
   write files under a Composer with plugins active; a project locking one
