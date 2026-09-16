@@ -413,6 +413,39 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-17 — PCRE2 compilé avec des symboles préfixés, jamais la lib système (v0.12)
+
+Constat : ePHPm (ephpm/ephpm#523, `ephpm composer` = `vivacity::run` en
+process) échoue à l'édition de liens — `duplicate symbol:
+_pcre2_check_escape_8…` — parce que `libphp.a` embarque la PCRE2 de PHP et
+que `pcre2-sys` compile la sienne quand pkg-config ne trouve pas
+`libpcre2-8`. Constat 2 (méta-analyse) : nos binaires de release 0.10.0
+macOS arm64 et Linux x86_64 étaient liés **dynamiquement** à une PCRE2
+système (Homebrew `libpcre2-8.0.dylib`, `libpcre2-8.so.0`) — un Mac sans
+`brew install pcre2` ne les démarrait pas. Options écartées : remplacer
+PCRE (le `JsonManipulator` de Composer vit de sous-motifs récursifs
+`(?&json)`, le scanner de classes de lookbehind + possessifs en mode octets
+— aucun moteur Rust pur ne les a, et la parité est prouvée contre PCRE) ;
+`objcopy --prefix-symbols` (préfixe aussi les indéfinis, inexistant sous
+MSVC) ; demander à l'hôte `--with-external-pcre` (déplace le problème).
+Décision : deux crates à nous, `vivacity-pcre2-sys` (pcre2-sys 0.2.10 +
+PCRE2 10.46, toujours compilée depuis la source vendorée, `PCRE2_SYMBOL_PREFIX=vivacity_`
+par un patch de 16 lignes de `pcre2.h` — les DEUX définitions de
+`PCRE2_SUFFIX` — et de `pcre2_internal.h` — six symboles indépendants de la
+largeur — ; bindings en `#[link_name]`) et `vivacity-pcre2` (pcre2 0.2.11
+intact). Un `[patch]` ne se propage pas aux consommateurs crates.io, d'où
+des crates publiées, versionnées avec le workspace (base amont dans la
+description). Preuves : `tools/check-pcre2-symbols.sh` (137/137 globaux
+préfixés, en CI Linux/macOS), `crates/pcre2-link-test` (un objet C
+définissant `pcre2_compile_8`, `_pcre2_check_escape_8`, `pcre2_match_8`
+lié à plat par `rustc-link-arg-tests` — vérifié : sans préfixe, doublons
+sous GNU ld/lld, masquage silencieux sous ld d'Apple attrapé par
+l'assertion de match ; avec, vert), l'assertion « pas de PCRE2 dynamique »
+dans release.yml, et la suite de harness rejouée (le moteur exercé sur
+macOS/Linux passe de la lib système à la 10.46 vendorée). Le patch est
+proposable à rust-pcre2 tel quel (sans la macro, les symboles sont
+identiques à l'octet à la base).
+
 ## 2026-09-16 — L'ordre de `files` chez Composer dépend de l'ordre de son dépôt local (cycles)
 
 Constat, sur wallabag (`--no-dev`) devenu natif avec `bin-dir` : le

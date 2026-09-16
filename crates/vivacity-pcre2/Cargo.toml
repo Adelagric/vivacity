@@ -1,0 +1,26 @@
+[package]
+name = "vivacity-pcre2"
+version.workspace = true
+edition = "2024"
+authors = ["Andrew Gallant <jamslam@gmail.com>", "Adel Kaleche <kaleche@gmail.com>"]
+description = "pcre2 0.2.11, unchanged, on top of vivacity-pcre2-sys (PCRE2 built statically with prefixed symbols) — the regex engine of vivacity."
+homepage = "https://github.com/Adelagric/vivacity"
+documentation = "https://docs.rs/pcre2"
+readme = "README.md"
+keywords = ["pcre2", "regex", "composer"]
+categories = ["text-processing"]
+license = "Unlicense OR MIT"
+repository.workspace = true
+include = ["src/**", "README.md", "COPYING", "LICENSE-MIT", "UNLICENSE", "rustfmt.toml"]
+
+[lib]
+name = "pcre2"
+path = "src/lib.rs"
+
+[lints.clippy]
+all = "allow"
+
+[dependencies]
+libc = "=0.2.189"
+log = "=0.4.34"
+pcre2-sys = { package = "vivacity-pcre2-sys", version = "=0.10.0", path = "../vivacity-pcre2-sys" }

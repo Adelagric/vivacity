@@ -218,6 +218,17 @@ installs its own process-wide default provider before the first request:
 vivacity = { version = "0.10", default-features = false, features = ["rustls-tls-no-provider"] }
 ```
 
+vivacity's regular expressions run on PCRE2 (Composer's patterns need it:
+recursive subpatterns, possessive quantifiers, byte-mode class scanning),
+built in from source with every symbol prefixed `vivacity_`
+(`vivacity-pcre2-sys`, `vivacity-pcre2`). A host that links its own PCRE2
+— PHP's `libphp.a` bundles one, with the usual `pcre2_*_8` names — gets no
+duplicate symbols from vivacity; another crate pulling the stock
+`pcre2-sys` into the same binary would still collide with the host's, that
+is not vivacity's to fix. The prefix is checked in CI
+(`tools/check-pcre2-symbols.sh`) and by a link test against a foreign
+PCRE2 (`crates/pcre2-link-test`).
+
 ## Development
 
 ```bash

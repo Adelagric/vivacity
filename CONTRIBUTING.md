@@ -75,6 +75,10 @@ the roadmap below.
   from memory, no "close enough".
 - **Never run PHP at install time.** Scripts and plugins are out, by design.
 - **Measure before optimising** (`bench/`), and publish the losing numbers too.
+- **Six crates are published**, in dependency order by `cargo publish
+  --workspace`: `vivacity-pcre2-sys`, `vivacity-pcre2` (forks of
+  BurntSushi's, see their READMEs — nothing else changes there), then
+  `vivacity-core`, `vivacity-autoload`, `vivacity-resolver`, `vivacity`.
 - Gates before a PR: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   `cargo test` (needs php + composer 2.10.3 on PATH),
   `harness/diff-vendor.sh --with-autoloader`, `harness/update.sh`,

@@ -1087,25 +1087,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcre2"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
-dependencies = [
- "libc 0.2.189",
- "log",
- "pcre2-sys",
-]
-
-[[package]]
-name = "pcre2-sys"
-version = "0.2.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18b9073c1a2549bd409bf4a32c94d903bb1a09bf845bc306ae148897fa0760a4"
+name = "pcre2-link-test"
+version = "0.10.0"
 dependencies = [
  "cc",
- "libc 0.2.189",
- "pkg-config",
+ "vivacity-pcre2",
 ]
 
 [[package]]
@@ -1956,13 +1942,13 @@ version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "md-5",
- "pcre2",
  "rayon",
  "serde_json",
  "sha1",
  "tempfile",
  "thiserror",
  "vivacity-core",
+ "vivacity-pcre2",
  "walkdir",
 ]
 
@@ -1975,7 +1961,6 @@ dependencies = [
  "hex",
  "libc 1.0.0-alpha.4",
  "md-5",
- "pcre2",
  "proptest",
  "rayon",
  "reqwest",
@@ -1985,20 +1970,38 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "vivacity-pcre2",
  "zip",
+]
+
+[[package]]
+name = "vivacity-pcre2"
+version = "0.10.0"
+dependencies = [
+ "libc 0.2.189",
+ "log",
+ "vivacity-pcre2-sys",
+]
+
+[[package]]
+name = "vivacity-pcre2-sys"
+version = "0.10.0"
+dependencies = [
+ "cc",
+ "libc 0.2.189",
 ]
 
 [[package]]
 name = "vivacity-resolver"
 version = "0.10.0"
 dependencies = [
- "pcre2",
  "serde",
  "serde_json",
  "sha1",
  "tempfile",
  "thiserror",
  "vivacity-core",
+ "vivacity-pcre2",
 ]
 
 [[package]]

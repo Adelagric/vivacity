@@ -55,6 +55,9 @@ jobs:
       - name: Tests (unitaires + oracles PHP)
         run: cargo test
 
+      - name: PCRE2 symbols all prefixed (embeddable next to libphp.a)
+        run: tools/check-pcre2-symbols.sh
+
       - name: Parity without autoloader
         run: harness/diff-vendor.sh
 

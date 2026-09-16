@@ -41,6 +41,8 @@ jobs:
 
       - name: Unit tests
         run: cargo test --workspace --lib
+      - name: Link test next to a foreign PCRE2 (MSVC)
+        run: cargo test -p pcre2-link-test
 
       - name: Bin proxy .bat (bin-compat rule, caller, skip, Composer bytes)
         run: cargo test -p vivacity-core --test fixtures_binproxy bat_

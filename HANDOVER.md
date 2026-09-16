@@ -39,7 +39,7 @@ dépendances, gérée par cargo :
 cargo login                       # une fois, jeton du compte crates.io du mainteneur
 # bumper la version : [workspace.package].version ET les trois dépendances
 # `path = "../vivacity-*", version = "…"` (crates/vivacity*/Cargo.toml)
-cargo publish --workspace         # core → autoload → resolver → vivacity
+cargo publish --workspace         # pcre2-sys → pcre2 → core → autoload → resolver → vivacity
 ```
 
 Les quatre crates sont sur crates.io en 0.5.0 (`cargo install vivacity` vérifié). Un job de publication
@@ -140,6 +140,13 @@ Rien n'est porté d'un logiciel GPL.
 - `serde_json` DOIT garder `preserve_order` + `float_roundtrip` (content-hash).
 - Le pattern classmap de Composer exige pcre2 (possessifs, lookbehind,
   octets non-UTF-8) — décision plan r1/F4. Les noms de classes sont des `Vec<u8>`.
+- PCRE2 est compilé depuis `crates/vivacity-pcre2-sys/upstream/` avec tous
+  ses symboles préfixés `vivacity_` (jamais la lib système : un embarqueur
+  qui lie `libphp.a` — ePHPm — aurait des symboles en double). Pour passer à
+  un pcre2-sys plus récent : recopier `upstream/`, `src/bindings.rs`,
+  `build.rs` ; réappliquer le patch de `pcre2.h` / `pcre2_internal.h`
+  (README du crate) ; `tools/prefix-pcre2-bindings.py` ;
+  `tools/check-pcre2-symbols.sh` doit compter 0 symbole non préfixé.
 - `harness/diff-vendor.sh` copie le projet complet (les règles d'autoload de
   la racine — `src/Kernel.php` chez Sylius — doivent exister).
 - Sylius boot : `php -d memory_limit=1G` (128 Mo brew insuffisants) ; une résolution FRAÎCHE de sylius-standard ne boote pas sur PHP 8.5 (Doctrine ORM / lazy objects) — CI épinglée en PHP 8.4.

@@ -51,6 +51,14 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target ${{ matrix.target }} -p vivacity
+      # PCRE2 is built in (vivacity-pcre2-sys): the binary must not need a
+      # system libpcre2-8 (0.10.0's macOS and Linux binaries did).
+      - name: No dynamic PCRE2
+        if: runner.os != 'Windows'
+        run: |
+          bin=target/${{ matrix.target }}/release/vivacity
+          if [ "${{ runner.os }}" = macOS ]; then deps=$(otool -L "$bin"); else deps=$(readelf -d "$bin"); fi
+          echo "$deps" | grep -i pcre && { echo "::error::$bin links a system PCRE2"; exit 1; } || echo "no PCRE2 dependency"
       # One script for every target (tar.gz + sha256, then re-read and
       # `--version`): what install.sh and install.ps1 consume.
       - name: Package

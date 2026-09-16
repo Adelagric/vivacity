@@ -7,6 +7,16 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **PCRE2 built in with prefixed symbols** (`docs/plans/v0.12-pcre2-prefix.md`):
+  two crates of our own, `vivacity-pcre2-sys` (pcre2-sys 0.2.10 with PCRE2
+  10.46, always built from the vendored source, every symbol prefixed
+  `vivacity_` through a 16-line `PCRE2_SYMBOL_PREFIX` patch, bindings on
+  `#[link_name]`) and `vivacity-pcre2` (pcre2 0.2.11, unchanged). A
+  program that embeds vivacity and links its own PCRE2 — PHP's `libphp.a`
+  bundles one — no longer gets `duplicate symbol: _pcre2_check_escape_8…`
+  (ePHPm's `ephpm composer`, ephpm/ephpm#523). Checked by
+  `tools/check-pcre2-symbols.sh` (137/137 globals) and a link test against
+  a foreign PCRE2 (`crates/pcre2-link-test`), on the three CI platforms.
 - **`config.vendor-dir` and `config.bin-dir`** (`docs/plans/v0.11-vendor-dir.md`):
   resolved like `Config::get` — `COMPOSER_VENDOR_DIR` / `COMPOSER_BIN_DIR`,
   then the project's `config`, then the global config; `{$vendor-dir}`
@@ -29,6 +39,11 @@ byte-identical-output promise are the public API.
   install each one enables; results and reading in `bench/M7-ci-cache.md`.
 
 ### Fixed
+- The macOS (arm64) and Linux release binaries no longer depend on a
+  system `libpcre2-8` (0.10.0's did: `pcre2-sys` picked Homebrew's /
+  Ubuntu's library through pkg-config on the runners, so the macOS binary
+  failed to start on a Mac without `brew install pcre2`); `release.yml`
+  now asserts it.
 - `installed.php` lists the inline aliases of the lock (`"x/y": "dev-branch
   as 1.2.3"`, the lock's `aliases` list) in a package's `aliases`, like
   Composer's `MarkAliasInstalled` does. Found by the corpus once
