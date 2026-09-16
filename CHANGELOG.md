@@ -27,6 +27,10 @@ byte-identical-output promise are the public API.
   install each one enables; results and reading in `bench/M7-ci-cache.md`.
 
 ### Fixed
+- `installed.php` lists the inline aliases of the lock (`"x/y": "dev-branch
+  as 1.2.3"`, the lock's `aliases` list) in a package's `aliases`, like
+  Composer's `MarkAliasInstalled` does. Found by the corpus once
+  joomla-cms (`vendor-dir: libraries/vendor`) became native.
 - `harness/update.sh` runs the Drupal case with `--no-security-blocking` on
   both sides: `packages.drupal.org` (the project's own repository, not
   frozen by the snapshot) serves live advisories for `drupal/core`, and

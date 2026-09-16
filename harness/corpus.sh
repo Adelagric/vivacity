@@ -142,7 +142,19 @@ run_one() { # nom, mode, ligne JSON du scan
     vrel="$(jq -r '.config["vendor-dir"] // "vendor" | sub("/+$"; "") | sub("^\\./"; "")' "$ref/composer.json" 2>/dev/null || echo vendor)"
     if jq -e '(.config["allow-plugins"]["composer/installers"] == true) or (.config["vendor-dir"] != null) or (.config["bin-dir"] != null)' "$ref/composer.json" >/dev/null 2>&1; then scope_ref="$ref"; scope_viv="$viv"; fi
     if ! VENDOR_REL="$vrel" compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff" >/dev/null; then
-      bucket="diff"; detail="$(head -20 "$WORK/$n.$mode.diff")"
+      # L'ordre de `files` (et de la classmap statique) chez Composer dépend
+      # de l'ordre de son dépôt local quand des paquets se requièrent en
+      # cycle (PackageSorter tronque le cycle là où il le rencontre) : un
+      # `composer install` frais et son propre `composer dump-autoload` sur
+      # le même arbre diffèrent (wallabag, cycle hoa/*). vivacity écrit la
+      # forme de `dump-autoload` (installed.json, trié par nom). Quand seule
+      # cette différence subsiste, l'entrée compte native, annotée.
+      if (cd "$ref" && composer dump-autoload --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1) \
+         && VENDOR_REL="$vrel" compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff2" >/dev/null; then
+        detail="autoload order: Composer's fresh install differs from its own dump-autoload on this tree (require cycle); vivacity matches the dump-autoload form"
+      else
+        bucket="diff"; detail="$(head -20 "$WORK/$n.$mode.diff")"
+      fi
     fi
   fi
   echo "$scan" | jq -c --arg bucket "$bucket" --arg detail "$detail" --argjson t_ref "$t_ref" --argjson t_viv "$t_viv" --arg ignored "${ignore[*]}" \

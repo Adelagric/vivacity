@@ -413,6 +413,27 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-16 — L'ordre de `files` chez Composer dépend de l'ordre de son dépôt local (cycles)
+
+Constat, sur wallabag (`--no-dev`) devenu natif avec `bin-dir` : le
+`autoload_files.php` d'un `composer install` frais et celui de
+`composer dump-autoload` lancé juste après **sur le même arbre** diffèrent
+(`symfony/polyfill-ctype` avant/après `hoa/consistency`). Cause :
+`PackageSorter::sortPackages` calcule le poids d'un paquet récursivement
+sur ses utilisateurs et **tronque un cycle là où il le rencontre**
+(`$computing[$name]` → 0) ; les paquets `hoa/*` se requièrent en cycle, donc
+le résultat dépend de l'ordre d'itération du package map — l'ordre du dépôt
+local en mémoire à l'installation (ordre d'exécution des opérations, lié à
+l'achèvement des extractions) contre l'ordre d'installed.json (trié par
+nom) au `dump-autoload`. vivacity écrit la forme de `dump-autoload`, la
+seule reproductible. Décision : le corpus (`harness/corpus.sh`) retente la
+comparaison après un `composer dump-autoload` de la référence (mêmes
+`--ignore-platform-req`, même `--no-dev`) et compte l'entrée native
+**annotée** quand seule cette différence subsistait ; la promesse reste
+« identique à Composer », précisée en « à sa forme déterministe » sur ce
+point. Candidat à un rapport upstream (install ≠ dump-autoload sur un
+arbre à cycles).
+
 ## 2026-09-16 — `vendor-dir` / `bin-dir` : la forme relative normalisée, les autres formes refusées (v0.11)
 
 Composer résout `vendor-dir` et `bin-dir` (`Config::get`) en absolu sans

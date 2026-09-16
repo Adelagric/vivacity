@@ -274,6 +274,18 @@ pub fn installed_php(
         {
             entry.aliases.push(pretty);
         }
+        // Inline alias of the lock (`"x/y": "dev-branch as 1.2.3"`, the
+        // lock's `aliases` list): Composer marks the AliasPackage installed
+        // with the transaction, and installed.php lists its pretty version.
+        for a in &lock.aliases {
+            if a.get("package").and_then(Value::as_str) == Some(p.name())
+                && a.get("version").and_then(Value::as_str) == Some(p.version())
+            {
+                if let Some(alias) = a.get("alias").and_then(Value::as_str) {
+                    entry.aliases.push(alias.to_owned());
+                }
+            }
+        }
     }
 
     // Virtual packages: replace then provide (same rules as Composer).
@@ -519,6 +531,30 @@ mod tests {
             .to_string(),
         )
         .expect("lock")
+    }
+
+    #[test]
+    fn inline_alias_of_the_lock_is_listed() {
+        let lock = Lock::parse(
+            &json!({
+                "packages": [
+                    {"name": "voku/portable-utf8", "version": "dev-joomla-5.3", "type": "library",
+                     "source": {"type": "git", "url": "https://x/u.git", "reference": "eeb3d9e390411cd31af808caa7f7de337ea3a24c"}}
+                ],
+                "packages-dev": [],
+                "aliases": [{"package": "voku/portable-utf8", "version": "dev-joomla-5.3",
+                             "alias": "6.0.13", "alias_normalized": "6.0.13.0"}]
+            })
+            .to_string(),
+        )
+        .expect("lock");
+        let layout = Layout::vendor_only(std::path::Path::new("/proj"), &lock, true);
+        let root = RootPackage::from_manifest(&json!({"name": "joomla/joomla-cms"}), true);
+        let text = installed_php(&lock, &root, &json!({}), true, &layout).expect("php");
+        assert!(
+            text.contains("'aliases' => array(\n                0 => '6.0.13',\n            ),"),
+            "{text}"
+        );
     }
 
     #[test]
