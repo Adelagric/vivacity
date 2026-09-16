@@ -46,11 +46,18 @@ for fx in "${FIXTURES[@]}"; do
   home="$WORK/home-$fx"; rm -rf "$home"; mkdir -p "$home"
   printf '{"repositories": %s}\n' "$(snapshot_repositories_json "$reg")" > "$home/config.json"
   root_version=""; [ "$fx" = "rector" ] && root_version="dev-main"
+  # Drupal : packages.drupal.org (dépôt du projet, non figé) ne sert pour
+  # drupal/core que ses avis de sécurité, et chaque avis touchant la version
+  # figée rend le lock de référence insoluble par blocage (SA-CORE-2026-013
+  # du 2026-09-16 sur 11.4.6) — Composer plante alors sur les avis partiels
+  # de l'instantané file:// au lieu d'expliquer. Le blocage est vérifié par
+  # les fixtures solver-policies ; ici on le débranche des deux côtés.
+  blocking=(); [ "$fx" = "drupal" ] && blocking=(--no-security-blocking)
   for side in ref viv; do
     stage_project "$fx" "$WORK/$side-$fx"
   done
   if ! (cd "$WORK/ref-$fx" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
-        composer update --no-install --no-scripts --no-plugins --no-interaction --no-audit --quiet 2>"$WORK/$fx.composer.log"); then
+        composer update --no-install --no-scripts --no-plugins --no-interaction --no-audit --quiet ${blocking[@]+"${blocking[@]}"} 2>"$WORK/$fx.composer.log"); then
     echo "FAIL $fx : composer update a échoué :"; tail -5 "$WORK/$fx.composer.log"; status=1; continue
   fi
   if ! diff -q "$WORK/ref-$fx/composer.lock" "$reg/composer.lock.expected" >/dev/null; then
@@ -58,7 +65,7 @@ for fx in "${FIXTURES[@]}"; do
     diff "$WORK/ref-$fx/composer.lock" "$reg/composer.lock.expected" | head -10 || true; status=1; continue
   fi
   if ! (cd "$WORK/viv-$fx" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
-        "$VIVACITY" update --no-install 2>"$WORK/$fx.vivacity.log"); then
+        "$VIVACITY" update --no-install ${blocking[@]+"${blocking[@]}"} 2>"$WORK/$fx.vivacity.log"); then
     echo "FAIL $fx : vivacity update a échoué :"; tail -5 "$WORK/$fx.vivacity.log"; status=1; continue
   fi
   if diff -q "$WORK/ref-$fx/composer.lock" "$WORK/viv-$fx/composer.lock" >/dev/null; then

@@ -11,6 +11,15 @@ byte-identical-output promise are the public API.
   artifact costs, Composer's zip cache against the extracted store, and the
   install each one enables; results and reading in `bench/M7-ci-cache.md`.
 
+### Fixed
+- `harness/update.sh` runs the Drupal case with `--no-security-blocking` on
+  both sides: `packages.drupal.org` (the project's own repository, not
+  frozen by the snapshot) serves live advisories for `drupal/core`, and
+  SA-CORE-2026-013 (2026-09-16) made the locked 11.4.6 blocked — Composer
+  then crashes on the snapshot's partial advisories instead of explaining
+  the problem, where vivacity prints the explanation. Blocking parity is
+  covered by the solver-policies fixtures.
+
 ## [0.10.0] — 2026-09-16
 
 ### Added
