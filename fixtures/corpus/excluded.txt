@@ -1,0 +1,9 @@
+# Entries that cannot enter the corpus, and why (2026-09-16).
+magento/project-community-edition   authentication required (repo.magento.com)
+ibexa/*                             authentication required beyond the OSS skeleton
+oro/*                               authentication required
+picocms/pico-composer               unsolvable on PHP 8.5 even with php ignored (create-project resolves live)
+tempestphp/tempest-app              no stable release (create-project refuses without --stability)
+winter/winter                       no stable release found by create-project 2.10.3
+roundcube/roundcubemail, wp-cli/wp-cli, flarum/framework, FriendsOfPHP/PHP-CS-Fixer, phpmd/phpmd, deployphp/deployer, laravel/pint, kanboard/kanboard, thelia/thelia, osTicket/osTicket, shlinkio/shlink, sabre-io/Baikal, postfixadmin/postfixadmin, phpipam/phpipam, typecho/typecho, modxcms/revolution, the-djmaze/snappymail, LimeSurvey/LimeSurvey, fuel/fuel, roots/sage, infection/infection, phpbench/phpbench, maglnet/ComposerRequireChecker, composer-unused/composer-unused, ergebnis/composer-normalize, humbug/box   no committed composer.lock
+vanilla/vanilla, Enalean/tuleap, captainhook/captainhook     repository not found on GitHub under that name

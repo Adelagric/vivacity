@@ -1,0 +1,67 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "vinkla/wordplate",
+    "description": "The WordPlate boilerplate",
+    "license": "MIT",
+    "type": "project",
+    "keywords": [
+        "wordplate",
+        "wordpress"
+    ],
+    "require": {
+        "php": "^8.4",
+        "composer/installers": "^2.3",
+        "roots/bedrock-autoloader": "^1.1",
+        "roots/wordpress": "^7.1",
+        "symfony/http-foundation": "^8.1",
+        "vinkla/headache": "^3.6",
+        "vlucas/phpdotenv": "^5.6",
+        "wp-plugin/clean-image-filenames": "^1.5"
+    },
+    "require-dev": {
+        "symfony/var-dumper": "^8.1"
+    },
+    "repositories": [
+        {
+            "name": "wp-packages",
+            "type": "composer",
+            "url": "https://repo.wp-packages.org"
+        }
+    ],
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "autoload": {
+        "files": [
+            "src/helpers.php"
+        ]
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/installers": true,
+            "roots/wordpress-core-installer": true
+        },
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true
+    },
+    "extra": {
+        "installer-paths": {
+            "public/mu-plugins/{$name}": [
+                "type:wordpress-muplugin",
+                "wp-plugin/clean-image-filenames"
+            ],
+            "public/plugins/{$name}": [
+                "type:wordpress-plugin"
+            ],
+            "public/themes/{$name}": [
+                "type:wordpress-theme"
+            ]
+        },
+        "wordpress-install-dir": "public/wordpress"
+    },
+    "scripts": {
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ]
+    }
+}

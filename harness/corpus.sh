@@ -85,6 +85,11 @@ scan_one() { # nom, mode
   # Périmètre seulement : la plateforme locale (extensions, version de PHP)
   # n'entre pas dans le seau prévu ; elle est relevée à part.
   (cd "$d" && "$VIVACITY" install --check-scope --ignore-platform-reqs "${flags[@]+"${flags[@]}"}" >"$d/scope.out" 2>"$d/scope.err") || code=$?
+  # La colonne plateforme : ce que cette machine ne satisfait pas (version
+  # de PHP, extension absente) — le double install ignorera `ext-*` et, si
+  # une exigence `php` échoue ici, `php` aussi (noté).
+  local platform_failures
+  platform_failures="$(cd "$d" && "$VIVACITY" install --check-scope "${flags[@]+"${flags[@]}"}" 2>&1 | grep -E '^  - .*: (Missing|Mismatch|Unsupported)' | sed 's/^  - //' | jq -Rs 'split("\n") | map(select(. != ""))')"
   local bucket reasons benign
   reasons="$(grep -E '^  - ' "$d/scope.err" | sed 's/^  - //' | jq -Rs 'split("\n") | map(select(. != ""))')"
   benign="$(grep -E '^Note: plugin ' "$d/scope.err" | sed -E 's/^Note: plugin ([^ ]+) .*/\1/' | jq -Rs 'split("\n") | map(select(. != ""))')"
@@ -95,13 +100,13 @@ scan_one() { # nom, mode
   esac
   local manifest="$ROOT/fixtures/corpus/$n/composer.json" lock="$ROOT/fixtures/corpus/$n/composer.lock"
   jq -n -c \
-    --arg name "$n" --arg mode "$mode" --arg predicted "$bucket" --argjson reasons "$reasons" --argjson benign "$benign" \
+    --arg name "$n" --arg mode "$mode" --arg predicted "$bucket" --argjson reasons "$reasons" --argjson benign "$benign" --argjson platform_failures "$platform_failures" \
     --arg provenance "$(cat "$ROOT/fixtures/corpus/$n/PROVENANCE")" \
     --argjson scripts "$(jq -c '.scripts // {} | keys' "$manifest")" \
     --argjson platform "$(jq -c '[(.require // {}), (.["require-dev"] // {})] | add | to_entries | map(select(.key | test("^(php|ext-|lib-)"))) | map(.key + " " + .value)' "$manifest")" \
     --argjson packages "$(jq -c "[.packages[], (if \"$mode\" == \"dev\" then .[\"packages-dev\"][] else empty end)] | map(.name + \"@\" + .version)" "$lock")" \
     --argjson plugins "$(jq -c "[.packages[], (if \"$mode\" == \"dev\" then .[\"packages-dev\"][] else empty end)] | map(select(.type == \"composer-plugin\") | .name)" "$lock")" \
-    '{name: $name, mode: $mode, predicted: $predicted, reasons: $reasons, benign_plugins: $benign, scripts: $scripts, platform: $platform, packages: $packages, plugins: $plugins, provenance: $provenance}'
+    '{name: $name, mode: $mode, predicted: $predicted, reasons: $reasons, benign_plugins: $benign, platform_failures: $platform_failures, scripts: $scripts, platform: $platform, packages: $packages, plugins: $plugins, provenance: $provenance}'
   rm -rf "$d"
 }
 
@@ -109,11 +114,15 @@ scan_one() { # nom, mode
 run_one() { # nom, mode, ligne JSON du scan
   local n="$1" mode="$2" scan="$3" ref="$WORK/ref-$1" viv="$WORK/viv-$1" flags=() ref_code=0 viv_code=0 t0 t_ref t_viv bucket="native" detail=""
   [ "$mode" = "no-dev" ] && flags+=(--no-dev)
+  # `ext-*` toujours ignoré ; `php` seulement quand cette machine ne le
+  # satisfait pas (PHP local trop récent pour le lock), d'après le scan.
+  local ignore=(--ignore-platform-req='ext-*')
+  if echo "$scan" | jq -e '.platform_failures | map(select(startswith("php "))) | length > 0' >/dev/null; then ignore+=(--ignore-platform-req=php); fi
   stage "$n" "$ref"; stage "$n" "$viv"
   t0=$(date +%s)
-  (cd "$ref" && composer install --no-scripts --no-interaction --no-ansi --ignore-platform-req='ext-*' "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.composer.log" 2>"$WORK/$n.$mode.composer.err") || ref_code=$?
+  (cd "$ref" && composer install --no-scripts --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.composer.log" 2>"$WORK/$n.$mode.composer.err") || ref_code=$?
   t_ref=$(( $(date +%s) - t0 )); t0=$(date +%s)
-  (cd "$viv" && "$VIVACITY" install --no-fallback --ignore-platform-req='ext-*' "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.vivacity.log" 2>"$WORK/$n.$mode.vivacity.err") || viv_code=$?
+  (cd "$viv" && "$VIVACITY" install --no-fallback "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.vivacity.log" 2>"$WORK/$n.$mode.vivacity.err") || viv_code=$?
   t_viv=$(( $(date +%s) - t0 ))
   if [ "$ref_code" != 0 ]; then
     bucket="unavailable"; detail="$(tail -5 "$WORK/$n.$mode.composer.err")"
@@ -128,8 +137,8 @@ run_one() { # nom, mode, ligne JSON du scan
       bucket="diff"; detail="$(head -20 "$WORK/$n.$mode.diff")"
     fi
   fi
-  echo "$scan" | jq -c --arg bucket "$bucket" --arg detail "$detail" --argjson t_ref "$t_ref" --argjson t_viv "$t_viv" \
-    '. + {bucket: $bucket, detail: $detail, seconds_composer: $t_ref, seconds_vivacity: $t_viv}'
+  echo "$scan" | jq -c --arg bucket "$bucket" --arg detail "$detail" --argjson t_ref "$t_ref" --argjson t_viv "$t_viv" --arg ignored "${ignore[*]}" \
+    '. + {bucket: $bucket, detail: $detail, seconds_composer: $t_ref, seconds_vivacity: $t_viv, ignored: $ignored}'
   rm -rf "$ref" "$viv"
 }
 
