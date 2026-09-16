@@ -1,0 +1,21 @@
+name: ci-cache
+
+# On demand: what a CI cache artifact costs (zip cache vs extracted store)
+# and the install each one enables, on a Linux runner (bench/ci-cache.sh).
+on:
+  workflow_dispatch:
+
+jobs:
+  ci-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:2.10.3
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq hyperfine jq zstd
+      - run: cargo build --release
+      - run: bench/ci-cache.sh

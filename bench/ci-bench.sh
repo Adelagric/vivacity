@@ -4,7 +4,7 @@
 # Scénarios, caches chauds : no-op ; warm (vendor supprimé) ; dump-autoload -o.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VIVACE="$ROOT/target/release/vivace"
+VIVACE="$ROOT/target/release/vivacity"
 WORK="${VIVACE_BENCH_DIR:-/tmp/vivace-bench}"
 RUNS="${BENCH_RUNS:-10}"
 C="composer --no-interaction --no-plugins --no-scripts"
