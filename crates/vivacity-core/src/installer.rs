@@ -12,7 +12,7 @@ use crate::state::RootPackage;
 use crate::store::Store;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 pub struct InstallOptions {
@@ -47,6 +47,9 @@ pub struct InstallReport {
     /// entries for the unchanged ones (Composer keeps the loaded objects and
     /// dumps them back; the autoloader is generated from them too).
     pub local_repository: Option<Lock>,
+    /// Lines Composer prints on stderr during the operations and vivacity
+    /// reproduces (`Skipped installation of bin …`).
+    pub messages: Vec<String>,
 }
 
 /// Installed identity of a package: version + dist reference.
@@ -66,9 +69,9 @@ struct Installed {
     raw: serde_json::Map<String, Value>,
 }
 
-fn installed_packages(vendor: &Path) -> BTreeMap<String, Installed> {
+fn installed_packages(composer_dir: &Path) -> BTreeMap<String, Installed> {
     let mut out = BTreeMap::new();
-    let path = vendor.join("composer/installed.json");
+    let path = composer_dir.join("installed.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return out;
     };
@@ -106,7 +109,8 @@ pub async fn install(
     // Absolute root (the layout's): the relative paths of the proxies and of
     // the state files must not depend on a relative --working-dir.
     let project_dir = layout.root();
-    let vendor = project_dir.join("vendor");
+    let vendor = layout.vendor_dir();
+    let bin_dir = layout.bin_dir();
     std::fs::create_dir_all(&vendor).map_err(Error::io(&vendor))?;
 
     let mut report = InstallReport::default();
@@ -115,7 +119,7 @@ pub async fn install(
     // `Factory::purgePackages`: a package of installed.json whose install
     // path is gone is not installed at all (a fresh install, not an
     // update — no `removeBinaries`, no removal of the old path).
-    let mut previous = installed_packages(&vendor);
+    let mut previous = installed_packages(&layout.composer_dir());
     previous.retain(|name, _| {
         layout
             .abs(name)
@@ -306,7 +310,6 @@ pub async fn install(
     let touches_installed = to_install.iter().any(|p| previous.contains_key(p.name()))
         || previous.keys().any(|n| !wanted_names.contains(n.as_str()));
     if touches_installed {
-        let bin_dir = vendor.join("bin");
         std::fs::create_dir_all(&bin_dir).map_err(Error::io(&bin_dir))?;
     }
 
@@ -323,26 +326,74 @@ pub async fn install(
     // `.bat`.
     let bin_compat = crate::binproxy::resolve_bin_compat(root_manifest)?;
     let placed: std::collections::HashSet<&str> = to_install.iter().map(|p| p.name()).collect();
+    // `LibraryInstaller::update` removes the old version's binaries before
+    // installing the new ones (`removeBinaries` then `installBinaries`); a
+    // fresh install only adds. The bin directory is removed when a removal
+    // leaves it empty — and recreated by the next `initializeBinDir`.
+    let previous_bins = |name: &str| -> Vec<String> {
+        previous
+            .get(name)
+            .and_then(|i| i.raw.get("bin"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     for p in &wanted {
         let bins = p.bins();
-        if bins.is_empty() {
-            continue;
-        }
         let Some(dir) = layout.abs(p.name()) else {
             continue;
         };
+        if placed.contains(p.name()) && previous.contains_key(p.name()) {
+            let old = previous_bins(p.name());
+            let old: Vec<&str> = old.iter().map(String::as_str).collect();
+            crate::binproxy::remove_binaries(&bin_dir, &old)?;
+        }
+        if bins.is_empty() {
+            continue;
+        }
         let missing = || {
             bins.iter().any(|b| {
                 let b = b.trim_start_matches("./");
                 let link_name = b.rsplit_once('/').map(|(_, f)| f).unwrap_or(b);
-                dir.join(b).exists() && !vendor.join("bin").join(link_name).exists()
+                dir.join(b).exists() && !bin_dir.join(link_name).exists()
             })
         };
-        if placed.contains(p.name()) || missing() {
-            crate::binproxy::install_binaries(&vendor, &dir, &bins, bin_compat)?;
+        if placed.contains(p.name()) {
+            report.messages.extend(crate::binproxy::install_binaries(
+                &vendor,
+                &bin_dir,
+                p.name(),
+                &dir,
+                &bins,
+                bin_compat,
+                true,
+            )?);
+        } else if missing() {
+            crate::binproxy::install_binaries(
+                &vendor,
+                &bin_dir,
+                p.name(),
+                &dir,
+                &bins,
+                bin_compat,
+                false,
+            )?;
         }
     }
-    prune_orphan_bin_proxies(&vendor, &wanted, bin_compat)?;
+    // Removed packages: `removeBinaries` on each (their proxies and `.bat`).
+    for name in previous.keys() {
+        if !wanted_names.contains(name.as_str()) {
+            let old = previous_bins(name);
+            let old: Vec<&str> = old.iter().map(String::as_str).collect();
+            crate::binproxy::remove_binaries(&bin_dir, &old)?;
+        }
+    }
+    prune_stale_bat_proxies(&bin_dir, &wanted, bin_compat)?;
 
     // State files + runtime stub, from the local repository: an unchanged
     // package keeps the entry installed.json already had (its own
@@ -370,7 +421,7 @@ pub async fn install(
     }
     let root = RootPackage::detect(root_manifest, project_dir, opts.with_dev);
     crate::state::write_state_files(
-        &vendor.join("composer"),
+        &layout.composer_dir(),
         &local,
         &root,
         root_manifest,
@@ -400,13 +451,20 @@ fn prune_empty_parent(project_dir: &Path, removed: &Path) {
     }
 }
 
-fn prune_orphan_bin_proxies(
-    vendor: &Path,
+/// A `<bin>.bat` next to an expected proxy is the Windows proxy of that
+/// bin — kept only when the resolved bin-compat writes `.bat` proxies at
+/// all; otherwise a leftover from a previous full-mode install, purged so
+/// the tree converges on what Composer produces on a bare checkout.
+/// Nothing else is touched: the bin directory may be the project's own.
+fn prune_stale_bat_proxies(
+    bin_dir: &Path,
     wanted: &[&LockPackage],
     bin_compat: crate::binproxy::BinCompat,
 ) -> Result<()> {
-    let bin_dir = vendor.join("bin");
-    let Ok(entries) = std::fs::read_dir(&bin_dir) else {
+    if bin_compat == crate::binproxy::BinCompat::Full {
+        return Ok(());
+    }
+    let Ok(entries) = std::fs::read_dir(bin_dir) else {
         return Ok(());
     };
     let mut expected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -419,25 +477,13 @@ fn prune_orphan_bin_proxies(
     }
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        // A `.bat` is the Windows proxy of an expected bin — kept only when
-        // the resolved bin-compat writes `.bat` proxies at all (otherwise a
-        // leftover from a previous full-mode install, purged, converging on
-        // what Composer produces on a bare checkout) — or the proxy of a
-        // removed package (purged), or a user-placed file.
-        let keep = expected.contains(&file_name)
-            || (bin_compat == crate::binproxy::BinCompat::Full
-                && file_name
-                    .strip_suffix(".bat")
-                    .is_some_and(|stem| expected.contains(stem)));
-        if !keep {
+        if file_name
+            .strip_suffix(".bat")
+            .is_some_and(|stem| expected.contains(stem))
+        {
             let p = entry.path();
             std::fs::remove_file(&p).map_err(Error::io(&p))?;
         }
     }
     Ok(())
-}
-
-/// Utility path: the project's vendor/composer.
-pub fn vendor_composer_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join("vendor/composer")
 }

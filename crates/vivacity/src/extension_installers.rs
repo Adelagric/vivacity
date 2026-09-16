@@ -77,7 +77,7 @@ fn full_pretty_version(p: &LockPackage) -> String {
 /// whole.
 fn absolute_install_path(layout: &Layout, name: &str) -> Option<String> {
     let abs = layout.abs(name)?;
-    let vendor = layout.root().join("vendor");
+    let vendor = layout.vendor_dir();
     let rel = abs.strip_prefix(&vendor).ok()?;
     let real = std::fs::canonicalize(&vendor).unwrap_or(vendor);
     let real = real.to_string_lossy();

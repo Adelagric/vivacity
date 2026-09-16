@@ -7,6 +7,21 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`config.vendor-dir` and `config.bin-dir`** (`docs/plans/v0.11-vendor-dir.md`):
+  resolved like `Config::get` — `COMPOSER_VENDOR_DIR` / `COMPOSER_BIN_DIR`,
+  then the project's `config`, then the global config; `{$vendor-dir}`
+  substituted; trailing slashes and `./` dropped — and followed by every
+  derived path: install paths, `installed.json` / `installed.php`
+  (the root's `install_path` included), the bin proxies, the autoloader's
+  `$vendorDir` / `$baseDir` and its scan exclusion, the emulated plugins'
+  files. The bin directory may be the project's own: an existing regular
+  file keeps its place with Composer's `Skipped installation of bin …`
+  notice, only the proxies of removed or updated packages are unlinked,
+  and the directory is removed when a removal empties it
+  (`BinaryInstaller::removeBinaries`). Absolute, `..`, `.`, `~/` and
+  `$VAR` forms are refused as scope issues. `harness/vendor-dir.sh`: six
+  variants on the symfony and wordpress fixtures (install, `dump -o`,
+  no-op; whole project compared), in CI on Linux, macOS and Windows.
 - `bench/ci-cache.sh` + `ci-cache` workflow (on demand): what a CI cache
   artifact costs, Composer's zip cache against the extracted store, and the
   install each one enables; results and reading in `bench/M7-ci-cache.md`.

@@ -612,7 +612,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
-    let as_lock = serde_json::json!({"packages": installed_packages(&project), "packages-dev": []});
+    let as_lock = serde_json::json!({"packages": installed_packages(&project, &manifest), "packages-dev": []});
     let present = vivacity_resolver::repository::locked_repository_with(&as_lock, &mut arena, true)
         .map_err(|e| anyhow::anyhow!("installed.json: {}", e.0))?;
     let result =
@@ -671,7 +671,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             for line in abandoned_warnings(&lock_value) {
                 eprintln!("{line}");
             }
-            print_funding(&project);
+            print_funding(&project, &manifest);
         }
         return Ok(0);
     }
@@ -829,6 +829,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     } else {
         String::new()
     };
+    for m in &report.messages {
+        eprintln!("{m}");
+    }
     eprintln!(
         "vivacity: {} installed, {} unchanged, {} removed ({} from store, {} from cache, {} from network){warmed}{autoload_note} in {:.2}s",
         report.installed,
@@ -855,7 +858,9 @@ fn emulate_pest_plugin(
     plugins_enabled: bool,
     previously_present: bool,
 ) -> anyhow::Result<()> {
-    let vendor = project.join("vendor");
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
     let wanted: std::collections::BTreeMap<&str, &vivacity_core::lock::LockPackage> = local
         .wanted_packages(with_dev)
         .map(|p| (p.name(), p))
@@ -901,7 +906,7 @@ fn operation_lines(
                     Some(d) if d.kind == "path" => {
                         let install_path = layout
                             .abs(&pkg.name)
-                            .unwrap_or_else(|| project.join("vendor").join(&pkg.name));
+                            .unwrap_or_else(|| layout.vendor_dir().join(&pkg.name));
                         match vivacity_core::path_install::install_appendix(
                             project,
                             &install_path,
@@ -925,7 +930,7 @@ fn operation_lines(
                     Some(d) if d.kind == "path" => {
                         let install_path = layout
                             .abs(&pkg.name)
-                            .unwrap_or_else(|| project.join("vendor").join(&pkg.name));
+                            .unwrap_or_else(|| layout.vendor_dir().join(&pkg.name));
                         if vivacity_core::path_install::is_own_source(
                             project,
                             &install_path.to_string_lossy(),
@@ -1020,12 +1025,21 @@ fn dump_autoload(
             vivacity_core::layout::PluginVerdict::Allowed
         )
     {
-        vivacity_core::runtime_stub::write_stub(&project.join("vendor"), project, manifest)?;
+        vivacity_core::runtime_stub::write_stub(&layout.vendor_dir(), project, manifest)?;
     }
     for w in &report.warnings {
         eprintln!("{w}");
     }
     Ok(report)
+}
+
+/// `<vendor-dir>/composer` of a project before its layout is resolved
+/// (reading installed.json): the configured directory, or `vendor/composer`
+/// when the configuration is one vivacity refuses (the layout will say so).
+fn composer_dir_of(project: &std::path::Path, manifest: &serde_json::Value) -> std::path::PathBuf {
+    vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .composer_dir(project)
 }
 
 fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
@@ -1038,11 +1052,12 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     .context("invalid composer.json")?;
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
     // Dev mode: that of the installed state (installed.json), like Composer.
-    let installed_dev = std::fs::read_to_string(project.join("vendor/composer/installed.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
-        .unwrap_or(true);
+    let installed_dev =
+        std::fs::read_to_string(composer_dir_of(&project, &manifest).join("installed.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
+            .unwrap_or(true);
     let dev_mode = !args.no_dev && installed_dev;
     let layout = match vivacity_core::layout::Layout::resolve(
         &project,
@@ -1076,7 +1091,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             return Ok(3);
         }
     }
-    let installed_order: Vec<String> = installed_packages(&project)
+    let installed_order: Vec<String> = installed_packages(&project, &manifest)
         .iter()
         .filter_map(|p| {
             p.get("name")
@@ -1400,15 +1415,18 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
     for line in &resolved.post {
         eprintln!("{line}");
     }
-    print_funding(project);
+    print_funding(project, &resolved.manifest);
 }
 
 /// The packages of vendor/composer/installed.json (list form of old
 /// Composers accepted), minus those whose install path is gone
 /// (`Factory::purgePackages` through `LibraryInstaller::isInstalled`; a
 /// metapackage is always installed).
-fn installed_packages(project: &std::path::Path) -> Vec<serde_json::Value> {
-    let composer_dir = project.join("vendor/composer");
+fn installed_packages(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let composer_dir = composer_dir_of(project, manifest);
     let Some(installed) = std::fs::read_to_string(composer_dir.join("installed.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -1438,7 +1456,7 @@ fn installed_packages(project: &std::path::Path) -> Vec<serde_json::Value> {
 /// (never an alias), unless `COMPOSER_FUND` is a number equal to 0. Printed
 /// in every mode, dry run included (`$localRepo` is then the mocked
 /// repository of the same packages).
-fn print_funding(project: &std::path::Path) {
+fn print_funding(project: &std::path::Path, manifest: &serde_json::Value) {
     if let Ok(env) = std::env::var("COMPOSER_FUND") {
         let t = env.trim();
         if let Ok(n) = t.parse::<f64>() {
@@ -1447,7 +1465,7 @@ fn print_funding(project: &std::path::Path) {
             }
         }
     }
-    let funding = installed_packages(project)
+    let funding = installed_packages(project, manifest)
         .iter()
         .filter(|p| {
             p.get("funding")
@@ -1596,9 +1614,11 @@ fn resolve_and_lock(
     // `Installer::run` after `doUpdate` (and after the install phase): the
     // suggestions of the newly installed packages (and of the root on a
     // fresh install), the abandoned packages of the new lock.
-    let fresh_install = !project.join("vendor/composer/installed.json").is_file();
-    let post = post_update_report(&session, ops, &lock, &manifest_text, fresh_install);
     let manifest = patched_manifest(&session, &manifest_text);
+    let fresh_install = !composer_dir_of(&project, &manifest)
+        .join("installed.json")
+        .is_file();
+    let post = post_update_report(&session, ops, &lock, &manifest_text, fresh_install);
     Ok(Resolved {
         status: 0,
         lock: Some(lock),
@@ -2070,7 +2090,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         return Ok(status);
     }
     for package in &packages {
-        if locally_installed(&project, package) {
+        if locally_installed(&project, &manifest, package) {
             eprintln!("Removal failed, {package} is still present, it may be required by another package. See `composer why {package}`.");
             return Ok(2);
         }
@@ -2080,8 +2100,8 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
 
 /// `$composer->getRepositoryManager()->getLocalRepository()->findPackages($name)`
 /// is non-empty.
-fn locally_installed(project: &std::path::Path, name: &str) -> bool {
-    installed_packages(project)
+fn locally_installed(project: &std::path::Path, manifest: &serde_json::Value, name: &str) -> bool {
+    installed_packages(project, manifest)
         .iter()
         .any(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
 }

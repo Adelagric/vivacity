@@ -44,9 +44,6 @@ the roadmap below.
   the pieces a `vcs` port reuses: the git-like version guesser
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
-- **`config.vendor-dir` and `bin-dir`** — the first and third fallback
-  reasons of the corpus (16 projects together): a layout with a vendor
-  directory elsewhere, and the proxies elsewhere.
 - **`wikimedia/composer-merge-plugin`** (4 corpus projects) — merges
   `require` from other files at resolution time; on `install` from a lock
   its listeners still fire. The emulated plugins (`pest_plugin.rs`,

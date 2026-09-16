@@ -434,27 +434,48 @@ fn is_docker() -> bool {
     })
 }
 
-/// Installs a package's proxies (laid out in `package_dir`) into vendor/bin
-/// (0755), following the resolved [`BinCompat`] exactly as
-/// `BinaryInstaller::installBinaries` does: `Full` (bin-compat `"full"`, or
-/// `"auto"` on Windows/WSL) goes through [`install_full_binaries`]; `Proxy`
-/// writes the unixy proxy alone. vivacity always writes proxies (never
-/// symlinks), which is Composer's own proxy mode.
+/// Installs a package's proxies (laid out in `package_dir`) into the bin
+/// directory (`config.bin-dir`, 0755), following the resolved [`BinCompat`]
+/// exactly as `BinaryInstaller::installBinaries` does: `Full` (bin-compat
+/// `"full"`, or `"auto"` on Windows/WSL) goes through
+/// [`install_full_binaries`]; `Proxy` writes the unixy proxy alone.
+/// vivacity always writes proxies (never symlinks), which is Composer's own
+/// proxy mode. An existing regular file at the link's place is kept (a
+/// project-owned `bin/console`, say): Composer skips that bin with
+/// `Skipped installation of bin <bin> for package <name>: name conflicts
+/// with an existing file` — printed on an install or update
+/// (`warnOnOverwrite`), silent on the `ensureBinariesPresence` pass. The
+/// messages are returned for the caller to print.
 pub fn install_binaries(
     vendor_dir: &Path,
+    bin_dir: &Path,
+    package: &str,
     package_dir: &Path,
     bins: &[&str],
     compat: BinCompat,
-) -> Result<()> {
-    let bin_dir = vendor_dir.join("bin");
-    std::fs::create_dir_all(&bin_dir).map_err(Error::io(&bin_dir))?;
-    for bin in bins {
-        let bin = bin.trim_start_matches("./");
+    warn_on_overwrite: bool,
+) -> Result<Vec<String>> {
+    std::fs::create_dir_all(bin_dir).map_err(Error::io(bin_dir))?;
+    let mut skipped = Vec::new();
+    for declared in bins {
+        let bin = declared.trim_start_matches("./");
         let target = package_dir.join(bin);
         let link_name = bin.rsplit_once('/').map(|(_, f)| f).unwrap_or(bin);
         let link = bin_dir.join(link_name);
         if !target.exists() {
             continue; // binary declared but missing from the dist: Composer skips it too
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&link) {
+            if !meta.file_type().is_symlink() {
+                if warn_on_overwrite {
+                    skipped.push(format!(
+                        "    Skipped installation of bin {declared} for package {package}: name conflicts with an existing file"
+                    ));
+                }
+                continue;
+            }
+            // A symlink (Composer's pre-2.2 mode, or a user's): replaced.
+            std::fs::remove_file(&link).map_err(Error::io(&link))?;
         }
         match compat {
             BinCompat::Full => install_full_binaries(vendor_dir, &link, link_name, &target)?,
@@ -466,9 +487,43 @@ pub fn install_binaries(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = umask_mode_0777(&bin_dir)?;
+            let mode = umask_mode_0777(bin_dir)?;
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
                 .map_err(Error::io(&target))?;
+        }
+    }
+    Ok(skipped)
+}
+
+/// `BinaryInstaller::removeBinaries`: the package's links (and their
+/// `.bat`) unlinked whatever they are; the bin directory removed when it
+/// ends up empty (only when the package declared binaries).
+pub fn remove_binaries(bin_dir: &Path, bins: &[&str]) -> Result<()> {
+    if bins.is_empty() {
+        return Ok(());
+    }
+    for bin in bins {
+        let bin = bin.trim_start_matches("./");
+        let link_name = bin.rsplit_once('/').map(|(_, f)| f).unwrap_or(bin);
+        for p in [
+            bin_dir.join(link_name),
+            bin_dir.join(format!("{link_name}.bat")),
+        ] {
+            match std::fs::remove_file(&p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(&p)(e)),
+            }
+        }
+    }
+    remove_bin_dir_if_empty(bin_dir)
+}
+
+/// `is_dir($binDir) && isDirEmpty($binDir)` → `rmdir`.
+pub fn remove_bin_dir_if_empty(bin_dir: &Path) -> Result<()> {
+    if let Ok(mut entries) = std::fs::read_dir(bin_dir) {
+        if entries.next().is_none() {
+            std::fs::remove_dir(bin_dir).map_err(Error::io(bin_dir))?;
         }
     }
     Ok(())

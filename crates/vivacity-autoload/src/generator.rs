@@ -165,7 +165,7 @@ pub fn dump(
             .map_err(io(project_dir))?
             .to_string_lossy(),
     );
-    let vendor_dir = project_dir.join("vendor");
+    let vendor_dir = layout.vendor_dir();
     std::fs::create_dir_all(&vendor_dir).map_err(io(&vendor_dir))?;
     let vendor_path = normalize_path(
         &vivacity_core::pathutil::canonicalize(&vendor_dir)
@@ -178,9 +178,10 @@ pub fn dump(
 
     // Absolute install path of a package: under vendor/ via the canonicalized
     // vendor (symlinks resolved like Composer), otherwise under the root.
+    let vendor_prefix = format!("{}/", layout.dirs().vendor_rel());
     let install_abs = |name: &str| -> Option<String> {
         let rel = layout.rel(name)?;
-        Some(match rel.strip_prefix("vendor/") {
+        Some(match rel.strip_prefix(vendor_prefix.as_str()) {
             Some(rest) => format!("{vendor_path}/{rest}"),
             None => format!("{base_path}/{rel}"),
         })

@@ -343,7 +343,7 @@ pub fn installed_php(
         entry.version = Some(root.version.clone());
         entry.reference = Some(root.reference.clone());
         entry.package_type = Some(root.package_type.clone());
-        entry.install_path = Some(Some("__DIR__ . '/../../'".to_owned()));
+        entry.install_path = Some(Some(install_path_code(&layout.root_install_path())));
         entry.dev_requirement = Some(false);
         entry.aliases = root.aliases.clone();
     }
@@ -376,7 +376,12 @@ pub fn installed_php(
             .unwrap_or_else(|| "null".to_owned()),
     );
     push_kv(&mut out, 2, "type", &php_str(&root.package_type));
-    push_kv(&mut out, 2, "install_path", "__DIR__ . '/../../'");
+    push_kv(
+        &mut out,
+        2,
+        "install_path",
+        &install_path_code(&layout.root_install_path()),
+    );
     if root.aliases.is_empty() {
         push_kv(&mut out, 2, "aliases", "array()");
     } else {

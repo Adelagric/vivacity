@@ -26,10 +26,12 @@
 # extension-installer écrit `install_path` en absolu) : les deux copies
 # vivent dans des répertoires différents, le contenu est comparé après
 # remplacement du chemin physique de chaque côté par `<project>`.
+# Le répertoire vendor du projet (`config.vendor-dir`) est `vendor` sauf
+# `VENDOR_REL` : les fichiers tolérés sont cherchés là.
 compare_vendor() {
-  local ref="$1" viv="$2" out="${3:-$(mktemp)}"
-  local ip_ref="$ref/vendor/composer/include_paths.php" ip_viv="$viv/vendor/composer/include_paths.php"
-  [ -d "$ref/vendor" ] || { ip_ref="$ref/composer/include_paths.php"; ip_viv="$viv/composer/include_paths.php"; }
+  local ref="$1" viv="$2" out="${3:-$(mktemp)}" vrel="${VENDOR_REL:-vendor}"
+  local ip_ref="$ref/$vrel/composer/include_paths.php" ip_viv="$viv/$vrel/composer/include_paths.php"
+  [ -d "$ref/$vrel" ] || { ip_ref="$ref/composer/include_paths.php"; ip_viv="$viv/composer/include_paths.php"; }
   if [ -f "$ip_ref" ] && [ -f "$ip_viv" ] && ! diff -q <(sort "$ip_ref") <(sort "$ip_viv") >/dev/null; then
     echo "include_paths.php diffère même trié" > "$out"; diff <(sort "$ip_ref") <(sort "$ip_viv") | head >> "$out"
     head -20 "$out"; return 1

@@ -135,9 +135,13 @@ run_one() { # nom, mode, ligne JSON du scan
   elif [ "$viv_code" != 0 ]; then
     bucket="diff"; detail="vivacity exit $viv_code: $(tail -5 "$WORK/$n.$mode.vivacity.err")"
   else
-    local scope_ref="$ref/vendor" scope_viv="$viv/vendor"
-    if jq -e '.config["allow-plugins"]["composer/installers"] == true' "$ref/composer.json" >/dev/null 2>&1; then scope_ref="$ref"; scope_viv="$viv"; fi
-    if ! compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff" >/dev/null; then
+    # Projet entier dès qu'un fichier peut atterrir hors vendor/ : installers,
+    # ou un `vendor-dir` / `bin-dir` configuré (compare.sh cherche alors ses
+    # fichiers tolérés sous VENDOR_REL).
+    local scope_ref="$ref/vendor" scope_viv="$viv/vendor" vrel
+    vrel="$(jq -r '.config["vendor-dir"] // "vendor" | sub("/+$"; "") | sub("^\\./"; "")' "$ref/composer.json" 2>/dev/null || echo vendor)"
+    if jq -e '(.config["allow-plugins"]["composer/installers"] == true) or (.config["vendor-dir"] != null) or (.config["bin-dir"] != null)' "$ref/composer.json" >/dev/null 2>&1; then scope_ref="$ref"; scope_viv="$viv"; fi
+    if ! VENDOR_REL="$vrel" compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff" >/dev/null; then
       bucket="diff"; detail="$(head -20 "$WORK/$n.$mode.diff")"
     fi
   fi

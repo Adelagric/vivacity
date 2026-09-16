@@ -4,6 +4,7 @@ pub mod binproxy;
 pub mod clone;
 pub mod constraint;
 pub mod content_hash;
+pub mod dirs;
 pub mod error;
 pub mod extract;
 pub mod fetch;

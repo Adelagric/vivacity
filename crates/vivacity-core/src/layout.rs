@@ -9,6 +9,7 @@
 //! no trailing slash); that is the form Composer normalises before computing
 //! `install-path` (FilesystemRepository::write).
 
+use crate::dirs::Dirs;
 use crate::installers::{self, Placement};
 use crate::lock::{Lock, LockPackage};
 use crate::pathutil::{find_shortest_path, normalize_path};
@@ -21,6 +22,8 @@ pub struct Layout {
     /// Project root, absolute (as given, not canonicalised: the relative paths
     /// derived from it do not depend on symlinks).
     root: PathBuf,
+    /// `config.vendor-dir` / `bin-dir`, project-relative.
+    dirs: Dirs,
     /// name -> project-relative path (absent for a metapackage).
     paths: BTreeMap<String, String>,
     /// Emulated composer/installers tag, if the plugin is active.
@@ -145,16 +148,18 @@ pub fn global_config_value(key: &str) -> Option<Value> {
     v.get("config")?.get(key).cloned()
 }
 
-/// Project-relative path of a package handled by LibraryInstaller.
-fn vendor_rel(name: &str, target_dir: Option<&str>) -> String {
+/// Project-relative path of a package handled by LibraryInstaller:
+/// `<vendor-dir>/<name>[/<target-dir>]`.
+fn vendor_rel(vendor: &str, name: &str, target_dir: Option<&str>) -> String {
     match target_dir {
-        Some(t) => format!("vendor/{name}/{t}"),
-        None => format!("vendor/{name}"),
+        Some(t) => format!("{vendor}/{name}/{t}"),
+        None => format!("{vendor}/{name}"),
     }
 }
 
 /// Decision for a package (name, type, extra) under the current configuration.
 fn place(
+    vendor: &str,
     table: Option<&installers::Table>,
     root_extra: Option<&Value>,
     name: &str,
@@ -163,10 +168,10 @@ fn place(
     target_dir: Option<&str>,
 ) -> Result<String, String> {
     let Some(table) = table else {
-        return Ok(vendor_rel(name, target_dir));
+        return Ok(vendor_rel(vendor, name, target_dir));
     };
     match installers::placement(table, root_extra, name, package_type, package_extra) {
-        Ok(Placement::Vendor) => Ok(vendor_rel(name, target_dir)),
+        Ok(Placement::Vendor) => Ok(vendor_rel(vendor, name, target_dir)),
         Ok(Placement::Custom(p)) => {
             if crate::pathutil::is_absolute_path(&p) {
                 return Err(format!(
@@ -184,9 +189,9 @@ fn place(
                     "installers: {name} would install outside the project (`{p}`)"
                 ));
             }
-            if rel == "vendor" || rel.starts_with("vendor/") {
+            if rel == vendor || rel.starts_with(&format!("{vendor}/")) {
                 return Err(format!(
-                    "installers: {name} targets `{p}` inside vendor/ (not emulated: use the default vendor layout)"
+                    "installers: {name} targets `{p}` inside {vendor}/ (not emulated: use the default vendor layout)"
                 ));
             }
             Ok(rel)
@@ -199,14 +204,23 @@ impl Layout {
     /// Everything in vendor/ (no layout plugin), for tests and code paths
     /// that have no plugin-aware lock.
     pub fn vendor_only(project_dir: &Path, lock: &Lock, with_dev: bool) -> Layout {
+        Self::vendor_only_with(project_dir, lock, with_dev, Dirs::default())
+    }
+
+    /// `vendor_only` under the given `config.vendor-dir` / `bin-dir`.
+    pub fn vendor_only_with(project_dir: &Path, lock: &Lock, with_dev: bool, dirs: Dirs) -> Layout {
         let mut paths = BTreeMap::new();
         for p in lock.wanted_packages(with_dev) {
             if !p.is_virtual(false) {
-                paths.insert(p.name().to_owned(), vendor_rel(p.name(), p.target_dir()));
+                paths.insert(
+                    p.name().to_owned(),
+                    vendor_rel(dirs.vendor_rel(), p.name(), p.target_dir()),
+                );
             }
         }
         Layout {
             root: absolutize(project_dir),
+            dirs,
             paths,
             installers_tag: None,
             removals: BTreeMap::new(),
@@ -223,10 +237,13 @@ impl Layout {
         plugins_enabled: bool,
     ) -> Result<Layout, Vec<String>> {
         let root = absolutize(project_dir);
+        let dirs = Dirs::resolve(manifest).map_err(|e| vec![e])?;
+        let vendor = dirs.vendor_rel().to_owned();
+        let vendor_prefix = format!("{vendor}/");
         let mut issues: Vec<String> = Vec::new();
         let wanted: Vec<&LockPackage> = lock.wanted_packages(with_dev).collect();
-        let previous = installed_packages(&root);
-        let has_state = root.join("vendor/composer/installed.json").is_file();
+        let previous = installed_packages(&root, &dirs);
+        let has_state = dirs.composer_dir(&root).join("installed.json").is_file();
 
         // Is the plugin active? Composer loads it from installed.json
         // (PluginManager::loadInstalledPlugins) and installs it first in the
@@ -310,6 +327,7 @@ impl Layout {
                 continue;
             }
             match place(
+                &vendor,
                 table,
                 root_extra,
                 p.name(),
@@ -336,7 +354,7 @@ impl Layout {
             }
             let customs: Vec<(&str, &str)> = paths
                 .iter()
-                .filter(|(_, rel)| !rel.starts_with("vendor/"))
+                .filter(|(_, rel)| !rel.starts_with(&vendor_prefix))
                 .map(|(n, r)| (n.as_str(), r.as_str()))
                 .collect();
             for (name, rel) in &customs {
@@ -357,7 +375,7 @@ impl Layout {
         let wanted_names: std::collections::BTreeSet<&str> =
             wanted.iter().map(|p| p.name()).collect();
         let vendor_composer =
-            normalize_path(&format!("{}/vendor/composer", root.to_string_lossy()));
+            normalize_path(&format!("{}/{vendor}/composer", root.to_string_lossy()));
         let root_norm = normalize_path(&root.to_string_lossy());
         for prev in &previous {
             let name = prev["name"].as_str().unwrap_or("");
@@ -382,6 +400,7 @@ impl Layout {
                 continue;
             };
             let expected = place(
+                &vendor,
                 table,
                 root_extra,
                 name,
@@ -398,8 +417,8 @@ impl Layout {
                 Ok(rel) if rel == old_rel => {
                     // LibraryInstaller::removeCode deletes getPackageBasePath:
                     // vendor/<name> without the target-dir.
-                    let dir = if rel.starts_with("vendor/") {
-                        format!("vendor/{name}")
+                    let dir = if rel.starts_with(&vendor_prefix) {
+                        format!("{vendor}/{name}")
                     } else {
                         rel
                     };
@@ -415,6 +434,7 @@ impl Layout {
         if issues.is_empty() {
             Ok(Layout {
                 root,
+                dirs,
                 paths,
                 installers_tag,
                 removals,
@@ -426,6 +446,36 @@ impl Layout {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn dirs(&self) -> &Dirs {
+        &self.dirs
+    }
+
+    /// `<root>/<vendor-dir>` (not canonicalised).
+    pub fn vendor_dir(&self) -> PathBuf {
+        self.dirs.vendor_dir(&self.root)
+    }
+
+    /// `<root>/<bin-dir>`.
+    pub fn bin_dir(&self) -> PathBuf {
+        self.dirs.bin_dir(&self.root)
+    }
+
+    /// `<root>/<vendor-dir>/composer`.
+    pub fn composer_dir(&self) -> PathBuf {
+        self.dirs.composer_dir(&self.root)
+    }
+
+    /// The root package's `install_path` in installed.php: relative to
+    /// `<vendor-dir>/composer` like the packages' (`'../../'` by default).
+    pub fn root_install_path(&self) -> String {
+        let root = self.root.to_string_lossy();
+        find_shortest_path(
+            &format!("{root}/{}/composer", self.dirs.vendor_rel()),
+            &root,
+            true,
+        )
     }
 
     /// Project-relative path (None: metapackage or unknown package).
@@ -442,11 +492,13 @@ impl Layout {
     /// (target-dir included) for LibraryInstaller, the target itself otherwise.
     pub fn package_root(&self, name: &str) -> Option<PathBuf> {
         let rel = self.rel(name)?;
-        Some(if rel.starts_with("vendor/") {
-            self.root.join("vendor").join(name)
-        } else {
-            self.root.join(rel)
-        })
+        Some(
+            if rel.starts_with(&format!("{}/", self.dirs.vendor_rel())) {
+                self.vendor_dir().join(name)
+            } else {
+                self.root.join(rel)
+            },
+        )
     }
 
     /// `install-path` of installed.json / installed.php: relative to
@@ -455,7 +507,7 @@ impl Layout {
         let rel = self.rel(name)?;
         let root = self.root.to_string_lossy();
         Some(find_shortest_path(
-            &format!("{root}/vendor/composer"),
+            &format!("{root}/{}/composer", self.dirs.vendor_rel()),
             &format!("{root}/{rel}"),
             true,
         ))
@@ -469,8 +521,8 @@ impl Layout {
     }
 }
 
-fn installed_packages(root: &Path) -> Vec<Value> {
-    let path = root.join("vendor/composer/installed.json");
+fn installed_packages(root: &Path, dirs: &Dirs) -> Vec<Value> {
+    let path = dirs.composer_dir(root).join("installed.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -537,6 +589,31 @@ mod tests {
             Some(&json!({"a/b": true, "c/d": true})),
         );
         assert_eq!(merged, Some(json!({"a/b": false, "c/d": true})));
+    }
+
+    #[test]
+    fn vendor_dir_moves_every_derived_path() {
+        let lock = lock_with(json!([pkg("a/b", "library", "1.0.0")]));
+        let manifest = json!({"config": {"vendor-dir": "./lib/vendor/", "bin-dir": "bin"}});
+        let l = Layout::resolve(&root(), &lock, &manifest, true, true).expect("layout");
+        assert_eq!(l.rel("a/b"), Some("lib/vendor/a/b"));
+        assert_eq!(l.abs("a/b"), Some(root().join("lib/vendor/a/b")));
+        assert_eq!(
+            l.package_root("a/b"),
+            Some(root().join("lib/vendor").join("a/b"))
+        );
+        assert_eq!(l.install_path("a/b").as_deref(), Some("../a/b"));
+        assert_eq!(l.root_install_path(), "../../../");
+        assert_eq!(l.vendor_dir(), root().join("lib/vendor"));
+        assert_eq!(l.bin_dir(), root().join("bin"));
+        assert_eq!(l.composer_dir(), root().join("lib/vendor/composer"));
+        let l = Layout::resolve(&root(), &lock, &json!({}), true, true).expect("layout");
+        assert_eq!(l.root_install_path(), "../../");
+        assert_eq!(l.bin_dir(), root().join("vendor/bin"));
+        // A refused form is a layout issue, not a silent default.
+        let manifest = json!({"config": {"vendor-dir": "../shared/vendor"}});
+        let err = Layout::resolve(&root(), &lock, &manifest, true, true).unwrap_err();
+        assert!(err[0].contains("outside the project"), "{err:?}");
     }
 
     #[test]

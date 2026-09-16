@@ -413,6 +413,35 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-16 — `vendor-dir` / `bin-dir` : la forme relative normalisée, les autres formes refusées (v0.11)
+
+Composer résout `vendor-dir` et `bin-dir` (`Config::get`) en absolu sans
+canonicaliser (`baseDir . '/' . valeur`), puis chaque consommateur fait
+`realpath` avant d'en dériver un chemin écrit (`LibraryInstaller`,
+`BinaryInstaller`, `AutoloadGenerator`, `FilesystemRepository`). Décision :
+vivacity garde la forme **relative au projet, normalisée** (`lib/vendor`,
+`vendor/bin`) dans `dirs::Dirs`, portée par `Layout` ; tout ce qui est
+dérivé (`install-path`, `$vendorDir`/`$baseDir`, proxies) passe par les
+mêmes `findShortestPath*` que Composer sur des chemins canoniques, donc les
+octets sont les mêmes (harness `vendor-dir.sh`, 6 variantes dont
+`./vendor/composer/vendor` et `src/vendor` sous un PSR-4 scanné en `-o`).
+Précédence identique : `COMPOSER_VENDOR_DIR` / `COMPOSER_BIN_DIR` (vide =
+absent), `config` du projet, config globale, défaut `{$vendor-dir}/bin` ;
+seul le placeholder `{$vendor-dir}` est substitué. Les formes que le
+harness ne peut pas couvrir — absolu, `..`, la racine elle-même, `~/`,
+`$VAR` / `%VAR%`, autres placeholders — sont **refusées** (issue de layout,
+repli Composer) plutôt que supportées sans preuve : Composer y produit des
+`install-path` et un `$baseDir` absolus (`Filesystem::findShortestPath`
+quand le préfixe commun est `/`), qu'aucune fixture ne compare ; aucun des
+105 projets du corpus ne les emploie. Retenu de la méta-analyse : un
+`bin-dir` peut être le répertoire du projet (`bin/console`, `bin/phpunit`
+de la fixture symfony) — le proxy d'un fichier existant est *sauté* avec le
+message de Composer (`Skipped installation of bin … name conflicts with an
+existing file`, silencieux sur la passe de présence), la purge ne touche
+plus que les proxies des paquets retirés ou mis à jour (`removeBinaries`,
+`rmdir` si le répertoire se vide), et le harness tourne `--no-fallback`
+pour qu'un site oublié échoue au lieu d'être rendu à Composer.
+
 ## 2026-09-16 — Le corpus comme étalon de « prêt au quotidien » (v0.10)
 
 Fait : six fixtures prouvent la parité là où elle s'applique, pas la

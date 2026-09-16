@@ -172,6 +172,14 @@ time (`symfony/flex`, `php-http/discovery`, `phpstan/extension-installer`,
 emulated (its source is GPL-2.0-or-later, see NOTICE.md): a project that
 uses it goes through the Composer fallback below.
 
+`config.vendor-dir` and `config.bin-dir` are honoured (project config,
+global config, `COMPOSER_VENDOR_DIR` / `COMPOSER_BIN_DIR`, the
+`{$vendor-dir}` placeholder): the packages, the proxies, the state files
+and the autoloader follow the directories, and a project-owned file in
+the bin directory is kept with Composer's `Skipped installation of bin`
+notice. Forms the harness does not cover (absolute or `..` paths, `~`,
+`$VAR`) go through the fallback.
+
 Anything else — other plugins, `composer/installers` cases with custom
 naming, source-only packages, a `path` package on Windows, a plugin
 upgrade in progress — is detected

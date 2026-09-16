@@ -107,3 +107,5 @@ jobs:
         run: |
           harness/diff-vendor.sh --with-autoloader
           harness/diff-vendor.sh --with-autoloader
+      - name: config.vendor-dir / bin-dir
+        run: harness/vendor-dir.sh

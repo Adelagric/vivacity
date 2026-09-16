@@ -75,7 +75,16 @@ fn bat_proxy_bytes_match_composer_under_full_bin_compat() {
     use vivacity_core::binproxy::{install_binaries, windows_proxy_content, BinCompat};
 
     let (root, vendor, pkg) = scratch_pkg("bytes");
-    install_binaries(&vendor, &pkg, &["bin/php-parse"], BinCompat::Full).expect("install_binaries");
+    install_binaries(
+        &vendor,
+        &vendor.join("bin"),
+        "acme/pkg",
+        &pkg,
+        &["bin/php-parse"],
+        BinCompat::Full,
+        true,
+    )
+    .expect("install_binaries");
 
     let proxy = vendor.join("bin").join("php-parse");
     let bat = vendor.join("bin").join("php-parse.bat");
@@ -155,8 +164,16 @@ fn bat_follows_resolved_bin_compat() {
 
     // Proxy mode writes the unixy proxy alone — no `.bat` at all.
     let (root, vendor, pkg) = scratch_pkg("rule");
-    install_binaries(&vendor, &pkg, &["bin/php-parse"], BinCompat::Proxy)
-        .expect("install_binaries");
+    install_binaries(
+        &vendor,
+        &vendor.join("bin"),
+        "acme/pkg",
+        &pkg,
+        &["bin/php-parse"],
+        BinCompat::Proxy,
+        true,
+    )
+    .expect("install_binaries");
     assert!(
         vendor.join("bin/php-parse").is_file(),
         "unixy proxy missing"
@@ -182,7 +199,16 @@ fn bat_proxy_existing_is_skipped_not_overwritten() {
     let sentinel = "@ECHO OFF\r\nREM user-managed proxy\r\n";
     std::fs::write(&bat, sentinel).unwrap();
 
-    install_binaries(&vendor, &pkg, &["bin/php-parse"], BinCompat::Full).expect("install_binaries");
+    install_binaries(
+        &vendor,
+        &vendor.join("bin"),
+        "acme/pkg",
+        &pkg,
+        &["bin/php-parse"],
+        BinCompat::Full,
+        true,
+    )
+    .expect("install_binaries");
 
     assert!(
         vendor.join("bin/php-parse").is_file(),
@@ -304,7 +330,16 @@ fn bat_proxy_executes_with_a_real_php() {
         BinCompat::Full,
         "auto must resolve to full on Windows"
     );
-    install_binaries(&vendor, &pkg, &["bin/greet"], compat).expect("install_binaries");
+    install_binaries(
+        &vendor,
+        &vendor.join("bin"),
+        "acme/pkg",
+        &pkg,
+        &["bin/greet"],
+        compat,
+        true,
+    )
+    .expect("install_binaries");
 
     // Rust can launch a .bat directly (it goes through cmd.exe, escaping the
     // arguments) — the same path as a user typing `vendor\bin\greet`.
@@ -321,4 +356,74 @@ fn bat_proxy_executes_with_a_real_php() {
     );
     assert_eq!(stdout.trim_end(), "vivacity-bat:alpha,beta:bin-dir-set");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `BinaryInstaller::installBinaries`: an existing regular file at the
+/// link's place is kept and reported (a project-owned `bin/console`); a
+/// symlink is replaced; the presence pass is silent.
+#[test]
+fn existing_regular_file_is_skipped_with_composer_message() {
+    use vivacity_core::binproxy::{install_binaries, BinCompat};
+    let tmp = tempfile::tempdir().expect("tmp");
+    let vendor = tmp.path().join("vendor");
+    let bin_dir = tmp.path().join("bin");
+    let pkg = vendor.join("acme/tool");
+    std::fs::create_dir_all(pkg.join("bin")).unwrap();
+    std::fs::write(pkg.join("bin/greet"), "#!/bin/sh\necho hi\n").unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(bin_dir.join("greet"), "mine").unwrap();
+    let skipped = install_binaries(
+        &vendor,
+        &bin_dir,
+        "acme/tool",
+        &pkg,
+        &["bin/greet"],
+        BinCompat::Proxy,
+        true,
+    )
+    .expect("install_binaries");
+    assert_eq!(
+        skipped,
+        vec!["    Skipped installation of bin bin/greet for package acme/tool: name conflicts with an existing file".to_string()]
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("greet")).unwrap(),
+        "mine"
+    );
+    let silent = install_binaries(
+        &vendor,
+        &bin_dir,
+        "acme/tool",
+        &pkg,
+        &["bin/greet"],
+        BinCompat::Proxy,
+        false,
+    )
+    .expect("install_binaries");
+    assert!(silent.is_empty());
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(bin_dir.join("greet")).unwrap();
+        std::os::unix::fs::symlink("nowhere", bin_dir.join("greet")).unwrap();
+        let skipped = install_binaries(
+            &vendor,
+            &bin_dir,
+            "acme/tool",
+            &pkg,
+            &["bin/greet"],
+            BinCompat::Proxy,
+            true,
+        )
+        .expect("install_binaries");
+        assert!(skipped.is_empty());
+        // A symlink is replaced by the proxy (a shell one: the target is not PHP).
+        let meta = std::fs::symlink_metadata(bin_dir.join("greet")).unwrap();
+        assert!(!meta.file_type().is_symlink());
+        assert!(std::fs::read_to_string(bin_dir.join("greet"))
+            .unwrap()
+            .starts_with("#!/usr/bin/env sh"));
+    }
+    // removeBinaries: the link goes, the directory too once empty.
+    vivacity_core::binproxy::remove_binaries(&bin_dir, &["bin/greet"]).unwrap();
+    assert!(!bin_dir.exists());
 }

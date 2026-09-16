@@ -144,8 +144,9 @@ pub fn plugin_issues(lock: &Lock, with_dev: bool) -> Vec<ScopeIssue> {
 }
 
 /// The `config` keys of the manifest (or the global config) that vivacity
-/// does not honour: `vendor-dir` other than `vendor`, `bin-dir` other than
-/// `vendor/bin`, a `preferred-install` asking for `source` anywhere.
+/// does not honour: a `preferred-install` asking for `source` anywhere.
+/// (`vendor-dir` / `bin-dir` are resolved by `dirs::Dirs`; the forms it
+/// refuses come back as layout issues.)
 pub fn config_issues(root_manifest: &Value) -> Vec<String> {
     let value = |key: &str| -> Option<Value> {
         root_manifest
@@ -155,17 +156,6 @@ pub fn config_issues(root_manifest: &Value) -> Vec<String> {
             .or_else(|| crate::layout::global_config_value(key))
     };
     let mut out = Vec::new();
-    let trimmed = |v: &Value| v.as_str().map(|s| s.trim_end_matches('/').to_owned());
-    if let Some(v) = value("vendor-dir") {
-        if trimmed(&v).as_deref() != Some("vendor") {
-            out.push(format!("vendor-dir {v}"));
-        }
-    }
-    if let Some(v) = value("bin-dir") {
-        if trimmed(&v).as_deref() != Some("vendor/bin") {
-            out.push(format!("bin-dir {v}"));
-        }
-    }
     if let Some(v) = value("preferred-install") {
         let wants_source = match &v {
             Value::String(s) => s == "source",
@@ -317,12 +307,9 @@ mod tests {
         let r = analyze(&proj(), &lock, &manifest, true, true);
         assert_eq!(
             r.issues,
-            vec![
-                ScopeIssue::Config("vendor-dir \"lib/\"".into()),
-                ScopeIssue::Config(
-                    "preferred-install {\"acme/*\":\"source\",\"*\":\"dist\"}".into()
-                ),
-            ]
+            vec![ScopeIssue::Config(
+                "preferred-install {\"acme/*\":\"source\",\"*\":\"dist\"}".into()
+            ),]
         );
         let manifest = json!({"config": {"vendor-dir": "vendor", "preferred-install": "auto"}});
         assert!(analyze(&proj(), &lock, &manifest, true, true).is_native_ok());
