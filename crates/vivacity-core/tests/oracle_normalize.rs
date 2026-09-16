@@ -4,6 +4,13 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 const VERSIONS: &[&str] = &[
+    "2026.04.1",
+    "1.02",
+    "v01.2.3",
+    "1.0.0-RC01",
+    "2026.04.x-dev",
+    "0.9",
+    "1.0.0-beta.01",
     "1.0",
     "v2.0.4",
     "0.18.0",

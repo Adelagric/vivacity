@@ -154,18 +154,16 @@ pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
         .strip_suffix(".x-dev")
         .or_else(|| stripped.strip_suffix(".X-dev"))
     {
-        let mut parts: Vec<u64> = Vec::new();
+        // The digit runs are kept as written (`2026.04.x-dev` stays
+        // `2026.04.9999999.9999999-dev`): VersionParser concatenates the
+        // matched strings, it never re-prints numbers.
+        let mut out: Vec<String> = Vec::new();
         for piece in stem.split('.') {
-            if piece.is_empty() || !piece.bytes().all(|b| b.is_ascii_digit()) || parts.len() >= 3 {
+            if piece.is_empty() || !piece.bytes().all(|b| b.is_ascii_digit()) || out.len() >= 3 {
                 return Err(UnsupportedVersion(input.to_owned()));
             }
-            parts.push(
-                piece
-                    .parse()
-                    .map_err(|_| UnsupportedVersion(input.to_owned()))?,
-            );
+            out.push(piece.to_owned());
         }
-        let mut out: Vec<String> = parts.iter().map(u64::to_string).collect();
         while out.len() < 4 {
             out.push("9999999".to_owned());
         }
@@ -173,22 +171,22 @@ pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
     }
 
     let (num, suffix) = split_stability(stripped);
-    let (stability, pre_number) = parse_stability(suffix, input)?;
-    let mut count = 0usize;
-    let mut parts = [0u64; 4];
+    let (stability, _) = parse_stability(suffix, input)?;
+    // Same rule: `1.02` is `1.02.0.0`, `v01.2.3` is `01.2.3.0`.
+    let mut parts: Vec<&str> = Vec::new();
     for piece in num.split('.') {
-        if count >= 4 || piece.is_empty() || !piece.bytes().all(|b| b.is_ascii_digit()) {
+        if parts.len() >= 4 || piece.is_empty() || !piece.bytes().all(|b| b.is_ascii_digit()) {
             return Err(UnsupportedVersion(input.to_owned()));
         }
-        parts[count] = piece
-            .parse()
-            .map_err(|_| UnsupportedVersion(input.to_owned()))?;
-        count += 1;
+        parts.push(piece);
     }
-    if count == 0 {
+    if parts.is_empty() {
         return Err(UnsupportedVersion(input.to_owned()));
     }
-    let base = format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], parts[3]);
+    while parts.len() < 4 {
+        parts.push("0");
+    }
+    let base = parts.join(".");
     let word = match stability {
         Stability::Stable => return Ok(base),
         Stability::Dev => "dev",
@@ -197,12 +195,13 @@ pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
         Stability::Rc => "RC",
         Stability::Patch => "patch",
     };
-    // Suffixes without a number stay bare (`-alpha`), else the number is appended.
-    let had_number = suffix.chars().any(|c| c.is_ascii_digit());
-    if had_number {
-        Ok(format!("{base}-{word}{pre_number}"))
-    } else {
+    // Suffixes without a number stay bare (`-alpha`), else the number is
+    // appended as written (`RC01` keeps its zero).
+    let digits: String = suffix.chars().filter(char::is_ascii_digit).collect();
+    if digits.is_empty() {
         Ok(format!("{base}-{word}"))
+    } else {
+        Ok(format!("{base}-{word}{digits}"))
     }
 }
 
