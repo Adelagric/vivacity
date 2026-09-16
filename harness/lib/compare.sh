@@ -8,7 +8,9 @@
 #     symlink pendant (identique des deux côtés, vérifié par l'inventaire) ;
 #   - vendor/composer/include_paths.php (paquets PEAR à `include-path`) :
 #     Composer l'écrit dans l'ordre d'achèvement des extractions asynchrones
-#     (non déterministe, vérifié le 2026-09-11) ; comparé trié.
+#     (non déterministe, vérifié le 2026-09-11) ; comparé trié ;
+#   - `$loader->setApcuPrefix('…')` dans autoload_real.php : préfixe aléatoire
+#     chez Composer (`bin2hex(random_bytes(10))`) ; la ligne est ignorée.
 # Les modes des fichiers et les cibles des liens sont comparés par un
 # inventaire `stat` (`diff -r` ne voit ni les uns ni les autres) : une
 # extraction par `unzip` (Composer) préserve les modes du zip, vivacity aussi.
@@ -23,7 +25,10 @@ compare_vendor() {
     echo "include_paths.php diffère même trié" > "$out"; diff <(sort "$ip_ref") <(sort "$ip_viv") | head >> "$out"
     head -20 "$out"; return 1
   fi
-  diff -r --no-dereference --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
+  # `setApcuPrefix('…')` : Composer tire un préfixe aléatoire (bin2hex de
+  # 10 octets) quand `apcu-autoloader` est actif sans préfixe donné — les
+  # deux côtés en ont un, jamais le même.
+  diff -r --no-dereference -I "setApcuPrefix('" --exclude=.git --exclude=include_paths.php "$ref" "$viv" 2>&1 \
     | grep -v 'vendor/autoload_runtime.php\|vendor: autoload_runtime.php' \
     | grep -v 'No such file or directory' > "$out" || true   # grep -v renvoie 1 sur diff vide : succès
   diff <(vendor_inventory "$ref") <(vendor_inventory "$viv") >> "$out" || true

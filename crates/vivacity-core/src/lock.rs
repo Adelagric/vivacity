@@ -129,6 +129,12 @@ impl LockPackage {
         self.package_type() == "metapackage"
     }
 
+    /// Installed nowhere: a metapackage, or a `symfony-pack` when Flex is
+    /// active (its `SymfonyPackInstaller extends MetapackageInstaller`).
+    pub fn is_virtual(&self, flex_packs: bool) -> bool {
+        self.is_metapackage() || (flex_packs && self.package_type() == "symfony-pack")
+    }
+
     pub fn bins(&self) -> Vec<&str> {
         self.raw
             .get("bin")
@@ -197,6 +203,20 @@ impl Lock {
     }
 
     /// Packages to install according to --no-dev.
+    /// Whether `symfony-pack` packages are virtual for this install: Flex
+    /// is in the lock, plugins are enabled and Flex is allowed (Composer
+    /// loads it and it registers the pack installer).
+    pub fn flex_packs(&self, root_manifest: &Value, with_dev: bool, plugins_enabled: bool) -> bool {
+        plugins_enabled
+            && self
+                .wanted_packages(with_dev)
+                .any(|p| p.name() == "symfony/flex")
+            && matches!(
+                crate::layout::plugin_allowed(root_manifest, "symfony/flex"),
+                crate::layout::PluginVerdict::Allowed
+            )
+    }
+
     pub fn wanted_packages(&self, with_dev: bool) -> impl Iterator<Item = &LockPackage> {
         self.packages
             .iter()

@@ -131,7 +131,9 @@ pub async fn install(
     let mut to_warm: Vec<&LockPackage> = Vec::new();
     let mut unchanged_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for p in &wanted {
-        if p.is_metapackage() {
+        // Installed nowhere (a metapackage, a Flex pack): the layout has no
+        // path for it.
+        if layout.install_path(p.name()).is_none() {
             if previous.get(p.name()).map(|i| &i.identity) == Some(&identity(p)) {
                 unchanged_names.insert(p.name());
             }
@@ -377,7 +379,7 @@ pub async fn install(
     )?;
     report.local_repository = Some(local);
     if wanted.iter().any(|p| p.name() == "symfony/runtime") {
-        crate::runtime_stub::write_stub(&vendor)?;
+        crate::runtime_stub::write_stub(&vendor, project_dir, root_manifest)?;
     }
 
     Ok(report)

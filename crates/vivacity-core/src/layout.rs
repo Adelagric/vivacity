@@ -201,7 +201,7 @@ impl Layout {
     pub fn vendor_only(project_dir: &Path, lock: &Lock, with_dev: bool) -> Layout {
         let mut paths = BTreeMap::new();
         for p in lock.wanted_packages(with_dev) {
-            if !p.is_metapackage() {
+            if !p.is_virtual(false) {
                 paths.insert(p.name().to_owned(), vendor_rel(p.name(), p.target_dir()));
             }
         }
@@ -303,9 +303,10 @@ impl Layout {
         }
 
         let root_extra = manifest.get("extra");
+        let flex_packs = lock.flex_packs(manifest, with_dev, plugins_enabled);
         let mut paths: BTreeMap<String, String> = BTreeMap::new();
         for p in &wanted {
-            if p.is_metapackage() {
+            if p.is_virtual(flex_packs) {
                 continue;
             }
             match place(

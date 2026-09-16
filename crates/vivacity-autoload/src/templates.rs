@@ -51,9 +51,12 @@ pub struct RealFileOptions<'a> {
     pub use_global_include_path: bool,
     pub prepend_autoloader: bool,
     pub target_dir_loader: Option<&'a str>,
+    /// `setApcu(true, $prefix)`: the prefix written into `setApcuPrefix`
+    /// (Composer draws `bin2hex(random_bytes(10))` when none is given).
+    pub apcu_prefix: Option<&'a str>,
 }
 
-/// `getAutoloadRealFile(...)` (apcu unsupported: never enabled by vivacity).
+/// `getAutoloadRealFile(...)`.
 pub fn autoload_real_php(o: &RealFileOptions<'_>) -> String {
     let suffix = o.suffix;
     let prepend = if o.prepend_autoloader {
@@ -102,6 +105,13 @@ class ComposerAutoloaderInit{suffix}
     ));
     if o.class_map_authoritative {
         f.push_str("        $loader->setClassMapAuthoritative(true);\n");
+    }
+
+    if let Some(prefix) = o.apcu_prefix {
+        f.push_str(&format!(
+            "        $loader->setApcuPrefix({});\n",
+            crate::templates::php_var_export_str(prefix)
+        ));
     }
     if o.use_global_include_path {
         f.push_str("        $loader->setUseIncludePath(true);\n");
@@ -332,6 +342,11 @@ if ($issues) {{
 }}
 "#
     ))
+}
+
+/// `var_export($string, true)`: single quotes, `\\` and `'` escaped.
+pub fn php_var_export_str(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 #[cfg(test)]

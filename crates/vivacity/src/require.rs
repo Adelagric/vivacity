@@ -618,6 +618,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         no_autoloader: args.no_autoloader,
         optimize_autoloader: args.optimize_autoloader,
         classmap_authoritative: args.classmap_authoritative,
+        apcu_autoloader: args.apcu_autoloader,
+        apcu_autoloader_prefix: args.apcu_autoloader_prefix.clone(),
         no_scripts: args.no_scripts,
         no_plugins: args.no_plugins,
         no_audit: args.no_audit,

@@ -9,7 +9,7 @@
 
 use crate::error::{Error, Result};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const AUTOLOAD_RUNTIME_TEMPLATE: &str = r#"<?php
 
@@ -28,10 +28,8 @@ if (!is_object($app)) {
 if (is_string($_SERVER['APP_RUNTIME_OPTIONS'] ??= $_ENV['APP_RUNTIME_OPTIONS'] ?? [])) {
     $_SERVER['APP_RUNTIME_OPTIONS'] = json_decode($_SERVER['APP_RUNTIME_OPTIONS'], true, 512, JSON_THROW_ON_ERROR);
 }
-$_SERVER['APP_RUNTIME'] ??= $_ENV['APP_RUNTIME'] ?? 'Symfony\\Component\\Runtime\\SymfonyRuntime';
-$runtime = new $_SERVER['APP_RUNTIME']($_SERVER['APP_RUNTIME_OPTIONS'] += [
-  'project_dir' => dirname(__DIR__, 1),
-]);
+$_SERVER['APP_RUNTIME'] ??= $_ENV['APP_RUNTIME'] ?? %runtime_class%;
+$runtime = new $_SERVER['APP_RUNTIME']($_SERVER['APP_RUNTIME_OPTIONS'] += %runtime_options%);
 
 [$app, $args] = $runtime
     ->getResolver($app)
@@ -46,19 +44,216 @@ exit(
 );
 "#;
 
-/// Non-empty `extra.runtime` means options we do not emulate in v1.
-pub fn has_custom_runtime_options(root_manifest: &Value) -> bool {
-    root_manifest
-        .get("extra")
-        .and_then(|e| e.get("runtime"))
-        .and_then(Value::as_object)
-        .is_some_and(|o| !o.is_empty())
-}
-
-pub fn write_stub(vendor_dir: &Path) -> Result<()> {
+/// `ComposerPlugin::updateAutoloadFile`: the template shipped by the
+/// installed `symfony/runtime` (`Internal/autoload_runtime.template`, or
+/// `extra.runtime.autoload_template`), with `%project_dir%`,
+/// `%runtime_class%` and `%runtime_options%` substituted from
+/// `extra.runtime`. `extra.runtime: false` writes nothing. The embedded
+/// template above is the fallback when the package ships none.
+pub fn write_stub(vendor_dir: &Path, project_dir: &Path, root_manifest: &Value) -> Result<()> {
+    let extra = root_manifest.get("extra").and_then(|e| e.get("runtime"));
+    if extra == Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let mut options: serde_json::Map<String, Value> = match extra {
+        Some(Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    let template = match options.get("autoload_template").and_then(Value::as_str) {
+        Some(t) => {
+            let path = if crate::pathutil::is_absolute_path(t) {
+                PathBuf::from(t)
+            } else {
+                project_dir.join(t)
+            };
+            std::fs::read_to_string(&path).map_err(|_| {
+                Error::Unsupported(format!(
+                    "File \"{t}\" defined under \"extra.runtime.autoload_template\" in your composer.json file not found."
+                ))
+            })?
+        }
+        None => {
+            let shipped = vendor_dir.join("symfony/runtime/Internal/autoload_runtime.template");
+            std::fs::read_to_string(&shipped)
+                .unwrap_or_else(|_| AUTOLOAD_RUNTIME_TEMPLATE.to_owned())
+        }
+    };
+    // `makePathRelative(realpath($projectDir.'/'.$extra['project_dir']), $vendorDir)`,
+    // then the `../` prefixes become a `dirname(__DIR__, n)`.
+    let vendor_real =
+        std::fs::canonicalize(vendor_dir).unwrap_or_else(|_| vendor_dir.to_path_buf());
+    let sub = options
+        .get("project_dir")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target =
+        std::fs::canonicalize(project_dir.join(sub)).unwrap_or_else(|_| project_dir.join(sub));
+    let mut relative = make_path_relative(&target, &vendor_real);
+    let mut nesting = 0;
+    while let Some(rest) = relative.strip_prefix("../") {
+        nesting += 1;
+        relative = rest.to_owned();
+    }
+    let project_code = if nesting == 0 {
+        format!("__DIR__.{}", php_var_export_str(&format!("/{relative}")))
+    } else if relative.is_empty() {
+        format!("dirname(__DIR__, {nesting})")
+    } else {
+        format!(
+            "dirname(__DIR__, {nesting}).{}",
+            php_var_export_str(&format!("/{relative}"))
+        )
+    };
+    let class = options
+        .get("class")
+        .and_then(Value::as_str)
+        .unwrap_or("Symfony\\Component\\Runtime\\SymfonyRuntime")
+        .to_owned();
+    for k in ["class", "autoload_template", "project_dir"] {
+        options.remove(k);
+    }
+    // `'['.substr(var_export($extra, true), 7, -1)."  'project_dir' => {$projectDir},\n]"`
+    let exported = php_var_export(&Value::Object(options), 0);
+    let inner = &exported[7..exported.len() - 1];
+    let runtime_options = format!("[{inner}  'project_dir' => {project_code},\n]");
+    let code = template
+        .replace("%project_dir%", &project_code)
+        .replace("%runtime_class%", &php_var_export_str(&class))
+        .replace("%runtime_options%", &runtime_options);
     let path = vendor_dir.join("autoload_runtime.php");
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(code.as_str()) {
+        return Ok(());
+    }
     let tmp = vendor_dir.join(".autoload_runtime.php.vivacity-tmp");
-    std::fs::write(&tmp, AUTOLOAD_RUNTIME_TEMPLATE).map_err(Error::io(&tmp))?;
+    std::fs::write(&tmp, code).map_err(Error::io(&tmp))?;
     std::fs::rename(&tmp, &path).map_err(Error::io(&path))?;
     Ok(())
+}
+
+/// Symfony `Filesystem::makePathRelative($endPath, $startPath)` for two
+/// absolute paths: `../` per segment left in `start`, the rest of `end`,
+/// a trailing `/`; `./` for equal paths.
+fn make_path_relative(end: &Path, start: &Path) -> String {
+    let e: Vec<String> = end
+        .components()
+        .skip(1)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let st: Vec<String> = start
+        .components()
+        .skip(1)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let common = e.iter().zip(st.iter()).take_while(|(a, b)| a == b).count();
+    let mut out = "../".repeat(st.len() - common);
+    let rest = e[common..].join("/");
+    if !rest.is_empty() {
+        out.push_str(&rest);
+        out.push('/');
+    }
+    if out.is_empty() {
+        "./".to_owned()
+    } else {
+        out
+    }
+}
+
+/// `var_export($string, true)`.
+fn php_var_export_str(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// `var_export($value, true)` for a JSON-decoded value (`json_decode(…,
+/// true)`: objects are arrays), with PHP's two-space nesting.
+pub fn php_var_export(v: &Value, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    match v {
+        Value::Null => "NULL".to_owned(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.to_string()
+            } else {
+                let f = n.as_f64().unwrap_or(0.0);
+                let s = crate::phpjson::php_double(f).unwrap_or_default();
+                if s.contains('.') || s.contains('E') || s.contains('e') {
+                    s
+                } else {
+                    format!("{s}.0")
+                }
+            }
+        }
+        Value::String(s) => php_var_export_str(s),
+        Value::Array(items) => {
+            let mut out = String::from("array (\n");
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(&format!(
+                    "{pad}  {i} => {}",
+                    php_var_export_nested(item, indent + 1)
+                ));
+            }
+            out.push_str(&format!("{pad})"));
+            out
+        }
+        Value::Object(map) => {
+            let mut out = String::from("array (\n");
+            for (k, item) in map {
+                let key = match k.parse::<i64>() {
+                    Ok(i) if i.to_string() == *k => i.to_string(),
+                    _ => php_var_export_str(k),
+                };
+                out.push_str(&format!(
+                    "{pad}  {key} => {}",
+                    php_var_export_nested(item, indent + 1)
+                ));
+            }
+            out.push_str(&format!("{pad})"));
+            out
+        }
+    }
+}
+
+/// A value after `=>`: scalars inline, arrays on their own line (PHP
+/// prints `=> \n  array (`).
+fn php_var_export_nested(v: &Value, indent: usize) -> String {
+    match v {
+        Value::Array(_) | Value::Object(_) => {
+            format!("\n{}{},\n", "  ".repeat(indent), php_var_export(v, indent))
+        }
+        _ => format!("{},\n", php_var_export(v, indent)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn var_export_like_php() {
+        // php -r 'var_export(json_decode(…, true));'
+        assert_eq!(php_var_export(&json!({}), 0), "array (\n)");
+        assert_eq!(
+            php_var_export(&json!({"debug": true, "env": "prod", "n": 3, "list": ["a"], "sub": {"k": null}}), 0),
+            "array (\n  'debug' => true,\n  'env' => 'prod',\n  'n' => 3,\n  'list' => \n  array (\n    0 => 'a',\n  ),\n  'sub' => \n  array (\n    'k' => NULL,\n  ),\n)"
+        );
+    }
+
+    #[test]
+    fn default_stub_matches_the_observed_output() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vendor = tmp.path().join("vendor");
+        std::fs::create_dir_all(&vendor).expect("mkdir");
+        write_stub(&vendor, tmp.path(), &json!({})).expect("stub");
+        let code = std::fs::read_to_string(vendor.join("autoload_runtime.php")).expect("read");
+        assert!(code.contains("$_SERVER['APP_RUNTIME'] ??= $_ENV['APP_RUNTIME'] ?? 'Symfony\\\\Component\\\\Runtime\\\\SymfonyRuntime';"));
+        assert!(code.contains(
+            "$_SERVER['APP_RUNTIME_OPTIONS'] += [\n  'project_dir' => dirname(__DIR__, 1),\n]);"
+        ));
+        // Options and a sub-directory.
+        write_stub(&vendor, tmp.path(), &json!({"extra": {"runtime": {"class": "App\\Runtime", "dotenv_path": ".env.local", "project_dir": "."}}})).expect("stub");
+        let code = std::fs::read_to_string(vendor.join("autoload_runtime.php")).expect("read");
+        assert!(code.contains("?? 'App\\\\Runtime';"), "{code}");
+        assert!(code.contains("+= [\n  'dotenv_path' => '.env.local',\n  'project_dir' => dirname(__DIR__, 1),\n]);"), "{code}");
+    }
 }

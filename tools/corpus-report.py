@@ -4,8 +4,8 @@
 Stable ordering (by name, then mode) so two reports diff cleanly. Counts by
 project AND by distinct name@version package (a corpus of Laravel apps
 shares most of its packages); the fallback reasons ranked; every diff with
-its first lines; the plugins annotated when they only listen to script
-events, which `--no-scripts` (the baseline) silences in Composer too.
+its first lines; the plugins annotated with the events they listen to
+(all active in the baseline: `--no-scripts` only skips composer.json scripts).
 
 Usage: tools/corpus-report.py <results.jsonl> [<date>] > docs/corpus/<date>.md
 """
@@ -15,11 +15,11 @@ import json
 import re
 import sys
 
-# Plugins whose only work is done in listeners of the script events
-# (`Installer::run` dispatches them only with runScripts): inert under
-# `--no-scripts`, so porting them buys nothing until the scripts policy
-# exists. Checked against each plugin's getSubscribedEvents.
-SCRIPT_EVENT_ONLY = {
+# What each plugin listens to (getSubscribedEvents), for the reader: in
+# Composer, `--no-scripts` only switches off the composer.json scripts
+# (`EventDispatcher::setRunScripts`); every plugin listener still runs in
+# the baseline, so a plugin in this table is ACTIVE there, never inert.
+PLUGIN_EVENTS = {
     "symfony/thanks": "post-install-cmd/post-update-cmd only",
     "ergebnis/composer-normalize": "a command, no install-time listener",
     "bamarni/composer-bin-plugin": "post-install-cmd/post-update-cmd",
@@ -84,8 +84,8 @@ def main():
     p = out.append
     p(f"# Corpus report — {date}")
     p("")
-    p("Baseline: Composer 2.10.3 `install --no-scripts` (plugins loaded — which "
-      "also silences plugin listeners of the script events) against "
+    p("Baseline: Composer 2.10.3 `install --no-scripts` (plugins loaded and fully "
+      "active — `--no-scripts` only skips the composer.json scripts) against "
       "`vivacity install --no-fallback`, `--ignore-platform-req=ext-*` on both "
       "sides (`php` too where this machine's PHP fails the lock, noted per entry). "
       "Buckets: **native** = 0 diff in `vendor/` (files, modes, link targets); "
@@ -132,8 +132,8 @@ def main():
             p("|---|---:|---|")
             for (kind, what), n in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])):
                 note = ""
-                if kind in ("plugin", "layout-plugin") and what in SCRIPT_EVENT_ONLY:
-                    note = f"inert under `--no-scripts`: {SCRIPT_EVENT_ONLY[what]}"
+                if kind in ("plugin", "layout-plugin") and what in PLUGIN_EVENTS:
+                    note = f"listens to {PLUGIN_EVENTS[what]} (active in the baseline)"
                 elif kind == "no-dist":
                     note = "no zip dist (a `git`/`vcs` source, asset-packagist…)"
                 p(f"| {kind} `{what}` | {n} | {note} |")

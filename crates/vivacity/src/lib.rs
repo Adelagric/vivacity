@@ -240,6 +240,12 @@ struct UpdateArgs {
     optimize_autoloader: bool,
     #[arg(short = 'a', long)]
     classmap_authoritative: bool,
+    /// Use APCu to cache found/not-found classes.
+    #[arg(long)]
+    apcu_autoloader: bool,
+    /// A custom prefix for the APCu cache (implies --apcu-autoloader).
+    #[arg(long, value_name = "PREFIX")]
+    apcu_autoloader_prefix: Option<String>,
     /// Accepted for compatibility: vivacity never runs scripts.
     #[arg(long)]
     no_scripts: bool,
@@ -282,6 +288,12 @@ struct DumpArgs {
     /// Authoritative classmap (implies -o).
     #[arg(short = 'a', long)]
     classmap_authoritative: bool,
+    /// Use APCu to cache found/not-found classes.
+    #[arg(long = "apcu")]
+    apcu_autoloader: bool,
+    /// A custom prefix for the APCu cache (implies --apcu).
+    #[arg(long = "apcu-prefix", value_name = "PREFIX")]
+    apcu_autoloader_prefix: Option<String>,
     #[arg(long)]
     ignore_platform_reqs: bool,
     #[arg(long = "ignore-platform-req", value_name = "REQ")]
@@ -307,6 +319,12 @@ struct InstallArgs {
     /// Authoritative classmap (`-a`, implies -o).
     #[arg(short = 'a', long)]
     classmap_authoritative: bool,
+    /// Use APCu to cache found/not-found classes.
+    #[arg(long)]
+    apcu_autoloader: bool,
+    /// A custom prefix for the APCu cache (implies --apcu-autoloader).
+    #[arg(long, value_name = "PREFIX")]
+    apcu_autoloader_prefix: Option<String>,
     /// Accepted for compatibility: vivacity never runs scripts.
     #[arg(long)]
     no_scripts: bool,
@@ -669,16 +687,6 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if let Some(tag) = &layout.installers_tag {
         eprintln!("Note: composer/installers {tag} emulated natively (custom install paths)");
     }
-    if vivacity_core::runtime_stub::has_custom_runtime_options(&manifest) {
-        let scope = vivacity_core::scope::ScopeReport {
-            issues: vec![vivacity_core::scope::ScopeIssue::UnknownPlugin(
-                "symfony/runtime with custom extra.runtime options".to_owned(),
-            )],
-            skipped_plugins: vec![],
-            layout: None,
-        };
-        return fallback_or_fail(args, &project, &scope);
-    }
     for plugin in &scope.skipped_plugins {
         eprintln!(
             "Note: plugin {plugin} installed as a plain library (vivacity never runs plugins)"
@@ -752,6 +760,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             args.classmap_authoritative,
             args.ignore_platform_reqs,
             &args.ignore_platform_req,
+            (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
         )?;
         autoload_note = format!(", autoloader with {} classes", report.classes);
         trace("autoload dump", t0);
@@ -850,6 +859,7 @@ fn dump_autoload(
     authoritative: bool,
     ignore_all: bool,
     ignored: &[String],
+    apcu: (bool, Option<&str>),
 ) -> anyhow::Result<vivacity_autoload::DumpReport> {
     let platform_check = match manifest.get("config").and_then(|c| c.get("platform-check")) {
         Some(serde_json::Value::Bool(false)) => vivacity_autoload::PlatformCheckMode::Off,
@@ -866,7 +876,22 @@ fn dump_autoload(
     };
     let authoritative = authoritative || cfg_bool("classmap-authoritative");
     let optimize = optimize || authoritative || cfg_bool("optimize-autoloader");
+    // `$apcu = $apcuPrefix !== null || --apcu-autoloader || config.apcu-autoloader`;
+    // without a prefix Composer draws bin2hex(random_bytes(10)).
+    let apcu_prefix = if apcu.1.is_some() || apcu.0 || cfg_bool("apcu-autoloader") {
+        Some(apcu.1.map(str::to_owned).unwrap_or_else(|| {
+            use std::fmt::Write as _;
+            let mut s = String::new();
+            for b in vivacity_core::random_bytes(10) {
+                let _ = write!(s, "{b:02x}");
+            }
+            s
+        }))
+    } else {
+        None
+    };
     let opts = vivacity_autoload::DumpOptions {
+        apcu_prefix,
         dev_mode,
         optimize,
         authoritative,
@@ -948,6 +973,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         args.classmap_authoritative,
         args.ignore_platform_reqs,
         &args.ignore_platform_req,
+        (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
     )?;
     eprintln!(
         "vivacity: autoloader generated ({} classes) in {:.2}s",
@@ -1196,6 +1222,8 @@ fn install_after_update(
         no_autoloader: args.no_autoloader,
         optimize_autoloader: args.optimize_autoloader,
         classmap_authoritative: args.classmap_authoritative,
+        apcu_autoloader: args.apcu_autoloader,
+        apcu_autoloader_prefix: args.apcu_autoloader_prefix.clone(),
         no_scripts: args.no_scripts,
         no_plugins: args.no_plugins,
         ignore_platform_reqs: args.ignore_platform_reqs,
@@ -1871,6 +1899,8 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         no_autoloader: args.no_autoloader,
         optimize_autoloader: args.optimize_autoloader,
         classmap_authoritative: args.classmap_authoritative,
+        apcu_autoloader: args.apcu_autoloader,
+        apcu_autoloader_prefix: args.apcu_autoloader_prefix.clone(),
         no_scripts: args.no_scripts,
         no_plugins: args.no_plugins,
         no_audit: args.no_audit,

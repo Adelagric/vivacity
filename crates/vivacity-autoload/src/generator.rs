@@ -57,6 +57,9 @@ pub struct DumpOptions {
     pub ignore_all_platform_reqs: bool,
     pub ignored_platform_reqs: Vec<String>,
     pub suffix: Option<String>,
+    /// `--apcu-autoloader[-prefix]` / `config.apcu-autoloader`: Some(prefix)
+    /// when the APCu cache is enabled.
+    pub apcu_prefix: Option<String>,
     /// Store root + cache root: enables the per-store-entry classmap cache
     /// (None = full scan every time).
     pub classmap_cache: Option<ClassmapCacheConfig>,
@@ -605,6 +608,7 @@ pub fn dump(
             use_global_include_path,
             prepend_autoloader: prepend,
             target_dir_loader: None,
+            apcu_prefix: opts.apcu_prefix.as_deref(),
         }),
     )?;
     write(
