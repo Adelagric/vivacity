@@ -123,7 +123,7 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
             }
             let _ = std::fs::remove_file(&out);
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &out).map_err(Error::io(&out))?;
+            crate::clone::symlink_like_unzip(std::path::Path::new(&target), &out)?;
             // Off Unix: PHP ZipArchive (what Composer uses on Windows) does
             // not recreate symlinks — the entry becomes an ordinary file
             // whose content is the target. Same here, after the same

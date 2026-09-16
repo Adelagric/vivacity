@@ -45,7 +45,7 @@ fn link_or_copy_tree(src: &Path, dst: &Path) -> Result<()> {
         } else if ftype.is_symlink() {
             let target = std::fs::read_link(&from).map_err(Error::io(&from))?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &to).map_err(Error::io(&to))?;
+            symlink_like_unzip(&target, &to)?;
             #[cfg(windows)]
             clone_symlink_windows(&from, &target, &to)?;
             #[cfg(not(any(unix, windows)))]
@@ -148,6 +148,30 @@ fn clone_symlink_windows(from: &Path, target: &Path, to: &Path) -> Result<()> {
         }
         Ok(())
     }
+}
+
+/// A symbolic link the way `unzip` (Composer's extractor) leaves one: on
+/// macOS the link's own mode is 0777 (`fchmodat` without following), where a plain `symlink()`
+/// gets the umask applied; Linux ignores link modes.
+#[cfg(unix)]
+pub fn symlink_like_unzip(target: &std::path::Path, link: &std::path::Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link).map_err(Error::io(link))?;
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(link.as_os_str().as_bytes()).map_err(|_| Error::Io {
+            path: link.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"),
+        })?;
+        // SAFETY: FFI call with a valid NUL-terminated path; no memory is
+        // shared, the return value is checked.
+        let rc =
+            unsafe { libc::fchmodat(libc::AT_FDCWD, c.as_ptr(), 0o777, libc::AT_SYMLINK_NOFOLLOW) };
+        if rc != 0 {
+            return Err(Error::io(link)(std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -4,6 +4,20 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Added
+- `harness/lib/compare.sh`: the vendor comparison shared by
+  `diff-vendor.sh` and the corpus harness, with a `stat` inventory of
+  file modes and link targets that `diff -r` never saw. It found two
+  divergences on the six fixtures, both fixed: a package's own binaries
+  are now made executable like `BinaryInstaller::installBinaries` does
+  (`chmod 0777 & ~umask`), and a symbolic link extracted from a zip gets
+  `unzip`'s 0777 mode on macOS.
+- `config.vendor-dir`, `bin-dir` and `preferred-install: source` are scope
+  issues: `install` hands such a project to Composer instead of laying it
+  out differently.
+
 ## [0.9.0] — 2026-09-16
 
 ### Added

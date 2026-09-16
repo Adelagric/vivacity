@@ -3,16 +3,8 @@
 # par `composer install --no-plugins --no-scripts [--no-autoloader]` et celui
 # produit par `vivacity install [--no-autoloader]` sur des copies nues.
 #
-# Écarts tolérés (documentés) :
-#   - vendor/autoload_runtime.php : généré par vivacity (émulation symfony/runtime),
-#     absent d'un install Composer sans plugins — c'est la feature r2 ;
-#   - "No such file or directory" : `diff -r` ne sait pas suivre un symlink
-#     pendant (identique des deux côtés, vérifié via readlink) ;
-#   - vendor/composer/include_paths.php (paquets PEAR à `include-path`) :
-#     Composer l'écrit dans l'ordre d'achèvement des extractions asynchrones —
-#     trois `composer install` successifs donnent trois ordres (vérifié le
-#     2026-09-11 sur la fixture drupal) ; `composer dump-autoload` le réécrit
-#     dans l'ordre d'installed.json, que vivacity produit. Comparé trié.
+# La comparaison (écarts tolérés, inventaire des modes et des liens) est
+# dans harness/lib/compare.sh, partagée avec harness/corpus.sh.
 #
 # Usage : harness/diff-vendor.sh [--with-autoloader] [fixture...]
 set -euo pipefail
@@ -20,6 +12,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/fixture.sh
 . "$ROOT/harness/lib/fixture.sh"
+# shellcheck source=lib/compare.sh
+. "$ROOT/harness/lib/compare.sh"
 VIVACITY="$ROOT/target/release/vivacity"
 # Windows (Git Bash) : l'artefact cargo est vivacity.exe — le préférer quand
 # il existe, pour qu'un binaire unixy résiduel ne le masque pas. Gardé par
@@ -68,19 +62,10 @@ for fx in "${FIXTURES[@]}"; do
   if ! (cd "$viv" && "$VIVACITY" install $AUTOLOAD_FLAG --offline 2>"$WORK/$fx.vivacity.log"); then
     echo "FAIL $fx : vivacity install a échoué :"; tail -20 "$WORK/$fx.vivacity.log"; status=1; continue
   fi
-  ip_ref="$ref/vendor/composer/include_paths.php"; ip_viv="$viv/vendor/composer/include_paths.php"
-  if [ -f "$ip_ref" ] && [ -f "$ip_viv" ] && ! diff -q <(sort "$ip_ref") <(sort "$ip_viv") >/dev/null; then
-    echo "FAIL $fx : include_paths.php diffère même trié"; diff <(sort "$ip_ref") <(sort "$ip_viv") | head; status=1; continue
-  fi
-  lines=$(diff -r --exclude=.git --exclude=include_paths.php "$scope_ref" "$scope_viv" 2>&1 \
-    | grep -v 'vendor/autoload_runtime.php\|vendor: autoload_runtime.php' \
-    | grep -v 'No such file or directory' \
-    | wc -l | tr -d ' ' || true)   # grep -v renvoie 1 sur diff vide : c'est le succès
-  if [ "$lines" = "0" ]; then
+  if compare_vendor "$scope_ref" "$scope_viv" "$WORK/$fx.diff"; then
     echo "OK   $fx : $what identique"
   else
-    echo "FAIL $fx : $lines lignes de diff"
-    diff -r --exclude=.git --exclude=include_paths.php "$scope_ref" "$scope_viv" 2>&1 | grep -v 'vendor/autoload_runtime.php\|vendor: autoload_runtime.php' | head -20
+    echo "FAIL $fx : $what diffère ($(wc -l < "$WORK/$fx.diff" | tr -d ' ') lignes, $WORK/$fx.diff)"
     status=1
   fi
 done

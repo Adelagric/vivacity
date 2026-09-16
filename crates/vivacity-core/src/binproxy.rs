@@ -460,8 +460,40 @@ pub fn install_binaries(
             BinCompat::Full => install_full_binaries(vendor_dir, &link, link_name, &target)?,
             BinCompat::Proxy => install_unixy_proxy(vendor_dir, &link, &target)?,
         }
+        // `chmod($binPath, 0777 & ~umask())`: the package's own binary is
+        // made executable (a dist extracted without its modes gets them
+        // here; a mirrored path package too).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = umask_mode_0777(&bin_dir)?;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                .map_err(Error::io(&target))?;
+        }
     }
     Ok(())
+}
+
+/// `0777 & ~umask()` without libc: the mode a file created with 0777 gets.
+#[cfg(unix)]
+fn umask_mode_0777(dir: &Path) -> Result<u32> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let probe = dir.join(format!(".vivacity-umask-{}", std::process::id()));
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o777)
+        .open(&probe)
+        .map_err(Error::io(&probe))?;
+    let mode = f
+        .metadata()
+        .map_err(Error::io(&probe))?
+        .permissions()
+        .mode()
+        & 0o777;
+    drop(f);
+    let _ = std::fs::remove_file(&probe);
+    Ok(mode)
 }
 
 /// `BinaryInstaller::installFullBinaries`: a real `.bat` target
