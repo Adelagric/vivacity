@@ -1,0 +1,112 @@
+{
+    "name": "pterodactyl/panel",
+    "description": "The free, open-source game management panel. Supporting Minecraft, Spigot, BungeeCord, and SRCDS servers.",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Matthew Penner",
+            "email": "matthew@pterodactyl.io",
+            "homepage": "https://github.com/matthewpi",
+            "role": "Lead Developer"
+        },
+        {
+            "name": "Dane Everitt",
+            "email": "dane@daneeveritt.com",
+            "homepage": "https://github.com/DaneEveritt",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.2 || ^8.3",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-posix": "*",
+        "ext-zip": "*",
+        "aws/aws-sdk-php": "^3.369",
+        "guzzlehttp/guzzle": "^7.9.2",
+        "hashids/hashids": "^5.0.2",
+        "laracasts/utilities": "~3.2.3",
+        "laravel/framework": "^12.60.0",
+        "laravel/helpers": "^1.8.0",
+        "laravel/sanctum": "^4.2.0",
+        "laravel/tinker": "^2.10.0",
+        "laravel/ui": "~4.6.3",
+        "lcobucci/jwt": "^5.6.0",
+        "league/flysystem-aws-s3-v3": "^3.30.1",
+        "league/flysystem-memory": "^3.29.0",
+        "matriphe/iso-639": "~2.0",
+        "phpseclib/phpseclib": "^3.0.52",
+        "pragmarx/google2fa": "~8.0.3",
+        "predis/predis": "^3.3.0",
+        "prologue/alerts": "^1.3.0",
+        "psr/cache": "^3.0.0",
+        "s1lentium/iptools": "~1.2.0",
+        "spatie/laravel-fractal": "^6.3.2",
+        "spatie/laravel-query-builder": "^6.3.6",
+        "staudenmeir/belongs-to-through": "^2.16.0",
+        "symfony/http-client": "^7.4.0",
+        "symfony/mailgun-mailer": "^7.4.0",
+        "symfony/postmark-mailer": "^7.4.0",
+        "symfony/yaml": "^7.4.0",
+        "webmozart/assert": "^1.11.0"
+    },
+    "require-dev": {
+        "barryvdh/laravel-ide-helper": "^3.6",
+        "fakerphp/faker": "^1.24",
+        "friendsofphp/php-cs-fixer": "~3.64.0",
+        "itsgoingd/clockwork": "^5.3",
+        "larastan/larastan": "^3.8",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.9",
+        "phpstan/phpstan": "^2.1",
+        "phpstan/phpstan-webmozart-assert": "^2.0",
+        "phpunit/phpunit": "^11.5",
+        "spatie/laravel-ignition": "^2.9"
+    },
+    "autoload": {
+        "files": [
+            "app/helpers.php"
+        ],
+        "psr-4": {
+            "Pterodactyl\\": "app/",
+            "Database\\Factories\\": "database/Factories/",
+            "Database\\Seeders\\": "database/Seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Pterodactyl\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "cs:fix": "php-cs-fixer fix",
+        "cs:check": "php-cs-fixer fix --dry-run --diff --verbose",
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi || true"
+        ],
+        "post-install-cmd": [
+            "@php artisan p:environment:addons:run-hooks post-install || true"
+        ],
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ],
+        "post-create-project-cmd": [
+            "@php artisan key:generate --ansi",
+            "@php -r \"file_exists('database/database.sqlite') || touch('database/database.sqlite');\"",
+            "@php artisan migrate --graceful --ansi"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2.0"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

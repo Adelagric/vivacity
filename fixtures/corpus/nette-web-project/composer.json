@@ -1,0 +1,47 @@
+{
+	"name": "nette/web-project",
+	"description": "Nette: Standard Web Project",
+	"keywords": ["nette"],
+	"type": "project",
+	"license": ["MIT", "BSD-3-Clause", "GPL-2.0-only", "GPL-3.0-only"],
+	"require": {
+		"php": ">= 8.2",
+		"nette/application": "^3.2.3",
+		"nette/assets": "^1.0.0",
+		"nette/bootstrap": "^3.2.6",
+		"nette/caching": "^3.2",
+		"nette/database": "^3.2",
+		"nette/di": "^3.2",
+		"nette/forms": "^3.2",
+		"nette/http": "^3.3",
+		"nette/mail": "^4.0",
+		"nette/robot-loader": "^4.0",
+		"nette/security": "^3.2",
+		"nette/utils": "^4.0",
+		"latte/latte": "^3.1",
+		"tracy/tracy": "^2.10"
+	},
+	"require-dev": {
+		"nette/tester": "^2.5",
+		"phpstan/phpstan": "^2.1",
+		"phpstan/extension-installer": "^1.4",
+		"nette/phpstan-rules": "^1.0",
+		"symfony/thanks": "^1"
+	},
+	"autoload": {
+		"psr-4": {
+			"App\\": "app"
+		}
+	},
+	"scripts": {
+		"phpstan": "phpstan analyse",
+		"tester": "tester tests -s"
+	},
+	"minimum-stability": "stable",
+	"config": {
+		"allow-plugins": {
+			"symfony/thanks": true,
+			"phpstan/extension-installer": true
+		}
+	}
+}

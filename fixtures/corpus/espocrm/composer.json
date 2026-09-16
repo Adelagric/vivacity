@@ -1,0 +1,139 @@
+{
+    "name": "espocrm/espocrm",
+    "description": "EspoCRM. Open source CRM application.",
+    "type": "project",
+    "homepage": "https://github.com/espocrm/espocrm.git",
+    "license": "AGPL-3.0-or-later",
+    "require": {
+        "php": ">=8.3.0 <8.6.0",
+        "ext-openssl": "*",
+        "ext-json": "*",
+        "ext-zip": "*",
+        "ext-gd": "*",
+        "ext-mbstring": "*",
+        "ext-xml": "*",
+        "ext-dom": "*",
+        "ext-curl": "*",
+        "ext-exif": "*",
+        "ext-pdo": "*",
+        "ext-ctype": "*",
+        "psr/log": "~3",
+        "psr/http-message": "^2.0",
+        "psr/container": "^1.1",
+        "slim/slim": "^4.15",
+        "slim/psr7": "^1",
+        "dragonmantank/cron-expression": "^3.4",
+        "laminas/laminas-ldap": "^2.20",
+        "monolog/monolog": "^3.10",
+        "composer/semver": "^3",
+        "spatie/async": "^1.8.1",
+        "symfony/process": "^7",
+        "symfony/http-foundation": "^7",
+        "symfony/routing": "^7",
+        "cboden/ratchet": "0.4.x-dev#9ac6a412a26d8bae6541ee0b65ffaf78e316b1a6",
+        "react/zmq": "^0.4.0",
+        "guzzlehttp/psr7": "^2.13",
+        "michelf/php-markdown": "^1.9",
+        "robthree/twofactorauth": "^1.8",
+        "nesbot/carbon": "^3.11.0",
+        "phpoffice/phpspreadsheet": "^5.7",
+        "doctrine/dbal": "^3.10",
+        "league/flysystem-async-aws-s3": "^3.0",
+        "johngrogg/ics-parser": "^3.0",
+        "phpseclib/phpseclib": "^3.0",
+        "openspout/openspout": "^5.0",
+        "dompdf/dompdf": "^3.1",
+        "brick/phonenumber": "^0.5.0",
+        "picqer/php-barcode-generator": "^3.2",
+        "chillerlan/php-qrcode": "^5.0",
+        "tholu/php-cidr-match": "^0.5",
+        "league/oauth2-client": "^2.9",
+        "symfony/mailer": "^7",
+        "league/html-to-markdown": "^5.1",
+        "psr/clock": "^1.0",
+        "react/child-process": "^0.6.6",
+        "lasserafn/php-initial-avatar-generator": "dev-update-image-lib#a46ab8f1427f93c5b37957e739205da7fcca0290",
+        "directorytree/imapengine": "^1.19",
+        "zbateson/mail-mime-parser": "^3.0",
+        "guzzlehttp/guzzle": "^7.15",
+        "devtheorem/php-handlebars": "^1.0",
+        "php-amqplib/php-amqplib": "^3.7",
+        "predis/predis": "^3.5",
+        "psr/cache": "^3.0",
+        "league/oauth2-server": "^9.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5",
+        "phpstan/phpstan": "^2.1"
+    },
+    "suggest": {
+        "ext-pdo_mysql": "*",
+        "ext-pdo_pgsql": "*",
+        "ext-bcmath": "*",
+        "ext-zmq": "*",
+        "ext-ldap": "*",
+        "ext-fileinfo": "*",
+        "ext-pcntl": "*",
+        "ext-posix": "*"
+    },
+    "replace": {
+        "phpspec/prophecy": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Espo\\": "application/Espo/",
+            "Espo\\Custom\\": "custom/Espo/Custom/",
+            "Espo\\Modules\\": "custom/Espo/Modules/"
+        },
+        "files": [
+            "application/Espo/Resources/defaults/class-aliases.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "tests\\unit\\": "tests/unit/",
+            "tests\\integration\\": "tests/integration/",
+            "tests\\unit\\Espo\\": "tests/unit/Espo/",
+            "tests\\integration\\Espo\\": "tests/integration/Espo/",
+            "EspoDev\\": "dev/"
+        }
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/yurikuzn/php-initial-avatar-generator.git"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/ratchetphp/Ratchet.git"
+        }
+    ],
+    "provide": {
+        "ext-ldap": "*",
+        "ext-zmq": "*"
+    },
+    "authors": [
+        {
+            "name": "Yurii Kuznietsov",
+            "role": "Developer"
+        },
+        {
+            "name": "Taras Machyshyn",
+            "role": "Developer"
+        },
+        {
+            "name": "Oleksii Avramenko"
+        }
+    ],
+    "scripts": {
+        "setConfigParams": "php dev/set-config-params.php",
+        "post-install-cmd": [
+            "php dev/vendor-cleanup.php"
+        ]
+    },
+    "config": {
+        "platform": {
+            "php": "8.3.0"
+        }
+    }
+}

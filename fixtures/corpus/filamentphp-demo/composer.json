@@ -1,0 +1,103 @@
+{
+    "name": "laravel/laravel",
+    "type": "project",
+    "description": "The Laravel Framework.",
+    "keywords": [
+        "framework",
+        "laravel"
+    ],
+    "license": "MIT",
+    "require": {
+        "php": "^8.1",
+        "fakerphp/faker": "^1.9.1",
+        "filament/filament": "^5.0",
+        "filament/spatie-laravel-media-library-plugin": "^5.0",
+        "filament/spatie-laravel-settings-plugin": "^5.0",
+        "filament/spatie-laravel-tags-plugin": "^5.0",
+        "flowframe/laravel-trend": "^0.4.0",
+        "guzzlehttp/guzzle": "^7.2",
+        "laravel/framework": "^12.0",
+        "laravel/octane": "^2.15",
+        "laravel/sanctum": "^4.0",
+        "laravel/tinker": "^2.8",
+        "league/flysystem-aws-s3-v3": "^3.32",
+        "spatie/laravel-flare": "^2.2",
+        "squirephp/countries-en": "^3.3",
+        "squirephp/currencies-en": "^3.3"
+    },
+    "require-dev": {
+        "barryvdh/laravel-debugbar": "^3.6",
+        "larastan/larastan": "^3.1",
+        "laravel/boost": "^2.2",
+        "laravel/pint": "^1.0",
+        "laravel/sail": "^1.18",
+        "mockery/mockery": "^1.4.4",
+        "nunomaduro/collision": "^8.0",
+        "pestphp/pest": "^3.0",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpunit/phpunit": "^11.0",
+        "rector/rector": "^2.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi",
+            "@php artisan filament:upgrade"
+        ],
+        "post-update-cmd": [
+            "@php artisan vendor:publish --tag=laravel-assets --ansi --force"
+        ],
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ],
+        "post-create-project-cmd": [
+            "@php artisan key:generate --ansi"
+        ],
+        "setup": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
+            "@php artisan key:generate --ansi",
+            "@php -r \"file_exists('database/database.sqlite') || touch('database/database.sqlite');\"",
+            "@php artisan migrate --ansi",
+            "@php artisan db:seed --ansi",
+            "@php artisan storage:link --ansi"
+        ],
+        "cs": [
+            "pint"
+        ],
+        "pint": "pint",
+        "test:pest": "pest --parallel",
+        "test:phpstan": "phpstan analyse",
+        "test": [
+            "@test:pest",
+            "@test:phpstan"
+        ]
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": []
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true,
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

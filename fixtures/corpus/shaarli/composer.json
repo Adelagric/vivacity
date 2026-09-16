@@ -1,0 +1,87 @@
+{
+    "name": "shaarli/shaarli",
+    "description": "The personal, minimalist, super fast, database-free bookmarking service",
+    "type": "project",
+    "license": "MIT",
+    "homepage": "https://github.com/shaarli/Shaarli",
+    "support": {
+        "issues": "https://github.com/shaarli/Shaarli/issues",
+        "wiki": "https://shaarli.readthedocs.io"
+    },
+    "keywords": ["bookmark", "link", "share", "web"],
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2"
+        },
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "require": {
+        "php": ">=7.4",
+        "ext-json": "*",
+        "ext-zlib": "*",
+        "arthurhoaro/web-thumbnailer": "^2.0",
+        "erusev/parsedown": "^1.6",
+        "erusev/parsedown-extra": "^0.8.1",
+        "gettext/gettext": "^4.4",
+        "katzgrau/klogger": "^1.2",
+        "malkusch/lock": "^2.1",
+        "pubsubhubbub/publisher": "dev-master",
+        "shaarli/netscape-bookmark-parser": "^4.0",
+        "slim/slim": "^3.0"
+    },
+    "require-dev": {
+        "phpunit/php-text-template": "^2.0",
+        "phpunit/phpunit": "^9.0",
+        "roave/security-advisories": "dev-master",
+        "slevomat/coding-standard": "~8.0",
+        "squizlabs/php_codesniffer": "^4.0"
+    },
+    "suggest": {
+        "ext-curl": "Allows fetching web pages and thumbnails in a more robust way",
+        "ext-gd": "Required for thumbnail generation",
+        "ext-gettext": "Enables faster translation system in gettext mode",
+        "ext-intl": "Provides localized text sorting",
+        "ext-mbstring": "Provides multibyte (Unicode) string support"
+    },
+    "autoload": {
+        "psr-4": {
+            "Shaarli\\": "application",
+            "Shaarli\\Api\\": "application/api/",
+            "Shaarli\\Api\\Controllers\\": "application/api/controllers",
+            "Shaarli\\Api\\Exceptions\\": "application/api/exceptions",
+            "Shaarli\\Bookmark\\": "application/bookmark",
+            "Shaarli\\Bookmark\\Exception\\": "application/bookmark/exception",
+            "Shaarli\\Config\\": "application/config/",
+            "Shaarli\\Config\\Exception\\": "application/config/exception",
+            "Shaarli\\Container\\": "application/container",
+            "Shaarli\\Exceptions\\": "application/exceptions",
+            "Shaarli\\Feed\\": "application/feed",
+            "Shaarli\\Formatter\\": "application/formatter",
+            "Shaarli\\Front\\": "application/front",
+            "Shaarli\\Front\\Controller\\Admin\\": "application/front/controller/admin",
+            "Shaarli\\Front\\Controller\\Visitor\\": "application/front/controller/visitor",
+            "Shaarli\\Front\\Exception\\": "application/front/exceptions",
+            "Shaarli\\Helper\\": "application/helper",
+            "Shaarli\\Http\\": "application/http",
+            "Shaarli\\Legacy\\": "application/legacy",
+            "Shaarli\\Netscape\\": "application/netscape",
+            "Shaarli\\Plugin\\": "application/plugin",
+            "Shaarli\\Plugin\\Exception\\": "application/plugin/exception",
+            "Shaarli\\Plugin\\Wallabag\\": "plugins/wallabag",
+            "Shaarli\\Plugin\\ReadItLater\\": "plugins/readitlater",
+            "Shaarli\\Render\\": "application/render",
+            "Shaarli\\Security\\": "application/security",
+            "Shaarli\\Updater\\": "application/updater",
+            "Shaarli\\Updater\\Exception\\": "application/updater/exception"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+          "Shaarli\\Tests\\": "tests",
+          "Shaarli\\Tests\\Utils\\": "tests/utils"
+        }
+    }
+}

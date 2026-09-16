@@ -1,0 +1,81 @@
+{
+    "name": "composer/satis",
+    "description": "Simple Repository Generator",
+    "keywords": [
+        "package",
+        "repository",
+        "generator",
+        "static",
+        "composer"
+    ],
+    "homepage": "https://github.com/composer/satis",
+    "type": "composer-plugin",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Jordi Boggiano",
+            "email": "j.boggiano@seld.be",
+            "homepage": "https://seld.be"
+        },
+        {
+            "name": "Nils Adermann",
+            "email": "naderman@naderman.de",
+            "homepage": "https://www.naderman.de"
+        },
+        {
+            "name": "Rob Bast",
+            "email": "rob.bast@gmail.com",
+            "homepage": "https://robbast.nl"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/composer/satis",
+        "source": "https://github.com/composer/satis",
+        "forum": "https://gitter.com/composer/satis",
+        "irc": "irc://freenode.net/composer"
+    },
+    "bin": [
+        "bin/satis"
+    ],
+    "require": {
+        "php": "^8.4",
+        "ext-zip": "*",
+        "composer/composer": "^2.10.1",
+        "composer-plugin-api": "^2.3.0",
+        "symfony/console": "^7.4.13",
+        "twig/twig": "^3.27.1",
+        "twig/html-extra": "^3.24.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Composer\\Satis\\": "src"
+        }
+    },
+    "require-dev": {
+        "ext-json": "*",
+        "mikey179/vfsstream": "^1.6.12",
+        "phpunit/phpunit": "^11.5.55"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Composer\\Satis\\": "tests"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "4.x-dev"
+        },
+        "class": "Composer\\Satis\\Plugin\\SatisPlugin"
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/satis": true
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "phpstan": "tools/phpstan/vendor/bin/phpstan",
+        "php-cs-fixer": "PHP_CS_FIXER_IGNORE_ENV=true tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run --diff",
+        "php-cs-fixer-fix": "PHP_CS_FIXER_IGNORE_ENV=true tools/php-cs-fixer/vendor/bin/php-cs-fixer fix"
+    }
+}

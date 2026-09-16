@@ -323,6 +323,11 @@ struct InstallArgs {
     /// Never delegate to composer (fail explicitly when out of scope).
     #[arg(long)]
     no_fallback: bool,
+    /// Report whether this lock is installed natively (exit 0) or handed to
+    /// Composer (exit 3, the reasons on stderr), and stop before any
+    /// download or write. Implies --no-fallback.
+    #[arg(long)]
+    check_scope: bool,
     /// Only use local caches (no network access).
     #[arg(long)]
     offline: bool,
@@ -667,6 +672,10 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         );
     }
     trace("scope", t0);
+    if args.check_scope {
+        eprintln!("vivacity: this lock is installed natively");
+        return Ok(0);
+    }
 
     // The operation lines of a real install, in transaction order, with the
     // downloader's appendix (`getInstallOperationAppendix`: `: Extracting
@@ -944,7 +953,7 @@ fn fallback_or_fail(
     for issue in &scope.issues {
         eprintln!("  - {issue}");
     }
-    if args.no_fallback {
+    if args.no_fallback || args.check_scope {
         eprintln!("--no-fallback given: stopping here (no partial vendor/ was written).");
         return Ok(3);
     }
@@ -1179,6 +1188,7 @@ fn install_after_update(
         ignore_platform_reqs: args.ignore_platform_reqs,
         ignore_platform_req: args.ignore_platform_req.clone(),
         no_fallback: args.no_fallback,
+        check_scope: false,
         offline: args.offline,
         no_blocking: args.no_blocking,
         no_security_blocking: args.no_security_blocking,

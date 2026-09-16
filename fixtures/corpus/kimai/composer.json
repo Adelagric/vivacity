@@ -1,0 +1,215 @@
+{
+    "name": "kimai/kimai",
+    "license": "AGPL-3.0-or-later",
+    "type": "project",
+    "description": "Kimai - Time Tracking",
+    "authors": [
+        {
+            "name": "Kevin Papst",
+            "homepage": "https://www.kevinpapst.de"
+        },
+        {
+            "name": "All contributors",
+            "homepage": "https://github.com/kimai/kimai/contributors"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "ext-gd": "*",
+        "ext-intl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-pdo": "*",
+        "ext-tokenizer": "*",
+        "ext-xml": "*",
+        "ext-xsl": "*",
+        "ext-zip": "*",
+        "composer-runtime-api": "^2.0",
+        "azuyalabs/yasumi": "^2.6",
+        "composer/semver": "^3.3",
+        "doctrine/doctrine-bundle": "^2.7",
+        "doctrine/doctrine-migrations-bundle": "^3.3",
+        "doctrine/orm": "^2.8",
+        "endroid/qr-code": "^4.8",
+        "erusev/parsedown": "^1.6",
+        "friendsofsymfony/rest-bundle": "^3.0",
+        "gedmo/doctrine-extensions": "^3.6",
+        "horstoeko/zugferd": "^1.0",
+        "horstoeko/zugferdublbridge": "^1.0",
+        "jms/serializer-bundle": "^5.0",
+        "kevinpapst/tabler-bundle": "^2.0",
+        "league/csv": "^9.4",
+        "mpdf/mpdf": "^8.0",
+        "nelmio/api-doc-bundle": "^5.0",
+        "nelmio/cors-bundle": "^2.0",
+        "onelogin/php-saml": "^4.0",
+        "openspout/openspout": "^4.0",
+        "pagerfanta/pagerfanta": "^4.0",
+        "phpoffice/phpspreadsheet": "^2.0",
+        "phpoffice/phpword": "^1.0",
+        "psr/container": "^2.0",
+        "psr/log": "^3.0",
+        "scheb/2fa-backup-code": "^6.2",
+        "scheb/2fa-bundle": "^6.2",
+        "scheb/2fa-totp": "^6.2",
+        "symfony/asset": "^6.0",
+        "symfony/console": "^6.0",
+        "symfony/dotenv": "^6.0",
+        "symfony/expression-language": "^6.0",
+        "symfony/flex": "^2",
+        "symfony/form": "^6.0",
+        "symfony/framework-bundle": "^6.0",
+        "symfony/http-client": "^6.0",
+        "symfony/intl": "^6.0",
+        "symfony/mailer": "^6.0",
+        "symfony/mime": "^6.0",
+        "symfony/monolog-bundle": "^3.4",
+        "symfony/process": "^6.0",
+        "symfony/rate-limiter": "^6.0",
+        "symfony/runtime": "^6.0",
+        "symfony/security-bundle": "^6.0",
+        "symfony/security-csrf": "^6.0",
+        "symfony/serializer": "^6.0",
+        "symfony/translation": "^6.0",
+        "symfony/twig-bundle": "^6.0",
+        "symfony/validator": "^6.0",
+        "symfony/webpack-encore-bundle": "^2.0",
+        "symfony/yaml": "^6.0",
+        "twig/cssinliner-extra": "^3.0",
+        "twig/extra-bundle": "^3.0",
+        "twig/inky-extra": "^3.0",
+        "twig/intl-extra": "^3.0",
+        "twig/string-extra": "^3.0"
+    },
+    "require-dev": {
+        "ext-simplexml": "*",
+        "dama/doctrine-test-bundle": "^8.0",
+        "doctrine/doctrine-fixtures-bundle": "^3.2",
+        "fakerphp/faker": "^1.15",
+        "friendsofphp/php-cs-fixer": "^3.3",
+        "phpstan/phpstan": "^2.0",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-doctrine": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0",
+        "phpstan/phpstan-strict-rules": "^2.0",
+        "phpstan/phpstan-symfony": "^2.0",
+        "phpunit/phpunit": "^10.0",
+        "symfony/browser-kit": "^6.0",
+        "symfony/css-selector": "^6.0",
+        "symfony/debug-bundle": "^6.0",
+        "symfony/dom-crawler": "^6.0",
+        "symfony/maker-bundle": "^1.67",
+        "symfony/phpunit-bridge": "^6.0",
+        "symfony/stopwatch": "^6.0",
+        "symfony/var-dumper": "^6.0",
+        "symfony/web-profiler-bundle": "^6.0"
+    },
+    "repositories": [
+        {
+            "type": "artifact",
+            "url": "var/packages/"
+        }
+    ],
+    "config": {
+        "allow-plugins": {
+            "symfony/flex": true,
+            "symfony/runtime": true
+        },
+        "optimize-autoloader": true,
+        "platform": {
+            "php": "8.2"
+        },
+        "preferred-install": {
+            "*": "dist"
+        },
+        "sort-packages": true
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/",
+            "KimaiPlugin\\": "var/plugins/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "replace": {
+        "symfony/polyfill-ctype": "*",
+        "symfony/polyfill-mbstring": "*",
+        "symfony/polyfill-intl": "*",
+        "symfony/polyfill-intl-icu": "*",
+        "symfony/polyfill-intl-grapheme": "*",
+        "symfony/polyfill-intl-idn": "*",
+        "symfony/polyfill-intl-normalizer": "*",
+        "symfony/polyfill-iconv": "*",
+        "symfony/polyfill-php81": "*",
+        "symfony/polyfill-php80": "*",
+        "symfony/polyfill-php74": "*",
+        "symfony/polyfill-php73": "*",
+        "symfony/polyfill-php72": "*",
+        "symfony/polyfill-php71": "*",
+        "symfony/polyfill-php70": "*",
+        "symfony/polyfill-php56": "*",
+        "symfony/polyfill-php55": "*",
+        "symfony/polyfill-php54": "*"
+    },
+    "suggest": {
+        "laminas/laminas-ldap": "For LDAP authentication with Kimai"
+    },
+    "scripts": {
+        "auto-scripts": {
+            "cache:clear": "symfony-cmd",
+            "assets:install": "symfony-cmd"
+        },
+        "post-install-cmd": [
+            "@auto-scripts"
+        ],
+        "post-update-cmd": [
+            "@auto-scripts"
+        ],
+        "pre-commit":  [
+            "@codestyle",
+            "@phpstan",
+            "@linting",
+            "@tests-unit"
+        ],
+        "code-check":  [
+            "@pre-commit",
+            "@tests-integration"
+        ],
+        "linting": [
+            "bin/console lint:container",
+            "bin/console lint:yaml config --parse-tags",
+            "bin/console lint:twig templates --show-deprecations",
+            "bin/console doctrine:schema:validate --skip-sync -vvv --no-interaction",
+            "bin/console lint:xliff translations"
+        ],
+        "tests": "vendor/bin/phpunit tests/",
+        "tests-unit": "vendor/bin/phpunit --exclude-group integration tests/",
+        "tests-integration": "vendor/bin/phpunit --group integration tests/",
+        "phpstan": [
+            "@phpstan-src",
+            "@phpstan-tests"
+        ],
+        "phpstan-src": [
+            "vendor/bin/phpstan analyse -c phpstan.neon"
+        ],
+        "phpstan-tests": [
+            "vendor/bin/phpstan analyse -c tests/phpstan.neon"
+        ],
+        "codestyle": "vendor/bin/php-cs-fixer fix --dry-run --verbose --show-progress=none",
+        "codestyle-fix": "vendor/bin/php-cs-fixer fix"
+    },
+    "conflict": {
+        "symfony/symfony": "*"
+    },
+    "extra": {
+        "symfony": {
+            "id": "01C3FWRDJJEX9K6Y3A4XDFXPBR",
+            "allow-contrib": true,
+            "require": "6.4.*"
+        }
+    }
+}

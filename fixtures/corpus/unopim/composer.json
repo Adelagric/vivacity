@@ -1,0 +1,168 @@
+{
+    "name": "unopim/unopim",
+    "type": "project",
+    "description": "UnoPim Laravel PIM",
+    "keywords": [
+        "framework",
+        "laravel"
+    ],
+    "license": "MIT",
+    "require": {
+        "php": "^8.4.1",
+        "ext-calendar": "*",
+        "ext-curl": "*",
+        "ext-intl": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-tokenizer": "*",
+        "astrotomic/laravel-translatable": "^11.16.0",
+        "bacon/bacon-qr-code": "^3.1",
+        "barryvdh/laravel-dompdf": "^2.0.0|^3.0",
+        "diglactic/laravel-breadcrumbs": "^10.0",
+        "elasticsearch/elasticsearch": "^8.17",
+        "enshrined/svg-sanitize": "^0.22.0",
+        "guzzlehttp/guzzle": "^7.0.1",
+        "intervention/image": "^4.1.2",
+        "kalnoy/nestedset": "^7.0",
+        "khaled.alshamaa/ar-php": "^6.0.0",
+        "konekt/concord": "^1.16",
+        "laravel/ai": "^0.11.0",
+        "laravel/framework": "^13.0",
+        "laravel/octane": "^2.3",
+        "laravel/passport": "^13.7",
+        "laravel/sanctum": "^4.0",
+        "laravel/socialite": "^5.0",
+        "laravel/tinker": "^3.0",
+        "laravel/ui": "^4.0",
+        "maatwebsite/excel": "^3.1.46",
+        "openspout/openspout": "^4.28",
+        "owen-it/laravel-auditing": "^14.0",
+        "predis/predis": "^3.4",
+        "prettus/l5-repository": "^4.0",
+        "pusher/pusher-php-server": "^7.0",
+        "shetabit/visitor": "^4.1",
+        "symfony/intl": "^7.0"
+    },
+    "require-dev": {
+        "barryvdh/laravel-debugbar": "^4.2",
+        "driftingly/rector-laravel": "^2.5",
+        "fakerphp/faker": "^1.23",
+        "larastan/larastan": "^3.10",
+        "laravel/boost": "^2.1",
+        "laravel/pint": "^1.29.1",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.0",
+        "pestphp/pest": "^5.0",
+        "pestphp/pest-plugin-laravel": "^5.0",
+        "phpunit/phpunit": "^13.2",
+        "rector/rector": "^2.5",
+        "spatie/laravel-ignition": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/",
+            "Webkul\\Admin\\": "packages/Webkul/Admin/src",
+            "Webkul\\Attribute\\": "packages/Webkul/Attribute/src",
+            "Webkul\\Category\\": "packages/Webkul/Category/src",
+            "Webkul\\Core\\": "packages/Webkul/Core/src",
+            "Webkul\\DataGrid\\": "packages/Webkul/DataGrid/src",
+            "Webkul\\DataTransfer\\": "packages/Webkul/DataTransfer/src",
+            "Webkul\\DebugBar\\": "packages/Webkul/DebugBar/src",
+            "Webkul\\HistoryControl\\": "packages/Webkul/HistoryControl/src",
+            "Webkul\\Installer\\": "packages/Webkul/Installer/src",
+            "Webkul\\MagicAI\\": "packages/Webkul/MagicAI/src",
+            "Webkul\\Notification\\": "packages/Webkul/Notification/src",
+            "Webkul\\Product\\": "packages/Webkul/Product/src",
+            "Webkul\\Theme\\": "packages/Webkul/Theme/src",
+            "Webkul\\User\\": "packages/Webkul/User/src",
+            "Webkul\\AdminApi\\": "packages/Webkul/AdminApi/src",
+            "Webkul\\ElasticSearch\\": "packages/Webkul/ElasticSearch/src",
+            "Webkul\\Webhook\\": "packages/Webkul/Webhook/src",
+            "Webkul\\Completeness\\": "packages/Webkul/Completeness/src",
+            "Webkul\\AiAgent\\": "packages/Webkul/AiAgent/src",
+            "Webkul\\Measurement\\": "packages/Webkul/Measurement/src",
+            "Webkul\\AppUrlGuard\\": "packages/Webkul/AppUrlGuard/src",
+            "Webkul\\Resource\\": "packages/Webkul/Resource/src",
+            "Webkul\\Publication\\": "packages/Webkul/Publication/src",
+            "Webkul\\ProductPassport\\": "packages/Webkul/ProductPassport/src"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/",
+            "Webkul\\Admin\\Tests\\": "packages/Webkul/Admin/tests",
+            "Webkul\\Core\\Tests\\": "packages/Webkul/Core/tests",
+            "Webkul\\DataGrid\\Tests\\": "packages/Webkul/DataGrid/tests",
+            "Webkul\\User\\Tests\\": "packages/Webkul/User/tests",
+            "Webkul\\AdminApi\\Tests\\": "packages/Webkul/AdminApi/tests",
+            "Webkul\\Installer\\Tests\\": "packages/Webkul/Installer/tests",
+            "Webkul\\Completeness\\Tests\\": "packages/Webkul/Completeness/tests",
+            "Webkul\\Category\\Tests\\": "packages/Webkul/Category/tests",
+            "Webkul\\Product\\Tests\\": "packages/Webkul/Product/tests",
+            "Webkul\\Attribute\\Tests\\": "packages/Webkul/Attribute/tests",
+            "Webkul\\DataTransfer\\Tests\\": "packages/Webkul/DataTransfer/tests",
+            "Webkul\\Measurement\\Tests\\": "packages/Webkul/Measurement/tests",
+            "Webkul\\Resource\\Tests\\": "packages/Webkul/Resource/tests",
+            "Webkul\\Publication\\Tests\\": "packages/Webkul/Publication/tests",
+            "Webkul\\ProductPassport\\Tests\\": "packages/Webkul/ProductPassport/tests"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ],
+        "post-create-project-cmd": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
+            "@php artisan key:generate --ansi"
+        ],
+        "phpstan": [
+            "./vendor/bin/phpstan analyse --memory-limit=2G"
+        ],
+        "rector": [
+            "./vendor/bin/rector process"
+        ],
+        "rector-dry": [
+            "./vendor/bin/rector process --dry-run"
+        ],
+        "test": [
+            "./vendor/bin/pest"
+        ],
+        "test:tia": [
+            "./vendor/bin/pest --tia --filtered"
+        ],
+        "test:tia:parallel": [
+            "./vendor/bin/pest --tia --filtered --parallel --processes=3"
+        ]
+    },
+    "scripts-descriptions": {
+        "phpstan": "Run PHPStan static analysis at level 1 against the application.",
+        "rector": "Apply Rector automated refactorings to the application.",
+        "rector-dry": "Preview Rector refactorings without modifying files.",
+        "test": "Run the full Pest suite.",
+        "test:tia": "Run only the tests impacted by the current changes (requires pcov or Xdebug).",
+        "test:tia:parallel": "Run impacted tests across parallel workers (requires pcov or Xdebug)."
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": [
+                "shetabit/visitor"
+            ]
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

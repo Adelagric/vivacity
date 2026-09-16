@@ -1,0 +1,81 @@
+{
+    "name": "hyperf/hyperf-skeleton",
+    "type": "project",
+    "keywords": [
+        "php",
+        "swoole",
+        "framework",
+        "hyperf",
+        "microservice",
+        "middleware"
+    ],
+    "description": "A coroutine framework that focuses on hyperspeed and flexible, specifically use for build microservices and middlewares.",
+    "license": "Apache-2.0",
+    "require": {
+        "php": ">=8.2",
+        "hyperf/cache": "~3.2.0",
+        "hyperf/command": "~3.2.0",
+        "hyperf/config": "~3.2.0",
+        "hyperf/db-connection": "~3.2.0",
+        "hyperf/engine": "^2.10",
+        "hyperf/framework": "~3.2.0",
+        "hyperf/guzzle": "~3.2.0",
+        "hyperf/http-server": "~3.2.0",
+        "hyperf/logger": "~3.2.0",
+        "hyperf/memory": "~3.2.0",
+        "hyperf/process": "~3.2.0",
+        "hyperf/laminas-mime": "^3.0"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.0",
+        "hyperf/devtool": "~3.2.0",
+        "hyperf/testing": "~3.2.0",
+        "mockery/mockery": "^1.0",
+        "phpstan/phpstan": "^2.0",
+        "swoole/ide-helper": "^6.0"
+    },
+    "suggest": {
+        "ext-openssl": "Required to use HTTPS.",
+        "ext-json": "Required to use JSON.",
+        "ext-pdo": "Required to use MySQL Client.",
+        "ext-pdo_mysql": "Required to use MySQL Client.",
+        "ext-redis": "Required to use Redis Client."
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Installer\\": "installer/"
+        },
+        "files": [
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "HyperfTest\\": "./test/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "extra": {},
+    "scripts": {
+        "pre-install-cmd": "Installer\\Script::install",
+        "pre-update-cmd": "Installer\\Script::install",
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ],
+        "post-autoload-dump": [
+            "rm -rf runtime/container"
+        ],
+        "test": "co-phpunit --prepend test/bootstrap.php --colors=always",
+        "cs-fix": "php-cs-fixer fix $1",
+        "analyse": "phpstan analyse --memory-limit 300M",
+        "start": [
+          "Composer\\Config::disableProcessTimeout",
+          "php ./bin/hyperf.php start"
+        ]
+    }
+}

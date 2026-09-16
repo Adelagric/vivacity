@@ -1,0 +1,217 @@
+{
+    "name": "grumpydictator/firefly-iii",
+    "description": "Firefly III: a personal finances manager.",
+    "keywords": [
+        "finance",
+        "finances",
+        "manager",
+        "management",
+        "euro",
+        "dollar",
+        "laravel",
+        "money",
+        "currency",
+        "financials",
+        "financial",
+        "budgets",
+        "administration",
+        "tool",
+        "tooling",
+        "help",
+        "helper",
+        "assistant",
+        "planning",
+        "organizing",
+        "bills",
+        "personal finance",
+        "budgets",
+        "budgeting",
+        "budgeting tool",
+        "budgeting application",
+        "transactions",
+        "self hosted",
+        "self-hosted",
+        "transfers",
+        "management"
+    ],
+    "license": "AGPL-3.0-or-later",
+    "homepage": "https://github.com/firefly-iii/firefly-iii",
+    "type": "project",
+    "readme": "readme.md",
+    "authors": [
+        {
+            "name": "James Cole",
+            "email": "james@firefly-iii.org",
+            "homepage": "https://github.com/firefly-iii",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "email": "james@firefly-iii.org",
+        "issues": "https://github.com/firefly-iii/firefly-iii/issues",
+        "forum": "https://gitter.im/firefly-iii/firefly-iii",
+        "wiki": "https://github.com/firefly-iii/help/wiki",
+        "source": "https://github.com/firefly-iii/firefly-iii",
+        "docs": "https://docs.firefly-iii.org/"
+    },
+    "funding": [
+        {
+            "type": "patreon",
+            "url": "https://www.patreon.com/JC5"
+        },
+        {
+            "type": "github",
+            "url": "https://github.com/sponsors/JC5"
+        }
+    ],
+    "require": {
+        "php": ">=8.5",
+        "ext-bcmath": "*",
+        "ext-curl": "*",
+        "ext-fileinfo": "*",
+        "ext-iconv": "*",
+        "ext-intl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-pdo": "*",
+        "ext-session": "*",
+        "ext-simplexml": "*",
+        "ext-tokenizer": "*",
+        "ext-xml": "*",
+        "ext-xmlwriter": "*",
+        "bacon/bacon-qr-code": "^3.0",
+        "diglactic/laravel-breadcrumbs": "^10",
+        "gdbots/query-parser": "^3.0",
+        "guzzlehttp/guzzle": "^7.11",
+        "jc5/google2fa-laravel": "dev-main  ",
+        "jc5/recovery": "^2",
+        "laravel-notification-channels/pushover": "^5.0",
+        "laravel/framework": "^13",
+        "laravel/passport": "^13.0",
+        "laravel/slack-notification-channel": "^3.3",
+        "laravel/ui": "^4.2",
+        "league/commonmark": "^2",
+        "league/csv": "^9.10",
+        "league/fractal": "0.*",
+        "mailersend/laravel-driver": "^3.0",
+        "nunomaduro/collision": "^8",
+        "pragmarx/google2fa": "^9",
+        "predis/predis": "^3",
+        "psr/log": "<4",
+        "ramsey/uuid": "^4.7",
+        "spatie/laravel-html": "^3.13",
+        "spatie/laravel-ignition": "^2",
+        "spatie/period": "^2.4",
+        "symfony/expression-language": "^8.0",
+        "symfony/http-client": "^8.0",
+        "symfony/mailgun-mailer": "^8.0",
+        "thecodingmachine/safe": "^3.1"
+    },
+    "require-dev": {
+        "barryvdh/laravel-ide-helper": "^3",
+        "carthage-software/mago": "^1.24.0",
+        "driftingly/rector-laravel": "^2.0",
+        "ergebnis/phpstan-rules": "^2",
+        "fakerphp/faker": "1.*",
+        "filp/whoops": "2.*",
+        "fruitcake/laravel-debugbar": "^4.0",
+        "larastan/larastan": "^3",
+        "laravel-json-api/testing": "^3.0",
+        "magentron/laravel-blade-lint": "^2.0",
+        "mockery/mockery": "1.*",
+        "phpstan/extension-installer": "^1.4",
+        "phpstan/phpstan": "^2",
+        "phpstan/phpstan-deprecation-rules": "^2",
+        "phpstan/phpstan-strict-rules": "^2",
+        "phpunit/phpunit": "^13",
+        "rector/rector": "^2.5",
+        "thecodingmachine/phpstan-safe-rule": "^1.4"
+    },
+    "replace": {
+        "symfony/polyfill-php54": "*",
+        "paragonie/sodium_compat": "*",
+        "symfony/polyfill-mbstring": "*"
+    },
+
+    "suggest": {},
+    "autoload": {
+        "files": [
+            "app/Helpers/Functions/helpers.php"
+        ],
+        "psr-4": {
+            "FireflyIII\\": "app/",
+            "Domain\\": "domain/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": []
+        },
+        "phpstan": {
+            "includes": [
+                "extension.neon"
+            ]
+        }
+    },
+    "scripts": {
+        "post-root-package-install": [
+            "@php -r \"file_exists('.env') || copy('.env.example', '.env');\""
+        ],
+        "post-create-project-cmd": [
+            "@php artisan key:generate"
+        ],
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump"
+        ],
+        "post-update-cmd": [
+            "@php artisan config:clear",
+            "@php artisan route:clear",
+            "@php artisan view:clear",
+            "@php artisan clear-compiled",
+            "@php artisan cache:clear",
+            "@php artisan firefly-iii:upgrade-database",
+            "@php artisan firefly-iii:laravel-passport-keys",
+            "@php artisan firefly-iii:instructions update"
+        ],
+        "post-install-cmd": [
+            "@php artisan firefly-iii:instructions install",
+            "@php artisan firefly-iii:verify-security-alerts"
+        ],
+        "unit-test": [
+            "@php vendor/bin/phpunit -c phpunit.xml --testsuite unit --no-coverage"
+        ],
+        "integration-test": [
+            "@php vendor/bin/phpunit -c phpunit.xml --testsuite integration --no-coverage"
+        ],
+        "coverage": [
+            "@php vendor/bin/phpunit -c phpunit.xml"
+        ]
+    },
+    "config": {
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true,
+            "phpstan/extension-installer": true,
+            "php-http/discovery": true
+        },
+        "platform": {
+            "php": "8.5"
+        },
+        "audit": {
+            "ignore": {
+                "PKSA-y2cr-5h3j-g3ys": "Keys are not generated.",
+                "PKSA-wc55-9qj2-7v4h": "Update to follow."
+            }
+        }
+    }
+}

@@ -1,0 +1,205 @@
+{
+    "name": "sulu/skeleton",
+    "license": "MIT",
+    "type": "project",
+    "description": "Project template for starting your new project based on the Sulu content management system",
+    "homepage": "https://sulu.io/",
+    "keywords": [
+        "symfony",
+        "sulu",
+        "sulucms",
+        "cms",
+        "web-application",
+        "platform",
+        "data-managment",
+        "project-template"
+    ],
+    "authors": [
+        {
+            "name": "Sulu Community",
+            "homepage": "https://github.com/sulu/skeleton/graphs/contributors"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/sulu/skeleton/issues",
+        "source": "https://github.com/sulu/skeleton",
+        "docs": "https://docs.sulu.io/",
+        "chat": "https://sulu.io/services-and-support#chat"
+    },
+    "require": {
+        "php": "^8.2",
+        "ext-ctype": "*",
+        "ext-iconv": "*",
+        "cmsig/seal-loupe-adapter": "^0.12.2",
+        "doctrine/doctrine-bundle": "^2.13",
+        "doctrine/doctrine-fixtures-bundle": "^3.6 || ^4.0",
+        "doctrine/doctrine-migrations-bundle": "^3.3",
+        "friendsofsymfony/http-cache-bundle": "^3.0",
+        "scheb/2fa-bundle": "^7.4",
+        "scheb/2fa-email": "^7.4",
+        "scheb/2fa-trusted-device": "^7.4",
+        "stof/doctrine-extensions-bundle": "^1.11",
+        "sulu/sulu": "~3.0.9",
+        "symfony/config": "^7.4",
+        "symfony/dotenv": "^7.4",
+        "symfony/flex": "^1.17 || ^2.0",
+        "symfony/framework-bundle": "^7.4",
+        "symfony/mailer": "^7.4",
+        "symfony/monolog-bridge": "^7.4",
+        "symfony/monolog-bundle": "^4.0",
+        "symfony/runtime": "^7.4",
+        "symfony/security-bundle": "^7.4",
+        "symfony/twig-bundle": "^7.4"
+    },
+    "require-dev": {
+        "cmsig/seal-memory-adapter": "^0.12.2",
+        "jangregor/phpstan-prophecy": "^2.0",
+        "php-cs-fixer/shim": "^3.58",
+        "phpspec/prophecy-phpunit": "^2.1",
+        "phpstan/extension-installer": "^1.3",
+        "phpstan/phpstan": "^2.1",
+        "phpstan/phpstan-doctrine": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0",
+        "phpstan/phpstan-symfony": "^2.0",
+        "phpstan/phpstan-webmozart-assert": "^2.0",
+        "phpunit/phpunit": "^11.5 || ^12.1",
+        "rector/rector": "^2.0",
+        "sulu/sulu-rector": "^2.0",
+        "symfony/browser-kit": "^7.4",
+        "symfony/css-selector": "^7.4",
+        "symfony/debug-bundle": "^7.4",
+        "symfony/error-handler": "^7.4",
+        "symfony/thanks": "^1.2",
+        "symfony/web-profiler-bundle": "^7.4",
+        "vincentlanglet/twig-cs-fixer": "^3.0"
+    },
+    "conflict": {
+        "symfony/symfony": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "App\\Tests\\": "tests/"
+        }
+    },
+    "replace": {
+        "paragonie/random_compat": "2.*",
+        "symfony/polyfill-ctype": "*",
+        "symfony/polyfill-iconv": "*",
+        "symfony/polyfill-php82": "*",
+        "symfony/polyfill-php81": "*",
+        "symfony/polyfill-php80": "*",
+        "symfony/polyfill-php74": "*",
+        "symfony/polyfill-php73": "*",
+        "symfony/polyfill-php72": "*",
+        "symfony/polyfill-php71": "*",
+        "symfony/polyfill-php70": "*",
+        "symfony/polyfill-php56": "*"
+    },
+    "scripts": {
+        "auto-scripts": {
+            "cache:clear": "symfony-cmd",
+            "assets:install %PUBLIC_DIR%": "symfony-cmd",
+            "bin/websiteconsole cache:clear": "php-script",
+            "bin/adminconsole sulu:media:init": "php-script"
+        },
+        "post-install-cmd": [
+            "@auto-scripts"
+        ],
+        "post-update-cmd": [
+            "@auto-scripts"
+        ],
+        "post-root-package-install": [
+            "@php -r \"file_put_contents('.gitignore', str_replace(['composer.lock' . PHP_EOL, 'package-lock.json' . PHP_EOL, 'yarn.lock' . PHP_EOL, 'bun.lockb' . PHP_EOL, 'pnpm-lock.yaml' . PHP_EOL], '', file_get_contents('.gitignore')));\"",
+            "@php -r \"file_put_contents('.env.local', 'APP_ENV=dev' . PHP_EOL);\"",
+            "@php -r \"file_put_contents('.env', str_replace('APP_SECRET=\\'\\$ecretf0rt3st\\'', 'APP_SECRET=' . bin2hex(random_bytes(16)), file_get_contents('.env')));\""
+        ],
+        "post-create-project-cmd": [
+            "@php bin/adminconsole sulu:admin:info --ansi"
+        ],
+        "serve": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php -S 127.0.0.1:8000 -t public config/router.php"
+        ],
+        "bootstrap-test-environment": [
+            "@php bin/adminconsole doctrine:database:drop --if-exists --force --env test",
+            "@php bin/adminconsole doctrine:database:create --env test",
+            "@php bin/adminconsole doctrine:schema:create --env test"
+        ],
+        "test": "@php bin/phpunit",
+        "test-with-coverage": "@test --coverage-php var/reports/coverage.php --coverage-cobertura=var/reports/cobertura-coverage.xml --coverage-html var/reports/html --log-junit var/reports/junit.xml",
+        "lint": [
+            "@phpstan",
+            "@lint-php-cs",
+            "@lint-rector",
+            "@lint-twig",
+            "@lint-twig-cs",
+            "@lint-yaml",
+            "@lint-xliff",
+            "@lint-admin-build",
+            "@lint-translations",
+            "@lint-container",
+            "@lint-composer",
+            "@lint-doctrine"
+        ],
+        "fix": [
+            "@rector",
+            "@php-cs-fix",
+            "@twig-cs-fix"
+        ],
+        "phpstan": [
+            "@php bin/websiteconsole cache:warmup --env=dev",
+            "@php vendor/bin/phpstan analyze"
+        ],
+        "rector": [
+            "@php vendor/bin/rector process"
+        ],
+        "lint-rector": [
+            "@php bin/websiteconsole cache:warmup --env=dev",
+            "@php vendor/bin/rector process --dry-run"
+        ],
+        "php-cs-fix": "@php vendor/bin/php-cs-fixer fix",
+        "lint-php-cs": "@php vendor/bin/php-cs-fixer fix --verbose --diff --dry-run",
+        "twig-cs-fix": "@php vendor/bin/twig-cs-fixer lint --fix",
+        "lint-twig-cs": "@php vendor/bin/twig-cs-fixer lint",
+        "lint-composer": "@composer validate --no-check-publish --strict",
+        "lint-twig": "@php bin/console lint:twig templates/",
+        "lint-xliff": "@php bin/console lint:xliff translations/",
+        "lint-admin-build": "@php bin/console sulu:admin:validate-build",
+        "lint-translations": [
+            "@php bin/console debug:translation en --only-missing"
+        ],
+        "lint-yaml": "@php bin/console lint:yaml config/ --parse-tags",
+        "lint-container": [
+            "@php bin/console lint:container --env dev",
+            "@php bin/console lint:container --env test",
+            "@php bin/console lint:container --env stage",
+            "@php bin/console lint:container --env prod"
+        ],
+        "lint-doctrine": [
+            "@php bin/console doctrine:schema:validate --skip-sync"
+        ]
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true,
+            "php-http/discovery": true,
+            "symfony/flex": true,
+            "symfony/runtime": true,
+            "symfony/thanks": true,
+            "phpstan/extension-installer": true
+        },
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "extra": {
+        "symfony": {
+            "allow-contrib": true,
+            "require": "7.4.*"
+        }
+    }
+}

@@ -1,0 +1,112 @@
+{
+	"name": "ilias/ilias",
+	"description": "ILIAS",
+	"license": "GPL v3",
+	"authors": [],
+	"config": {
+		"optimize-autoloader": true,
+		"vendor-dir": "./vendor/composer/vendor",
+		"allow-plugins": {
+			"cweagans/composer-patches": true,
+			"captainhook/plugin-composer": true,
+			"simplesamlphp/composer-module-installer": false,
+			"simplesamlphp/composer-xmlprovider-installer": false
+		}
+	},
+	"scripts": {
+		"post-autoload-dump": [
+			"@php cli/build_bootstrap.php components/ILIAS/Setup/resources/dependency_resolution.php setup components/ILIAS/Init/resources/dependency_resolution.php default",
+			"@php cli/setup.php build --yes"
+		],
+		"pre-install-cmd": [
+			"mkdir -p public/Customizing/global/plugins",
+			"mkdir -p public/Customizing/skin"
+		],
+		"post-install-cmd": [
+			"@php vendor/composer/rmdirs.php"
+		],
+		"post-update-cmd": [
+			"@php vendor/composer/rmdirs.php"
+		],
+		"test-php-all": [
+			"./vendor/composer/vendor/bin/phpunit -c ./components/ILIAS/PHPUnit/config/PhpUnitConfig.xml --colors=always --disallow-todo-tests"
+		],
+		"test-php": [
+			"./scripts/PHPUnit/run_tests.sh"
+		],
+		"rector": [
+			"./vendor/composer/vendor/bin/rector process --config ./scripts/Rector/basic_rector.php --no-diffs"
+		]
+	},
+	"require": {
+		"php": ">=8.3 <8.5",
+		"ext-gd": "*",
+		"ext-dom": "*",
+		"ext-xsl": "*",
+		"ext-curl": "*",
+		"ext-json": "*",
+		"ext-simplexml": "*",
+		"ext-libxml": "*",
+		"ext-xml": "*",
+		"ext-zip": "*",
+		"ext-imagick": "*",
+		"celtic/lti": "^5.0.0",
+		"dflydev/fig-cookies": "^3.1.0",
+		"ezyang/htmlpurifier": "^4.18",
+		"filp/whoops": "^2.16",
+		"firebase/php-jwt": "*",
+		"guzzlehttp/psr7": "^2.7.0",
+		"ifsnop/mysqldump-php": "^2.11",
+		"james-heinrich/getid3": "^1.9.23",
+		"league/commonmark": "^2.7.0",
+		"league/flysystem": "^3.28.0",
+		"monolog/monolog": "^3.9",
+		"mustache/mustache": "^3.0",
+		"phpmailer/phpmailer": "^6.9",
+		"phpoffice/phpspreadsheet": "^3.5",
+		"pimple/pimple" : "^3.0",
+		"ramsey/uuid": "^4.7",
+		"sabre/dav": "^4.7",
+		"seld/jsonlint": "^1.11",
+		"simplesamlphp/simplesamlphp": "^2.3.7",
+		"symfony/console" : "^6.4",
+		"psr/http-message": "^2.0",
+		"jumbojett/openid-connect-php": "dev-master#bc719cc9930990a4a9916cc127b839b4ed1c89ad",
+		"phpunit/phpunit": "^11.5",
+		"phiki/phiki": "^2.0"
+	},
+	"require-dev": {
+		"captainhook/captainhook": "^5.24",
+		"friendsofphp/php-cs-fixer": "^3.65",
+		"mikey179/vfsstream": "^1.6",
+		"phpstan/phpstan": "^2.0"
+	},
+	"autoload": {
+		"psr-4" : {
+			"ILIAS\\Scripts\\" : "./scripts"
+		},
+		"classmap": [
+			"./public/Customizing/global/plugins",
+			"./components",
+			"./vendor/ilias",
+			"./components/ILIAS/soap",
+			"./components/ILIAS/setup_/classes"
+		],
+		"exclude-from-classmap": [
+			"./components/ILIAS/Migration",
+			"./*/*/lib",
+			"./public/Customizing/**/vendor",
+			"./components/ILIAS/setup_/sql",
+			"./cli/setup.php",
+			"./components/ILIAS/setup_/client.master.ini.php",
+			"./components/ILIAS/setup_/ilias.master.ini.php"
+		]
+	},
+	"extra": {
+		"patches": {
+			"imsglobal/lti": {
+				"ILIAS LTI Patches": "./vendor/composer/patches/lti.patch"
+			}
+		}
+	}
+}

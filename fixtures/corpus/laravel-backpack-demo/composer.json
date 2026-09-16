@@ -1,0 +1,117 @@
+{
+    "name": "backpack/demo",
+    "description": "A Laravel + Backpack installation to show off most features.",
+    "keywords": [
+        "backpack",
+        "laravel",
+        "backpack for laravel",
+        "admin panel",
+        "crud"
+    ],
+    "license": "proprietary",
+    "type": "project",
+    "require": {
+        "php": "^8.2",
+        "laravel/framework": "^13",
+        "backpack/crud": "^7.0",
+        "backpack/pro": "^3.0",
+        "backpack/medialibrary-uploaders": "^2.0",
+        "backpack/ckeditor-field": "^1.0",
+        "backpack/tinymce-field": "^1.0",
+        "backpack/activity-log": "^2.1",
+        "backpack/backupmanager": "^5.1",
+        "backpack/calendar-operation": "^1.1",
+        "backpack/editable-columns": "^3.1",
+        "backpack/filemanager": "^4.0",
+        "backpack/language-switcher": "^2.1",
+        "backpack/logmanager": "^5.1",
+        "backpack/menucrud": "^4.1",
+        "backpack/newscrud": "^5.2",
+        "backpack/pagemanager": "^3.4",
+        "backpack/permissionmanager": "^7.3",
+        "backpack/revise-operation": "^2.1",
+        "backpack/settings": "^3.2",
+        "backpack/theme-coreuiv2": "^2.0",
+        "backpack/theme-coreuiv4": "^1.2",
+        "backpack/theme-tabler": "^2.1",
+        "backpack/translation-manager": "^1.1",
+        "consoletvs/charts": "6.*",
+        "intervention/image": "^2.3",
+        "laravel/legacy-factories": "^1.0",
+        "laravel/tinker": "^3.0",
+        "league/flysystem-aws-s3-v3": "^3.0",
+        "mews/purifier": "^3.4",
+        "spatie/laravel-ignition": "^2.0",
+        "spatie/laravel-translatable": "^6.0",
+        "backpack/pan-panel": "^1.1",
+        "backpack/dataform-modal": "^1.0",
+        "backpack/report-operation": "^1.0",
+        "fakerphp/faker": "~1.4"
+    },
+    "require-dev": {
+        "mockery/mockery": "1.6.*",
+        "phpunit/phpunit": "^11",
+        "symfony/css-selector": "^7",
+        "symfony/dom-crawler": "^7",
+        "backpack/generators": "^4.1",
+        "barryvdh/laravel-debugbar": "^4.0",
+        "backpack/test-generators": "^1.0",
+        "laravel/boost": "^2.4",
+        "backpack/devtools": "^5.0"
+    },
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://repo.backpackforlaravel.com/"
+        }
+    ],
+    "autoload": {
+        "files": [
+            "app/helpers.php"
+        ],
+        "classmap": [
+            "database"
+        ],
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-root-package-install": [
+            "php -r \"copy('.env.example', '.env');\""
+        ],
+        "post-create-project-cmd": [
+            "php artisan key:generate"
+        ],
+        "post-install-cmd": [
+            "Illuminate\\Foundation\\ComposerScripts::postInstall",
+            "php artisan storage:link -q",
+            "@php artisan basset:cache"
+        ],
+        "post-update-cmd": [
+            "Illuminate\\Foundation\\ComposerScripts::postUpdate",
+            "@php artisan boost:update --ansi",
+            "@php artisan basset:cache"
+        ],
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover"
+        ],
+        "fresh": "php artisan key:generate --force && php artisan db:wipe --force && php artisan migrate --force && php artisan db:seed --force && php artisan backup:clean && php artisan cache:clear && php artisan view:clear && php artisan config:clear"
+    },
+    "config": {
+        "preferred-install": "dist",
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

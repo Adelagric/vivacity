@@ -1,0 +1,180 @@
+{
+    "name": "drupal/drupal",
+    "description": "Drupal is an open source content management platform powering millions of websites and applications.",
+    "type": "project",
+    "license": "GPL-2.0-or-later",
+    "homepage": "https://www.drupal.org/project/drupal",
+    "support": {
+        "docs": "https://www.drupal.org/docs/user_guide/en/index.html",
+        "chat": "https://www.drupal.org/node/314178"
+    },
+    "require": {
+        "composer/installers": "^2.3",
+        "drupal/core": "self.version",
+        "drupal/core-project-message": "self.version",
+        "drupal/core-recipe-unpack": "self.version",
+        "drupal/core-vendor-hardening": "self.version"
+    },
+    "conflict": {
+        "dealerdirect/phpcodesniffer-composer-installer": "1.1.0"
+    },
+    "require-dev": {
+        "behat/mink": "^1.11",
+        "behat/mink-browserkit-driver": "^2.2",
+        "colinodell/psr-testlogger": "^1.2",
+        "composer/composer": "^2.8.1",
+        "drupal/coder": "^9.0",
+        "lullabot/mink-selenium2-driver": "^1.7.3",
+        "lullabot/php-webdriver": "^2.0.7",
+        "mglaman/phpstan-drupal": "^2.0.15",
+        "micheh/phpcs-gitlab": "^2.0",
+        "mikey179/vfsstream": "^1.6.11",
+        "open-telemetry/exporter-otlp": "^1",
+        "open-telemetry/sdk": "^1",
+        "phpspec/prophecy": "^1.23",
+        "phpspec/prophecy-phpunit": "^2.4",
+        "phpstan/extension-installer": "^1.4.3",
+        "phpstan/phpstan": "^2.2.8",
+        "phpstan/phpstan-phpunit": "^2.0.16",
+        "phpunit/phpunit": "^12.5.15",
+        "spaze/phpstan-disallowed-calls": "^4.12.0",
+        "symfony/browser-kit": "^8.1",
+        "symfony/css-selector": "^8.1",
+        "symfony/dom-crawler": "^8.1",
+        "symfony/error-handler": "^8.1",
+        "symfony/lock": "^8.1",
+        "symfony/var-dumper": "^8.1",
+        "vincentlanglet/twig-cs-fixer": "^4.0"
+    },
+    "replace": {
+        "symfony/polyfill-php72": "*",
+        "symfony/polyfill-php73": "*",
+        "symfony/polyfill-php74": "*",
+        "symfony/polyfill-php80": "*",
+        "symfony/polyfill-php81": "*",
+        "symfony/polyfill-php82": "*",
+        "symfony/polyfill-php83": "*",
+        "symfony/polyfill-php84": "*",
+        "symfony/polyfill-php85": "*"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "platform": {
+            "php": "8.5.0"
+        },
+        "allow-plugins": {
+            "composer/installers": true,
+            "dealerdirect/phpcodesniffer-composer-installer": true,
+            "drupal/core-composer-scaffold": false,
+            "drupal/core-project-message": true,
+            "drupal/core-recipe-unpack": true,
+            "drupal/core-vendor-hardening": true,
+            "php-http/discovery": true,
+            "phpstan/extension-installer": true,
+            "symfony/runtime": true,
+            "tbachert/spi": false
+        }
+    },
+    "extra": {
+        "_readme": [
+            "By default Drupal loads the autoloader from ./vendor/autoload.php.",
+            "To change the autoloader you can edit ./autoload.php.",
+            "This file specifies the packages.drupal.org repository.",
+            "You can read more about this composer repository at:",
+            "https://www.drupal.org/node/2718229"
+        ],
+        "branch-alias": {
+            "dev-main": "12.x-dev"
+        },
+        "installer-paths": {
+            "core": ["type:drupal-core"],
+            "libraries/{$name}": ["type:drupal-library"],
+            "modules/contrib/{$name}": ["type:drupal-module"],
+            "profiles/contrib/{$name}": ["type:drupal-profile"],
+            "themes/contrib/{$name}": ["type:drupal-theme"],
+            "drush/Commands/contrib/{$name}": ["type:drupal-drush"],
+            "modules/custom/{$name}": ["type:drupal-custom-module"],
+            "themes/custom/{$name}": ["type:drupal-custom-theme"]
+        },
+        "drupal-recipe-unpack": {
+            "on-require": false
+        },
+        "drupal-core-project-message": {
+            "post-install-cmd-message": [
+                "<bg=blue;fg=white>drupal/drupal</>: This package is meant for core development,",
+                "               and not intended to be used for production sites.",
+                "               See: https://www.drupal.org/node/3082474"
+            ],
+            "post-create-project-cmd-message": [
+                "<bg=red;fg=white>drupal/drupal</>: This package is meant for core development,",
+                "               and not intended to be used for production sites.",
+                "               See: https://www.drupal.org/node/3082474"
+            ]
+        }
+    },
+    "autoload": {
+        "psr-4": {
+            "Drupal\\Core\\Composer\\": "core/lib/Drupal/Core/Composer",
+            "Drupal\\Composer\\": "composer"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Drupal\\PHPStan\\ErrorFormatter\\": "core/tests/PHPStan/ErrorFormatter",
+            "Drupal\\PHPStan\\Rules\\": "core/tests/PHPStan/Rules"
+        }
+    },
+    "scripts": {
+        "pre-install-cmd": "Drupal\\Composer\\Composer::ensureComposerVersion",
+        "pre-update-cmd": "Drupal\\Composer\\Composer::ensureComposerVersion",
+        "pre-autoload-dump": "Drupal\\Composer\\Plugin\\Scaffold\\Plugin::preAutoloadDump",
+        "drupal-phpunit-upgrade-check": "Drupal\\Core\\Composer\\Composer::upgradePHPUnit",
+        "drupal-phpunit-upgrade": [
+            "@composer update phpunit/phpunit --with-dependencies --no-progress"
+        ],
+        "post-update-cmd": [
+            "Drupal\\Composer\\Composer::generateMetapackages",
+            "Drupal\\Composer\\Composer::generateComponentPackages"
+        ],
+        "phpcs": "phpcs -d memory_limit=-1 --standard=core/phpcs.xml.dist --parallel=\"$( (nproc || sysctl -n hw.logicalcpu || echo 4) 2>/dev/null)\" --",
+        "phpcbf": "phpcbf -d memory_limit=-1 --standard=core/phpcs.xml.dist --parallel=\"$( (nproc || sysctl -n hw.logicalcpu || echo 4) 2>/dev/null)\" --",
+        "phpstan": "phpstan analyze --memory-limit=-1 --configuration=core/phpstan.neon.dist --",
+        "phpstan-baseline": "phpstan analyze --memory-limit=-1 --configuration=core/phpstan.neon.dist --generate-baseline=core/.phpstan-baseline.php",
+        "twigcs": "twig-cs-fixer lint -c core/.twig-cs-fixer.php",
+        "twigcs-fix": "twig-cs-fixer lint -c core/.twig-cs-fixer.php --fix"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "canonical": false,
+            "url": "core"
+        },
+        {
+            "type": "path",
+            "canonical": false,
+            "url": "composer/Plugin/RecipeUnpack"
+        },
+        {
+            "type": "path",
+            "canonical": false,
+            "url": "composer/Plugin/ProjectMessage"
+        },
+        {
+            "type": "path",
+            "canonical": false,
+            "url": "composer/Plugin/Scaffold"
+        },
+        {
+            "type": "path",
+            "canonical": false,
+            "url": "composer/Plugin/VendorHardening"
+        },
+        {
+            "type": "composer",
+            "url": "https://packages.drupal.org/8"
+        }
+    ]
+}

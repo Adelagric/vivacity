@@ -1,0 +1,84 @@
+<?php
+
+namespace Tests;
+
+use App\Facades\License;
+use App\Helpers\Ulid;
+use App\Helpers\Uuid;
+use App\Models\Album;
+use App\Observers\AlbumObserver;
+use App\Services\License\CommunityLicenseService;
+use App\Services\MediaBrowser;
+use App\Services\Network\Network;
+use Illuminate\Filesystem\Filesystem;
+use Illuminate\Foundation\Testing\LazilyRefreshDatabase;
+use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Illuminate\Support\Facades\File;
+use Tests\Concerns\AssertsArraySubset;
+use Tests\Concerns\CreatesApplication;
+use Tests\Concerns\MakesHttpRequests;
+use Tests\Fakes\FakeNetwork;
+
+abstract class TestCase extends BaseTestCase
+{
+    use AssertsArraySubset;
+    use CreatesApplication;
+    use LazilyRefreshDatabase;
+    use MakesHttpRequests;
+
+    /**
+     * @var Filesystem The backup of the real filesystem instance, to restore after tests.
+     * This is necessary because we might be mocking the File facade in tests, and at the same time
+     * we delete test resources during suite's teardown.
+     */
+    private Filesystem $fileSystem;
+
+    public function setUp(): void
+    {
+        parent::setUp();
+
+        License::swap($this->app->make(CommunityLicenseService::class));
+        $this->app->instance(Network::class, new FakeNetwork());
+        $this->fileSystem = File::getFacadeRoot();
+
+        // Replace the AlbumObserver with a partial that skips the `saved` event (which dispatches
+        // thumbnail generation jobs). All other observer methods are preserved.
+        // Tests that verify the `saved` behavior can re-bind the real observer.
+        $this->app->instance(AlbumObserver::class, new class extends AlbumObserver {
+            public function saved(Album $album): void
+            {
+                // no-op: prevent thumbnail job dispatch noise in tests
+            }
+        });
+
+        self::createSandbox();
+    }
+
+    protected function tearDown(): void
+    {
+        File::swap($this->fileSystem);
+        self::destroySandbox();
+        MediaBrowser::clearCache();
+
+        Ulid::unfreeze();
+        Uuid::unfreeze();
+
+        parent::tearDown();
+    }
+
+    private static function createSandbox(): void
+    {
+        config([
+            'koel.image_storage_dir' => sandbox_dir() . '/img/storage',
+            'koel.artifacts_path' => sandbox_path('artifacts/'),
+        ]);
+
+        File::ensureDirectoryExists(public_path(config('koel.image_storage_dir')));
+        File::ensureDirectoryExists(sandbox_path('media/'));
+    }
+
+    private static function destroySandbox(): void
+    {
+        File::deleteDirectory(sandbox_path());
+    }
+}

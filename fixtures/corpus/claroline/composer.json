@@ -1,0 +1,172 @@
+{
+    "name": "claroline/claroline",
+    "description": "Claroline Learning Management System",
+    "keywords": [
+        "Claroline",
+        "LMS"
+    ],
+    "homepage": "https://www.claroline.com",
+    "license": "AGPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "Claroline development team",
+            "email": "dev@claroline.net",
+            "homepage": "https://github.com/claroline"
+        }
+    ],
+    "prefer-stable": true,
+    "require": {
+        "php": ">=8.2",
+        "ext-curl": "*",
+        "ext-dom": "*",
+        "ext-fileinfo": "*",
+        "ext-gd": "*",
+        "ext-iconv": "*",
+        "ext-intl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*",
+        "ext-openssl": "*",
+        "ext-simplexml": "*",
+        "ext-zip": "*",
+        "claroline/json-quiz": "^1.0",
+        "claroline/jval": "^1.0",
+        "composer/composer": "^2.5",
+        "doctrine/data-fixtures": "^1.7",
+        "doctrine/doctrine-bundle": "^2.13",
+        "doctrine/migrations": "^3.9",
+        "doctrine/orm": "^3.3",
+        "dompdf/dompdf": "^2.0",
+        "friendsofsymfony/jsrouting-bundle": "^3.5",
+        "gedmo/doctrine-extensions": "^3.16",
+        "geoip2/geoip2": "^2.11",
+        "icap/html-diff": "1.1.0",
+        "jdorn/sql-formatter": "1.2.17",
+        "postal/postal": "^1.0",
+        "psr/log": "^2.0|^3.0",
+        "ramsey/uuid": "^3.9",
+        "stof/doctrine-extensions-bundle": "^1.12",
+        "symfony/monolog-bundle": "^3.10",
+        "symfony/asset": "^7.4",
+        "symfony/console": "^7.4",
+        "symfony/doctrine-messenger": "^7.4",
+        "symfony/doctrine-bridge": "^7.4",
+        "symfony/dotenv": "^7.4",
+        "symfony/framework-bundle": "^7.4",
+        "symfony/http-kernel": "^7.4",
+        "symfony/google-mailer": "^7.4",
+        "symfony/http-client": "^7.4",
+        "symfony/intl": "^7.4",
+        "symfony/mailer": "^7.4",
+        "symfony/messenger": "^7.4",
+        "symfony/rate-limiter": "^7.4",
+        "symfony/security-bundle": "^7.4",
+        "symfony/translation": "^7.4",
+        "symfony/twig-bridge": "^7.4",
+        "symfony/twig-bundle": "^7.4",
+        "symfony/yaml": "^7.4",
+        "twig/twig": "^3.14",
+        "willdurand/js-translation-bundle": "^7.0",
+        "league/oauth2-client": "^2.0",
+        "league/oauth2-github": "^3.1",
+        "symfony/var-exporter": "^7.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.5",
+        "friendsofphp/php-cs-fixer": "^3.20.0",
+        "mikey179/vfsstream": "^1.6",
+        "mockery/mockery": "^1.5",
+        "phpmd/phpmd": "^2.13",
+        "symfony/browser-kit": "^7.4",
+        "symfony/debug-bundle": "^7.4",
+        "symfony/phpunit-bridge": "^7.4",
+        "symfony/web-profiler-bundle": "^7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Claroline\\AgendaBundle\\": "src/plugin/agenda",
+            "Claroline\\AnnouncementBundle\\": "src/plugin/announcement",
+            "Claroline\\AppBundle\\": "src/main/app",
+            "Claroline\\AudioPlayerBundle\\": "src/plugin/audio-player",
+            "Claroline\\AuthenticationBundle\\": "src/main/authentication",
+            "Claroline\\BigBlueButtonBundle\\": "src/integration/big-blue-button",
+            "Claroline\\ClacoFormBundle\\": "src/plugin/claco-form",
+            "Claroline\\CommunityBundle\\": "src/main/community",
+            "Claroline\\CoreBundle\\": "src/main/core",
+            "Claroline\\CursusBundle\\": "src/plugin/cursus",
+            "Claroline\\DevBundle\\": "src/main/dev",
+            "Claroline\\DropZoneBundle\\": "src/plugin/drop-zone",
+            "Claroline\\EvaluationBundle\\": "src/main/evaluation",
+            "Claroline\\ExampleBundle\\": "src/main/example",
+            "Claroline\\ForumBundle\\": "src/plugin/forum",
+            "Claroline\\FlashcardBundle\\": "src/plugin/flashcard",
+            "Claroline\\GitHubBundle\\": "src/integration/github",
+            "Claroline\\HomeBundle\\": "src/plugin/home",
+            "Claroline\\ImagePlayerBundle\\": "src/plugin/image-player",
+            "Claroline\\InstallationBundle\\": "src/main/installation",
+            "Claroline\\KernelBundle\\": "src/main/kernel",
+            "Claroline\\LinkBundle\\": "src/plugin/link",
+            "Claroline\\LogBundle\\": "src/main/log",
+            "Claroline\\MessageBundle\\": "src/plugin/message",
+            "Claroline\\NotificationBundle\\": "src/main/notification",
+            "Claroline\\OpenBadgeBundle\\": "src/plugin/open-badge",
+            "Claroline\\PdfPlayerBundle\\": "src/plugin/pdf-player",
+            "Claroline\\PeerTubeBundle\\": "src/integration/peertube",
+            "Claroline\\PrivacyBundle\\": "src/main/privacy",
+            "Claroline\\SchedulerBundle\\": "src/main/scheduler",
+            "Claroline\\ScormBundle\\": "src/plugin/scorm",
+            "Claroline\\TagBundle\\": "src/plugin/tag",
+            "Claroline\\TemplateBundle\\": "src/main/template",
+            "Claroline\\ThemeBundle\\": "src/main/theme",
+            "Claroline\\TransferBundle\\": "src/main/transfer",
+            "Claroline\\VideoPlayerBundle\\": "src/plugin/video-player",
+            "Claroline\\WebResourceBundle\\": "src/plugin/web-resource",
+            "Claroline\\YouTubeBundle\\": "src/integration/youtube",
+            "HeVinci\\UrlBundle\\": "src/plugin/url",
+            "Icap\\LessonBundle\\": "src/plugin/lesson",
+            "Innova\\PathBundle\\": "src/plugin/path",
+            "UJM\\ExoBundle\\": "src/plugin/exo"
+        }
+    },
+    "scripts": {
+        "enable-maintenance": [
+            "Claroline\\CoreBundle\\Library\\Maintenance\\MaintenanceHandler::enableMaintenance"
+        ],
+        "disable-maintenance": [
+            "Claroline\\CoreBundle\\Library\\Maintenance\\MaintenanceHandler::disableMaintenance"
+        ],
+        "delete-cache": [
+            "rm -rf ./var/cache/*"
+        ],
+        "bundles": [
+            "Claroline\\KernelBundle\\ScriptHandler::buildBundleFile"
+        ],
+        "setup-geoip": [
+            "php bin/console claroline:geoip:download"
+        ],
+        "pre-install-cmd": [
+            "php bin/configure"
+        ],
+        "post-install-cmd": [
+            "composer bundles",
+            "composer setup-geoip"
+        ],
+        "pre-update-cmd": [
+            "php bin/configure",
+            "composer enable-maintenance",
+            "composer delete-cache"
+        ],
+        "post-update-cmd": [
+            "composer bundles",
+            "composer setup-geoip",
+            "composer disable-maintenance",
+            "composer delete-cache"
+        ]
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}

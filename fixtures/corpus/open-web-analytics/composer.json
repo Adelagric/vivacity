@@ -1,0 +1,65 @@
+{
+    "name": "open-web-analytics/open-web-analytics",
+    "description": "The open source analytics framework.",
+    "keywords": [
+        "open-web-analytics",
+        "owa",
+        "web-analytics",
+        "analytics"
+    ],
+    "homepage": "https://www.openwebanalytics.com",
+    "license": "GPL-2.0",
+    "authors": [
+        {
+            "name": "The OWA Team",
+            "email": "hello@openwebanalytics.com"
+        }
+    ],
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2.0"
+        },
+        "allow-plugins": {
+            "wikimedia/composer-merge-plugin": true
+        }
+    },
+    "require": {
+        "php": ">=8.2",
+        "wikimedia/composer-merge-plugin": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "OWA\\Core\\": "Core/",
+            "OWA\\Module\\": "modules/"
+        }
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^10.5"
+    },
+    "scripts": {
+        "lint": "find . -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' -print0 | xargs -0 -n1 php -l",
+        "phpstan": "phpstan analyse --memory-limit=1G",
+        "phpstan:migration": "phpstan analyse -c phpstan-migration.neon --memory-limit=1G",
+        "phpstan:templates": "phpstan analyse -c phpstan-templates.neon --memory-limit=1G",
+        "test": "phpunit",
+        "test:isolation": "bash tests/tools/isolation_sweep.sh",
+        "test:scratch": "bash tests/tools/scratch_db_run.sh",
+        "test:configless": "bash tests/tools/configless_run.sh",
+        "test:upgrade": "bash tests/tools/upgrade_cycle_run.sh"
+    },
+    "extra": {
+        "merge-plugin": {
+            "include": [
+                "modules/*/composer.json"
+            ],
+            "replace": false,
+            "ignore-duplicates": true,
+            "merge-dev": true,
+            "merge-extra": false,
+            "merge-extra-deep": false,
+            "merge-scripts": true
+        }
+    }
+}
