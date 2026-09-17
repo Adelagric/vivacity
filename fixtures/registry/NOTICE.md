@@ -20,7 +20,8 @@ The `solver-*` archives back the manifests in `fixtures/projects/solver-*`:
 small cases written for the solver oracle (`tests/oracle_pool.rs`) —
 backtracking, an unsolvable set (no reference lock, `unsolvable` in
 `SNAPSHOT`), root aliases on dev branches, virtual packages with several
-providers. They are resolved by `tools/oracle-pool.php --solve` and by
+providers, blocking policies, dev branches held at their lock entry through
+their branch alias in a partial update. They are resolved by `tools/oracle-pool.php --solve` and by
 vivacity on the same snapshot; the decision sequences must be identical.
 
 `path-repos` has no Packagist metadata at all (`p2/` is empty, Packagist is

@@ -43,15 +43,22 @@ drupal/core-composer-scaffold, which vivacity does not emulate (GPL source):
 the fixture proves the Composer fallback path and `harness/transitions.sh`
 the refusal before any write. Boot check: `vendor/bin/dr --version`.
 
-`solver-*` are four small manifests written for the resolver oracle, with
-no lock and no vendor: `solver-backtrack` (phpunit `^10 || ^11 || ^12`
+`solver-*` are small manifests written for the resolver oracle, with no
+vendor: `solver-backtrack` (phpunit `^10 || ^11 || ^12`
 against `sebastian/version ^4`), `solver-conflict` (monolog 3 with
 psr/log 1, deliberately unsolvable), `solver-aliases` (a `dev-master as
 3.99.0` root alias, a `7.4.x-dev` branch, `minimum-stability: dev` with
 `prefer-stable`), `solver-providers` (virtual packages with several
-providers, `symfony/polyfill-mbstring`). Their Packagist snapshots live in
-`fixtures/registry/solver-*.tar.gz`; `harness/update.sh` does not run them
-(they have nothing to install), `tests/oracle_pool.rs` does.
+providers, `symfony/polyfill-mbstring`), `solver-policies` (blocking
+policies, see its NOTICE.md), `solver-held-branch` (the only one with a
+lock: six `dev-*` branches held at their lock entry — `composer/installers`
+`dev-main`, `psr/http-client` `dev-master`, … — each carrying its
+`extra.branch-alias`, and required by caret by other held packages one
+and two hops away; a partial update must seed the alias beside the base or
+every dependant reads as "could not be found"). Their Packagist snapshots
+live in `fixtures/registry/solver-*.tar.gz`; `tests/oracle_pool.rs` runs
+them all, `harness/update.sh` only `solver-held-branch` (three partial
+updates, lock byte-identical), the others have no lock to start from.
 
 `path-repos` is a manifest written for the harness (MIT, like the harness):
 six `acme/*` packages served by three `path` repositories — a glob

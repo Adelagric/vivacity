@@ -1,0 +1,12 @@
+{
+    "name": "vivace/solver-held-branch",
+    "description": "Solver case: dev branches held at their lock entry in a partial update, required by caret through their branch alias (composer/installers dev-main <- ^1.0 || ^2.0, psr/http-client dev-master <- ^1.0 one hop further)",
+    "minimum-stability": "dev",
+    "require": {
+        "composer/installers": "dev-main",
+        "oomphinc/composer-installers-extender": "^2.0",
+        "php-http/curl-client": "2.x-dev",
+        "psr/http-client": "dev-master",
+        "psr/log": "^3.0"
+    }
+}

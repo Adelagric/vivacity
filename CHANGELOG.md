@@ -4,6 +4,20 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Added
+- **Fixture `solver-held-branch`**: `minimum-stability: dev`, six `dev-*`
+  branches held at their lock entry with their `extra.branch-alias`
+  (`composer/installers` `dev-main` ⇐ `^1.0 || ^2.0`, `psr/http-client`
+  `dev-master` ⇐ `^1.0` one hop further), three partial updates
+  (`psr/log`, `php-http/curl-client -w`, `psr/log -W`) in the pool oracle
+  and `harness/update.sh`. Pool, decisions and lock byte-identical to
+  Composer without any code change: the `ArrayLoader` port
+  (`loader::load_packages`) creates the alias package for every origin,
+  the locked repository included, so a held branch never loses its alias
+  and its dependants never read "could not be found".
+
 ## [0.11.1] — 2026-09-17
 
 ### Fixed

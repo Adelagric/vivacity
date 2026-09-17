@@ -12,7 +12,7 @@ cargo build --release
 harness/diff-vendor.sh [--with-autoloader]   # parité vs Composer sur les 6 fixtures (projet entier pour wordpress et drupal) — harness/lib/compare.sh : diff -r + inventaire des modes et des liens
 harness/removal.sh                       # paquets retirés du lock : même projet que Composer après
 harness/transitions.sh                   # montée de version d'un plugin émulé → main rendue à Composer, disque intact
-harness/update.sh                        # `composer update` vs `vivacity update` (complet + 7 cas partiels) : locks identiques sur l'instantané Packagist figé (drupal avec `--no-security-blocking` des deux côtés : les avis de packages.drupal.org ne sont pas figés)
+harness/update.sh                        # `composer update` vs `vivacity update` (complet + 10 cas partiels, dont 3 sur `solver-held-branch` : branches dev tenues via leur branch-alias) : locks identiques sur l'instantané Packagist figé (drupal avec `--no-security-blocking` des deux côtés : les avis de packages.drupal.org ne sont pas figés)
 harness/steps.sh                         # `composer update|require|remove|install` vs vivacity (229 cas, 206 avec stderr identique) : composer.json, lock, stderr et code retour identiques
 harness/vendor-dir.sh [variante...]      # config.vendor-dir / bin-dir : 6 variantes (symfony ×5, wordpress ×1) — install, dump -o, no-op ; projet entier comparé, lignes « Skipped installation of bin » comparées
 harness/path-repos.sh                    # dépôts `path` (10 étapes) : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)

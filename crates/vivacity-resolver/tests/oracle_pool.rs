@@ -22,6 +22,7 @@ const FIXTURES: &[&str] = &[
     "solver-aliases",
     "solver-providers",
     "solver-policies",
+    "solver-held-branch",
 ];
 
 fn root() -> PathBuf {
@@ -182,6 +183,13 @@ const PARTIAL: &[(&str, &[&str], &str)] = &[
     ("sylius", &["symfony/*"], "-W"),
     ("sylius", &["symfony/console", "symfony/http-kernel"], "-w"),
     ("sylius", &["sylius/sylius"], "-W"),
+    // Held dev branches with `extra.branch-alias` in the lock entry
+    // (composer/installers dev-main <- ^1.0 || ^2.0, psr/http-client
+    // dev-master <- ^1.0): the alias must be seeded beside the base or
+    // every dependant is reported as "could not be found".
+    ("solver-held-branch", &["psr/log"], ""),
+    ("solver-held-branch", &["php-http/curl-client"], "-w"),
+    ("solver-held-branch", &["psr/log"], "-W"),
 ];
 
 fn oracle(s: &Setup, solve: bool) -> Value {

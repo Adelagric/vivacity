@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/fixture.sh"
 VIVACITY="$ROOT/target/release/vivacity"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/update"
-FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius rector drupal path-repos)
+FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius rector drupal path-repos solver-held-branch)
 # Cas de mise à jour partielle : "fixture|arguments de composer update".
 PARTIAL=(
   "laravel|laravel/pint"
@@ -29,6 +29,12 @@ PARTIAL=(
   "sylius|symfony/console symfony/http-kernel -w"
   "sylius|sylius/sylius -W"
   "rector|phpstan/*"
+  # Branches dev tenues au lock avec leur extra.branch-alias, exigées en
+  # caret par d'autres paquets tenus : l'alias doit être semé à côté de
+  # la base, et les stability-flags du lock rester ceux de Composer.
+  "solver-held-branch|psr/log"
+  "solver-held-branch|php-http/curl-client -w"
+  "solver-held-branch|psr/log -W"
 )
 [ -x "$VIVACITY" ] || { echo "binaire absent : cargo build --release"; exit 1; }
 mkdir -p "$WORK"
