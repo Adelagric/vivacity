@@ -4,6 +4,20 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **No C compression library in the graph**: `zip` now runs bzip2 on its
+  pure-Rust backend (`libbz2-rs-sys`, exports carry their own prefix) and
+  LZMA on `lzma-rs`; the `xz` and `zstd` features (C `lzma-sys`,
+  `zstd-sys`) are off — Info-ZIP's `unzip`, Composer's extractor, has
+  neither. With PCRE2 prefixed, bzip2 was the next duplicate-symbol
+  failure for a host linking `libphp.a` (ephpm/ephpm#523, PHP's `ext/bz2`).
+  The link test (`crates/pcre2-link-test`) now also defines the foreign
+  `BZ2_*` names and round-trips a bzip2 stream. vivacity's binary holds
+  exactly one C library: its own prefixed PCRE2 (plus ring's versioned
+  symbols with the default TLS feature).
+
 ## [0.11.0] — 2026-09-17
 
 ### Added

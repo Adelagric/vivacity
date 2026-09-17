@@ -8,3 +8,17 @@
 void *pcre2_compile_8(void) { return 0; }
 int _pcre2_check_escape_8(void) { return 0; }
 int pcre2_match_8(void) { return -1; }
+
+/* libphp.a also bundles bzip2 (ext/bz2). vivacity's `zip` runs bzip2 on a
+   pure-Rust backend whose exports carry their own prefix
+   (LIBBZ2_RS_SYS_v0.1.x_BZ2_*); should bzip2-sys ever come back into the
+   graph, these become duplicates (or shadow the real ones — caught by the
+   round trip in link.rs: BZ_CONFIG_ERROR (-9) from the init functions makes
+   the bzip2 crate fail at once rather than loop on a garbage stream). */
+int BZ2_bzCompressInit(void) { return -9; }
+int BZ2_bzCompress(void) { return -9; }
+int BZ2_bzCompressEnd(void) { return -9; }
+int BZ2_bzDecompressInit(void) { return -9; }
+int BZ2_bzDecompress(void) { return -9; }
+int BZ2_bzDecompressEnd(void) { return -9; }
+const char *BZ2_bzlibVersion(void) { return "foreign"; }

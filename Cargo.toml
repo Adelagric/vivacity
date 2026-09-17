@@ -14,7 +14,12 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "gzip", "stream", "charset"] }
-zip = "=2.4.2"
+# No C compression library: PHP's libphp.a bundles bzip2, libzip's xz and
+# zstd — an embedder would get duplicate symbols (ephpm/ephpm#523). bzip2 on
+# its pure-Rust backend, LZMA on lzma-rs, no xz/zstd (Info-ZIP's unzip, the
+# extractor Composer uses, has neither).
+zip = { version = "=2.4.2", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "time"] }
+bzip2 = { version = "=0.5.2", default-features = false, features = ["libbz2-rs-sys"] }
 sha1 = "=0.10.7"
 md-5 = "=0.10.6"
 thiserror = "=2.0.20"

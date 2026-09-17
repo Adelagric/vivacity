@@ -413,6 +413,24 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-17 — Aucune bibliothèque C hors PCRE2 : bzip2/LZMA en Rust pur, pas de xz/zstd
+
+Constat : PCRE2 préfixée, le run E2E suivant d'ePHPm (0.11.0 épinglée)
+tombe sur `duplicate symbol: BZ2_bzDecompressInit…` — `zip` en features par
+défaut tire `bzip2-sys`, `lzma-sys` (xz) et `zstd-sys`, et `libphp.a`
+embarque libbz2 (`ext/bz2`), libzip et ses compresseurs. Décision : `zip`
+sans features par défaut — `deflate` (miniz_oxide), `deflate64`, `bzip2`
+sur le backend Rust `libbz2-rs-sys` (exports déjà préfixés
+`LIBBZ2_RS_SYS_v0.1.x_`), `lzma` (lzma-rs), `time` ; ni `xz` ni `zstd`
+(Info-ZIP `unzip`, l'extracteur de Composer, ne les lit pas non plus).
+Preuve : `nm` du binaire = 0 symbole `BZ2_`/`lzma_`/`ZSTD_`/`pcre2_`
+non préfixé ; le test de lien définit aussi les `BZ2_*` étrangers et fait
+un aller-retour bzip2 (vérifié : avec `bzip2-sys`, `BZ_CONFIG_ERROR` des
+dummies → échec immédiat, `mem.rs:123`) ; diff-vendor, vendor-dir,
+path-repos inchangés. Règle retenue : vivacity ne livre qu'une seule
+bibliothèque C, la sienne, préfixée — tout ajout de `*-sys` C passe par
+le test de lien.
+
 ## 2026-09-17 — PCRE2 compilé avec des symboles préfixés, jamais la lib système (v0.12)
 
 Constat : ePHPm (ephpm/ephpm#523, `ephpm composer` = `vivacity::run` en

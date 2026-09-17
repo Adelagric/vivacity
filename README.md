@@ -225,7 +225,10 @@ built in from source with every symbol prefixed `vivacity_`
 — PHP's `libphp.a` bundles one, with the usual `pcre2_*_8` names — gets no
 duplicate symbols from vivacity; another crate pulling the stock
 `pcre2-sys` into the same binary would still collide with the host's, that
-is not vivacity's to fix. The prefix is checked in CI
+is not vivacity's to fix. Nothing else in vivacity is C: zip extraction
+runs on pure-Rust deflate, deflate64, bzip2 and LZMA backends (PHP's
+`ext/bz2` bundles libbz2, which would collide the same way), so an
+embedder's own zlib, bzip2, xz or zstd are never duplicated. The prefix is checked in CI
 (`tools/check-pcre2-symbols.sh`) and by a link test against a foreign
 PCRE2 (`crates/pcre2-link-test`).
 

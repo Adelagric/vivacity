@@ -17,3 +17,20 @@ fn vivacity_pcre2_links_next_to_a_foreign_pcre2() {
     assert!(re.is_match(b"class X").unwrap());
     assert!(!re.is_match(b"$class X").unwrap());
 }
+
+/// bzip2 (a zip entry compression) must not come from a C libbz2 either:
+/// a round trip through the crate vivacity uses, next to the foreign
+/// `BZ2_*` dummies.
+#[test]
+fn vivacity_bzip2_is_not_the_foreign_one() {
+    use std::io::{Read, Write};
+    let input = b"vivacity vivacity vivacity vivacity";
+    let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    enc.write_all(input).unwrap();
+    let compressed = enc.finish().unwrap();
+    let mut out = Vec::new();
+    bzip2::read::BzDecoder::new(&compressed[..])
+        .read_to_end(&mut out)
+        .unwrap();
+    assert_eq!(out, input);
+}

@@ -4,13 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Proves that vivacity's PCRE2 can be linked next to another PCRE2 (PHP's libphp.a bundles one): a C object defining the unprefixed names is linked into this crate's test binary."
+description = "Proves that vivacity links next to a host's own PCRE2 and bzip2 (PHP's libphp.a bundles both): a C object defining their unprefixed names is linked into this crate's test binary."
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 pcre2.workspace = true
+bzip2.workspace = true
 
 [build-dependencies]
 cc = { version = "=1.4.5", features = ["parallel"] }
