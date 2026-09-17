@@ -44,12 +44,15 @@ the roadmap below.
   the pieces a `vcs` port reuses: the git-like version guesser
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
-- **`wikimedia/composer-merge-plugin`** (4 corpus projects) — merges
-  `require` from other files at resolution time; on `install` from a lock
-  its listeners still fire. The emulated plugins (`pest_plugin.rs`,
-  `phpcs_installer.rs`, `extension_installers.rs`) are the pattern:
-  vendor the writer under `docs/reference/plugins/`, generate at
-  autoload-dump time, prove it on the corpus entries.
+- **`wikimedia/composer-merge-plugin` for the resolution commands** —
+  `install` and `dump-autoload` emulate it (0.12); `update` / `require` /
+  `remove` refuse a project that configures it: the merged requirements,
+  stability flags and prepended repositories would have to enter the
+  pool (`vivacity-resolver::merge_plugin` already produces the structured
+  links). The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
+  `extension_installers.rs`, `merge_plugin.rs`) are the pattern: vendor
+  the writer under `docs/reference/plugins/`, prove it on a fixture and
+  the corpus entries.
 - **`path` repositories on Windows** — junctions (`Filesystem::junction`,
   `PathDownloader`'s Windows branch); today such a lock goes through the
   Composer fallback there.

@@ -38,6 +38,16 @@ const VERSIONS: &[&str] = &[
     "4.2.1-p1",
     "1.0.0-a5",
     "V3.1",
+    // A `.` (or `_`, `-`) before the stability word: corpus, gymadarasz/ace v1.2.3.stable.
+    "v1.2.3.stable",
+    "1.2.3.stable",
+    "1.2.3-stable",
+    "1.2.3stable",
+    "2.0.0.beta1",
+    "1.0.0.p1",
+    "1.0.0.pl2",
+    "1.0-b3",
+    "1.0.0.a",
 ];
 
 #[test]

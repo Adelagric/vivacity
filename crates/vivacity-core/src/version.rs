@@ -71,11 +71,17 @@ impl Version {
 }
 
 /// Splits `1.2.3-beta2` / `1.2.3beta2` / `1.2.3_RC1` into (numeric, suffix).
+/// The numeric part and the stability suffix: `VersionParser::normalize`
+/// allows one `.`, `_` or `-` between them (`1.2.3.stable`, `2.0.0.beta1`,
+/// `1.0-b3` all count).
 fn split_stability(s: &str) -> (&str, &str) {
     match s.find(|c: char| !(c.is_ascii_digit() || c == '.')) {
         Some(i) => {
             let suffix = &s[i..];
-            (&s[..i], suffix.trim_start_matches(['-', '_', '.']))
+            (
+                s[..i].trim_end_matches('.'),
+                suffix.trim_start_matches(['-', '_', '.']),
+            )
         }
         None => (s, ""),
     }

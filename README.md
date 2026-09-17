@@ -160,13 +160,20 @@ Packagist search behind "Did you mean …".
 
 ## Plugins and scripts
 
-Scripts are never run. Six plugins are emulated and checked against the
+Scripts are never run. Seven plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
 `dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
 `installed_paths`), `phpstan/extension-installer` and
-`rector/extension-installer` (their `GeneratedConfig.php`). A plugin listed as `false` in `allow-plugins` is
+`rector/extension-installer` (their `GeneratedConfig.php`), and
+`wikimedia/composer-merge-plugin` (the included manifests merged into the
+root — autoload, requirements, links, `extra` — for `install` and
+`dump-autoload`; with one deliberate difference: on a bare vendor the
+plugin would run an implicit `composer update` of the merged requirements
+and rewrite `composer.lock`, vivacity never does — a lock that misses a
+merged requirement is handed to Composer instead, and `update` on such a
+project is refused). A plugin listed as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `phpstan/extension-installer`,
 …) is installed as plain libraries. `drupal/core-composer-scaffold` is not

@@ -1,0 +1,44 @@
+{
+    "name": "vivacity/merge-plugin-fixture",
+    "version": "1.2.3",
+    "description": "composer-merge-plugin: includes, a required file, recursion, duplicate rules",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "wikimedia/composer-merge-plugin": "^2.1",
+        "psr/log": "^3.0",
+        "monolog/monolog": "^3.0"
+    },
+    "require-dev": {
+        "psr/container": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        },
+        "files": [
+            "src/helpers.php"
+        ]
+    },
+    "conflict": {
+        "acme/nowhere": "<1.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "wikimedia/composer-merge-plugin": true
+        },
+        "sort-packages": true
+    },
+    "extra": {
+        "merge-plugin": {
+            "include": [
+                "modules/*/composer.json"
+            ],
+            "require": [
+                "ext/composer.ext.json"
+            ],
+            "recurse": true
+        }
+    }
+}

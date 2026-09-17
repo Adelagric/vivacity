@@ -1,0 +1,4 @@
+{
+    "require": {"symfony/polyfill-mbstring": "^1.30"},
+    "autoload": {"classmap": ["Legacy/"]}
+}

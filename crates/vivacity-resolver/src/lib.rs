@@ -10,6 +10,7 @@ pub mod intervals;
 pub mod json_manipulator;
 pub mod loader;
 pub mod lockfile;
+pub mod merge_plugin;
 pub mod metacache;
 pub mod optimizer;
 pub mod package;

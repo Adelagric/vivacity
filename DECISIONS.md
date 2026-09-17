@@ -413,6 +413,40 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-17 — composer-merge-plugin : la fusion, jamais sa mise à jour implicite (v0.13)
+
+Constat mesuré (open-web-analytics avec ses vrais `modules/*/composer.json`) :
+sur un vendor vierge, `composer install` — même `--no-scripts` — installe le
+plugin, l'active, et à `post-install-cmd` lance un `composer update` partiel
+des exigences fusionnées contre les dépôts en ligne, qui **réécrit
+composer.lock** (maxmind-db/reader 1.13.1 → 1.14.0, monolog 2.11.0 →
+2.11.1, symfony/filesystem 7.4.15 → 7.4.18). Le résultat d'un `install`
+dépend donc de l'heure : Composer lui-même n'est pas reproductible là.
+Avec le plugin déjà installé, rien de tel : fusion dès INIT, lock validé
+contre les exigences fusionnées (`getMissingRequirementInfo`, code 4).
+Décision, avec l'utilisateur : vivacity émule la fusion (`ExtraPackage` /
+`PluginState` portés dans `vivacity-resolver::merge_plugin`, contraintes
+des doublons **structurées** — une conjonction textuelle `"^2.11 || ^1.0,
+^2.8"` se lit `^2.11 || (^1.0, ^2.8)` et accepterait un lock que Composer
+refuse, vérifié) et valide le lock comme Composer le fait avec le plugin
+installé ; elle **ne lance jamais** la mise à jour implicite : sur un
+vendor vierge, un lock qui ne satisfait pas les exigences fusionnées est
+rendu à Composer avec la raison, et `update` / `require` / `remove` sont
+refusés sur un projet qui configure le plugin (leur pool n'a pas encore
+les exigences et dépôts fusionnés). Parité prouvable : à dépôts figés, la
+mise à jour implicite ne trouve rien et le résultat de Composer est celui
+de vivacity ; le harness `merge-plugin.sh` prend pour référence l'état
+stable (plugin pré-amorcé seul — un premier `install --no-plugins` laisse
+un résidu de disposition avec composer/installers, vérifié —, `autoload.php`
+de l'amorce retiré car Composer reprend le suffixe d'un autoload existant
+avant celui du lock, lock inchangé vérifié). Précédent : l'ordre de
+`pest-plugins.json` et de `files` sur un cycle — là où Composer n'est pas
+reproductible, vivacity écrit la forme déterministe et le dit. Trouvé au
+passage : le rapport post-install (abandoned + funding) absent d'un
+`install` réel ; le filtre `--no-dev` de l'autoloader par nom vs par
+atteignabilité selon ce que le dépôt local connaît ; la racine candidate
+avec ses replace/provide dans `getMissingRequirementInfo`.
+
 ## 2026-09-17 — Aucune bibliothèque C hors PCRE2 : bzip2/LZMA en Rust pur, pas de xz/zstd
 
 Constat : PCRE2 préfixée, le run E2E suivant d'ePHPm (0.11.0 épinglée)

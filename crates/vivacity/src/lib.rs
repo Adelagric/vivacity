@@ -482,6 +482,24 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     trace("read manifests", t0);
 
     let with_dev = !args.no_dev && std::env::var("COMPOSER_NO_DEV").as_deref() != Ok("1");
+    // `wikimedia/composer-merge-plugin`: the root package Composer works
+    // with is the merged one (INIT, before any output — a merge error
+    // fails Composer inside Factory::create). Everything below reads the
+    // merged manifest; the content-hash keeps reading the file.
+    let merged = match merge_plugin_root(&project, &lock, &manifest, with_dev, !args.no_plugins) {
+        Ok(m) => m,
+        Err(reason) => {
+            let report = vivacity_core::scope::ScopeReport {
+                issues: vec![vivacity_core::scope::ScopeIssue::MergePlugin(reason)],
+                ..Default::default()
+            };
+            return fallback_or_fail(args, &project, &report);
+        }
+    };
+    let manifest = match &merged {
+        Some(m) => m.manifest.clone(),
+        None => manifest,
+    };
     let config_lock = config_lock_enabled(&manifest_text);
     // `Installer::doInstall`: the headline, then the platform verification
     // notice (the lock is solved against the platform when not coming
@@ -620,8 +638,40 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             .map_err(|e| anyhow::anyhow!("composer.lock: {}", e.0))?;
     // `Locker::getMissingRequirementInfo`: a root requirement the lock does
     // not satisfy (a hand-edited composer.json) stops here with code 4.
-    let missing = missing_requirement_info(&manifest, &lock_value, with_dev)?;
+    let merged_links = merged
+        .as_ref()
+        .map(|m| (m.requires.as_slice(), m.requires_dev.as_slice()));
+    let root_version =
+        vivacity_core::state::RootPackage::detect(&manifest, &project, with_dev).version;
+    let missing = missing_requirement_info(
+        &manifest,
+        &lock_value,
+        with_dev,
+        &root_version,
+        merged_links,
+    )?;
     if !missing.is_empty() {
+        // On a bare vendor the plugin is not active yet in Composer's run:
+        // it would install itself, then run a partial `composer update` of
+        // the merged requirements and rewrite the lock. vivacity does not
+        // do that on a user's behalf: the lock goes to Composer, with the
+        // reason. With the plugin installed, Composer refuses like this.
+        if let Some(m) = &merged {
+            let plugin_installed = installed_packages(&project, &manifest).iter().any(|p| {
+                p.get("name").and_then(|n| n.as_str())
+                    == Some(vivacity_resolver::merge_plugin::PLUGIN_NAME)
+            });
+            if !plugin_installed {
+                let report = vivacity_core::scope::ScopeReport {
+                    issues: vec![vivacity_core::scope::ScopeIssue::MergePlugin(format!(
+                        "the lock does not satisfy the merged requirements ({}); Composer would run the plugin's implicit update and rewrite composer.lock",
+                        m.merged_names.join(", ")
+                    ))],
+                    ..Default::default()
+                };
+                return fallback_or_fail(args, &project, &report);
+            }
+        }
         for line in &missing {
             eprintln!("{line}");
         }
@@ -744,6 +794,10 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     for line in &operation_lines {
         eprintln!("{line}");
     }
+    // `BinaryInstaller` notices belong to the operations, before the dump.
+    for m in &report.messages {
+        eprintln!("{m}");
+    }
     let mut autoload_note = String::new();
     if !args.no_autoloader {
         eprintln!("Generating autoload files");
@@ -763,6 +817,11 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             &args.ignore_platform_req,
             (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
             !args.no_plugins,
+            // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`
+            lock.packages_dev
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect(),
         )?;
         autoload_note = format!(", autoloader with {} classes", report.classes);
         // Plugins listening to post-autoload-dump, emulated: the local
@@ -824,14 +883,20 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         extension_installers::phpstan(layout, local, &manifest, with_dev, !args.no_plugins)?;
         extension_installers::rector(layout, local, &manifest, with_dev, !args.no_plugins)?;
     }
+    // `Installer::run` after the install phase: the abandoned packages of
+    // the lock (dev included), then the funding count of the local
+    // repository. An install driven by `update` reports through it.
+    if !args.after_update {
+        for line in abandoned_warnings(&lock_value) {
+            eprintln!("{line}");
+        }
+        print_funding(&project, &manifest);
+    }
     let warmed = if report.store_warmed > 0 {
         format!(", store warmed for {} packages", report.store_warmed)
     } else {
         String::new()
     };
-    for m in &report.messages {
-        eprintln!("{m}");
-    }
     eprintln!(
         "vivacity: {} installed, {} unchanged, {} removed ({} from store, {} from cache, {} from network){warmed}{autoload_note} in {:.2}s",
         report.installed,
@@ -964,6 +1029,7 @@ fn dump_autoload(
     ignored: &[String],
     apcu: (bool, Option<&str>),
     plugins_enabled: bool,
+    dev_package_names: Vec<String>,
 ) -> anyhow::Result<vivacity_autoload::DumpReport> {
     let platform_check = match manifest.get("config").and_then(|c| c.get("platform-check")) {
         Some(serde_json::Value::Bool(false)) => vivacity_autoload::PlatformCheckMode::Off,
@@ -1003,6 +1069,7 @@ fn dump_autoload(
         ignore_all_platform_reqs: ignore_all || ignored.iter().any(|p| p == "*"),
         ignored_platform_reqs: ignored.to_vec(),
         suffix: None,
+        dev_package_names,
         classmap_cache: if std::env::var_os("VIVACITY_NO_CLASSMAP_CACHE").is_some() {
             None
         } else {
@@ -1033,6 +1100,89 @@ fn dump_autoload(
     Ok(report)
 }
 
+/// `wikimedia/composer-merge-plugin` on this run: `Some` when the plugin is
+/// locked (wanted for the mode), allowed, plugins enabled and a merge
+/// configuration declared — the merged root (`extra.branch-alias` kept
+/// from the original: `RootPackageLoader` reads it before the plugin
+/// runs). `Err`: the reason vivacity cannot emulate this project.
+fn merge_plugin_root(
+    project: &std::path::Path,
+    lock: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> Result<Option<vivacity_resolver::merge_plugin::Merged>, String> {
+    use vivacity_resolver::merge_plugin::{self, Settings};
+    if !plugins_enabled
+        || !lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == merge_plugin::PLUGIN_NAME)
+        || !matches!(
+            vivacity_core::layout::plugin_allowed(manifest, merge_plugin::PLUGIN_NAME),
+            vivacity_core::layout::PluginVerdict::Allowed
+        )
+        || !Settings::declared(manifest)
+    {
+        return Ok(None);
+    }
+    let root = vivacity_core::state::RootPackage::detect(manifest, project, with_dev);
+    let mut merged = merge_plugin::merge(
+        project,
+        manifest,
+        &root.version,
+        &root.pretty_version,
+        with_dev,
+    )?;
+    let original_alias = manifest
+        .get("extra")
+        .and_then(|e| e.get("branch-alias"))
+        .cloned();
+    if let Some(extra) = merged
+        .manifest
+        .get_mut("extra")
+        .and_then(|e| e.as_object_mut())
+    {
+        match original_alias {
+            Some(a) => {
+                extra.insert("branch-alias".to_owned(), a);
+            }
+            None => {
+                extra.remove("branch-alias");
+            }
+        }
+    }
+    Ok(Some(merged))
+}
+
+/// The resolution commands do not emulate the merge (the merged
+/// requirements and repositories would be missing from the pool): a
+/// project that requires, allows and configures the plugin is refused.
+fn refuse_merge_plugin_resolution(
+    manifest: &serde_json::Value,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_resolver::merge_plugin::{self, Settings};
+    let required = ["require", "require-dev"].iter().any(|k| {
+        manifest
+            .get(k)
+            .and_then(|m| m.get(merge_plugin::PLUGIN_NAME))
+            .is_some()
+    });
+    if plugins_enabled
+        && required
+        && matches!(
+            vivacity_core::layout::plugin_allowed(manifest, merge_plugin::PLUGIN_NAME),
+            vivacity_core::layout::PluginVerdict::Allowed
+        )
+        && Settings::declared(manifest)
+    {
+        anyhow::bail!(
+            "wikimedia/composer-merge-plugin merges other manifests into the root before resolving; vivacity emulates it for `install` and `dump-autoload` only — run `composer update` for this project"
+        );
+    }
+    Ok(())
+}
+
 /// `<vendor-dir>/composer` of a project before its layout is resolved
 /// (reading installed.json): the configured directory, or `vendor/composer`
 /// when the configuration is one vivacity refuses (the layout will say so).
@@ -1052,13 +1202,39 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     .context("invalid composer.json")?;
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
     // Dev mode: that of the installed state (installed.json), like Composer.
-    let installed_dev =
+    let installed_json: Option<serde_json::Value> =
         std::fs::read_to_string(composer_dir_of(&project, &manifest).join("installed.json"))
             .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
-            .unwrap_or(true);
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let installed_dev = installed_json
+        .as_ref()
+        .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
+        .unwrap_or(true);
+    // `$localRepo->getDevPackageNames()`: installed.json's list.
+    let installed_dev_package_names: Vec<String> = installed_json
+        .as_ref()
+        .and_then(|v| {
+            v.get("dev-package-names")
+                .and_then(serde_json::Value::as_array)
+        })
+        .map(|a| {
+            a.iter()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     let dev_mode = !args.no_dev && installed_dev;
+    // The merge plugin's PRE_AUTOLOAD_DUMP merge, with the dump's dev mode.
+    let manifest = match merge_plugin_root(&project, &lock, &manifest, dev_mode, !args.no_plugins) {
+        Ok(Some(m)) => m.manifest,
+        Ok(None) => manifest,
+        Err(reason) => {
+            eprintln!("vivacity: this lock is outside what vivacity handles natively:");
+            eprintln!("  - wikimedia/composer-merge-plugin: {reason}");
+            eprintln!("Run `composer dump-autoload` instead.");
+            return Ok(3);
+        }
+    };
     let layout = match vivacity_core::layout::Layout::resolve(
         &project,
         &lock,
@@ -1111,6 +1287,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         &args.ignore_platform_req,
         (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
         !args.no_plugins,
+        installed_dev_package_names,
     )?;
     {
         let order: Vec<&str> = installed_order.iter().map(String::as_str).collect();
@@ -1495,6 +1672,9 @@ fn resolve_and_lock(
     let manifest_path = project.join("composer.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+    if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+        refuse_merge_plugin_resolution(&m, !args.no_plugins)?;
+    }
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
     let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
@@ -1867,6 +2047,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .with_context(|| format!("cannot read {}", file.display()))?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
         .with_context(|| format!("{} does not contain valid JSON", file.display()))?;
+    refuse_merge_plugin_resolution(&manifest, !args.no_plugins)?;
     if serde_json::from_str::<serde_json::Value>(&manifest_text)
         .ok()
         .and_then(|m| m.get("config")?.get("update-with-minimal-changes").cloned())
@@ -2114,6 +2295,11 @@ fn missing_requirement_info(
     manifest: &serde_json::Value,
     lock: &serde_json::Value,
     include_dev: bool,
+    root_version: &str,
+    merged_links: Option<(
+        &[vivacity_resolver::merge_plugin::MergedLink],
+        &[vivacity_resolver::merge_plugin::MergedLink],
+    )>,
 ) -> anyhow::Result<Vec<String>> {
     use vivacity_resolver::constraint::{parse_constraints, Constraint, Op};
     use vivacity_resolver::package::{Origin, Package};
@@ -2122,7 +2308,30 @@ fn missing_requirement_info(
     let root_name = manifest
         .get("name")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("__root__");
+        .unwrap_or("__root__")
+        .to_lowercase();
+    // `RootPackageRepository`: the root itself, with its `replace` and
+    // `provide` links (`self.version` = its version), is a candidate too.
+    let root_links: Vec<(String, Constraint)> = ["replace", "provide"]
+        .iter()
+        .flat_map(|key| {
+            manifest
+                .get(key)
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flat_map(|m| m.iter())
+                .filter_map(|(t, c)| {
+                    let text = c.as_str()?;
+                    let text = if text == "self.version" {
+                        root_version
+                    } else {
+                        text
+                    };
+                    Some((t.to_lowercase(), parse_constraints(text).ok()?.constraint))
+                })
+        })
+        .collect();
+    let root_eq = Constraint::new(Op::Eq, root_version);
     let mut sets: Vec<(bool, &str, &str)> = vec![(false, "require", "Required")];
     if include_dev {
         sets.push((true, "require-dev", "Required (in require-dev)"));
@@ -2132,20 +2341,36 @@ fn missing_requirement_info(
         let repo =
             vivacity_resolver::repository::locked_repository_with(lock, &mut arena, with_dev)
                 .map_err(|e| anyhow::anyhow!("composer.lock: {}", e.0))?;
-        let Some(links) = manifest.get(key).and_then(serde_json::Value::as_object) else {
-            continue;
+        // The root's links: the merged, structured ones when the merge
+        // plugin is active (a duplicate key is a conjunction the text of
+        // the manifest cannot carry faithfully), else the manifest's.
+        let links: Vec<(String, String, Constraint)> = match merged_links {
+            Some((req, dev)) => (if with_dev { dev } else { req })
+                .iter()
+                .map(|l| (l.target.clone(), l.pretty.clone(), l.constraint.clone()))
+                .collect(),
+            None => {
+                let Some(map) = manifest.get(key).and_then(serde_json::Value::as_object) else {
+                    continue;
+                };
+                map.iter()
+                    .filter_map(|(target, pretty)| {
+                        let pretty = pretty.as_str()?;
+                        let parsed = parse_constraints(pretty).ok()?;
+                        Some((target.to_lowercase(), pretty.to_owned(), parsed.constraint))
+                    })
+                    .collect()
+            }
         };
-        for (target, pretty) in links {
-            let target = target.to_lowercase();
-            let Some(pretty) = pretty.as_str() else {
-                continue;
-            };
+        for (target, pretty, constraint) in links {
+            let pretty = pretty.as_str();
             if vivacity_resolver::platform::is_platform_package(&target) || pretty == "self.version"
             {
                 continue;
             }
-            let Ok(parsed) = parse_constraints(pretty) else {
-                continue;
+            let parsed = vivacity_resolver::constraint::ParsedConstraint {
+                constraint,
+                pretty: pretty.to_owned(),
             };
             // `findPackagesWithReplacersAndProviders($target, $constraint)`
             // over [lock repo, root repo]: a package of that name, or a
@@ -2161,7 +2386,12 @@ fn missing_requirement_info(
                 })
             };
             let root_matches = |constraint: Option<&Constraint>| -> bool {
-                root_name.to_lowercase() == target && constraint.is_none()
+                if root_name == target {
+                    return constraint.is_none_or(|c| c.matches(&root_eq));
+                }
+                root_links
+                    .iter()
+                    .any(|(t, lc)| *t == target && constraint.is_none_or(|c| c.matches(lc)))
             };
             if repo.iter().any(|&i| matches(i, Some(&parsed.constraint)))
                 || root_matches(Some(&parsed.constraint))

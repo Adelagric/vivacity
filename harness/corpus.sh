@@ -10,9 +10,9 @@
 #            relève aussi les `scripts` déclarés, les exigences de plateforme
 #            et les plugins ignorés comme bibliothèques.
 #   (défaut) le scan, puis pour les entrées prévues natives le double install :
-#            `composer install --no-scripts` (plugins chargés — la référence est
-#            un Composer SANS scripts, qui coupe aussi les écouteurs de plugins
-#            sur ces événements) contre `vivacity install --no-fallback`, avec
+#            `composer install --no-scripts` (plugins chargés et actifs :
+#            `--no-scripts` ne coupe que les scripts de composer.json, jamais
+#            les écouteurs des plugins) contre `vivacity install --no-fallback`, avec
 #            --ignore-platform-req=ext-* des deux côtés (le `php` reste :
 #            platform_check.php est exercé) ; vendor/ comparé par
 #            harness/lib/compare.sh (diff + inventaire modes/liens).
@@ -120,11 +120,33 @@ run_one() { # nom, mode, ligne JSON du scan
   if echo "$scan" | jq -e '.platform_failures | map(select(startswith("php "))) | length > 0' >/dev/null; then ignore+=(--ignore-platform-req=php); fi
   stage "$n" "$ref"; stage "$n" "$viv"
   t0=$(date +%s)
-  (cd "$ref" && composer install --no-scripts --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.composer.log" 2>"$WORK/$n.$mode.composer.err") || ref_code=$?
+  # wikimedia/composer-merge-plugin actif : sur un vendor vierge le plugin
+  # lance un `composer update` partiel et réécrit le lock (non
+  # reproductible). La référence est l'état stable : un premier install
+  # `--no-plugins` (le plugin devient un paquet installé), puis l'install
+  # avec plugins — fusion dès INIT, pas de mise à jour implicite. Valable
+  # sans plugin de disposition (composer/installers…), vérifié.
+  if jq -e '(.config["allow-plugins"]["wikimedia/composer-merge-plugin"] == true) and (.extra["merge-plugin"] != null)' "$ref/composer.json" >/dev/null 2>&1; then
+    if jq -e '.config["allow-plugins"]["composer/installers"] == true' "$ref/composer.json" >/dev/null 2>&1; then
+      ref_code=99
+    else
+      (cd "$ref" && composer install --no-scripts --no-plugins --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.composer.log" 2>"$WORK/$n.$mode.composer.err") || ref_code=$?
+    fi
+  fi
+  if [ "$ref_code" = 0 ]; then
+    (cd "$ref" && composer install --no-scripts --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.composer.log" 2>"$WORK/$n.$mode.composer.err") || ref_code=$?
+  fi
+  if [ "$ref_code" = 0 ] && ! (cd "$ref" && git diff --quiet -- composer.lock); then
+    ref_code=98
+  fi
   t_ref=$(( $(date +%s) - t0 )); t0=$(date +%s)
   (cd "$viv" && "$VIVACITY" install --no-fallback "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.vivacity.log" 2>"$WORK/$n.$mode.vivacity.err") || viv_code=$?
   t_viv=$(( $(date +%s) - t0 ))
-  if [ "$ref_code" != 0 ]; then
+  if [ "$ref_code" = 99 ]; then
+    bucket="unavailable"; detail="merge-plugin with a layout plugin: no deterministic reference recipe"
+  elif [ "$ref_code" = 98 ]; then
+    bucket="unavailable"; detail="the reference rewrote composer.lock (merge-plugin implicit update)"
+  elif [ "$ref_code" != 0 ]; then
     bucket="unavailable"; detail="$(tail -5 "$WORK/$n.$mode.composer.err")"
   elif grep -q "Failed to set PHP CodeSniffer" "$WORK/$n.$mode.composer.log"; then
     # Le plugin de référence a échoué sur cette machine (phpcs lui-même,

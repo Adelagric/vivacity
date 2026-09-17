@@ -83,6 +83,8 @@ jobs:
         run: harness/path-repos.sh
       - name: config.vendor-dir / bin-dir (install, dump -o, no-op on moved directories)
         run: harness/vendor-dir.sh
+      - name: wikimedia/composer-merge-plugin (merged root, no implicit update)
+        run: harness/merge-plugin.sh
 
       - name: Boot on vivacity vendor
         run: harness/boot.sh

@@ -18,6 +18,52 @@ byte-identical-output promise are the public API.
   the locked repository included, so a held branch never loses its alias
   and its dependants never read "could not be found".
 
+## [Unreleased]
+
+### Added
+- **`wikimedia/composer-merge-plugin` emulated** (v2.0.1–v2.1.0;
+  `docs/plans/v0.13-merge-plugin.md`): the manifests named by
+  `extra.merge-plugin.include` / `require` (PHP `glob()`, no flags,
+  recursive) are merged into the root for `install` and `dump-autoload`
+  — `require` / `require-dev` (duplicate rules `ignore-duplicates`,
+  `replace`, else Composer's conjunctive constraint with the
+  `Intervals::isSubsetOf` short-cuts, structured, not textual),
+  `autoload` / `autoload-dev` (`array_merge_recursive`, paths re-based on
+  the included file's directory), `conflict` / `replace` / `provide`,
+  `extra` with `merge-extra` (shallow or deep, root or include wins),
+  `self.version` on every link section, `merge-dev`. The lock is
+  validated against the merged requirements exactly as Composer does
+  with the plugin installed (exit 4, same lines). **Deliberately not
+  reproduced**: on a bare vendor the plugin installs itself, then runs a
+  partial `composer update` of the merged requirements against the live
+  repositories and rewrites `composer.lock` (measured: three packages
+  bumped on a fresh checkout of open-web-analytics); vivacity hands such
+  a lock to Composer with the reason instead, and refuses `update` /
+  `require` / `remove` on a project that configures the plugin (the
+  merged requirements and repositories are not in vivacity's pool yet).
+  Fixture `fixtures/projects/merge-plugin`, `harness/merge-plugin.sh`
+  (five variants × install, `dump -o`, `dump -a`, `--no-dev`, the two
+  missing-requirement cases, the refusal), in CI. `tools/corpus-add.sh`
+  keeps the included manifests (they were absent from the corpus
+  fixtures, where the plugin was a silent no-op), `harness/corpus.sh`
+  builds the steady-state reference for such entries.
+
+### Fixed
+- A real `install` now prints Composer's post-install report — the
+  abandoned packages of the lock and the funding count — like a dry run
+  and an update already did; `Skipped installation of bin` notices come
+  with the operations, before `Generating autoload files`.
+- `--no-dev` autoloader: Composer drops the dev packages **by name** when
+  the local repository knows them (`Installer::doInstall` sets the lock's
+  dev names before the dump) and only falls back to the reachability
+  filter (`filterPackageMap`) when it knows none (`dump-autoload` after a
+  `--no-dev` install); vivacity always filtered by reachability, which
+  differs for a locked package no root requirement reaches.
+- `Locker::getMissingRequirementInfo`: the root package is a candidate
+  with its `replace` / `provide` links (`RootPackageRepository`), so a
+  root requirement satisfied by the root's own replace no longer reads
+  "is not present in the lock file".
+
 ## [0.11.1] — 2026-09-17
 
 ### Fixed

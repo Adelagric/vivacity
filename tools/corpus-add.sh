@@ -78,6 +78,47 @@ jq -r '[.autoload, .["autoload-dev"]] | map(select(. != null)) | .[] |
     dir)  if [ -n "$p" ]; then mkdir -p "$dest/$p" && touch "$dest/$p/.gitkeep"; fi ;;
   esac
 done
+# Les manifestes que wikimedia/composer-merge-plugin fusionne (`extra.
+# merge-plugin.include` / `require`, globs PHP sans option, récursifs), avec
+# ce que leur autoload exige — sans eux le plugin serait un no-op muet sur la
+# fixture, et la référence ne représenterait pas le projet.
+merge_autoload_paths() { # manifeste, préfixe de répertoire
+  jq -r --arg base "$2" '[.autoload, .["autoload-dev"]] | map(select(. != null)) | .[] |
+        ((.files // [])[] | "file\t" + $base + .),
+        ((.classmap // [])[] | "path\t" + $base + .),
+        (((.["psr-4"] // {}) + (.["psr-0"] // {})) | to_entries[] | .value | if type == "array" then .[] else . end | "dir\t" + $base + .)' "$1"
+}
+copy_autoload_paths() { # lignes "what<TAB>path"
+  sort -u | while IFS=$'\t' read -r what p; do
+    p="${p#./}"; p="${p%/}"
+    case "$what" in
+      file) if [ -f "$tree/$p" ]; then mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"; fi ;;
+      path) if [ -f "$tree/$p" ]; then mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"
+            else mkdir -p "$dest/$p" && touch "$dest/$p/.gitkeep"; fi ;;
+      dir)  if [ -n "$p" ]; then mkdir -p "$dest/$p" && touch "$dest/$p/.gitkeep"; fi ;;
+    esac
+  done
+}
+merge_includes() { # manifeste (chemin relatif à $tree)
+  local m="$1" base pattern f
+  base="$(dirname "$m")"; [ "$base" = "." ] && base="" || base="$base/"
+  jq -r '.extra["merge-plugin"] // {} | [(.include // []), (.require // [])] | flatten | .[]' "$tree/$m" 2>/dev/null | while read -r pattern; do
+    [ -n "$pattern" ] || continue
+    (cd "$tree" && php -r 'foreach (glob($argv[1]) as $f) echo "$f\n";' "$base$pattern") | while read -r f; do
+      [ -f "$tree/$f" ] || continue
+      mkdir -p "$dest/$(dirname "$f")"; cp "$tree/$f" "$dest/$f"
+      merge_autoload_paths "$tree/$f" "$(dirname "$f")/" | copy_autoload_paths
+      merge_includes "$f"
+    done
+  done
+}
+if jq -e '.extra["merge-plugin"] != null' "$tree/composer.json" >/dev/null 2>&1; then
+  merge_includes composer.json
+fi
+# Le gabarit d'autoload_runtime.php propre au projet (symfony/runtime,
+# `extra.runtime.autoload_template`) : sans lui, Composer lui-même échoue.
+t="$(jq -r '.extra.runtime.autoload_template // empty' "$tree/composer.json")"
+if [ -n "$t" ] && [ -f "$tree/$t" ]; then mkdir -p "$dest/$(dirname "$t")"; cp "$tree/$t" "$dest/$t"; fi
 echo "$provenance" > "$dest/PROVENANCE"
 n="$(jq '(.packages | length) + (.["packages-dev"] | length)' "$dest/composer.lock")"
 echo "OK   $name : $n paquets, $(find "$dest" -type f | wc -l | tr -d ' ') fichiers — $provenance"

@@ -63,6 +63,15 @@ pub struct DumpOptions {
     /// Store root + cache root: enables the per-store-entry classmap cache
     /// (None = full scan every time).
     pub classmap_cache: Option<ClassmapCacheConfig>,
+    /// `$localRepo->getDevPackageNames()` at dump time, for `!dev_mode`:
+    /// `parseAutoloads($packageMap, $root, $devPackageNames ?: true)` —
+    /// non-empty, the dev packages are dropped **by name** (every other
+    /// package stays, reachable or not); empty, `filterPackageMap` keeps
+    /// what the root's `require` reaches. An install sets the lock's
+    /// dev names on the local repository before the dump
+    /// (`Installer::doInstall`); `dump-autoload` reads installed.json's
+    /// `dev-package-names` (empty after a `--no-dev` install).
+    pub dev_package_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -291,7 +300,12 @@ pub fn dump(
         ))
     };
 
-    let autoloads = parse_autoloads(&packages, opts.dev_mode, &base_path);
+    let autoloads = parse_autoloads(
+        &packages,
+        opts.dev_mode,
+        &opts.dev_package_names,
+        &base_path,
+    );
 
     // autoload_namespaces.php / autoload_psr4.php
     let path_code = |p: &str| get_path_code(&base_path, &vendor_path, p);
@@ -712,13 +726,24 @@ fn resolve_suffix(
 }
 
 /// `parseAutoloads`: dev filtering, sorting, then merging by type.
-fn parse_autoloads(packages: &[Pkg], dev_mode: bool, base_path: &str) -> Autoloads {
+fn parse_autoloads(
+    packages: &[Pkg],
+    dev_mode: bool,
+    dev_package_names: &[String],
+    base_path: &str,
+) -> Autoloads {
     let root = &packages[0];
     let others: Vec<&Pkg> = packages[1..].iter().collect();
 
-    // !devMode: filterPackageMap (reachable from the root's require).
+    // !devMode: the dev packages dropped by name when the local repository
+    // knows them, else filterPackageMap (reachable from the root's require).
     let filtered: Vec<&Pkg> = if dev_mode {
         others
+    } else if !dev_package_names.is_empty() {
+        others
+            .into_iter()
+            .filter(|p| !dev_package_names.contains(&p.name))
+            .collect()
     } else {
         let by_name: BTreeMap<&str, &Pkg> = others.iter().map(|p| (p.name.as_str(), *p)).collect();
         let mut replaced_by: BTreeMap<&str, &str> = BTreeMap::new();

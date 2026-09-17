@@ -23,6 +23,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "dealerdirect/phpcodesniffer-composer-installer",
     "phpstan/extension-installer",
     "rector/extension-installer",
+    "wikimedia/composer-merge-plugin",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose
@@ -68,6 +69,11 @@ pub enum ScopeIssue {
     /// (`vendor-dir`, `bin-dir`, `preferred-install: source`): Composer's
     /// output would differ, so the lock is handed over.
     Config(String),
+    /// `wikimedia/composer-merge-plugin` could not be emulated for this
+    /// run (a `require` pattern without match, an invalid included file,
+    /// or a bare vendor whose lock misses a merged requirement — where
+    /// Composer would run the plugin's implicit update).
+    MergePlugin(String),
 }
 
 impl std::fmt::Display for ScopeIssue {
@@ -84,6 +90,7 @@ impl std::fmt::Display for ScopeIssue {
                 write!(f, "package {p} has no usable dist (no zip, no path source)")
             }
             ScopeIssue::Config(why) => write!(f, "config {why} is not supported natively"),
+            ScopeIssue::MergePlugin(why) => write!(f, "wikimedia/composer-merge-plugin: {why}"),
         }
     }
 }

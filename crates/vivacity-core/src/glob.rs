@@ -25,11 +25,23 @@ use std::path::{Path, PathBuf};
 pub fn glob_dirs(pattern: &str, base: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for alternative in brace_expand(pattern) {
-        let mut found = glob_one(&alternative, base);
+        let mut found = glob_one(&alternative, base, true);
         found.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         out.extend(found);
     }
     out
+}
+
+/// `glob($pattern)` with no flags, as `wikimedia/composer-merge-plugin`
+/// calls it (`array_map('glob', $patterns)`): no brace expansion, files
+/// and directories alike, no trailing `/` added, a leading `.` matched
+/// only by an explicit `.`, results sorted bytewise (PHP starts in the C
+/// locale). A relative pattern is resolved against `base` (the project
+/// directory, PHP's cwd); the spelling of the pattern is kept.
+pub fn glob_plain(pattern: &str, base: &Path) -> Vec<String> {
+    let mut found = glob_one(pattern, base, false);
+    found.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    found
 }
 
 /// `GLOB_BRACE`: the first `{…}` with a matching `}` is expanded, each
@@ -119,7 +131,9 @@ fn unescape(segment: &str) -> String {
     out
 }
 
-fn glob_one(pattern: &str, base: &Path) -> Vec<String> {
+/// One brace-free pattern; `only_dirs` = `GLOB_ONLYDIR | GLOB_MARK`
+/// (directories only, trailing `/` on every result).
+fn glob_one(pattern: &str, base: &Path, only_dirs: bool) -> Vec<String> {
     if pattern.is_empty() {
         return Vec::new();
     }
@@ -164,7 +178,7 @@ fn glob_one(pattern: &str, base: &Path) -> Vec<String> {
                         continue;
                     }
                     let fs = dir.join(&name);
-                    if i == last && !fs.is_dir() {
+                    if i == last && only_dirs && !fs.is_dir() {
                         continue;
                     }
                     next.push((format!("{prefix}{name}"), fs));
@@ -172,7 +186,11 @@ fn glob_one(pattern: &str, base: &Path) -> Vec<String> {
             } else {
                 let literal = unescape(seg);
                 let fs = dir.join(&literal);
-                let exists = if i == last { fs.is_dir() } else { fs.exists() };
+                let exists = if i == last && only_dirs {
+                    fs.is_dir()
+                } else {
+                    fs.exists()
+                };
                 if !exists {
                     continue;
                 }
@@ -184,7 +202,7 @@ fn glob_one(pattern: &str, base: &Path) -> Vec<String> {
     current
         .into_iter()
         .map(|(spelling, _)| {
-            if spelling.ends_with('/') {
+            if !only_dirs || spelling.ends_with('/') {
                 spelling
             } else {
                 format!("{spelling}/")
@@ -344,6 +362,69 @@ fn user_directory() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_glob_files_and_dirs_bytewise_no_braces() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let p = tmp.path();
+        for d in [
+            "modules/Base",
+            "modules/Zeta",
+            "modules/.hidden",
+            "modules/a b",
+        ] {
+            std::fs::create_dir_all(p.join(d)).unwrap();
+        }
+        for f in [
+            "modules/Base/composer.json",
+            "modules/Zeta/composer.json",
+            "modules/.hidden/composer.json",
+            "modules/a b/composer.json",
+            "modules/_a.json",
+            "modules/{x,y}.json",
+            "composer.ext.json",
+        ] {
+            std::fs::write(p.join(f), "{}").unwrap();
+        }
+        assert_eq!(
+            glob_plain("modules/*/composer.json", p),
+            vec![
+                "modules/Base/composer.json",
+                "modules/Zeta/composer.json",
+                "modules/a b/composer.json"
+            ]
+        );
+        // Files and directories, no trailing slash, `_` before letters.
+        assert_eq!(
+            glob_plain("modules/*", p),
+            vec![
+                "modules/Base",
+                "modules/Zeta",
+                "modules/_a.json",
+                "modules/a b",
+                "modules/{x,y}.json"
+            ]
+        );
+        // A leading dot only by an explicit dot; no brace expansion.
+        assert_eq!(
+            glob_plain("modules/.*/composer.json", p),
+            vec!["modules/.hidden/composer.json"]
+        );
+        assert_eq!(
+            glob_plain("modules/{x,y}.json", p),
+            vec!["modules/{x,y}.json"]
+        );
+        // A literal path: itself when it exists, nothing otherwise.
+        assert_eq!(
+            glob_plain("composer.ext.json", p),
+            vec!["composer.ext.json"]
+        );
+        assert!(glob_plain("public/legacy/composer.ext.json", p).is_empty());
+        assert_eq!(
+            glob_plain("./modules/Base/composer.json", p),
+            vec!["./modules/Base/composer.json"]
+        );
+    }
 
     #[test]
     fn braces() {
