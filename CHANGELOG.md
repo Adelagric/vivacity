@@ -7,20 +7,6 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
-- **Fixture `solver-held-branch`**: `minimum-stability: dev`, six `dev-*`
-  branches held at their lock entry with their `extra.branch-alias`
-  (`composer/installers` `dev-main` ⇐ `^1.0 || ^2.0`, `psr/http-client`
-  `dev-master` ⇐ `^1.0` one hop further), three partial updates
-  (`psr/log`, `php-http/curl-client -w`, `psr/log -W`) in the pool oracle
-  and `harness/update.sh`. Pool, decisions and lock byte-identical to
-  Composer without any code change: the `ArrayLoader` port
-  (`loader::load_packages`) creates the alias package for every origin,
-  the locked repository included, so a held branch never loses its alias
-  and its dependants never read "could not be found".
-
-## [Unreleased]
-
-### Added
 - **`wikimedia/composer-merge-plugin` emulated** (v2.0.1–v2.1.0;
   `docs/plans/v0.13-merge-plugin.md`): the manifests named by
   `extra.merge-plugin.include` / `require` (PHP `glob()`, no flags,
@@ -50,6 +36,17 @@ byte-identical-output promise are the public API.
   native in dev (was 55), 66/105 in `--no-dev` (was 63), 0 diff
   (`docs/corpus/2026-09-17-v0.12.md`).
 
+- **Fixture `solver-held-branch`**: `minimum-stability: dev`, six `dev-*`
+  branches held at their lock entry with their `extra.branch-alias`
+  (`composer/installers` `dev-main` ⇐ `^1.0 || ^2.0`, `psr/http-client`
+  `dev-master` ⇐ `^1.0` one hop further), three partial updates
+  (`psr/log`, `php-http/curl-client -w`, `psr/log -W`) in the pool oracle
+  and `harness/update.sh`. Pool, decisions and lock byte-identical to
+  Composer without any code change: the `ArrayLoader` port
+  (`loader::load_packages`) creates the alias package for every origin,
+  the locked repository included, so a held branch never loses its alias
+  and its dependants never read "could not be found".
+
 ### Fixed
 - A real `install` now prints Composer's post-install report — the
   abandoned packages of the lock and the funding count — like a dry run
@@ -64,7 +61,14 @@ byte-identical-output promise are the public API.
 - `Locker::getMissingRequirementInfo`: the root package is a candidate
   with its `replace` / `provide` links (`RootPackageRepository`), so a
   root requirement satisfied by the root's own replace no longer reads
-  "is not present in the lock file".
+  "is not present in the lock file" — and when only the root matches by
+  name with an unsatisfied constraint, the line reads `is in the lock
+  file as "replaced as <c> by <root> <v>"` like Composer's.
+- `normalize_pretty`: a `.` before the stability word (`v1.2.3.stable`,
+  gymadarasz/ace in the SuiteCRM corpus entry — `installed.json` carried
+  the raw string), exactly one separator like `VersionParser`'s
+  `[._-]?`, and a bare trailing `.` (`1.2.3.` is `1.2.3.0`); the
+  normalisation oracle covers the forms.
 
 ## [0.11.1] — 2026-09-17
 

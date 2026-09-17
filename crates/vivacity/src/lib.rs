@@ -641,13 +641,13 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let merged_links = merged
         .as_ref()
         .map(|m| (m.requires.as_slice(), m.requires_dev.as_slice()));
-    let root_version =
-        vivacity_core::state::RootPackage::detect(&manifest, &project, with_dev).version;
+    let root_pkg = vivacity_core::state::RootPackage::detect(&manifest, &project, with_dev);
     let missing = missing_requirement_info(
         &manifest,
         &lock_value,
         with_dev,
-        &root_version,
+        &root_pkg.version,
+        &root_pkg.pretty_version,
         merged_links,
     )?;
     if !missing.is_empty() {
@@ -798,6 +798,14 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     for m in &report.messages {
         eprintln!("{m}");
     }
+    // `Installer::run`: the abandoned packages of the lock (dev included)
+    // before the dump, the funding count after it; an install driven by
+    // `update` reports through it.
+    if !args.after_update {
+        for line in abandoned_warnings(&lock_value) {
+            eprintln!("{line}");
+        }
+    }
     let mut autoload_note = String::new();
     if !args.no_autoloader {
         eprintln!("Generating autoload files");
@@ -883,13 +891,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         extension_installers::phpstan(layout, local, &manifest, with_dev, !args.no_plugins)?;
         extension_installers::rector(layout, local, &manifest, with_dev, !args.no_plugins)?;
     }
-    // `Installer::run` after the install phase: the abandoned packages of
-    // the lock (dev included), then the funding count of the local
-    // repository. An install driven by `update` reports through it.
     if !args.after_update {
-        for line in abandoned_warnings(&lock_value) {
-            eprintln!("{line}");
-        }
         print_funding(&project, &manifest);
     }
     let warmed = if report.store_warmed > 0 {
@@ -1113,10 +1115,18 @@ fn merge_plugin_root(
     plugins_enabled: bool,
 ) -> Result<Option<vivacity_resolver::merge_plugin::Merged>, String> {
     use vivacity_resolver::merge_plugin::{self, Settings};
+    // `PluginManager::loadInstalledPlugins` activates the plugin from
+    // installed.json whatever the mode (a dev-only plugin still merges at
+    // INIT on an `install --no-dev` over a dev vendor), and an install
+    // from the lock activates it as it lands.
+    let present = lock
+        .wanted_packages(with_dev)
+        .any(|p| p.name() == merge_plugin::PLUGIN_NAME)
+        || installed_packages(project, manifest)
+            .iter()
+            .any(|p| p.get("name").and_then(|n| n.as_str()) == Some(merge_plugin::PLUGIN_NAME));
     if !plugins_enabled
-        || !lock
-            .wanted_packages(with_dev)
-            .any(|p| p.name() == merge_plugin::PLUGIN_NAME)
+        || !present
         || !matches!(
             vivacity_core::layout::plugin_allowed(manifest, merge_plugin::PLUGIN_NAME),
             vivacity_core::layout::PluginVerdict::Allowed
@@ -2296,6 +2306,7 @@ fn missing_requirement_info(
     lock: &serde_json::Value,
     include_dev: bool,
     root_version: &str,
+    root_pretty_version: &str,
     merged_links: Option<(
         &[vivacity_resolver::merge_plugin::MergedLink],
         &[vivacity_resolver::merge_plugin::MergedLink],
@@ -2312,25 +2323,32 @@ fn missing_requirement_info(
         .to_lowercase();
     // `RootPackageRepository`: the root itself, with its `replace` and
     // `provide` links (`self.version` = its version), is a candidate too.
-    let root_links: Vec<(String, Constraint)> = ["replace", "provide"]
-        .iter()
-        .flat_map(|key| {
-            manifest
-                .get(key)
-                .and_then(serde_json::Value::as_object)
-                .into_iter()
-                .flat_map(|m| m.iter())
-                .filter_map(|(t, c)| {
-                    let text = c.as_str()?;
-                    let text = if text == "self.version" {
-                        root_version
-                    } else {
-                        text
-                    };
-                    Some((t.to_lowercase(), parse_constraints(text).ok()?.constraint))
-                })
-        })
-        .collect();
+    // (target, constraint, pretty constraint, "replaced"/"provided")
+    let root_links: Vec<(String, Constraint, String, &str)> =
+        [("replace", "replaced"), ("provide", "provided")]
+            .iter()
+            .flat_map(|(key, word)| {
+                manifest
+                    .get(*key)
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flat_map(|m| m.iter())
+                    .filter_map(move |(t, c)| {
+                        let text = c.as_str()?;
+                        let source = if text == "self.version" {
+                            root_version
+                        } else {
+                            text
+                        };
+                        Some((
+                            t.to_lowercase(),
+                            parse_constraints(source).ok()?.constraint,
+                            text.to_owned(),
+                            *word,
+                        ))
+                    })
+            })
+            .collect();
     let root_eq = Constraint::new(Op::Eq, root_version);
     let mut sets: Vec<(bool, &str, &str)> = vec![(false, "require", "Required")];
     if include_dev {
@@ -2391,7 +2409,7 @@ fn missing_requirement_info(
                 }
                 root_links
                     .iter()
-                    .any(|(t, lc)| *t == target && constraint.is_none_or(|c| c.matches(lc)))
+                    .any(|(t, lc, _, _)| *t == target && constraint.is_none_or(|c| c.matches(lc)))
             };
             if repo.iter().any(|&i| matches(i, Some(&parsed.constraint)))
                 || root_matches(Some(&parsed.constraint))
@@ -2419,6 +2437,27 @@ fn missing_requirement_info(
                             }
                         }
                     }
+                    format!("- {description} package \"{target}\" is in the lock file as \"{description_text}\" but that does not satisfy your constraint \"{pretty}\".")
+                }
+                // The root repository comes after the lock's: the root by
+                // name, or through one of its replace/provide links.
+                None if root_matches(None) => {
+                    let root_name_pretty = manifest
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("__root__");
+                    let description_text = if root_name == target {
+                        root_pretty_version.to_owned()
+                    } else {
+                        match root_links.iter().find(|(t, _, _, _)| *t == target) {
+                            Some((_, _, pc, word)) => {
+                                format!(
+                                    "{word} as {pc} by {root_name_pretty} {root_pretty_version}"
+                                )
+                            }
+                            None => root_pretty_version.to_owned(),
+                        }
+                    };
                     format!("- {description} package \"{target}\" is in the lock file as \"{description_text}\" but that does not satisfy your constraint \"{pretty}\".")
                 }
                 None => {

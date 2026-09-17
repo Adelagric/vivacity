@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 /// renumbered. Two lists concatenate; a list and an object cannot meet in
 /// the schema, the object wins then.
 pub fn array_merge(a: &Value, b: &Value) -> Value {
-    match (a, b) {
+    match (empty_as_object(a), empty_as_object(b)) {
         (Value::Object(oa), Value::Object(ob)) => {
             let mut out = oa.clone();
             for (k, v) in ob {
@@ -32,7 +32,7 @@ pub fn array_merge(a: &Value, b: &Value) -> Value {
 /// become a list (`[a, b]`; a list on one side takes the other side's
 /// value appended, in order); integer keys append.
 pub fn array_merge_recursive(a: &Value, b: &Value) -> Value {
-    match (a, b) {
+    match (empty_as_object(a), empty_as_object(b)) {
         (Value::Object(oa), Value::Object(ob)) => {
             let mut out: Map<String, Value> = oa.clone();
             for (k, vb) in ob {
@@ -85,7 +85,7 @@ pub fn array_merge_recursive(a: &Value, b: &Value) -> Value {
 /// keys append, a string key whose values are both arrays merges
 /// recursively, otherwise the later value wins.
 pub fn merge_deep(a: &Value, b: &Value) -> Value {
-    match (a, b) {
+    match (empty_as_object(a), empty_as_object(b)) {
         (Value::Object(oa), Value::Object(ob)) => {
             let mut out = oa.clone();
             for (k, vb) in ob {
@@ -119,10 +119,33 @@ pub fn merge_deep(a: &Value, b: &Value) -> Value {
     }
 }
 
+/// A JSON `[]` is PHP's empty array, the same thing as `{}`: read as an
+/// empty object so that it merges as a map (`"autoload": []` in a root).
+fn empty_as_object(v: &Value) -> &Value {
+    static EMPTY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    match v {
+        Value::Array(a) if a.is_empty() => EMPTY.get_or_init(|| Value::Object(Map::new())),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn empty_list_is_an_empty_array() {
+        assert_eq!(
+            array_merge_recursive(&json!([]), &json!({"a": 1})),
+            json!({"a": 1})
+        );
+        assert_eq!(array_merge(&json!({"a": 1}), &json!([])), json!({"a": 1}));
+        assert_eq!(
+            merge_deep(&json!([]), &json!({"a": [1]})),
+            json!({"a": [1]})
+        );
+    }
 
     #[test]
     fn merge_recursive_like_php() {

@@ -77,13 +77,16 @@ impl Version {
 fn split_stability(s: &str) -> (&str, &str) {
     match s.find(|c: char| !(c.is_ascii_digit() || c == '.')) {
         Some(i) => {
-            let suffix = &s[i..];
-            (
-                s[..i].trim_end_matches('.'),
-                suffix.trim_start_matches(['-', '_', '.']),
-            )
+            let (num, suffix) = (&s[..i], &s[i..]);
+            // Exactly one separator: `[._-]?` in the regex.
+            if let Some(n) = num.strip_suffix('.') {
+                (n, suffix)
+            } else {
+                (num, suffix.strip_prefix(['-', '_', '.']).unwrap_or(suffix))
+            }
         }
-        None => (s, ""),
+        // `1.2.3.` is `1.2.3.0`: the optional separator with no modifier.
+        None => (s.strip_suffix('.').unwrap_or(s), ""),
     }
 }
 

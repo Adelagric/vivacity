@@ -177,7 +177,14 @@ pub fn merge(
                     continue;
                 };
                 let name = target.to_lowercase();
-                let parsed = parse_constraints(pretty)
+                // `RootPackageLoader`: the root's own `self.version` is its
+                // version; the pretty string stays (the lock check skips it).
+                let source = if pretty == "self.version" {
+                    root_version
+                } else {
+                    pretty
+                };
+                let parsed = parse_constraints(source)
                     .map_err(|e| format!("composer.json {key}.{target}: {e}"))?;
                 map.insert(
                     name.clone(),
@@ -212,6 +219,13 @@ pub fn merge(
         }
         m.root[key] = Value::Object(out);
     }
+    // `$mergedRequirements` is keyed by name.
+    let mut merged_names: Vec<String> = Vec::new();
+    for n in m.merged_names {
+        if !merged_names.contains(&n) {
+            merged_names.push(n);
+        }
+    }
     Ok(Merged {
         manifest: m.root,
         requires: m
@@ -224,7 +238,7 @@ pub fn merge(
             .iter()
             .filter_map(|n| m.requires_dev.get(n).cloned())
             .collect(),
-        merged_names: m.merged_names,
+        merged_names,
         files: m.files,
     })
 }
@@ -258,6 +272,11 @@ impl Merger<'_> {
             .map_err(|e| format!("merge-plugin: {path}: {e}"))?;
         let json: Value = serde_json::from_str(&text)
             .map_err(|e| format!("merge-plugin: \"{path}\" does not contain valid JSON\n{e}"))?;
+        // A JSON `[]` is an empty PHP array: nothing to merge.
+        if matches!(&json, Value::Array(a) if a.is_empty()) {
+            self.loaded.push(path.to_owned());
+            return Ok(());
+        }
         if !json.is_object() {
             return Err(format!(
                 "merge-plugin: \"{path}\" does not contain valid JSON"
@@ -280,17 +299,17 @@ impl Merger<'_> {
         self.loaded.push(path.to_owned());
 
         // mergeInto
-        self.merge_requires("require", &json, &name)?;
-        self.merge_package_links("conflict", &json)?;
+        self.merge_requires("require", &json, &name, path)?;
+        self.merge_package_links("conflict", &json, &name, path)?;
         if self.settings.merge_replace {
-            self.merge_package_links("replace", &json)?;
+            self.merge_package_links("replace", &json, &name, path)?;
         }
-        self.merge_package_links("provide", &json)?;
+        self.merge_package_links("provide", &json, &name, path)?;
         self.merge_autoload("autoload", &json, &base);
         self.merge_extra(&json);
         if self.with_dev {
             // mergeDevInto
-            self.merge_requires("require-dev", &json, &name)?;
+            self.merge_requires("require-dev", &json, &name, path)?;
             self.merge_autoload("autoload-dev", &json, &base);
         }
         if self.settings.recurse {
@@ -307,31 +326,50 @@ impl Merger<'_> {
     /// `replaceSelfVersionDependencies` for one link: `self.version` becomes
     /// the root's constraint on a package named like the include (looked up
     /// by the link's source, as the plugin does) or the root's version.
-    fn self_version(&self, key: &str, source: &str, pretty: &str) -> (Constraint, String) {
+    fn self_version(
+        &self,
+        key: &str,
+        source: &str,
+        pretty: &str,
+        path: &str,
+    ) -> Result<(Constraint, String), String> {
+        // `ArrayLoader::load`: an invalid constraint fails the whole run.
+        let parse = |text: &str| {
+            parse_constraints(text)
+                .map(|p| p.constraint)
+                .map_err(|e| format!("merge-plugin: {path} {key}: {e}"))
+        };
         if pretty != "self.version" {
-            let c = parse_constraints(pretty)
-                .map(|p| p.constraint)
-                .unwrap_or(Constraint::MatchAll);
-            return (c, pretty.to_owned());
+            return Ok((parse(pretty)?, pretty.to_owned()));
         }
-        let root_links = self.root.get(key).and_then(Value::as_object);
-        if let Some(existing) = root_links
-            .and_then(|m| m.get(&source.to_lowercase()))
-            .and_then(Value::as_str)
-        {
-            let c = parse_constraints(existing)
-                .map(|p| p.constraint)
-                .unwrap_or(Constraint::MatchAll);
-            return (c, existing.to_owned());
+        // `$root->getX()[$link->getSource()]`: the root's link (merged so
+        // far) whose target is the include's own name.
+        let lower = source.to_lowercase();
+        let existing: Option<String> = match key {
+            "require" => self.requires.get(&lower).map(|l| l.pretty.clone()),
+            "require-dev" => self.requires_dev.get(&lower).map(|l| l.pretty.clone()),
+            _ => self
+                .root
+                .get(key)
+                .and_then(Value::as_object)
+                .and_then(|m| m.get(&lower))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        if let Some(existing) = existing {
+            return Ok((parse(&existing)?, existing));
         }
-        let c = parse_constraints(&self.root_version)
-            .map(|p| p.constraint)
-            .unwrap_or(Constraint::MatchAll);
-        (c, self.root_pretty_version.clone())
+        Ok((parse(&self.root_version)?, self.root_pretty_version.clone()))
     }
 
     /// `mergeRequires` + `mergeOrDefer` on `require` or `require-dev`.
-    fn merge_requires(&mut self, key: &str, json: &Value, source: &str) -> Result<(), String> {
+    fn merge_requires(
+        &mut self,
+        key: &str,
+        json: &Value,
+        source: &str,
+        path: &str,
+    ) -> Result<(), String> {
         let Some(links) = json.get(key).and_then(Value::as_object) else {
             return Ok(());
         };
@@ -345,7 +383,7 @@ impl Merger<'_> {
                 continue;
             };
             let name = target.to_lowercase();
-            let (constraint, pretty) = self.self_version(key, source, pretty);
+            let (constraint, pretty) = self.self_version(key, source, pretty, path)?;
             let incoming = MergedLink {
                 target: name.clone(),
                 constraint,
@@ -381,18 +419,20 @@ impl Merger<'_> {
     /// `mergePackageLinks`: `array_merge($root->getX(), $links)` keyed by
     /// target — the include overwrites a duplicate key in place, new keys
     /// append; `self.version` replaced.
-    fn merge_package_links(&mut self, key: &str, json: &Value) -> Result<(), String> {
+    fn merge_package_links(
+        &mut self,
+        key: &str,
+        json: &Value,
+        source: &str,
+        path: &str,
+    ) -> Result<(), String> {
         let Some(links) = json.get(key).and_then(Value::as_object) else {
             return Ok(());
         };
         if links.is_empty() {
             return Ok(());
         }
-        let source = json
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+
         let mut out: Map<String, Value> = self
             .root
             .get(key)
@@ -403,7 +443,7 @@ impl Merger<'_> {
             let Some(pretty) = pretty.as_str() else {
                 continue;
             };
-            let (_, pretty) = self.self_version(key, &source, pretty);
+            let (_, pretty) = self.self_version(key, source, pretty, path)?;
             let name = target.to_lowercase();
             // The root's key may be spelled with capitals: same package.
             if let Some(existing) = out.keys().find(|k| k.to_lowercase() == name).cloned() {
@@ -752,6 +792,27 @@ mod tests {
         assert!(merge(d, &r, "1.0.0.0", "1.0.0", true)
             .unwrap_err()
             .contains("does not contain valid JSON"));
+        // An invalid constraint in an include fails like ArrayLoader would.
+        std::fs::write(
+            d.join("inc/composer.json"),
+            r#"{"require": {"x/y": "^^1"}}"#,
+        )
+        .unwrap();
+        assert!(merge(d, &r, "1.0.0.0", "1.0.0", true)
+            .unwrap_err()
+            .contains("inc/composer.json require"));
+        // The root's own self.version is its version; an empty include merges nothing.
+        std::fs::write(d.join("inc/composer.json"), "[]").unwrap();
+        let mut r2 = r.clone();
+        r2["require"]["acme/app-alias"] = json!("self.version");
+        let m = merge(d, &r2, "1.0.0.0", "1.0.0", true).unwrap();
+        let l = m
+            .requires
+            .iter()
+            .find(|l| l.target == "acme/app-alias")
+            .unwrap();
+        assert_eq!(l.pretty, "self.version");
+        assert!(l.constraint.matches_version("1.0.0.0"));
         // No match on an include: nothing merged, manifest identical.
         r["extra"]["merge-plugin"] = json!({"include": ["absent/*.json"]});
         let m = merge(d, &r, "1.0.0.0", "1.0.0", true).unwrap();

@@ -106,49 +106,16 @@ fn obj(v: Option<&Value>) -> Map<String, Value> {
     v.and_then(Value::as_object).cloned().unwrap_or_default()
 }
 
-/// `array_merge_recursive($autoload, $autoloadDev)` restricted to the shapes
-/// of the Composer schema: lists concatenated, maps merged key by key.
+/// `array_merge_recursive($autoload, $autoloadDev)` (PHP semantics, in
+/// `vivacity_core::phparray`).
 fn merge_autoload(a: &Map<String, Value>, b: &Map<String, Value>) -> Map<String, Value> {
-    let mut out = a.clone();
-    for (k, vb) in b {
-        match out.get_mut(k) {
-            None => {
-                out.insert(k.clone(), vb.clone());
-            }
-            Some(va) => {
-                *va = match (va.clone(), vb) {
-                    (Value::Array(mut la), Value::Array(lb)) => {
-                        la.extend(lb.iter().cloned());
-                        Value::Array(la)
-                    }
-                    (Value::Object(oa), Value::Object(ob)) => {
-                        let mut m = oa;
-                        for (nk, nv) in ob {
-                            match m.get_mut(nk) {
-                                None => {
-                                    m.insert(nk.clone(), nv.clone());
-                                }
-                                Some(existing) => {
-                                    let mut list = match existing.clone() {
-                                        Value::Array(l) => l,
-                                        other => vec![other],
-                                    };
-                                    match nv {
-                                        Value::Array(l) => list.extend(l.iter().cloned()),
-                                        other => list.push(other.clone()),
-                                    }
-                                    *existing = Value::Array(list);
-                                }
-                            }
-                        }
-                        Value::Object(m)
-                    }
-                    (_, other) => other.clone(),
-                };
-            }
-        }
+    match vivacity_core::phparray::array_merge_recursive(
+        &Value::Object(a.clone()),
+        &Value::Object(b.clone()),
+    ) {
+        Value::Object(m) => m,
+        _ => a.clone(),
     }
-    out
 }
 
 /// Merged autoload paths (`parseAutoloads`).

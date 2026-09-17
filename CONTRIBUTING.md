@@ -45,7 +45,7 @@ the roadmap below.
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
 - **`wikimedia/composer-merge-plugin` for the resolution commands** —
-  `install` and `dump-autoload` emulate it (0.12); `update` / `require` /
+  `install` and `dump-autoload` emulate it (0.12.0); `update` / `require` /
   `remove` refuse a project that configures it: the merged requirements,
   stability flags and prepended repositories would have to enter the
   pool (`vivacity-resolver::merge_plugin` already produces the structured
