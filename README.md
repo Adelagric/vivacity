@@ -71,8 +71,8 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 105 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-09-16 (after
-`config.vendor-dir` / `bin-dir` support), against Composer 2.10.3
+committed lock, pinned — `fixtures/corpus/`). On 2026-09-17 (0.12.0,
+after `wikimedia/composer-merge-plugin`), against Composer 2.10.3
 `--no-scripts` with its plugins active, `vivacity install` laid out **66 of
 105 projects (63 %) natively with `--no-dev`** and 58 of 105 (55 %) with
 the dev packages, byte-identical down to file modes and link targets, and
@@ -160,7 +160,8 @@ Packagist search behind "Did you mean …".
 
 ## Plugins and scripts
 
-Scripts are never run. Seven plugins are emulated and checked against the
+Scripts are never run by vivacity itself (see `--run-scripts` below).
+Seven plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),

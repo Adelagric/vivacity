@@ -76,7 +76,9 @@ the roadmap below.
   source (`docs/reference/`, 2.10.3) and checked against the real phar
   (`tests/oracle_*.rs`) or against a real `vendor/` (`harness/`). No porting
   from memory, no "close enough".
-- **Never run PHP at install time.** Scripts and plugins are out, by design.
+- **Never run PHP inside vivacity.** Plugins are emulated from their
+  source, never executed; scripts are Composer's — `--run-scripts` only
+  hands the declared events to `composer run-script`, off by default.
 - **Measure before optimising** (`bench/`), and publish the losing numbers too.
 - **Six crates are published**, in dependency order by `cargo publish
   --workspace`: `vivacity-pcre2-sys`, `vivacity-pcre2` (forks of
