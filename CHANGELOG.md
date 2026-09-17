@@ -30,7 +30,14 @@ byte-identical-output promise are the public API.
   The link test (`crates/pcre2-link-test`) now also defines the foreign
   `BZ2_*` names and round-trips a bzip2 stream. vivacity's binary holds
   exactly one C library: its own prefixed PCRE2 (plus ring's versioned
-  symbols with the default TLS feature).
+  symbols with the default TLS feature). Luther Monson's PR #6, opened
+  47 minutes after the same change landed on main, adds what it lacked:
+  `tools/check-clib-deps.sh` pinning the graph in CI (no `lzma-sys`,
+  `zstd-sys`, `libz-sys`; `bzip2-sys` with `__disabled` only;
+  `libbz2-rs-sys` with an explicit `semver-prefix`), a bzip2 entry
+  extraction test, and the measurement that settles zstd: PHP's Windows
+  SDK (`php8embed.lib`) bundles 294 `ZSTD_*` and 33 `BZ2_*`, the Linux SDK
+  33 `BZ2_*` and 219 `lzma_*` (`docs/plans/v0.12-pure-rust-extraction.md`).
 
 ## [0.11.0] — 2026-09-17
 

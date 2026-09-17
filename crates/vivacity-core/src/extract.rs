@@ -371,4 +371,22 @@ mod tests {
             "zip-slip accepted"
         );
     }
+
+    #[test]
+    fn bzip2_entry_decompresses_through_the_pure_rust_backend() {
+        // The bzip2 backend is libbz2-rs-sys (workspace Cargo.toml) so an
+        // embedder's link stays free of BZ2_* symbols; no fixture carries a
+        // bzip2-compressed entry, so the decoder is exercised here.
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Bzip2);
+        w.start_file("pkg/src/a.php", opts).expect("start");
+        let body = "<?php // enough bytes for a real bzip2 block\n".repeat(200);
+        w.write_all(body.as_bytes()).expect("write");
+        let bytes = w.finish().expect("finish").into_inner();
+
+        let d = tmpdir();
+        extract_zip(&bytes, d.path()).expect("extract");
+        let out = std::fs::read_to_string(d.path().join("src/a.php")).expect("read");
+        assert_eq!(out, body);
+    }
 }

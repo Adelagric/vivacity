@@ -225,12 +225,19 @@ built in from source with every symbol prefixed `vivacity_`
 — PHP's `libphp.a` bundles one, with the usual `pcre2_*_8` names — gets no
 duplicate symbols from vivacity; another crate pulling the stock
 `pcre2-sys` into the same binary would still collide with the host's, that
-is not vivacity's to fix. Nothing else in vivacity is C: zip extraction
-runs on pure-Rust deflate, deflate64, bzip2 and LZMA backends (PHP's
-`ext/bz2` bundles libbz2, which would collide the same way), so an
-embedder's own zlib, bzip2, xz or zstd are never duplicated. The prefix is checked in CI
+is not vivacity's to fix. The prefix is checked in CI
 (`tools/check-pcre2-symbols.sh`) and by a link test against a foreign
-PCRE2 (`crates/pcre2-link-test`).
+PCRE2 and bzip2 (`crates/pcre2-link-test`).
+
+The decompressors behind dist extraction follow the same rule: everything
+decompresses in pure Rust — deflate on flate2's Rust backend, bzip2 on
+`libbz2-rs-sys` (exports carry the `LIBBZ2_RS_SYS_v…` semver prefix), LZMA
+on `lzma-rs` — so no unprefixed `BZ2_*` / `inflate*` / `lzma_*` / `ZSTD_*`
+symbol reaches the host's link. PHP's static builds bundle bz2 and zlib
+everywhere, lzma and zstd depending on the platform. Zip entries using the
+`xz` or `zstd` methods are refused rather than supported by a colliding C
+decoder — no Composer registry produces them; store and deflate are what
+dists contain. `tools/check-clib-deps.sh` pins all of this in CI.
 
 ## Development
 
