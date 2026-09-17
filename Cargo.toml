@@ -14,7 +14,21 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.151", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "fs", "process"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "gzip", "stream", "charset"] }
-zip = "=2.4.2"
+# zip's default features pull three C libraries (bzip2-sys, lzma-sys via
+# xz2, zstd-sys) whose unprefixed symbols collide with a host that links
+# its own — PHP's libphp bundles bz2, lzma and zstd. Extraction only ever
+# decompresses, so the pure-Rust decoders are enough: deflate (flate2's
+# Rust backend), deflate64, lzma (lzma-rs), and bzip2 through the bzip2
+# crate flipped to libbz2-rs-sys below. The `xz` and `zstd` methods are
+# dropped — no Composer dist has ever used them in a zip entry — and an
+# archive that does is refused with the zip crate's unsupported-method
+# error instead of linking a colliding C decoder for it.
+zip = { version = "=2.4.2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "lzma", "time"] }
+# Not used directly: flips the zip crate's bzip2 backend to the pure-Rust
+# libbz2-rs-sys, whose exports carry the LIBBZ2_RS_SYS_v… semver prefix.
+# The feature also sets bzip2-sys's `__disabled`, which stops its build
+# script from compiling the C library even though zip still names it.
+bzip2 = { version = "=0.5.2", default-features = false, features = ["libbz2-rs-sys"] }
 sha1 = "=0.10.7"
 md-5 = "=0.10.6"
 thiserror = "=2.0.20"

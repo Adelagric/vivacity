@@ -4,6 +4,28 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Changed
+- **Dist extraction decompresses in pure Rust**
+  (`docs/plans/v0.12-pure-rust-extraction.md`): the zip crate's default
+  features pulled three C libraries — `bzip2-sys`, `lzma-sys` (via `xz2`),
+  `zstd-sys` — whose unprefixed symbols collide with a host that links its
+  own copies. PHP's static builds ship bz2 and zlib everywhere, lzma and
+  zstd depending on the platform, so ePHPm's PHP-linked binary failed at
+  link with `duplicate symbol: BZ2_bzDecompress…` — the next links of the
+  chain PCRE2 started in 0.11.0 (ephpm/ephpm#523). bzip2 entries now
+  decompress through `libbz2-rs-sys` (the bzip2 crate's pure-Rust backend;
+  its exports carry the `LIBBZ2_RS_SYS_v…` semver prefix, and `bzip2-sys`
+  compiles nothing under its `__disabled` feature), deflate stays on
+  flate2's Rust backend, LZMA on `lzma-rs`. The `xz` and `zstd` zip entry
+  methods — never produced by a Composer registry, which emits store and
+  deflate — are dropped rather than kept on a colliding C decoder: such an
+  entry is refused with the zip crate's unsupported-method error.
+  Extraction only ever decompresses, so no compressor is lost. Pinned by
+  `tools/check-clib-deps.sh` in CI; parity on the six fixtures is
+  byte-identical (0 diff, `harness/diff-vendor.sh`).
+
 ## [0.11.0] — 2026-09-17
 
 ### Added

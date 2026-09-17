@@ -58,6 +58,9 @@ jobs:
       - name: PCRE2 symbols all prefixed (embeddable next to libphp.a)
         run: tools/check-pcre2-symbols.sh
 
+      - name: No C decompressor in the graph (embeddable next to libphp.a)
+        run: tools/check-clib-deps.sh
+
       - name: Parity without autoloader
         run: harness/diff-vendor.sh
 

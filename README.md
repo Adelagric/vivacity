@@ -229,6 +229,16 @@ is not vivacity's to fix. The prefix is checked in CI
 (`tools/check-pcre2-symbols.sh`) and by a link test against a foreign
 PCRE2 (`crates/pcre2-link-test`).
 
+The decompressors behind dist extraction follow the same rule: everything
+decompresses in pure Rust — deflate on flate2's Rust backend, bzip2 on
+`libbz2-rs-sys` (exports carry the `LIBBZ2_RS_SYS_v…` semver prefix), LZMA
+on `lzma-rs` — so no unprefixed `BZ2_*` / `inflate*` / `lzma_*` / `ZSTD_*`
+symbol reaches the host's link. PHP's static builds bundle bz2 and zlib
+everywhere, lzma and zstd depending on the platform. Zip entries using the
+`xz` or `zstd` methods are refused rather than supported by a colliding C
+decoder — no Composer registry produces them; store and deflate are what
+dists contain. `tools/check-clib-deps.sh` pins all of this in CI.
+
 ## Development
 
 ```bash
