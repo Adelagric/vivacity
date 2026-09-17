@@ -31,23 +31,36 @@ binaire `composer` du PATH vers `$TMPDIR/vivacity-oracle-composer.phar` et
 appellent ses classes via `php -r`. Sans php/composer ils ÉCHOUENT avec un
 message explicite (jamais de skip silencieux).
 
-## Publication sur crates.io (0.5.0 publiée le 2026-09-14)
+## Publication sur crates.io (dernière : 0.13.0 le 2026-09-17)
 
-Les quatre crates s'empaquettent (`cargo package --workspace --no-verify`,
-vérifié : 38 à 138 KiB compressés chacun). Procédure, dans l'ordre des
-dépendances, gérée par cargo :
+Six crates (`vivacity-pcre2-sys`, `vivacity-pcre2`, `vivacity-core`,
+`vivacity-autoload`, `vivacity-resolver`, `vivacity`) s'empaquettent
+(`cargo package --workspace --no-verify` ; `pcre2-link-test` est
+`publish = false`). Procédure, dans l'ordre des dépendances, gérée par
+cargo :
 
 ```bash
 cargo login                       # une fois, jeton du compte crates.io du mainteneur
-# bumper la version : [workspace.package].version ET les trois dépendances
-# `path = "../vivacity-*", version = "…"` (crates/vivacity*/Cargo.toml)
+# bumper la version : [workspace.package].version, les dépendances internes
+# `path = "../vivacity-*", version = "…"` (crates/vivacity*/Cargo.toml, la
+# dépendance pcre2 de Cargo.toml et de crates/vivacity-pcre2), le pin de
+# README.md (`uses: Adelagric/vivacity@vX`, `vivacity = { version = "X" …`),
+# action.yml, l'en-tête CHANGELOG — release.yml vérifie la cohérence.
 cargo publish --workspace         # pcre2-sys → pcre2 → core → autoload → resolver → vivacity
 ```
 
-Les quatre crates sont sur crates.io en 0.5.0 (`cargo install vivacity` vérifié). Un job de publication
-dans release.yml demanderait un secret `CARGO_REGISTRY_TOKEN` (décision du
-mainteneur). Une fois publiés, `cargo install vivacity` et l'embarquement
-(`vivacity = "0.5"` → `vivacity::run(args)`) ne passent plus par git.
+Vérifié après la 0.13.0 : binaire GitHub (checksum, `--version`, aucune
+PCRE2 dynamique, symboles `vivacity_pcre2_*`), install réel (Laravel, 109
+paquets), `--run-scripts` (journal identique), `cargo install vivacity
+--version 0.13.0` depuis crates.io. Le job publish de release.yml
+(`softprops/action-gh-release`) a échoué une fois à mi-téléversement
+(« Error creating asset temp dir », aléa de l'action) : `gh run rerun
+<id> --failed` relance le seul job publish, les artefacts de build sont
+conservés et `overwrite_files: true` complète la release. Un job de
+publication crates.io dans release.yml demanderait un secret
+`CARGO_REGISTRY_TOKEN` (décision du mainteneur). Une fois publiés,
+`cargo install vivacity` et l'embarquement (`vivacity = "0.13"` →
+`vivacity::run(args)`) ne passent plus par git.
 
 ## Jalons
 
@@ -65,8 +78,8 @@ mainteneur). Une fois publiés, `cargo install vivacity` et l'embarquement
 | v0.3 drupal/core-composer-scaffold natif | publié (v0.3.0, 2026-09-11), **retiré en 0.6.0** (port d'un code GPL-2.0-or-later, voir Licences) ; la fixture drupal passe désormais par le fallback `composer install` | fixture drupal (projet entier 0 diff via le fallback, boot `vendor/bin/dr`), harness/transitions.sh (scaffold présent → refus sans toucher au disque) |
 
 | v0.4 résolveur (option A : port du solveur) | publié (v0.4.0, 2026-09-12) : `vivacity update` écrit le lock de Composer à l'octet (pool, séquence de décisions du solveur, opérations, lock) ; cache de métadonnées au format de Composer ; mises à jour partielles | docs/plans/v0.4-resolver.md, tests/oracle_pool.rs, harness/update.sh |
-| v0.14 (plan) `--run-scripts` | fait (2026-09-17, à taguer) : `crates/vivacity/src/scripts.rs` — `composer run-script [--no-dev] <event>` pour chaque événement déclaré, aux points d'`Installer::run` / `AutoloadGenerator::dump` ; opt-in, contrat inchangé par défaut ; non porté : événements par paquet, drapeau `optimize` | docs/plans/v0.14-run-scripts.md |
-| v0.13 (plan) `wikimedia/composer-merge-plugin` — livré en **0.12.0** | fait (2026-09-17, à taguer) — corpus 58/105 natifs en dev, 66/105 en --no-dev, 0 diff (docs/corpus/2026-09-17-v0.12.md) : `vivacity-resolver::merge_plugin` (port d'`ExtraPackage`/`PluginState` : globs PHP sans option, fusion require/autoload/links/extra, doublons structurés, `self.version`, récursion), manifeste fusionné avant l'en-tête d'`install`/`dump`, contrôle du lock sur les liens structurés (racine candidate avec ses replace/provide), **jamais la mise à jour implicite** (repli avec raison sur vendor vierge, `update`/`require`/`remove` refusés) ; harness 5 variantes 0 diff ; corpus-add conserve les fichiers inclus | docs/plans/v0.13-merge-plugin.md |
+| v0.14 (plan) `--run-scripts` | publié (v0.13.0, 2026-09-17) : `crates/vivacity/src/scripts.rs` — `composer run-script [--no-dev] <event>` pour chaque événement déclaré, aux points d'`Installer::run` / `AutoloadGenerator::dump` ; opt-in, contrat inchangé par défaut ; non porté : événements par paquet, drapeau `optimize` | docs/plans/v0.14-run-scripts.md |
+| v0.13 (plan) `wikimedia/composer-merge-plugin` — livré en **0.12.0** | publié (v0.12.0, 2026-09-17) — corpus 58/105 natifs en dev, 66/105 en --no-dev, 0 diff (docs/corpus/2026-09-17-v0.12.md) : `vivacity-resolver::merge_plugin` (port d'`ExtraPackage`/`PluginState` : globs PHP sans option, fusion require/autoload/links/extra, doublons structurés, `self.version`, récursion), manifeste fusionné avant l'en-tête d'`install`/`dump`, contrôle du lock sur les liens structurés (racine candidate avec ses replace/provide), **jamais la mise à jour implicite** (repli avec raison sur vendor vierge, `update`/`require`/`remove` refusés) ; harness 5 variantes 0 diff ; corpus-add conserve les fichiers inclus | docs/plans/v0.13-merge-plugin.md |
 | v0.12 PCRE2 préfixé (vivacity-pcre2-sys, vivacity-pcre2) | publié dans 0.11.0 (2026-09-17) : symboles `vivacity_*` (137/137, tools/check-pcre2-symbols.sh), toujours statique, test de lien contre une PCRE2 étrangère (crates/pcre2-link-test) sur 3 OS, binaires release sans libpcre2-8 dynamique ; déclencheur ephpm/ephpm#523 | docs/plans/v0.12-pcre2-prefix.md |
 | v0.11 `config.vendor-dir` / `bin-dir` | publié (v0.11.0, 2026-09-17) — corpus 55/105 natifs en dev, 63/105 en --no-dev, 0 diff (docs/corpus/2026-09-16-v0.11.md) : `dirs.rs` (résolution `Config::get` : env > config projet > config globale, `{$vendor-dir}`, formes refusées = issues de layout), `Layout` porte les répertoires (chemins, `install_path` racine, proxies, autoloader, plugins émulés) ; règle de conflit de `BinaryInstaller` (fichier existant conservé + message), `removeBinaries` (proxies du paquet retiré ou mis à jour, rmdir si vide) ; harness `vendor-dir.sh` 6 variantes 0 diff ; deux parités trouvées par le corpus (alias inline du lock dans installed.php ; ordre de `files` non stable chez Composer sur un cycle — annoté) | docs/plans/v0.11-vendor-dir.md, crates/vivacity-core/src/dirs.rs, harness/vendor-dir.sh |
 | v0.10 le corpus (106 projets réels, 0 diff, 56/105 natifs en --no-dev, 50/105 en dev) + 4 plugins émulés (pest-plugin, dealerdirect, phpstan/rector extension-installer) + référence plugins-on | publié (v0.10.0, 2026-09-16) : docs/corpus/2026-09-16.md, harness/corpus.sh, ScopeIssue::Config, compare.sh avec inventaire des modes | docs/plans/v0.10-corpus.md |
