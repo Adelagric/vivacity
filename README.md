@@ -73,17 +73,17 @@ How much of the real world that covers is measured, not assumed:
 105 real PHP projects (application templates and applications with a
 committed lock, pinned — `fixtures/corpus/`). On 2026-09-16 (after
 `config.vendor-dir` / `bin-dir` support), against Composer 2.10.3
-`--no-scripts` with its plugins active, `vivacity install` laid out **63 of
-105 projects (60 %) natively with `--no-dev`** and 55 of 105 (52 %) with
+`--no-scripts` with its plugins active, `vivacity install` laid out **66 of
+105 projects (63 %) natively with `--no-dev`** and 58 of 105 (55 %) with
 the dev packages, byte-identical down to file modes and link targets, and
 **no diff in either mode**: every other project was handed to Composer
 before any write, for reasons the report ranks — packages without a zip
-dist, `wikimedia/composer-merge-plugin`, then plugins one by one. The
-reasons that headed that list earlier the same day (`pestphp/pest-plugin`,
+dist, then plugins one by one. The reasons that headed that list a day
+earlier (`pestphp/pest-plugin`,
 `dealerdirect/phpcodesniffer-composer-installer`,
-`phpstan/extension-installer`, `config.vendor-dir`, `bin-dir`) are handled
-now. The corpus also found eight parity bugs that six fixtures never
-could; all are fixed.
+`phpstan/extension-installer`, `config.vendor-dir`, `bin-dir`,
+`wikimedia/composer-merge-plugin`) are handled now. The corpus also found
+twelve parity bugs that six fixtures never could; all are fixed.
 
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
 

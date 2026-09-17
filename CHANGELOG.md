@@ -46,7 +46,9 @@ byte-identical-output promise are the public API.
   missing-requirement cases, the refusal), in CI. `tools/corpus-add.sh`
   keeps the included manifests (they were absent from the corpus
   fixtures, where the plugin was a silent no-op), `harness/corpus.sh`
-  builds the steady-state reference for such entries.
+  builds the steady-state reference for such entries. Corpus: 58/105
+  native in dev (was 55), 66/105 in `--no-dev` (was 63), 0 diff
+  (`docs/corpus/2026-09-17-v0.12.md`).
 
 ### Fixed
 - A real `install` now prints Composer's post-install report — the
