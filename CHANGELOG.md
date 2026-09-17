@@ -4,7 +4,7 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
-## [Unreleased]
+## [0.11.1] — 2026-09-17
 
 ### Fixed
 - **No C compression library in the graph**: `zip` now runs bzip2 on its
