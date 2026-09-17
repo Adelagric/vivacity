@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "pcre2-link-test"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bzip2",
  "cc",
@@ -1921,7 +1921,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vivacity"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "vivacity-autoload"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64 0.23.1",
  "md-5",
@@ -1951,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "vivacity-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "vivacity-pcre2"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "libc 0.2.189",
  "log",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "vivacity-pcre2-sys"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "cc",
  "libc 0.2.189",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "vivacity-resolver"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
