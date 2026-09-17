@@ -9,6 +9,7 @@
 
 mod extension_installers;
 mod require;
+mod scripts;
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -302,6 +303,10 @@ struct DumpArgs {
     /// Like Composer: no plugin, not even emulated ones (composer/installers).
     #[arg(long)]
     no_plugins: bool,
+    /// Run `pre-autoload-dump` / `post-autoload-dump` through
+    /// `composer run-script`.
+    #[arg(long)]
+    run_scripts: bool,
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
 }
@@ -329,6 +334,11 @@ struct InstallArgs {
     /// Accepted for compatibility: vivacity never runs scripts.
     #[arg(long)]
     no_scripts: bool,
+    /// Run the project's scripts through `composer run-script`, at the
+    /// points where Composer dispatches them (pre-install-cmd,
+    /// pre/post-autoload-dump, post-install-cmd).
+    #[arg(long)]
+    run_scripts: bool,
     /// Like Composer: no plugin, not even emulated ones (composer/installers);
     /// everything installs into vendor/.
     #[arg(long)]
@@ -500,6 +510,26 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         Some(m) => m.manifest.clone(),
         None => manifest,
     };
+    // `--run-scripts`: the declared events go to `composer run-script` at
+    // Composer's own points; `pre-install-cmd` fires before anything
+    // (before the headline and the lock validation, Installer::run).
+    let runner = if args.run_scripts && !args.no_scripts {
+        match scripts::Runner::new(&project, &manifest, with_dev, which_composer()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("vivacity: {e}");
+                return Ok(3);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(r) = &runner {
+        let code = r.run(scripts::PRE_INSTALL_CMD)?;
+        if code != 0 {
+            return Ok(code);
+        }
+    }
     let config_lock = config_lock_enabled(&manifest_text);
     // `Installer::doInstall`: the headline, then the platform verification
     // notice (the lock is solved against the platform when not coming
@@ -808,6 +838,12 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     let mut autoload_note = String::new();
     if !args.no_autoloader {
+        if let Some(r) = &runner {
+            let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
         eprintln!("Generating autoload files");
         // `AutoloadGenerator::dump($localRepo)`: the local repository, not
         // the lock (they differ for an unchanged package whose lock entry
@@ -864,6 +900,14 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 previously_present,
             )?;
         }
+        // `AutoloadGenerator::dump`: post-autoload-dump once the files are
+        // written (the emulated post-autoload-dump plugins included).
+        if let Some(r) = &runner {
+            let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
         trace("autoload dump", t0);
     }
     // `dealerdirect/phpcodesniffer-composer-installer` listens to
@@ -893,6 +937,12 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     if !args.after_update {
         print_funding(&project, &manifest);
+    }
+    if let Some(r) = &runner {
+        let code = r.run(scripts::POST_INSTALL_CMD)?;
+        if code != 0 {
+            return Ok(code);
+        }
     }
     let warmed = if report.store_warmed > 0 {
         format!(", store warmed for {} packages", report.store_warmed)
@@ -1285,6 +1335,24 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
                 .map(str::to_owned)
         })
         .collect();
+    // `DumpAutoloadCommand`: the two autoload events around the dump.
+    let runner = if args.run_scripts {
+        match scripts::Runner::new(&project, &manifest, dev_mode, which_composer()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("vivacity: {e}");
+                return Ok(3);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(r) = &runner {
+        let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
+        if code != 0 {
+            return Ok(code);
+        }
+    }
     let report = dump_autoload(
         &project,
         &lock,
@@ -1311,6 +1379,12 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             !args.no_plugins,
             previously_present,
         )?;
+    }
+    if let Some(r) = &runner {
+        let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;
+        if code != 0 {
+            return Ok(code);
+        }
     }
     eprintln!(
         "vivacity: autoloader generated ({} classes) in {:.2}s",
@@ -1343,8 +1417,13 @@ fn fallback_or_fail(
     eprintln!("vivacity: delegating to `composer install`…");
     let mut cmd = std::process::Command::new(composer);
     // The contract holds through the fallback: vivacity never runs
-    // scripts, so Composer does not either; the plugin regime follows.
-    cmd.arg("install").arg("--no-scripts").current_dir(project);
+    // scripts, so Composer does not either — unless `--run-scripts`, where
+    // Composer runs them itself, in its own order; the plugin regime
+    // follows.
+    cmd.arg("install").current_dir(project);
+    if !args.run_scripts || args.no_scripts {
+        cmd.arg("--no-scripts");
+    }
     if args.no_plugins {
         cmd.arg("--no-plugins");
     }
@@ -1561,6 +1640,7 @@ fn install_after_update(
         apcu_autoloader: args.apcu_autoloader,
         apcu_autoloader_prefix: args.apcu_autoloader_prefix.clone(),
         no_scripts: args.no_scripts,
+        run_scripts: false,
         no_plugins: args.no_plugins,
         ignore_platform_reqs: args.ignore_platform_reqs,
         ignore_platform_req: args.ignore_platform_req.clone(),

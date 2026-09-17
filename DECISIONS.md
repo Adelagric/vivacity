@@ -413,6 +413,32 @@ les versions retirées par l'optimiseur (`recordRemovedVersionsForPackage`,
 sauté jusqu'ici « parce que seuls les messages s'en servent ») et par les
 politiques, et la sonde PHP renvoie les fichiers `.ini`.
 
+## 2026-09-17 — Les scripts : à Composer, opt-in, jamais de PHP dans vivacity (v0.14)
+
+Mesure sur le corpus : 62/105 projets ont des scripts au moment de
+l'install — 74 lignes `php` (45 × `artisan …`), **46 callables PHP
+statiques** qui reçoivent `Composer\Script\Event` (accès au `Composer`,
+à l'IO, au dépôt local), 24 alias, 9 commandes shell. Les callables ne
+peuvent être exécutés que par le Composer PHP : embarquer PHP (et donc
+Composer) dans vivacity en ferait « Composer avec un installeur Rust
+devant », le produit d'ePHPm, qui embarque vivacity précisément parce
+qu'elle n'a pas de PHP. Décision (utilisateur) : frontière technique
+ferme — le déterministe (structure, réseau, extraction, résolution,
+autoload) à vivacity, le PHP arbitraire à un runtime PHP — et une
+couture : `--run-scripts`, opt-in, délègue chaque événement déclaré à
+`composer run-script` dans l'ordre exact d'`Installer::run` (lu dans la
+source : `pre-install-cmd` avant tout, autoload autour du dump,
+`post-install-cmd` après le funding), `COMPOSER_DEV_MODE` posé par
+`run-script` depuis `--no-dev`, code de sortie propagé. Le défaut reste
+« aucun script » (contrat, CI reproductible) ; l'hôte qui embarque PHP
+(ePHPm) gère ses scripts lui-même via la bibliothèque. Ce que
+`run-script` ne sait pas porter, dit tel quel : les événements par
+paquet (l'opération manque, 5 projets du corpus) et le drapeau
+`optimize` des événements d'autoload (vérifié : `optimize=0` chez
+Composer, absent via `run-script`) ; les écouteurs de plugins de ces
+événements rejouent (idempotents pour les émulés). Preuve :
+`harness/scripts.sh` — journal de 15 lignes identique à Composer.
+
 ## 2026-09-17 — composer-merge-plugin : la fusion, jamais sa mise à jour implicite (v0.13)
 
 Constat mesuré (open-web-analytics avec ses vrais `modules/*/composer.json`) :

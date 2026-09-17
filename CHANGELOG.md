@@ -4,6 +4,28 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Added
+- **`--run-scripts`** on `install` and `dump-autoload`
+  (`docs/plans/v0.14-run-scripts.md`): the events the manifest declares
+  go to `composer run-script [--no-dev] <event>` at Composer's own
+  points — `pre-install-cmd` before the headline and the lock
+  validation, `pre-autoload-dump` / `post-autoload-dump` around the dump
+  (never with `--no-autoloader`), `post-install-cmd` after the funding
+  lines; a non-zero exit stops the run with that code. vivacity embeds
+  no PHP: the static callables receive Composer's `Script\Event` because
+  Composer runs them. The fallback keeps the scripts too (`composer
+  install` without `--no-scripts`). Not carried: the per-package events
+  (`pre/post-package-*`, five corpus projects) and the `optimize` flag of
+  the autoload events (`run-script` passes none); the plugins' own
+  listeners of those events run again through `run-script`. Fixture
+  `fixtures/projects/scripts` and `harness/scripts.sh` (log of the
+  events with `COMPOSER_DEV_MODE`, callables reading the local
+  repository, dev / `--no-dev` / `dump -o`, a failing script, `--no-autoloader`,
+  nothing without the flag), in CI. Off by default: the contract
+  "vivacity never runs scripts" is unchanged.
+
 ## [0.12.0] — 2026-09-17
 
 ### Added

@@ -85,6 +85,8 @@ jobs:
         run: harness/vendor-dir.sh
       - name: wikimedia/composer-merge-plugin (merged root, no implicit update)
         run: harness/merge-plugin.sh
+      - name: --run-scripts (the scripts, by Composer, in Composer's order)
+        run: harness/scripts.sh
 
       - name: Boot on vivacity vendor
         run: harness/boot.sh

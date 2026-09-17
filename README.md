@@ -192,8 +192,19 @@ Anything else — other plugins, `composer/installers` cases with custom
 naming, source-only packages, a `path` package on Windows, a plugin
 upgrade in progress — is detected
 before `vendor/` is touched, and vivacity execs the real `composer install`
-instead (`--no-fallback` to make it fail). Post-install scripts such as
-Laravel's `package:discover` are yours to run.
+instead (`--no-fallback` to make it fail).
+
+Scripts stay Composer's business: `vivacity install --run-scripts` hands
+each event the project declares to `composer run-script`, at the points
+where Composer dispatches them — `pre-install-cmd` before anything,
+`pre-autoload-dump` and `post-autoload-dump` around the dump,
+`post-install-cmd` at the end — with `COMPOSER_DEV_MODE` set from
+`--no-dev`; a failing script stops the run with its exit code, like
+Composer. Static callables (`Illuminate\Foundation\ComposerScripts::…`)
+work, since Composer runs them. Not carried: the per-package events
+(`pre/post-package-*`) and the `optimize` flag of the autoload events.
+Without the flag, no script ever runs (`composer run-script post-install-cmd`
+is one command away).
 
 Not supported: `gitlab-token` auth, root version detection from
 hg/svn/fossil.
