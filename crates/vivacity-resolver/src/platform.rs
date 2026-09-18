@@ -88,13 +88,178 @@ pub fn loaded_extensions(probed: &[Value]) -> std::collections::BTreeSet<String>
         .collect()
 }
 
-/// Runs the probe on the current PHP (`VIVACITY_PHP` or `php`).
+/// Identity of a file the probe's result depends on: its path and, when
+/// it exists, its mtime (nanoseconds) and size. An absent file is recorded
+/// as absent, so its appearance invalidates the cache too.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FileId {
+    path: String,
+    mtime_ns: Option<i128>,
+    size: Option<u64>,
+}
+
+impl FileId {
+    fn of(path: &str) -> FileId {
+        let meta = std::fs::metadata(path).ok();
+        let mtime_ns = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_nanos() as i128)
+        });
+        FileId {
+            path: path.to_owned(),
+            mtime_ns,
+            size: meta.map(|m| m.len()),
+        }
+    }
+}
+
+/// The environment the probe's output depends on (xdebug handling in the
+/// probe, PHP's own ini discovery), captured by value.
+const PROBE_ENV: &[&str] = &["PHPRC", "PHP_INI_SCAN_DIR", "XDEBUG_MODE", "XDEBUG_CONFIG"];
+
+/// One cached probe: valid while the php binary, every ini file PHP read
+/// (and the directory it scans), and the relevant environment are the same.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ProbeCache {
+    php: FileId,
+    inis: Vec<FileId>,
+    env: Vec<(String, Option<String>)>,
+    probed: Vec<Value>,
+}
+
+/// The files PHP read its configuration from, per the probe's `ini` entry:
+/// the loaded php.ini, the scanned files, and the scan directory itself
+/// (its mtime changes when a file is added or removed).
+fn ini_dependencies(probed: &[Value]) -> Vec<FileId> {
+    let Some(entry) = probed
+        .iter()
+        .find(|v| v.get("kind").and_then(Value::as_str) == Some("ini"))
+    else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for key in ["loaded", "scan_dir"] {
+        if let Some(p) = entry.get(key).and_then(Value::as_str) {
+            if !p.is_empty() {
+                paths.push(p.to_owned());
+            }
+        }
+    }
+    if let Some(scanned) = entry.get("scanned").and_then(Value::as_str) {
+        paths.extend(
+            scanned
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    paths.iter().map(|p| FileId::of(p)).collect()
+}
+
+fn probe_env() -> Vec<(String, Option<String>)> {
+    PROBE_ENV
+        .iter()
+        .map(|k| ((*k).to_owned(), std::env::var(k).ok()))
+        .collect()
+}
+
+/// The php binary `php` names: as given when it holds a path separator,
+/// else the first executable of that name on PATH (with PATHEXT's `.exe`,
+/// `.bat`, `.cmd` on Windows), canonicalized. None when there is none.
+fn locate_php(php: &str) -> Option<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = if php.contains('/') || php.contains('\\') {
+        vec![std::path::PathBuf::from(php)]
+    } else {
+        let exts: &[&str] = if cfg!(windows) {
+            &["", ".exe", ".bat", ".cmd"]
+        } else {
+            &[""]
+        };
+        std::env::var_os("PATH")
+            .map(|p| {
+                std::env::split_paths(&p)
+                    .flat_map(|dir| exts.iter().map(move |e| dir.join(format!("{php}{e}"))))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    candidates
+        .into_iter()
+        .find(|c| is_executable(c))
+        .and_then(|c| vivacity_core::pathutil::canonicalize(c).ok())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+
+fn probe_cache_file() -> std::path::PathBuf {
+    vivacity_core::platform::cache_dir().join("platform-probe.json")
+}
+
+/// Runs the probe on the current PHP (`VIVACITY_PHP` or `php`), through a
+/// disk cache: a php process costs 30–60 ms, most of a no-op install. The
+/// cache is keyed on what the result depends on — the php binary (path,
+/// mtime, size), every ini file PHP loaded or scanned plus the scan
+/// directory, and PHPRC / PHP_INI_SCAN_DIR / XDEBUG_MODE / XDEBUG_CONFIG.
+/// `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it.
 pub fn probe() -> Result<Vec<Value>, PlatformError> {
     let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
+    if std::env::var_os("VIVACITY_NO_PLATFORM_CACHE").is_some() {
+        return run_probe(&php);
+    }
+    let Some(php_path) = locate_php(&php) else {
+        return run_probe(&php);
+    };
+    let php_id = FileId::of(&php_path.to_string_lossy());
+    let env = probe_env();
+    let cache_file = probe_cache_file();
+    if let Ok(bytes) = std::fs::read(&cache_file) {
+        if let Ok(cached) = serde_json::from_slice::<ProbeCache>(&bytes) {
+            if cached.php == php_id
+                && cached.env == env
+                && cached.inis.iter().all(|f| FileId::of(&f.path) == *f)
+            {
+                return Ok(cached.probed);
+            }
+        }
+    }
+    let probed = run_probe(&php)?;
+    let cache = ProbeCache {
+        php: php_id,
+        inis: ini_dependencies(&probed),
+        env,
+        probed: probed.clone(),
+    };
+    if let Some(dir) = cache_file.parent() {
+        if std::fs::create_dir_all(dir).is_ok() {
+            if let Ok(json) = serde_json::to_vec(&cache) {
+                let tmp = cache_file.with_extension(format!("json.{}.tmp", std::process::id()));
+                if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &cache_file).is_err()
+                {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
+        }
+    }
+    Ok(probed)
+}
+
+/// One real run of assets/platform-probe.php.
+fn run_probe(php: &str) -> Result<Vec<Value>, PlatformError> {
     let dir = tempfile::tempdir().map_err(|e| PlatformError(e.to_string()))?;
     let script = dir.path().join("platform-probe.php");
     std::fs::write(&script, PROBE).map_err(|e| PlatformError(e.to_string()))?;
-    let out = Command::new(&php)
+    let out = Command::new(php)
         .arg(&script)
         .output()
         .map_err(|e| PlatformError(format!("cannot run {php}: {e}")))?;
@@ -448,6 +613,70 @@ pub fn check_install(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_cache_watches_every_ini_file_and_the_scan_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ini = dir.path().join("php.ini");
+        std::fs::write(&ini, "memory_limit=1G\n").expect("write");
+        let scan = dir.path().join("conf.d");
+        std::fs::create_dir(&scan).expect("mkdir");
+        let ext = scan.join("ext-mbstring.ini");
+        std::fs::write(&ext, "extension=mbstring\n").expect("write");
+        let probed = vec![serde_json::json!({
+            "kind": "ini", "name": "ini", "version": "",
+            "loaded": ini.to_string_lossy(),
+            "scanned": format!("{},\n{}", ext.to_string_lossy(), ext.to_string_lossy()),
+            "scan_dir": scan.to_string_lossy(),
+        })];
+        let deps = ini_dependencies(&probed);
+        let paths: Vec<&str> = deps.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                ini.to_string_lossy().as_ref(),
+                scan.to_string_lossy().as_ref(),
+                ext.to_string_lossy().as_ref(),
+                ext.to_string_lossy().as_ref()
+            ]
+        );
+        assert!(deps
+            .iter()
+            .all(|f| f.mtime_ns.is_some() && f.size.is_some()));
+        // Unchanged: every id still matches.
+        assert!(deps.iter().all(|f| FileId::of(&f.path) == *f));
+        // A file edited (size changes) or removed invalidates.
+        std::fs::write(&ext, "extension=mbstring\nextension=intl\n").expect("write");
+        assert!(deps.iter().any(|f| FileId::of(&f.path) != *f));
+        std::fs::remove_file(&ext).expect("rm");
+        assert_eq!(FileId::of(&ext.to_string_lossy()).mtime_ns, None);
+        // No loaded php.ini ('' in the probe): nothing to watch for it, the
+        // scan dir still is.
+        let probed = vec![
+            serde_json::json!({"kind": "ini", "loaded": "", "scanned": null,
+                                            "scan_dir": scan.to_string_lossy()}),
+        ];
+        assert_eq!(ini_dependencies(&probed).len(), 1);
+    }
+
+    #[test]
+    fn locate_php_resolves_an_explicit_path_only_when_executable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = dir.path().join("php");
+        std::fs::write(&plain, "").expect("write");
+        #[cfg(unix)]
+        {
+            assert_eq!(locate_php(&plain.to_string_lossy()), None);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        assert!(locate_php(&plain.to_string_lossy()).is_some());
+        assert_eq!(
+            locate_php(&dir.path().join("missing").to_string_lossy()),
+            None
+        );
+    }
 
     #[test]
     fn platform_names() {

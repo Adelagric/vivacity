@@ -99,6 +99,9 @@ numbers and the scripts that produce them are in [bench/](bench/); the
 short version is that a no-op install takes tens of milliseconds, a warm
 reinstall of Sylius under a second, and `update --no-install` on Sylius
 about a third of Composer's time. Cold network installs are not faster.
+CI gates on the vivacity/Composer ratio per scenario (`bench/gate.py`,
+tolerance 15 % past `bench/results/baseline-ratio.json`), so a regression
+shows up as a red `bench` job rather than a slower table.
 
 ## The resolver
 

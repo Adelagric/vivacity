@@ -6,6 +6,28 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Changed
+- **The platform probe is cached.** `install` and the resolver ran
+  `php assets/platform-probe.php` on every invocation since 0.8 (the
+  lock check against the full platform repository), 30–60 ms of a no-op
+  install. The result is now cached (`platform-probe.json` in vivacity's
+  cache directory) and reused while the php binary (path, mtime, size),
+  every ini file PHP loaded or scanned, the ini scan directory, and
+  `PHPRC` / `PHP_INI_SCAN_DIR` / `XDEBUG_MODE` / `XDEBUG_CONFIG` are
+  unchanged; `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it. A Laravel no-op
+  install goes from 163 ms to 84 ms here (M4 Max, APFS).
+
+### Added
+- **Performance gate on the vivacity/Composer ratio** (`bench/gate.py`,
+  run by `bench.yml` after `bench/ci-bench.sh`): each scenario's
+  `vivacity_median / composer_median`, measured in the same job on the
+  same runner, is compared to `bench/results/baseline-ratio.json` and
+  fails past baseline × 1.15 when the regression is worth at least 5 ms
+  in that run's seconds. The ratio cancels the runner's speed, which
+  varies tens of percent between identical runs; the baseline is the
+  median across several CI runs (`bench/gate.py --merge`). The gate
+  skips with a notice until the baseline exists.
+
 ### Fixed
 - **`install --no-plugins` on a lock naming a plugin outside vivacity's
   lists** (yiisoft/yii2-composer, roots/wordpress-core-installer,

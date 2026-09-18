@@ -391,5 +391,7 @@ if (defined('HHVM_VERSION')) {
 // XdebugHandler::getAllIniFiles() (the extension hint of an unsolvable
 // set): the loaded php.ini ('' if none) and the scanned files.
 $scanned = php_ini_scanned_files();
-$out[] = ['kind' => 'ini', 'name' => 'ini', 'version' => '', 'loaded' => (string) php_ini_loaded_file(), 'scanned' => $scanned === false ? null : $scanned];
+// scan_dir: the directory PHP scans for extra .ini files (PHP_INI_SCAN_DIR
+// or the compiled-in default), so the probe cache can watch it.
+$out[] = ['kind' => 'ini', 'name' => 'ini', 'version' => '', 'loaded' => (string) php_ini_loaded_file(), 'scanned' => $scanned === false ? null : $scanned, 'scan_dir' => (string) (getenv('PHP_INI_SCAN_DIR') !== false ? getenv('PHP_INI_SCAN_DIR') : PHP_CONFIG_FILE_SCAN_DIR)];
 echo json_encode($out);

@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VIVACE="$ROOT/target/release/vivacity"
 WORK="${VIVACE_BENCH_DIR:-/tmp/vivace-bench}"
 RUNS="${BENCH_RUNS:-10}"
+# (install 2.10 n'audite que sur --audit : pas de réseau dans le dénominateur du ratio, bench/gate.py)
 C="composer --no-interaction --no-plugins --no-scripts"
 mkdir -p "$WORK"
 out="| fixture | scénario | Composer | vivace | gain |\n|---|---|---|---|---|\n"
@@ -16,11 +17,11 @@ for fx in laravel symfony sylius; do
   cd "$d"
   $C install --quiet; "$VIVACE" install --offline 2>/dev/null   # chauffe caches, store, classmap
   hyperfine -N --warmup 1 --min-runs "$RUNS" --export-json "$WORK/$fx.json" \
-    --prepare true -n "composer-noop" "composer install --no-interaction --no-plugins --no-scripts" \
+    --prepare true -n "composer-noop" "$C install" \
     --prepare true -n "vivace-noop" "$VIVACE install --offline" \
-    --prepare "rm -rf vendor" -n "composer-warm" "composer install --no-interaction --no-plugins --no-scripts" \
+    --prepare "rm -rf vendor" -n "composer-warm" "$C install" \
     --prepare "rm -rf vendor" -n "vivace-warm" "$VIVACE install --offline" \
-    --prepare true -n "composer-dump-o" "composer dump-autoload -o --no-plugins --no-scripts --quiet" \
+    --prepare true -n "composer-dump-o" "$C dump-autoload -o --quiet" \
     --prepare true -n "vivace-dump-o" "$VIVACE dump-autoload -o" >/dev/null 2>&1
   for sc in noop warm dump-o; do
     c=$(jq -r ".results[] | select(.command==\"composer-$sc\") | (.median*1000|round)" "$WORK/$fx.json")

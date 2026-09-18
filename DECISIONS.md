@@ -703,3 +703,28 @@ de `vendor/bin` — `Installer::run` appelle `ensureBinariesPresence` sur
 chaque paquet installé à chaque run, donc un proxy manquant d'un paquet
 inchangé est recréé (un `vendor/bin` effacé revient), un proxy existant est
 laissé ; `libc::FICLONE` (la constante codée en dur ne compile pas sous musl).
+
+## 2026-09-18 — Gate de perf en ratio, pas en secondes ; sonde de plateforme en cache
+
+Fait : un runner GitHub varie de 30 à 45 % d'un run à l'autre sur un code
+identique (mesuré chez svandragt/vivace, bench/compare.py — leur idée, reprise
+telle quelle) ; une baseline en secondes déclenche sur le runner, pas sur le
+code. Décision : `bench/gate.py` compare `médiane vivacity / médiane Composer`
+par scénario (no-op, warm, dump -o), mesurées dans le même job — la vitesse
+du runner se simplifie dans le ratio — contre `bench/results/baseline-ratio.json`,
+tolérance 15 % et marge absolue de 5 ms (un no-op à 10 ms franchit toute
+tolérance relative sur un aléa d'horloge). Baseline = médiane de plusieurs
+runs CI (`--merge`), jamais un run seul. Écarté : un seuil absolu (chasse le
+runner), un benchmark sur machine dédiée (pas de machine).
+
+Constat en chemin : depuis `3364470` (v0.8), `install` sondait php à chaque
+run (`platform::probe`, 30–60 ms) — le cache de `vivacity_core::platform::detect`
+n'avait plus d'appelant. Décision : cache de la sonde clé sur ce dont le résultat
+dépend (binaire php, fichiers ini chargés/scannés + répertoire de scan, variables
+PHPRC / PHP_INI_SCAN_DIR / XDEBUG_MODE / XDEBUG_CONFIG), pas sur le seul binaire
+comme `detect` le faisait (une extension activée dans php.ini doit être vue).
+Non copié de viv : son no-op ne régénère pas l'autoloader (état = content-hash +
+sha256 de composer.json) — un fichier ajouté dans un dossier `classmap` racine
+n'est pas vu là où `composer install` le voit (vérifié sur viv 0.14.0) ; vivacity
+garde le contrat de Composer et paie le dump (~50 ms avec le cache de classmap).
+

@@ -4,7 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["crates/**", "bench/ci-bench.sh", ".github/workflows/bench.yml"]
+    paths: ["crates/**", "bench/ci-bench.sh", "bench/gate.py", "bench/results/baseline-ratio.json", ".github/workflows/bench.yml"]
+  pull_request:
+    paths: ["crates/**", "bench/ci-bench.sh", "bench/gate.py", "bench/results/baseline-ratio.json", ".github/workflows/bench.yml"]
 
 jobs:
   bench:
@@ -30,7 +32,18 @@ jobs:
       - run: fixtures/make.sh
       - name: Benchmarks
         run: bench/ci-bench.sh | tee bench-linux.md
+        env:
+          VIVACE_BENCH_DIR: ${{ runner.temp }}/vivace-bench
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.os }}
-          path: bench-linux.md
+          path: |
+            bench-linux.md
+            ${{ runner.temp }}/vivace-bench/*.json
+      # Gate on the vivacity/Composer ratio per scenario (runner-independent,
+      # bench/gate.py): fails past baseline × 1.15 when the regression is
+      # worth at least 5 ms in this run's seconds. Skips with a notice until
+      # bench/results/baseline-ratio.json exists — produce it with
+      # `bench/gate.py --merge <downloaded artifacts…>` (median across runs).
+      - name: Perf gate
+        run: python3 bench/gate.py ${{ runner.temp }}/vivace-bench --baseline bench/results/baseline-ratio.json
