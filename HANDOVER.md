@@ -50,10 +50,10 @@ cargo login                       # une fois, jeton du compte crates.io du maint
 cargo publish --workspace         # pcre2-sys → pcre2 → core → autoload → resolver → vivacity
 ```
 
-Vérifié après la 0.13.0 : binaire GitHub (checksum, `--version`, aucune
-PCRE2 dynamique, symboles `vivacity_pcre2_*`), install réel (Laravel, 109
-paquets), `--run-scripts` (journal identique), `cargo install vivacity
---version 0.13.0` depuis crates.io. Le job publish de release.yml
+Vérifié après la 0.14.0 (comme après la 0.13.0) : binaire GitHub (checksum, `--version`, aucune
+PCRE2 dynamique, symboles `vivacity_pcre2_*`), `cargo install vivacity
+--version 0.14.0` depuis crates.io, install réel avec ce binaire (Laravel, 109
+paquets, `--no-plugins`). Le job publish de release.yml
 (`softprops/action-gh-release`) a échoué une fois à mi-téléversement
 (« Error creating asset temp dir », aléa de l'action) : `gh run rerun
 <id> --failed` relance le seul job publish, les artefacts de build sont
