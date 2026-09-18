@@ -88,6 +88,9 @@ jobs:
       - name: --run-scripts (the scripts, by Composer, in Composer's order)
         run: harness/scripts.sh
 
+      - name: Per-file scan cache (root sources edited between installs)
+        run: harness/root-scan.sh
+
       - name: Boot on vivacity vendor
         run: harness/boot.sh
 
