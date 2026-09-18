@@ -4,7 +4,7 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
-## [Unreleased]
+## [0.14.0] — 2026-09-18
 
 ### Changed
 - **The platform probe is cached.** `install` and the resolver ran

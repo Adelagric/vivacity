@@ -18,9 +18,9 @@ rustls-tls-ring = ["vivacity-core/rustls-tls-ring"]
 rustls-tls-no-provider = ["vivacity-core/rustls-tls-no-provider"]
 
 [dependencies]
-vivacity-core = { path = "../vivacity-core", version = "0.13.0", default-features = false }
-vivacity-resolver = { path = "../vivacity-resolver", version = "0.13.0", default-features = false }
-vivacity-autoload = { path = "../vivacity-autoload", version = "0.13.0", default-features = false }
+vivacity-core = { path = "../vivacity-core", version = "0.14.0", default-features = false }
+vivacity-resolver = { path = "../vivacity-resolver", version = "0.14.0", default-features = false }
+vivacity-autoload = { path = "../vivacity-autoload", version = "0.14.0", default-features = false }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
