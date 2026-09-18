@@ -778,3 +778,32 @@ Mesuré (laravel, `optimize-autoloader: true`) : `dump-autoload` Mac 61,5 →
 Reste dans le dump : chargement des ~250 caches de store (`scan_only`),
 var_export + réindentation de la statique, `installed.json` parsé en `Value`.
 
+## 2026-09-18 — P3 refusé : pas de raccourci du dump sur empreinte (plan v0.15-perf-install)
+
+Fait : le raccourci proposé (sauter le dump de l'autoloader quand une
+empreinte des entrées du dump précédent correspond) a été soumis à une
+méta-analyse par un relecteur frais, lecture du code à l'appui. Entrées du
+dump absentes de l'empreinte, chacune avec une divergence concrète :
+les avertissements du dump (« Ambiguous class resolution », violations PSR,
+doublons `files`) que Composer réimprime à chaque no-op — un hit les
+tairait, stderr diverge (`lib.rs`, impression de `report.warnings`) ; un
+dossier psr-4 absent au dump précédent puis créé (`generator.rs`, `is_dir`
+→ `continue`) ; le `config.json` global (`allow-plugins` gouverne
+`autoload_runtime.php`) ; le gabarit `extra.runtime.autoload_template` lu au
+dump ; `vendor/composer/LICENSE` et `include_paths.php` parmi les sorties ;
+les chemins canoniques de `$baseDir`/`$vendorDir` ; un préfixe apcu tiré au
+sort par dump. Et un fait de coût : après P2 un scan chaud hors store est
+déjà stat-only, le hit coûterait à peu près le scan ; ce qui reste dans le
+dump (~250 caches de store chargés, var_export + réindentation de la
+statique, `installed.json` en `Value`) se réduit sans toucher au contrat.
+Décision : **refusé**. Raison de fond : une empreinte n'est jamais complète
+par construction — toute lecture ajoutée à `dump` devra y être reportée à la
+main, et le harnais ne teste que les entrées qu'on a imaginées ; c'est le
+défaut du raccourci « content-hash » déjà écarté, à grain plus fin. Gain en
+jeu : ~15–20 ms hors ligne seulement. À la place : (b) un cache de store
+consolidé par lock et une statique émise directement dans sa forme finale ;
+(c) le dump calculé en mémoire pendant l'attente réseau et écrit après la
+jointure (`write` compare déjà les octets). Puis la seule décision restante
+est celle de la requête de listes elle-même (revalidation par install, comme
+Composer, ou TTL) — décision de contrat, à prendre avec les chiffres.
+
