@@ -562,53 +562,43 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
 
     // `Installer::doInstall` runs the lock pool through the list filter in
     // install scope: a flagged locked version (malware list) is not
-    // installed.
-    if !args.after_update {
+    // installed. One conditional request per install (Composer's
+    // `loadFilterSummary`, `packages.json` cached 600 s), the only network
+    // wait of an install from lock: it runs on its own thread while the
+    // platform check, the transaction and the scope are computed, and is
+    // joined before anything is printed or written past this point — the
+    // output order and the decision order are Composer's.
+    let policy_thread = if args.after_update {
+        None
+    } else {
         let http = http_transport(&project, args.offline)?;
         let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
-        let (problems, warnings) = vivacity_resolver::session::install_policy_problems(
-            &project,
-            vivacity_core::fetch::composer_home().as_deref(),
-            Some(http),
-            Some(&cache_repo_dir),
-            with_dev,
-            args.no_blocking || args.no_security_blocking,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-        for w in &warnings {
-            eprintln!("{w}");
-        }
-        if !problems.is_empty() {
-            // `Installer::doInstall`: the headline, then
-            // `SolverProblemsException::getPrettyString` (problems
-            // deduplicated and numbered, each ending with a newline).
-            eprintln!("Your lock file does not contain a compatible set of packages. Please run composer update.");
-            let mut text = String::from("\n");
-            let mut seen: Vec<&String> = Vec::new();
-            for p in &problems {
-                if seen.contains(&p) {
-                    continue;
-                }
-                seen.push(p);
-                text.push_str(&format!("  Problem {}\n    {p}\n", seen.len()));
-            }
-            eprintln!("{text}");
-            return Ok(2);
-        }
-        trace("policy", t0);
-    }
+        let composer_home = vivacity_core::fetch::composer_home();
+        let project_dir = project.clone();
+        let no_blocking = args.no_blocking || args.no_security_blocking;
+        Some(std::thread::spawn(move || {
+            vivacity_resolver::session::install_policy_problems(
+                &project_dir,
+                composer_home.as_deref(),
+                Some(http),
+                Some(&cache_repo_dir),
+                with_dev,
+                no_blocking,
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        }))
+    };
 
-    // Platform.
+    // Platform (computed now, reported after the policy join).
     let mut ignored = args.ignore_platform_req.clone();
     if args.ignore_platform_reqs {
         ignored.push("*".to_owned());
     }
-    if ignored.iter().all(|p| p != "*") {
+    let platform_outcome: PlatformOutcome = if ignored.iter().all(|p| p != "*") {
         // The full platform repository (php, extensions, libraries, the
         // composer-*-api packages, `config.platform`), probed through php
         // like `update` does; without php, a warning.
-        let probed = vivacity_resolver::platform::probe().ok();
-        match probed {
+        match vivacity_resolver::platform::probe().ok() {
             Some(probed) => {
                 let empty = serde_json::Map::new();
                 let overrides = manifest
@@ -618,39 +608,17 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                     .unwrap_or(&empty);
                 let platform = vivacity_resolver::platform::platform_packages(&probed, overrides)
                     .map_err(|e| anyhow::anyhow!("{}", e.0))?;
-                let failures = vivacity_resolver::platform::check_install(
+                PlatformOutcome::Failures(vivacity_resolver::platform::check_install(
                     &lock, &platform, with_dev, &ignored,
-                );
-                if !failures.is_empty() {
-                    eprintln!("Your lock file cannot be installed on this platform:");
-                    for f in &failures {
-                        let by = f
-                            .required_by
-                            .as_deref()
-                            .map(|p| format!(" (required by {p})"))
-                            .unwrap_or_default();
-                        eprintln!(
-                            "  - {} {}{}: {:?}",
-                            f.requirement, f.constraint, by, f.reason
-                        );
-                    }
-                    eprintln!(
-                        "Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass."
-                    );
-                    return Ok(4);
-                }
+                ))
             }
-            None => {
-                if !lock.platform.is_empty() || (with_dev && !lock.platform_dev.is_empty()) {
-                    eprintln!(
-                        "Warning: php not found, platform requirements were not checked \
-                         (--ignore-platform-reqs silences this warning)"
-                    );
-                }
-            }
+            None => PlatformOutcome::NoPhp {
+                warn: !lock.platform.is_empty() || (with_dev && !lock.platform_dev.is_empty()),
+            },
         }
-    }
-
+    } else {
+        PlatformOutcome::Failures(Vec::new())
+    };
     trace("platform check", t0);
     // `LocalRepoTransaction` (installed.json against the lock): the
     // `Package operations` summary, and in a dry run the operation lines
@@ -680,6 +648,74 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         &root_pkg.pretty_version,
         merged_links,
     )?;
+    let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
+    // The scope analysis is pure (lock, manifest, installed.json, global
+    // config): computed here, reported after the join.
+    let scope = if args.dry_run {
+        None
+    } else {
+        Some(vivacity_core::scope::analyze(
+            &project,
+            &lock,
+            &manifest,
+            with_dev,
+            !args.no_plugins,
+        ))
+    };
+
+    // Join: policy first (exit 2), then the platform (exit 4), then the
+    // missing requirements, in `Installer::doInstall`'s order.
+    if let Some(handle) = policy_thread {
+        let (problems, warnings) = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("the policy check thread panicked"))??;
+        for w in &warnings {
+            eprintln!("{w}");
+        }
+        if !problems.is_empty() {
+            // `Installer::doInstall`: the headline, then
+            // `SolverProblemsException::getPrettyString` (problems
+            // deduplicated and numbered, each ending with a newline).
+            eprintln!("Your lock file does not contain a compatible set of packages. Please run composer update.");
+            let mut text = String::from("\n");
+            let mut seen: Vec<&String> = Vec::new();
+            for p in &problems {
+                if seen.contains(&p) {
+                    continue;
+                }
+                seen.push(p);
+                text.push_str(&format!("  Problem {}\n    {p}\n", seen.len()));
+            }
+            eprintln!("{text}");
+            return Ok(2);
+        }
+        trace("policy", t0);
+    }
+    match platform_outcome {
+        PlatformOutcome::Failures(failures) if !failures.is_empty() => {
+            eprintln!("Your lock file cannot be installed on this platform:");
+            for f in &failures {
+                let by = f
+                    .required_by
+                    .as_deref()
+                    .map(|p| format!(" (required by {p})"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "  - {} {}{}: {:?}",
+                    f.requirement, f.constraint, by, f.reason
+                );
+            }
+            eprintln!("Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass.");
+            return Ok(4);
+        }
+        PlatformOutcome::NoPhp { warn: true } => {
+            eprintln!(
+                "Warning: php not found, platform requirements were not checked \
+                 (--ignore-platform-reqs silences this warning)"
+            );
+        }
+        _ => {}
+    }
     if !missing.is_empty() {
         // On a bare vendor the plugin is not active yet in Composer's run:
         // it would install itself, then run a partial `composer update` of
@@ -712,7 +748,6 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             return Ok(4);
         }
     }
-    let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
     {
         use vivacity_resolver::transaction::Operation;
         let ops = &transaction.operations;
@@ -757,8 +792,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
 
     // Out of scope: exec composer as fallback (default) or fail explicitly.
-    let scope =
-        vivacity_core::scope::analyze(&project, &lock, &manifest, with_dev, !args.no_plugins);
+    let Some(scope) = scope else {
+        anyhow::bail!("internal: scope was not analysed");
+    };
     if !scope.is_native_ok() {
         return fallback_or_fail(args, &project, &scope);
     }
@@ -1474,6 +1510,14 @@ fn which_composer() -> Option<PathBuf> {
 /// Network transport for remote composer repositories: the vivacity-core
 /// Fetcher (Composer auth, retries), made synchronous, with a parallel
 /// batch (Composer: curl multi, 12 downloads at a time).
+/// What the platform check found, reported after the policy join.
+enum PlatformOutcome {
+    /// php probed: the requirements the lock cannot satisfy (empty = fine).
+    Failures(Vec<vivacity_core::platform::PlatformFailure>),
+    /// No php: a warning when the lock has platform requirements to check.
+    NoPhp { warn: bool },
+}
+
 fn http_transport(
     project: &std::path::Path,
     offline: bool,

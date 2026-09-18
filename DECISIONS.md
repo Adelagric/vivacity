@@ -728,3 +728,23 @@ sha256 de composer.json) — un fichier ajouté dans un dossier `classmap` racin
 n'est pas vu là où `composer install` le voit (vérifié sur viv 0.14.0) ; vivacity
 garde le contrat de Composer et paie le dump (~50 ms avec le cache de classmap).
 
+## 2026-09-18 — P1 : la requête de listes recouvre le travail local (plan v0.15-perf-install)
+
+Fait : un `install` depuis le lock attend une requête conditionnelle (résumé
+des listes de blocage, `If-Modified-Since` → 304 ; `packages.json` en cache
+600 s — `loadFilterSummary` / `loadRootServerFile(600)` de Composer) avant
+de faire quoi que ce soit d'autre : 73–92 ms sur le conteneur Linux arm64,
+100–200 ms sur le Mac selon l'heure, pour 30–47 ms de travail réel hors ligne.
+Décision : la vérification tourne sur un thread ; plateforme, transaction
+(`LocalRepoTransaction`) et analyse de scope sont calculées en silence
+pendant l'attente ; jointure avant toute impression ou écriture, puis le
+rapport dans l'ordre de `Installer::doInstall` (avertissements de politique,
+problèmes → code 2, plateforme → code 4, exigences manquantes, opérations,
+notes de scope). Mesuré (laravel, `--no-plugins --no-scripts`) : trace Linux
+scope = jointure (75,6 ms → 75,6 ms : ~10 ms recouverts), Mac 13–18 ms ;
+hyperfine no-op en ligne Linux 128 → 117 ms (σ 37–43 : dans le bruit
+réseau), warm 128 vs 131 (idem). stderr identique (diff), 286 cas de harnais
+0 échec, 214 tests. Écarté : lancer la requête avant `pre-install-cmd` (un
+script peut changer auth.json/config) ; un TTL sur le résumé (contrat :
+Composer revalide à chaque install — décision séparée).
+
