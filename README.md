@@ -224,6 +224,12 @@ The lower layers are separate crates (`vivacity-core`: manifests, lock,
 store, installers; `vivacity-resolver`: the resolver port; `vivacity-autoload`:
 the autoloader generator).
 
+Embedded by [ePHPm](https://github.com/ephpm/ephpm) since
+[v0.11.0](https://github.com/ephpm/ephpm/releases/tag/v0.11.0): its
+[`ephpm composer`](https://ephpm.dev/reference/cli/composer/) subcommand
+forwards every argument to vivacity compiled into the same binary, so
+`ephpm composer install` needs neither a PHP runtime nor `composer.phar`.
+
 Embedding brings in vivacity's HTTP stack (reqwest over rustls). The default
 feature `rustls-tls-ring` bundles the ring crypto provider — right for the
 standalone binary, wrong for a host that already links another rustls
