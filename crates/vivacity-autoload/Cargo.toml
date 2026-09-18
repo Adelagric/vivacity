@@ -24,6 +24,7 @@ pcre2.workspace = true
 rayon.workspace = true
 walkdir.workspace = true
 sha1.workspace = true
+memchr.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

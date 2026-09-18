@@ -4,6 +4,28 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Changed
+- **`install` overlaps its one network request with the local work**: the
+  filter-summary revalidation (Composer's `loadFilterSummary`) runs on a
+  thread while the platform check, the transaction and the scope are
+  computed; the join comes before any output or write, and the report
+  keeps `Installer::doInstall`'s order (policy, platform, missing
+  requirements, operations). ~10 ms hidden on Linux, 13–18 on macOS.
+- **The autoloader dump is twice as fast** on a Laravel-sized classmap
+  (macOS 61 → 28 ms, Linux `-o` 40 → 19 ms) with byte-identical output:
+  the scanned-files set compares path bytes instead of `PathBuf`
+  components, `__DIR__` substitution uses a real substring search,
+  already-normalised paths are not re-normalised, exclusion regexes and
+  literal prefixes are compiled once per pattern.
+- **Scans outside the store are cached per file** (project sources, `path`
+  packages, a vendor/ the store does not know): key (mtime ns, size) per
+  file, directory listed on every scan, so an added, changed or removed
+  file is always seen. `harness/root-scan.sh` replays nine such edits
+  against Composer. `VIVACITY_NO_CLASSMAP_CACHE=1` disables it with the
+  store cache.
+
 ## [0.14.0] — 2026-09-18
 
 ### Changed

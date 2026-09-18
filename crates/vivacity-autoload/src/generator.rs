@@ -128,6 +128,15 @@ struct Autoloads {
     exclude: Vec<String>,
 }
 
+fn trace(label: &str, since: std::time::Instant) {
+    if std::env::var_os("VIVACITY_TRACE").is_some() {
+        eprintln!(
+            "trace:   dump {label:<15} {:>7.1} ms",
+            since.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 pub fn dump(
     project_dir: &Path,
     lock: &Lock,
@@ -135,6 +144,7 @@ pub fn dump(
     layout: &Layout,
     opts: &DumpOptions,
 ) -> Result<DumpReport, AutoloadError> {
+    let t0 = std::time::Instant::now();
     let mut report = DumpReport::default();
     let base_path = normalize_path(
         &vivacity_core::pathutil::canonicalize(project_dir)
@@ -251,20 +261,32 @@ pub fn dump(
         }
         None => Vec::new(),
     };
-    let cache_slot = |abs: &str| -> Option<crate::classmap::CacheSlot> {
+    // A directory under a store entry is immutable: one record for the
+    // whole directory. Anything else (the project's own sources, a `path`
+    // package, a vendor/ that Composer wrote) can change between two
+    // installs: one record per file, keyed on mtime and size.
+    let cache_slot = |abs: &str| -> Option<ScanSlot> {
         let cfg = opts.classmap_cache.as_ref()?;
         let se = store_entries
             .iter()
-            .find(|se| abs == se.install || abs.starts_with(&se.install_slash))?;
-        let rel = abs
-            .strip_prefix(&se.install)
-            .unwrap_or("")
-            .trim_start_matches('/');
-        Some(crate::classmap::CacheSlot::new(
-            &cfg.cache_root,
-            &se.entry,
-            Path::new(rel),
-        ))
+            .find(|se| abs == se.install || abs.starts_with(&se.install_slash));
+        match se {
+            Some(se) => {
+                let rel = abs
+                    .strip_prefix(&se.install)
+                    .unwrap_or("")
+                    .trim_start_matches('/');
+                Some(ScanSlot::Store(crate::classmap::CacheSlot::new(
+                    &cfg.cache_root,
+                    &se.entry,
+                    Path::new(rel),
+                )))
+            }
+            None => Some(ScanSlot::Files(crate::classmap::FileCacheSlot::new(
+                &cfg.cache_root,
+                Path::new(abs),
+            ))),
+        }
     };
 
     let autoloads = parse_autoloads(
@@ -274,6 +296,7 @@ pub fn dump(
         &base_path,
     );
 
+    trace("inputs", t0);
     // autoload_namespaces.php / autoload_psr4.php
     let path_code = |p: &str| get_path_code(&base_path, &vendor_path, p);
     let mut namespaces_body: Vec<u8> = Vec::new();
@@ -299,12 +322,24 @@ pub fn dump(
     // "first one wins") is replayed SEQUENTIALLY in that same order: the
     // classmap and the bytes of autoload_classmap.php therefore do not
     // depend on the parallelism.
+    enum ScanSlot {
+        Store(crate::classmap::CacheSlot),
+        Files(crate::classmap::FileCacheSlot),
+    }
+    impl ScanSlot {
+        fn as_cache(&self) -> crate::classmap::ScanCache<'_> {
+            match self {
+                ScanSlot::Store(c) => crate::classmap::ScanCache::Store(c),
+                ScanSlot::Files(f) => crate::classmap::ScanCache::Files(f),
+            }
+        }
+    }
     struct ScanJob {
         path: PathBuf,
         excl: Option<pcre2::bytes::Regex>,
         ty: AutoloadType,
         ns: String,
-        slot: Option<crate::classmap::CacheSlot>,
+        slot: Option<ScanSlot>,
     }
     let mut jobs: Vec<ScanJob> = Vec::new();
     for dir in &autoloads.classmap {
@@ -359,14 +394,15 @@ pub fn dump(
         }
     }
 
+    trace("jobs", t0);
     let mut scanner = Scanner::new()?;
     {
         use rayon::prelude::*;
         // The pure phase only touches `path`/`slot` (Send + Sync), never the
         // exclusion regex — no Sync requirement on pcre2::Regex.
-        let inputs: Vec<(&Path, Option<&crate::classmap::CacheSlot>)> = jobs
+        let inputs: Vec<(&Path, Option<crate::classmap::ScanCache<'_>>)> = jobs
             .iter()
-            .map(|j| (j.path.as_path(), j.slot.as_ref()))
+            .map(|j| (j.path.as_path(), j.slot.as_ref().map(ScanSlot::as_cache)))
             .collect();
         // Directories in parallel means READS in parallel. That pays where
         // I/O latency dominates (ext4/WSL2: sylius cold scan 1.03 s -> 0.48 s)
@@ -393,6 +429,7 @@ pub fn dump(
             scanner.merge_scanned(sf?, &j.path, j.excl.as_ref(), j.ty, &j.ns)?;
         }
     }
+    trace("scan+merge", t0);
     for (class, others) in &scanner.class_map.ambiguous {
         let first = scanner
             .class_map
@@ -499,6 +536,7 @@ pub fn dump(
         std::fs::remove_file(&include_path_file).map_err(io(&include_path_file))?;
     }
 
+    trace("classmap file", t0);
     // autoload_files.php
     let files_file = target_dir.join("autoload_files.php");
     let use_include_files = !autoloads.files.is_empty();
@@ -527,6 +565,7 @@ pub fn dump(
         std::fs::remove_file(&files_file).map_err(io(&files_file))?;
     }
 
+    trace("files", t0);
     // autoload_static.php
     let static_file = build_static_file(
         &suffix,
@@ -538,6 +577,7 @@ pub fn dump(
     );
     write(&target_dir.join("autoload_static.php"), static_file)?;
 
+    trace("static", t0);
     // platform_check.php
     let check_platform =
         opts.platform_check != PlatformCheckMode::Off && !opts.ignore_all_platform_reqs;
@@ -935,8 +975,19 @@ fn build_exclusion_regex(
         let abs = normalize_path(&absolute(base_path, dir));
         let dir_match_normalized = preg_quote(&abs);
         let is_symlink = dir_match != dir_match_normalized;
+        // `literal_prefix` is a character walk over the pattern, the same
+        // for every directory: once per pattern text.
+        thread_local! {
+            static LITERALS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
         kept.retain(|pattern| {
-            let literal = literal_prefix(pattern);
+            let literal = LITERALS.with(|m| {
+                m.borrow_mut()
+                    .entry(pattern.clone())
+                    .or_insert_with(|| literal_prefix(pattern))
+                    .clone()
+            });
             let related = |d: &str| literal.starts_with(d) || d.starts_with(&literal);
             related(&dir_match) || (is_symlink && related(&dir_match_normalized))
         });
@@ -945,10 +996,22 @@ fn build_exclusion_regex(
         return Ok(None);
     }
     let pattern = format!("({})", kept.join("|"));
-    pcre2::bytes::RegexBuilder::new()
-        .build(&pattern)
-        .map(Some)
-        .map_err(|e| AutoloadError::Regex(e.to_string()))
+    // The same pattern is compiled for every directory of a package (a
+    // `-o` dump has one job per PSR directory): one compilation per text.
+    thread_local! {
+        static COMPILED: std::cell::RefCell<std::collections::HashMap<String, pcre2::bytes::Regex>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    COMPILED.with(|cache| {
+        if let Some(re) = cache.borrow().get(&pattern) {
+            return Ok(Some(re.clone()));
+        }
+        let re = pcre2::bytes::RegexBuilder::new()
+            .build(&pattern)
+            .map_err(|e| AutoloadError::Regex(e.to_string()))?;
+        cache.borrow_mut().insert(pattern, re.clone());
+        Ok(Some(re))
+    })
 }
 
 /// `^(([^.+*?\[^\]$(){}=!<>|:\\#-]+|\\[.+*?\[^\]$(){}=!<>|:#-])*).*`: literal prefix.
@@ -975,8 +1038,14 @@ fn literal_prefix(pattern: &str) -> String {
 
 /// `getPathCode`: PHP expression (`$vendorDir . '/x'`, `$baseDir . '/y'`, absolute).
 fn get_path_code(base_path: &str, vendor_path: &str, path: &str) -> String {
-    let abs = normalize_path(&absolute(base_path, path));
-    let (mut prefix, rel) = if abs == vendor_path || abs.starts_with(&format!("{vendor_path}/")) {
+    let abs: std::borrow::Cow<'_, str> = if vivacity_core::pathutil::is_normalized_absolute(path) {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        std::borrow::Cow::Owned(normalize_path(&absolute(base_path, path)))
+    };
+    let under_vendor = abs == vendor_path
+        || (abs.starts_with(vendor_path) && abs.as_bytes().get(vendor_path.len()) == Some(&b'/'));
+    let (mut prefix, rel) = if under_vendor {
         (
             "$vendorDir . ".to_owned(),
             abs[vendor_path.len()..].to_owned(),
@@ -998,8 +1067,14 @@ fn get_path_code(base_path: &str, vendor_path: &str, path: &str) -> String {
 /// Absolute value of an autoload path (what PHP gets by evaluating the
 /// getPathCode code), for the static file.
 fn absolute_value(base_path: &str, vendor_path: &str, path: &str) -> String {
-    let abs = normalize_path(&absolute(base_path, path));
-    let value = if abs == vendor_path || abs.starts_with(&format!("{vendor_path}/")) {
+    let abs = if vivacity_core::pathutil::is_normalized_absolute(path) {
+        path.to_owned()
+    } else {
+        normalize_path(&absolute(base_path, path))
+    };
+    let under_vendor = abs == vendor_path
+        || (abs.starts_with(vendor_path) && abs.as_bytes().get(vendor_path.len()) == Some(&b'/'));
+    let value = if under_vendor {
         abs
     } else {
         let short = normalize_path(&find_shortest_path(base_path, &abs));

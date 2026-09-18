@@ -748,3 +748,33 @@ réseau), warm 128 vs 131 (idem). stderr identique (diff), 286 cas de harnais
 script peut changer auth.json/config) ; un TTL sur le résumé (contrat :
 Composer revalide à chaque install — décision séparée).
 
+## 2026-09-18 — P2 : le dump de l'autoloader, profilé plutôt que supposé (plan v0.15-perf-install)
+
+Fait : le plan supposait que les ~50 ms de dump sur laravel (Mac, `-o`)
+venaient du scan psr-4 racine non caché. Un échantillonnage (`sample` sur
+une boucle in-process de 40 dumps) a montré autre chose : 28 % du dump dans
+`std::path::compare_components` — le set des chemins réels déjà pris
+(`$this->scannedFiles`) était un `BTreeSet<PathBuf>`, comparé composant par
+composant à chaque `contains`/`insert` sur 6 849 fichiers ; puis
+`replace_bytes` (substitution `__DIR__` sur le var_export de ~1 Mo, un
+`starts_with` par octet et par motif), `normalize_path` réalloué pour chaque
+fichier déjà normalisé, `format!("{vendor}/")` par classe dans `getPathCode`,
+la regex d'exclusion recompilée et `literal_prefix` recalculé pour chacun des
+~250 jobs d'un `-o`. Décisions : `HashSet<Vec<u8>>` sur les octets du chemin ;
+`memchr::memmem` pour la substitution ; `normalize_path_cow` /
+`is_normalized_absolute` (identité sans allocation quand le chemin est déjà
+normalisé — les fichiers scannés le sont tous) ; regex et préfixes littéraux
+mémorisés par texte de motif. Le cache par fichier hors store
+(`FileCacheSlot`, clé chemin canonique, entrée (mtime ns, taille, classes),
+répertoire relu à chaque scan) est livré aussi : il ne pèse pas sur laravel
+(les sources racine sont petites) mais couvre un paquet `path` ou un vendor/
+que le store ne connaît pas ; `harness/root-scan.sh` (9 étapes : ajout,
+classe en plus, réécriture même taille à la seconde suivante, sous-répertoire,
+suppression, psr-4 sous `-o`) le compare à Composer à chaque pas.
+Mesuré (laravel, `optimize-autoloader: true`) : `dump-autoload` Mac 61,5 →
+28,1 ms ; Linux (conteneur arm64) `dump -o` 39,7 → 19,4 ms, no-op `--offline`
+53,2 → 34,7 ms, warm `--offline` 72,5 → 53,1 ms. Sortie identique à l'octet
+(diff-vendor `--with-autoloader` cache froid puis chaud, 298 cas de harnais).
+Reste dans le dump : chargement des ~250 caches de store (`scan_only`),
+var_export + réindentation de la statique, `installed.json` parsé en `Value`.
+

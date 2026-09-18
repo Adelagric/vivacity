@@ -201,17 +201,20 @@ fn replace_bytes(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     if from.is_empty() {
         return haystack.to_vec();
     }
+    // Non-overlapping, left to right — what a byte-by-byte `starts_with`
+    // scan did, on a megabyte of var_export per substitution.
+    let finder = memchr::memmem::Finder::new(from);
     let mut out = Vec::with_capacity(haystack.len());
     let mut i = 0;
-    while i < haystack.len() {
-        if haystack[i..].starts_with(from) {
-            out.extend_from_slice(to);
-            i += from.len();
-        } else {
-            out.push(haystack[i]);
-            i += 1;
+    for at in finder.find_iter(haystack) {
+        if at < i {
+            continue;
         }
+        out.extend_from_slice(&haystack[i..at]);
+        out.extend_from_slice(to);
+        i = at + from.len();
     }
+    out.extend_from_slice(&haystack[i..]);
     out
 }
 

@@ -19,7 +19,7 @@
 
 use crate::pathutil::normalize_path;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -461,6 +461,118 @@ impl CacheSlot {
     }
 }
 
+/// Which cache a scan may use.
+#[derive(Clone, Copy)]
+pub enum ScanCache<'a> {
+    /// An immutable store entry: one record for the whole directory.
+    Store(&'a CacheSlot),
+    /// A directory that can change (the project's own sources, a `path`
+    /// package, a vendor/ written by Composer): one record per file, keyed
+    /// on its mtime and size; the directory is still listed on every scan.
+    Files(&'a FileCacheSlot),
+}
+
+/// Version of the per-file cache encoding; bump with `CACHE_FORMAT`.
+const FILE_CACHE_FORMAT: &str = "r1";
+
+/// Cache location for the per-file scan of a mutable directory (or file):
+/// key = canonical path + format version. Reading and detection are skipped
+/// for a file whose (mtime ns, size) are unchanged; a file added, removed or
+/// rewritten is seen — `collect_files` lists the directory every time.
+/// Residual risk, documented: a file rewritten within the same mtime tick
+/// with the same size is served from the cache.
+pub struct FileCacheSlot {
+    file: PathBuf,
+}
+
+/// One cached file: (mtime ns, size, raw classes).
+type FileRecord = (u64, u64, Vec<Vec<u8>>);
+
+impl FileCacheSlot {
+    pub fn new(cache_root: &Path, path: &Path) -> FileCacheSlot {
+        use sha1::{Digest, Sha1};
+        let canonical =
+            vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut h = Sha1::new();
+        h.update(CACHE_FORMAT.as_bytes());
+        h.update(b"\0");
+        h.update(FILE_CACHE_FORMAT.as_bytes());
+        h.update(b"\0");
+        h.update(canonical.to_string_lossy().as_bytes());
+        let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        FileCacheSlot {
+            file: cache_root.join("classmap-files").join(format!("{key}.bin")),
+        }
+    }
+
+    /// (mtime ns, size) of a file, None when it cannot be stat'ed.
+    fn identity(path: &Path) -> Option<(u64, u64)> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some((u64::try_from(mtime).ok()?, meta.len()))
+    }
+
+    /// Records by relative path.
+    ///
+    ///   u32 file_count
+    ///   [ u32 rel_len, rel, u64 mtime_ns, u64 size,
+    ///     u32 class_count, [ u32 class_len, class ]* ]*
+    fn load(&self) -> Option<BTreeMap<String, FileRecord>> {
+        let bytes = std::fs::read(&self.file).ok()?;
+        let mut r = ByteReader::new(&bytes);
+        let n = r.u32()? as usize;
+        let mut out = BTreeMap::new();
+        for _ in 0..n {
+            let rel = String::from_utf8(r.slice()?.to_vec()).ok()?;
+            let mtime = r.u64()?;
+            let size = r.u64()?;
+            let nc = r.u32()? as usize;
+            let mut classes = Vec::with_capacity(nc.min(r.remaining() / 4));
+            for _ in 0..nc {
+                classes.push(r.slice()?.to_vec());
+            }
+            out.insert(rel, (mtime, size, classes));
+        }
+        if !r.is_empty() {
+            return None;
+        }
+        Some(out)
+    }
+
+    fn store(&self, records: &BTreeMap<String, FileRecord>) {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
+        for (rel, (mtime, size, classes)) in records {
+            push_slice(&mut buf, rel.as_bytes());
+            buf.extend_from_slice(&mtime.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&(classes.len() as u32).to_le_bytes());
+            for c in classes {
+                push_slice(&mut buf, c);
+            }
+        }
+        if let Some(parent) = self.file.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = self.file.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        if std::fs::write(&tmp, &buf).is_ok() && std::fs::rename(&tmp, &self.file).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
 /// Appends `u32 len` then the bytes.
 fn push_slice(buf: &mut Vec<u8>, s: &[u8]) {
     buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
@@ -483,6 +595,12 @@ impl<'a> ByteReader<'a> {
         self.pos = end;
         Some(u32::from_le_bytes(raw.try_into().ok()?))
     }
+    fn u64(&mut self) -> Option<u64> {
+        let b = self.bytes.get(self.pos..self.pos + 8)?;
+        self.pos += 8;
+        Some(u64::from_le_bytes(b.try_into().ok()?))
+    }
+
     fn slice(&mut self) -> Option<&'a [u8]> {
         let len = self.u32()? as usize;
         let end = self.pos.checked_add(len)?;
@@ -516,7 +634,10 @@ pub struct ClassMap {
 
 pub struct Scanner {
     pub class_map: ClassMap,
-    scanned: BTreeSet<PathBuf>,
+    /// Real paths already taken (`$this->scannedFiles`), by their OS bytes:
+    /// a `PathBuf` set compares component by component on every lookup,
+    /// which was a quarter of a dump's time on 7 000 files.
+    scanned: std::collections::HashSet<Vec<u8>>,
 }
 
 /// `(path, real path, raw classes)` of one directory, in walk order — the
@@ -540,7 +661,7 @@ impl Scanner {
         ClassFinder::new()?; // validates the regexes early
         Ok(Scanner {
             class_map: ClassMap::default(),
-            scanned: BTreeSet::new(),
+            scanned: std::collections::HashSet::new(),
         })
     }
 
@@ -573,7 +694,7 @@ impl Scanner {
         excluded: Option<&pcre2::bytes::Regex>,
         autoload_type: AutoloadType,
         namespace: &str,
-        cache: Option<&CacheSlot>,
+        cache: Option<ScanCache<'_>>,
     ) -> Result<(), ClassMapError> {
         let scanned_files = Scanner::scan_only(path, cache)?;
         self.merge_scanned(scanned_files, path, excluded, autoload_type, namespace)
@@ -586,8 +707,16 @@ impl Scanner {
     /// parallel and then merged sequentially in order.
     pub fn scan_only(
         path: &Path,
-        cache: Option<&CacheSlot>,
+        cache: Option<ScanCache<'_>>,
     ) -> Result<ScannedFiles, ClassMapError> {
+        let (cache, files_cache) = match cache {
+            Some(ScanCache::Store(c)) => (Some(c), None),
+            Some(ScanCache::Files(f)) => (None, Some(f)),
+            None => (None, None),
+        };
+        if let Some(f) = files_cache {
+            return Scanner::scan_only_files_cached(path, f);
+        }
         // (path, real path, raw classes) in walk order.
         let mut scanned_files: ScannedFiles = Vec::new();
 
@@ -621,6 +750,69 @@ impl Scanner {
         Ok(scanned_files)
     }
 
+    /// `scan_only` for a directory that can change: the directory is listed
+    /// (walk order, as always), each file's (mtime ns, size) is compared to
+    /// the cache, only the changed and new files are read and scanned, and
+    /// the cache is rewritten when anything differed. Symlinks inside: the
+    /// result is not cached (as for a store entry).
+    fn scan_only_files_cached(
+        path: &Path,
+        slot: &FileCacheSlot,
+    ) -> Result<ScannedFiles, ClassMapError> {
+        let (files, saw_symlink) = Scanner::collect_files(path)?;
+        let cached = slot.load().unwrap_or_default();
+        let base: PathBuf = if path.is_file() {
+            path.parent().map(Path::to_path_buf).unwrap_or_default()
+        } else {
+            path.to_path_buf()
+        };
+        let rel_of = |file: &Path| -> String {
+            file.strip_prefix(&base)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut hits: Vec<Option<Vec<Vec<u8>>>> = Vec::with_capacity(files.len());
+        let mut identities: Vec<Option<(u64, u64)>> = Vec::with_capacity(files.len());
+        let mut todo: Vec<(PathBuf, PathBuf, Vec<u8>)> = Vec::new();
+        for (file, real) in &files {
+            let id = FileCacheSlot::identity(real);
+            let hit = id.and_then(|(mtime, size)| {
+                let (m, sz, classes) = cached.get(&rel_of(file))?;
+                (*m == mtime && *sz == size).then(|| classes.clone())
+            });
+            if hit.is_none() {
+                let contents =
+                    std::fs::read(file).map_err(|_| ClassMapError::Read(file.clone()))?;
+                todo.push((file.clone(), real.clone(), contents));
+            }
+            identities.push(id);
+            hits.push(hit);
+        }
+        let found = find_all(&todo)?;
+        let mut found = found.into_iter();
+        let mut scanned_files: ScannedFiles = Vec::with_capacity(files.len());
+        let mut records: BTreeMap<String, FileRecord> = BTreeMap::new();
+        let mut changed = files.len() != cached.len();
+        for ((file, real), (hit, id)) in files.into_iter().zip(hits.into_iter().zip(identities)) {
+            let classes = match hit {
+                Some(c) => c,
+                None => {
+                    changed = true;
+                    found.next().unwrap_or_default()
+                }
+            };
+            if let Some((mtime, size)) = id {
+                records.insert(rel_of(&file), (mtime, size, classes.clone()));
+            }
+            scanned_files.push((file, real, classes));
+        }
+        if changed && !saw_symlink {
+            slot.store(&records);
+        }
+        Ok(scanned_files)
+    }
+
     /// Merge phase (sequential, ordered): applies exclusions, realpath
     /// deduplication, the PSR filter and "first one wins" on ambiguities —
     /// the shared state that forces the order across directories.
@@ -634,8 +826,10 @@ impl Scanner {
     ) -> Result<(), ClassMapError> {
         let base_path = normalize_path(&path.to_string_lossy());
         for (file, real, classes) in scanned_files {
-            let file_path = normalize_path(&file.to_string_lossy());
-            if self.scanned.contains(&real) {
+            let file_lossy = file.to_string_lossy();
+            let file_path = vivacity_core::pathutil::normalize_path_cow(&file_lossy);
+            let real_key = real.as_os_str().as_encoded_bytes().to_vec();
+            if self.scanned.contains(&real_key) {
                 continue;
             }
             if let Some(re) = excluded {
@@ -656,22 +850,22 @@ impl Scanner {
                     &base_path,
                 );
                 if !classes.is_empty() {
-                    self.scanned.insert(real);
+                    self.scanned.insert(real_key.clone());
                 }
             } else {
-                self.scanned.insert(real);
+                self.scanned.insert(real_key.clone());
             }
             for class in classes {
                 if let Some(existing) = self.class_map.map.get(&class) {
-                    if existing != &file_path {
+                    if existing.as_str() != file_path.as_ref() {
                         self.class_map
                             .ambiguous
                             .entry(class)
                             .or_default()
-                            .push(file_path.clone());
+                            .push(file_path.to_string());
                     }
                 } else {
-                    self.class_map.map.insert(class, file_path.clone());
+                    self.class_map.map.insert(class, file_path.to_string());
                 }
             }
         }
@@ -927,8 +1121,14 @@ mod cache_tests {
 
         let run = |slot: Option<&CacheSlot>| {
             let mut s = Scanner::new().expect("scanner");
-            s.scan_path_cached(&pkg.join("src"), None, AutoloadType::ClassMap, "", slot)
-                .expect("scan");
+            s.scan_path_cached(
+                &pkg.join("src"),
+                None,
+                AutoloadType::ClassMap,
+                "",
+                slot.map(ScanCache::Store),
+            )
+            .expect("scan");
             (s.class_map.map, s.class_map.ambiguous)
         };
         let direct = run(None);
@@ -951,8 +1151,14 @@ mod cache_tests {
         std::os::unix::fs::symlink(pkg.join("real"), pkg.join("link")).expect("ln");
         let slot = CacheSlot::new(tmp.path(), &pkg, Path::new(""));
         let mut s = Scanner::new().expect("scanner");
-        s.scan_path_cached(&pkg, None, AutoloadType::ClassMap, "", Some(&slot))
-            .expect("scan");
+        s.scan_path_cached(
+            &pkg,
+            None,
+            AutoloadType::ClassMap,
+            "",
+            Some(ScanCache::Store(&slot)),
+        )
+        .expect("scan");
         #[cfg(unix)]
         assert!(
             !slot.file.exists(),
@@ -976,8 +1182,14 @@ mod cache_tests {
 
         let run = |slot: Option<&CacheSlot>| {
             let mut s = Scanner::new().expect("scanner");
-            s.scan_path_cached(&pkg.join("src"), None, AutoloadType::ClassMap, "", slot)
-                .expect("scan");
+            s.scan_path_cached(
+                &pkg.join("src"),
+                None,
+                AutoloadType::ClassMap,
+                "",
+                slot.map(ScanCache::Store),
+            )
+            .expect("scan");
             (s.class_map.map, s.class_map.ambiguous)
         };
         let direct = run(None);

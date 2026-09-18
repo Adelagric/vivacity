@@ -1939,6 +1939,7 @@ version = "0.14.0"
 dependencies = [
  "base64 0.23.1",
  "md-5",
+ "memchr",
  "rayon",
  "serde_json",
  "sha1",

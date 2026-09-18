@@ -70,6 +70,28 @@ pub fn is_absolute_path(path: &str) -> bool {
 
 /// `Filesystem::normalizePath`: single slashes, `.`/`..` resolution, no
 /// trailing slash (except for the root).
+/// True when `normalize_path` would return `path` unchanged: absolute,
+/// forward slashes only, no empty / `.` / `..` segment, no trailing slash.
+pub fn is_normalized_absolute(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.ends_with('/')
+        && !path.contains('\\')
+        && !path[1..]
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+}
+
+/// `normalize_path` without the allocation when there is nothing to do —
+/// the case of every scanned file (a normalised directory joined to a name).
+pub fn normalize_path_cow(path: &str) -> std::borrow::Cow<'_, str> {
+    if is_normalized_absolute(path) {
+        std::borrow::Cow::Borrowed(path)
+    } else {
+        std::borrow::Cow::Owned(normalize_path(path))
+    }
+}
+
 pub fn normalize_path(path: &str) -> String {
     let path = path.replace('\\', "/");
     let (absolute, rest) = if path.starts_with("//") && path.len() > 2 {
