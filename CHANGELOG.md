@@ -38,8 +38,7 @@ byte-identical-output promise are the public API.
   `scope::analyze` already passed the plugin regime to the layout but
   classified plugins without it. `harness/diff-vendor.sh` now replays each
   plugin-allowing fixture under `--no-plugins` on both sides and requires
-  a native, identical `vendor/` (found through viv's bench corpus, where
-  four of ten projects were `n/a` for this reason).
+  a native, identical `vendor/`.
 
 ## [0.13.0] — 2026-09-17
 

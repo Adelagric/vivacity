@@ -707,9 +707,9 @@ laissé ; `libc::FICLONE` (la constante codée en dur ne compile pas sous musl).
 ## 2026-09-18 — Gate de perf en ratio, pas en secondes ; sonde de plateforme en cache
 
 Fait : un runner GitHub varie de 30 à 45 % d'un run à l'autre sur un code
-identique (mesuré chez svandragt/vivace, bench/compare.py — leur idée, reprise
-telle quelle) ; une baseline en secondes déclenche sur le runner, pas sur le
-code. Décision : `bench/gate.py` compare `médiane vivacity / médiane Composer`
+identique ; une baseline en secondes déclenche sur le runner, pas sur le
+code. (Idée reprise d'un autre projet Rust de l'écosystème Composer, qui
+grade ses benchs en ratio pour la même raison.) Décision : `bench/gate.py` compare `médiane vivacity / médiane Composer`
 par scénario (no-op, warm, dump -o), mesurées dans le même job — la vitesse
 du runner se simplifie dans le ratio — contre `bench/results/baseline-ratio.json`,
 tolérance 15 % et marge absolue de 5 ms (un no-op à 10 ms franchit toute
@@ -723,8 +723,10 @@ n'avait plus d'appelant. Décision : cache de la sonde clé sur ce dont le résu
 dépend (binaire php, fichiers ini chargés/scannés + répertoire de scan, variables
 PHPRC / PHP_INI_SCAN_DIR / XDEBUG_MODE / XDEBUG_CONFIG), pas sur le seul binaire
 comme `detect` le faisait (une extension activée dans php.ini doit être vue).
-Non copié de viv : son no-op ne régénère pas l'autoloader (état = content-hash +
-sha256 de composer.json) — un fichier ajouté dans un dossier `classmap` racine
-n'est pas vu là où `composer install` le voit (vérifié sur viv 0.14.0) ; vivacity
-garde le contrat de Composer et paie le dump (~50 ms avec le cache de classmap).
+Écarté : un court-circuit du no-op sur un état « content-hash du lock + sha256
+de composer.json » qui sauterait le dump de l'autoloader — un fichier ajouté
+dans un dossier `classmap` racine (ou psr-4 avec `-o`) ne serait pas vu là où
+`composer install` le voit. vivacity garde le contrat de Composer et paie le
+dump (~50 ms avec le cache de classmap) ; un court-circuit n'est acceptable
+qu'avec une empreinte de tout ce que le dump scanne (chemin, mtime, taille).
 
