@@ -11,6 +11,7 @@ pub mod fetch;
 pub mod glob;
 pub mod installer;
 pub mod installers;
+pub mod jsonfile;
 pub mod layout;
 pub mod lock;
 pub mod path_install;

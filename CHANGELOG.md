@@ -29,6 +29,8 @@ byte-identical-output promise are the public API.
   file is always seen. `harness/root-scan.sh` replays nine such edits
   against Composer. `VIVACITY_NO_CLASSMAP_CACHE=1` disables it with the
   store cache.
+- **One parse per JSON file per process** (`installed.json`, the global
+  `config.json`), validated on the file's mtime and size on every read.
 
 ## [0.14.0] — 2026-09-18
 

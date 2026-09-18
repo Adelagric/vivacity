@@ -143,8 +143,7 @@ pub fn global_allow_plugins() -> Option<Value> {
 /// layer of `Config::merge`, below the root composer.json.
 pub fn global_config_value(key: &str) -> Option<Value> {
     let path = crate::fetch::composer_home()?.join("config.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+    let v = crate::jsonfile::read(&path)?;
     v.get("config")?.get(key).cloned()
 }
 
@@ -523,10 +522,7 @@ impl Layout {
 
 fn installed_packages(root: &Path, dirs: &Dirs) -> Vec<Value> {
     let path = dirs.composer_dir(root).join("installed.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+    let Some(v) = crate::jsonfile::read(&path) else {
         return Vec::new();
     };
     v.get("packages")

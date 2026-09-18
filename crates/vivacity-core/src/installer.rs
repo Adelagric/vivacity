@@ -72,10 +72,7 @@ struct Installed {
 fn installed_packages(composer_dir: &Path) -> BTreeMap<String, Installed> {
     let mut out = BTreeMap::new();
     let path = composer_dir.join("installed.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return out;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+    let Some(v) = crate::jsonfile::read(&path) else {
         return out;
     };
     for p in v["packages"].as_array().into_iter().flatten() {

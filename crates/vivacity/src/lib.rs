@@ -1405,10 +1405,8 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     .context("invalid composer.json")?;
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
     // Dev mode: that of the installed state (installed.json), like Composer.
-    let installed_json: Option<serde_json::Value> =
-        std::fs::read_to_string(composer_dir_of(&project, &manifest).join("installed.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let installed_json =
+        vivacity_core::jsonfile::read(&composer_dir_of(&project, &manifest).join("installed.json"));
     let installed_dev = installed_json
         .as_ref()
         .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
@@ -1845,9 +1843,7 @@ fn installed_packages(
     manifest: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
     let composer_dir = composer_dir_of(project, manifest);
-    let Some(installed) = std::fs::read_to_string(composer_dir.join("installed.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    let Some(installed) = vivacity_core::jsonfile::read(&composer_dir.join("installed.json"))
     else {
         return Vec::new();
     };

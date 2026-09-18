@@ -839,3 +839,23 @@ requête revenue à 82–100 ms, le dump est sorti du chemin critique. Hors
 ligne +1,6 ms sur Linux (34,9 → 36,5 : installed.json lu une fois de plus —
 P4 le retire). stderr identique, 311 cas de harnais, 214 tests.
 
+## 2026-09-18 — P4 : un parse par fichier JSON et par processus (plan v0.15-perf-install)
+
+Fait : `installed.json` (~1 Mo sur laravel) était lu et parsé en `Value` par
+le scope, le layout, la transaction, l'installer (deux fois), l'émulation
+pest et le dump, dans le même run ; `~/.composer/config.json` par chaque
+`global_config_value` (sept appelants). Décision : `vivacity_core::jsonfile::read`
+— un cache par processus, clé chemin, validé à chaque lecture sur
+(mtime ns, taille) du fichier : un fichier réécrit en cours de run
+(installed.json par l'installer) est reparsé, un fichier disparu répond
+absent. Écarté : passer la valeur de main en main (sept signatures à
+changer pour le même effet). Mesuré (laravel, Mac) : no-op `--offline`
+51,0 → 50,1 ms (la lecture ajoutée par P3c annulée et au-delà),
+`dump-autoload` 28,1 → 25,8 ms. 215 tests, 299 cas de harnais.
+
+Bilan de la journée sur le no-op laravel (Mac, M4 Max) : 163 ms (matin) →
+50 ms hors ligne, 116 ms en ligne dont ~100 d'attente réseau ; Linux
+(conteneur arm64) 103–125 → 95 ms en ligne, 35 hors ligne. La seule
+décision qui reste pour le no-op en ligne est celle de la requête de listes
+(revalidation à chaque install, comme Composer, ou TTL).
+
