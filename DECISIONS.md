@@ -807,3 +807,35 @@ jointure (`write` compare déjà les octets). Puis la seule décision restante
 est celle de la requête de listes elle-même (revalidation par install, comme
 Composer, ou TTL) — décision de contrat, à prendre avec les chiffres.
 
+## 2026-09-18 — P3b/P3c : mesures négatives et positives (plan v0.15-perf-install)
+
+P3b, statique en une passe : `static_property` réécrit pour émettre
+`autoload_static.php` directement dans sa forme finale (une passe au lieu de
+var_export → substitution → réindentation). Sortie identique, tests verts —
+et **aucun gain mesurable** (hyperfine dump laravel Mac 28,1 → 28,0 ms) : la
+substitution par `memmem` (P2) avait déjà retiré ce que ces passes coûtaient ;
+ce qui reste dans la phase « static » est `php_str` et `absolute_value` par
+classe. Décision : **revenu en arrière** (deux implémentations pour zéro
+gain, c'est du code en plus). Le cache de store consolidé n'a pas été fait
+non plus : la phase « scan » chaude est à 4 ms sur Mac pour ~250 fichiers,
+le coût est dans les allocations par fichier, pas dans les ouvertures. Le
+profil du dump est plat désormais (scan 4 · merge 5 · statique 4 · classmap
+3 · JSON 5 · jobs 2 ms sur Mac) : chaque poste vaut 2–5 ms.
+
+P3c, le dump planifié pendant l'attente réseau : `generator::dump` scindé en
+`plan` (tout ce qui lit — manifestes, scans, `autoload.php` existant pour le
+suffixe, caches de classmap qu'il peut écrire — rien d'écrit sous vendor/) et
+`DumpPlan::commit` (les écritures dans l'ordre historique, `write` comparant
+les octets, suppressions si présents). Dans `run_install`, quand la
+transaction est vide, sans `--dry-run`/`--no-autoloader`/`--run-scripts`, le
+dépôt local que l'install produira est calculable avant lui
+(`installer::local_repository_if_unchanged` : chaque paquet voulu présent
+dans installed.json à la même identité, répertoire en place) : le plan est
+calculé avant la jointure de la requête de listes, gardé en `Result` et
+consommé là où le dump tourne aujourd'hui (une erreur sort au même point,
+même texte), puis `commit` après l'install. Mesuré (laravel, no-op en ligne) :
+Mac 141,7 → 116,4 ms, Linux 106,5 → 94,7 ms — trace : plan terminé à 30–44 ms,
+requête revenue à 82–100 ms, le dump est sorti du chemin critique. Hors
+ligne +1,6 ms sur Linux (34,9 → 36,5 : installed.json lu une fois de plus —
+P4 le retire). stderr identique, 311 cas de harnais, 214 tests.
+

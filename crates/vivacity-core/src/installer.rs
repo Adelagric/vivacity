@@ -97,6 +97,57 @@ fn installed_packages(composer_dir: &Path) -> BTreeMap<String, Installed> {
     out
 }
 
+/// The local repository the state files and the autoloader are produced
+/// from: the lock, where an unchanged package keeps the entry installed.json
+/// already had (minus what is recomputed).
+fn local_repository(
+    lock: &Lock,
+    previous: &BTreeMap<String, Installed>,
+    unchanged_names: &std::collections::BTreeSet<&str>,
+) -> Lock {
+    let mut local = lock.clone();
+    for p in local
+        .packages
+        .iter_mut()
+        .chain(local.packages_dev.iter_mut())
+    {
+        if !unchanged_names.contains(p.name()) {
+            continue;
+        }
+        if let Some(prev) = previous.get(p.name()) {
+            let mut raw = prev.raw.clone();
+            for key in ["version_normalized", "installation-source", "install-path"] {
+                raw.remove(key);
+            }
+            p.raw = raw;
+        }
+    }
+    local
+}
+
+/// The local repository `install` will produce when its transaction is
+/// empty (every wanted package present in installed.json with the same
+/// identity, its directory in place): computable before the install runs,
+/// so the autoloader can be planned while the install waits on the
+/// network. `None` when a wanted package is not that — the caller then
+/// plans after the install, as before.
+pub fn local_repository_if_unchanged(lock: &Lock, layout: &Layout, with_dev: bool) -> Option<Lock> {
+    let previous = installed_packages(&layout.composer_dir());
+    let mut unchanged: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for p in lock.wanted_packages(with_dev) {
+        if previous.get(p.name()).map(|i| &i.identity) != Some(&identity(p)) {
+            return None;
+        }
+        if layout.install_path(p.name()).is_some()
+            && !layout.abs(p.name()).is_some_and(|d| d.is_dir())
+        {
+            return None;
+        }
+        unchanged.insert(p.name());
+    }
+    Some(local_repository(lock, &previous, &unchanged))
+}
+
 pub async fn install(
     _project_dir: &Path,
     lock: &Lock,
@@ -402,23 +453,7 @@ pub async fn install(
     // changing its identity — routine with `path` packages whose reference
     // is a git HEAD or none — leaves installed.json and the autoloader as
     // Composer leaves them.
-    let mut local = lock.clone();
-    for p in local
-        .packages
-        .iter_mut()
-        .chain(local.packages_dev.iter_mut())
-    {
-        if !unchanged_names.contains(p.name()) {
-            continue;
-        }
-        if let Some(prev) = previous.get(p.name()) {
-            let mut raw = prev.raw.clone();
-            for key in ["version_normalized", "installation-source", "install-path"] {
-                raw.remove(key);
-            }
-            p.raw = raw;
-        }
-    }
+    let local = local_repository(lock, &previous, &unchanged_names);
     let root = RootPackage::detect(root_manifest, project_dir, opts.with_dev);
     crate::state::write_state_files(
         &layout.composer_dir(),

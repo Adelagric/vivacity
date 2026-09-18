@@ -137,6 +137,39 @@ fn trace(label: &str, since: std::time::Instant) {
     }
 }
 
+/// The files a dump would write or remove, computed without touching
+/// vendor/: `commit` applies them (byte-compare before each write, remove
+/// only when present) in the order `dump` always wrote them.
+#[derive(Debug, Default)]
+pub struct DumpPlan {
+    actions: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl DumpPlan {
+    fn write(&mut self, path: PathBuf, content: impl Into<Vec<u8>>) {
+        self.actions.push((path, Some(content.into())));
+    }
+
+    fn remove(&mut self, path: PathBuf) {
+        self.actions.push((path, None));
+    }
+
+    pub fn commit(&self) -> Result<(), AutoloadError> {
+        for (path, content) in &self.actions {
+            match content {
+                Some(bytes) => write(path, bytes)?,
+                None => {
+                    if path.exists() {
+                        std::fs::remove_file(path).map_err(io(path))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `AutoloadGenerator::dump`: computes and writes.
 pub fn dump(
     project_dir: &Path,
     lock: &Lock,
@@ -144,8 +177,24 @@ pub fn dump(
     layout: &Layout,
     opts: &DumpOptions,
 ) -> Result<DumpReport, AutoloadError> {
+    let (plan, report) = plan(project_dir, lock, root_manifest, layout, opts)?;
+    plan.commit()?;
+    Ok(report)
+}
+
+/// The computing half of `dump`: everything read (manifests, the scans, the
+/// existing `autoload.php` for the suffix, the classmap caches — which it
+/// may write), nothing written under vendor/.
+pub fn plan(
+    project_dir: &Path,
+    lock: &Lock,
+    root_manifest: &Value,
+    layout: &Layout,
+    opts: &DumpOptions,
+) -> Result<(DumpPlan, DumpReport), AutoloadError> {
     let t0 = std::time::Instant::now();
     let mut report = DumpReport::default();
+    let mut plan = DumpPlan::default();
     let base_path = normalize_path(
         &vivacity_core::pathutil::canonicalize(project_dir)
             .map_err(io(project_dir))?
@@ -425,11 +474,12 @@ pub fn dump(
                     .map(|(p, s)| Scanner::scan_only(p, *s))
                     .collect()
             };
+        trace("scan", t0);
         for (j, sf) in jobs.iter().zip(scans) {
             scanner.merge_scanned(sf?, &j.path, j.excl.as_ref(), j.ty, &j.ns)?;
         }
     }
-    trace("scan+merge", t0);
+    trace("merge", t0);
     for (class, others) in &scanner.class_map.ambiguous {
         let first = scanner
             .class_map
@@ -467,33 +517,33 @@ pub fn dump(
     // the lock's content-hash, otherwise random.
     let suffix = resolve_suffix(opts, root_manifest, &vendor_dir, lock);
 
-    write(
-        &target_dir.join("autoload_namespaces.php"),
+    plan.write(
+        target_dir.join("autoload_namespaces.php"),
         templates::map_file(
             "autoload_namespaces.php",
             &vendor_path_code,
             &app_base_dir_code,
             &namespaces_body,
         ),
-    )?;
-    write(
-        &target_dir.join("autoload_psr4.php"),
+    );
+    plan.write(
+        target_dir.join("autoload_psr4.php"),
         templates::map_file(
             "autoload_psr4.php",
             &vendor_path_code,
             &app_base_dir_code,
             &psr4_body,
         ),
-    )?;
-    write(
-        &target_dir.join("autoload_classmap.php"),
+    );
+    plan.write(
+        target_dir.join("autoload_classmap.php"),
         templates::map_file(
             "autoload_classmap.php",
             &vendor_path_code,
             &app_base_dir_code,
             &classmap_body,
         ),
-    )?;
+    );
 
     // include_paths.php
     let mut include_paths: Vec<String> = Vec::new();
@@ -523,17 +573,17 @@ pub fn dump(
             .iter()
             .flat_map(|p| format!("    {},\n", path_code(p)).into_bytes())
             .collect();
-        write(
-            &include_path_file,
+        plan.write(
+            include_path_file.clone(),
             templates::map_file(
                 "include_paths.php",
                 &vendor_path_code,
                 &app_base_dir_code,
                 &body,
             ),
-        )?;
-    } else if include_path_file.exists() {
-        std::fs::remove_file(&include_path_file).map_err(io(&include_path_file))?;
+        );
+    } else {
+        plan.remove(include_path_file.clone());
     }
 
     trace("classmap file", t0);
@@ -552,17 +602,17 @@ pub fn dump(
             }
             body.extend_from_slice(format!("    {} => {},\n", php_str(id), code).as_bytes());
         }
-        write(
-            &files_file,
+        plan.write(
+            files_file.clone(),
             templates::map_file(
                 "autoload_files.php",
                 &vendor_path_code,
                 &app_base_dir_code,
                 &body,
             ),
-        )?;
-    } else if files_file.exists() {
-        std::fs::remove_file(&files_file).map_err(io(&files_file))?;
+        );
+    } else {
+        plan.remove(files_file.clone());
     }
 
     trace("files", t0);
@@ -575,7 +625,7 @@ pub fn dump(
         &vendor_path,
         &target_path,
     );
-    write(&target_dir.join("autoload_static.php"), static_file)?;
+    plan.write(target_dir.join("autoload_static.php"), static_file);
 
     trace("static", t0);
     // platform_check.php
@@ -585,12 +635,12 @@ pub fn dump(
     let mut platform_written = false;
     if check_platform {
         if let Some(content) = platform_check(&packages, &dev_names, opts) {
-            write(&platform_file, content)?;
+            plan.write(platform_file.clone(), content);
             platform_written = true;
         }
     }
-    if !platform_written && platform_file.exists() {
-        std::fs::remove_file(&platform_file).map_err(io(&platform_file))?;
+    if !platform_written {
+        plan.remove(platform_file.clone());
     }
 
     // autoload.php + autoload_real.php + ClassLoader.php + LICENSE
@@ -605,10 +655,10 @@ pub fn dump(
             format!("{vendor_to_target_code} . '/autoload_real.php'")
         }
     };
-    write(
-        &vendor_dir.join("autoload.php"),
+    plan.write(
+        vendor_dir.join("autoload.php"),
         templates::autoload_php(&real_code, &suffix),
-    )?;
+    );
     let prepend = root_manifest
         .get("config")
         .and_then(|c| c.get("prepend-autoloader"))
@@ -619,8 +669,8 @@ pub fn dump(
         .and_then(|c| c.get("use-include-path"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    write(
-        &target_dir.join("autoload_real.php"),
+    plan.write(
+        target_dir.join("autoload_real.php"),
         templates::autoload_real_php(&templates::RealFileOptions {
             suffix: &suffix,
             check_platform: platform_written,
@@ -632,13 +682,13 @@ pub fn dump(
             target_dir_loader: None,
             apcu_prefix: opts.apcu_prefix.as_deref(),
         }),
-    )?;
-    write(
-        &target_dir.join("ClassLoader.php"),
+    );
+    plan.write(
+        target_dir.join("ClassLoader.php"),
         templates::CLASS_LOADER_PHP,
-    )?;
-    write(&target_dir.join("LICENSE"), templates::LICENSE)?;
-    Ok(report)
+    );
+    plan.write(target_dir.join("LICENSE"), templates::LICENSE);
+    Ok((plan, report))
 }
 
 fn links(v: Option<&Value>) -> Vec<(String, String)> {

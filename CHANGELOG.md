@@ -13,6 +13,10 @@ byte-identical-output promise are the public API.
   computed; the join comes before any output or write, and the report
   keeps `Installer::doInstall`'s order (policy, platform, missing
   requirements, operations). ~10 ms hidden on Linux, 13–18 on macOS.
+  When the install has nothing to place, the autoloader is planned in
+  memory during that same wait and written (byte-compare per file) after
+  the install: a no-op install online costs about the request alone
+  (Laravel: macOS 142 → 116 ms, Linux 107 → 95 ms).
 - **The autoloader dump is twice as fast** on a Laravel-sized classmap
   (macOS 61 → 28 ms, Linux `-o` 40 → 19 ms) with byte-identical output:
   the scanned-files set compares path bytes instead of `PathBuf`

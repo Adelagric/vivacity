@@ -663,6 +663,49 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         ))
     };
 
+    // The autoloader, planned during the network wait when the install has
+    // nothing to place (every wanted package present, same identity): its
+    // inputs are then all known — the local repository the install would
+    // produce, the manifest, the layout — and `plan` writes nothing under
+    // vendor/. Kept as a `Result` and only looked at where the dump runs
+    // today, so an error surfaces at the same point with the same text.
+    // Not with `--run-scripts` (pre-autoload-dump may edit sources).
+    let early_dump: Option<anyhow::Result<PlannedDump>> = if args.dry_run
+        || args.no_autoloader
+        || runner.is_some()
+        || !transaction.operations.is_empty()
+    {
+        None
+    } else {
+        scope
+            .as_ref()
+            .filter(|s| s.is_native_ok())
+            .and_then(|s| s.layout.as_ref())
+            .and_then(|layout| {
+                vivacity_core::installer::local_repository_if_unchanged(&lock, layout, with_dev)
+                    .map(|local| {
+                        dump_autoload_plan(
+                            &project,
+                            &local,
+                            &manifest,
+                            layout,
+                            with_dev,
+                            args.optimize_autoloader || args.classmap_authoritative,
+                            args.classmap_authoritative,
+                            args.ignore_platform_reqs,
+                            &args.ignore_platform_req,
+                            (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+                            !args.no_plugins,
+                            lock.packages_dev
+                                .iter()
+                                .map(|p| p.name().to_owned())
+                                .collect(),
+                        )
+                    })
+            })
+    };
+    trace("autoload planned", t0);
+
     // Join: policy first (exit 2), then the platform (exit 4), then the
     // missing requirements, in `Installer::doInstall`'s order.
     if let Some(handle) = policy_thread {
@@ -885,24 +928,30 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         // the lock (they differ for an unchanged package whose lock entry
         // moved).
         let local = report.local_repository.as_ref().unwrap_or(&lock);
-        let report = dump_autoload(
-            &project,
-            local,
-            &manifest,
-            layout,
-            with_dev,
-            args.optimize_autoloader || args.classmap_authoritative,
-            args.classmap_authoritative,
-            args.ignore_platform_reqs,
-            &args.ignore_platform_req,
-            (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
-            !args.no_plugins,
-            // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`
-            lock.packages_dev
-                .iter()
-                .map(|p| p.name().to_owned())
-                .collect(),
-        )?;
+        let planned = match early_dump {
+            // Planned during the network wait: the install placed nothing,
+            // the inputs are what they were.
+            Some(planned) => planned?,
+            None => dump_autoload_plan(
+                &project,
+                local,
+                &manifest,
+                layout,
+                with_dev,
+                args.optimize_autoloader || args.classmap_authoritative,
+                args.classmap_authoritative,
+                args.ignore_platform_reqs,
+                &args.ignore_platform_req,
+                (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+                !args.no_plugins,
+                // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`
+                lock.packages_dev
+                    .iter()
+                    .map(|p| p.name().to_owned())
+                    .collect(),
+            )?,
+        };
+        let report = planned.finish(&project, &manifest, layout)?;
         autoload_note = format!(", autoloader with {} classes", report.classes);
         // Plugins listening to post-autoload-dump, emulated: the local
         // repository's order is the previous installed.json order minus
@@ -1104,8 +1153,10 @@ fn operation_lines(
     Ok(lines)
 }
 
+/// The computing half of the dump (`vivacity_autoload::plan` with the
+/// options InstallCommand derives): nothing written under vendor/.
 #[allow(clippy::too_many_arguments)]
-fn dump_autoload(
+fn dump_autoload_plan(
     project: &std::path::Path,
     lock: &vivacity_core::lock::Lock,
     manifest: &serde_json::Value,
@@ -1118,7 +1169,7 @@ fn dump_autoload(
     apcu: (bool, Option<&str>),
     plugins_enabled: bool,
     dev_package_names: Vec<String>,
-) -> anyhow::Result<vivacity_autoload::DumpReport> {
+) -> anyhow::Result<PlannedDump> {
     let platform_check = match manifest.get("config").and_then(|c| c.get("platform-check")) {
         Some(serde_json::Value::Bool(false)) => vivacity_autoload::PlatformCheckMode::Off,
         Some(serde_json::Value::Bool(true)) => vivacity_autoload::PlatformCheckMode::Full,
@@ -1167,25 +1218,81 @@ fn dump_autoload(
             })
         },
     };
-    let report = vivacity_autoload::dump(project, lock, manifest, layout, &opts)?;
-    // `symfony/runtime`'s plugin writes vendor/autoload_runtime.php on
-    // POST_AUTOLOAD_DUMP: at dump time, with plugins on, never with
-    // --no-autoloader.
-    if plugins_enabled
-        && lock
-            .wanted_packages(dev_mode)
-            .any(|p| p.name() == "symfony/runtime")
-        && matches!(
-            vivacity_core::layout::plugin_allowed(manifest, "symfony/runtime"),
-            vivacity_core::layout::PluginVerdict::Allowed
-        )
-    {
-        vivacity_core::runtime_stub::write_stub(&layout.vendor_dir(), project, manifest)?;
+    let (plan, report) = vivacity_autoload::plan(project, lock, manifest, layout, &opts)?;
+    Ok(PlannedDump {
+        plan,
+        report,
+        runtime_stub: plugins_enabled
+            && lock
+                .wanted_packages(dev_mode)
+                .any(|p| p.name() == "symfony/runtime")
+            && matches!(
+                vivacity_core::layout::plugin_allowed(manifest, "symfony/runtime"),
+                vivacity_core::layout::PluginVerdict::Allowed
+            ),
+    })
+}
+
+/// A dump computed but not written: `finish` writes it (byte-compare per
+/// file), the `symfony/runtime` stub after it, and prints the warnings.
+struct PlannedDump {
+    plan: vivacity_autoload::DumpPlan,
+    report: vivacity_autoload::DumpReport,
+    runtime_stub: bool,
+}
+
+impl PlannedDump {
+    fn finish(
+        self,
+        project: &std::path::Path,
+        manifest: &serde_json::Value,
+        layout: &vivacity_core::layout::Layout,
+    ) -> anyhow::Result<vivacity_autoload::DumpReport> {
+        self.plan.commit()?;
+        // `symfony/runtime`'s plugin writes vendor/autoload_runtime.php on
+        // POST_AUTOLOAD_DUMP: at dump time, with plugins on, never with
+        // --no-autoloader.
+        if self.runtime_stub {
+            vivacity_core::runtime_stub::write_stub(&layout.vendor_dir(), project, manifest)?;
+        }
+        for w in &self.report.warnings {
+            eprintln!("{w}");
+        }
+        Ok(self.report)
     }
-    for w in &report.warnings {
-        eprintln!("{w}");
-    }
-    Ok(report)
+}
+
+/// `dump_autoload_plan` then `finish`: the dump as a single step.
+#[allow(clippy::too_many_arguments)]
+fn dump_autoload(
+    project: &std::path::Path,
+    lock: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    layout: &vivacity_core::layout::Layout,
+    dev_mode: bool,
+    optimize: bool,
+    authoritative: bool,
+    ignore_all: bool,
+    ignored: &[String],
+    apcu: (bool, Option<&str>),
+    plugins_enabled: bool,
+    dev_package_names: Vec<String>,
+) -> anyhow::Result<vivacity_autoload::DumpReport> {
+    dump_autoload_plan(
+        project,
+        lock,
+        manifest,
+        layout,
+        dev_mode,
+        optimize,
+        authoritative,
+        ignore_all,
+        ignored,
+        apcu,
+        plugins_enabled,
+        dev_package_names,
+    )?
+    .finish(project, manifest, layout)
 }
 
 /// `wikimedia/composer-merge-plugin` on this run: `Some` when the plugin is

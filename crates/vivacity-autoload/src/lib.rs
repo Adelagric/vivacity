@@ -8,5 +8,6 @@ pub mod sorter;
 pub mod templates;
 
 pub use generator::{
-    dump, AutoloadError, ClassmapCacheConfig, DumpOptions, DumpReport, PlatformCheckMode,
+    dump, plan, AutoloadError, ClassmapCacheConfig, DumpOptions, DumpPlan, DumpReport,
+    PlatformCheckMode,
 };
