@@ -123,7 +123,7 @@ pub fn analyze(
     let mut report = ScopeReport::default();
 
     for p in lock.wanted_packages(with_dev) {
-        classify_package(project_dir, p, &mut report);
+        classify_package(project_dir, p, plugins_enabled, &mut report);
     }
     report.issues.extend(
         config_issues(root_manifest)
@@ -176,8 +176,18 @@ pub fn config_issues(root_manifest: &Value) -> Vec<String> {
     out
 }
 
-fn classify_package(project_dir: &Path, p: &LockPackage, report: &mut ScopeReport) {
-    classify_plugin(p, report);
+fn classify_package(
+    project_dir: &Path,
+    p: &LockPackage,
+    plugins_enabled: bool,
+    report: &mut ScopeReport,
+) {
+    // Under --no-plugins Composer never loads a plugin (PluginManager::
+    // registerPackage returns at once): the package is a plain library in
+    // vendor/, whatever it would do when active, and nothing is printed.
+    if plugins_enabled {
+        classify_plugin(p, report);
+    }
     if p.is_metapackage() {
         return;
     }
@@ -249,6 +259,22 @@ mod tests {
         let r = analyze(&proj(), &lock, &json!({}), true, true);
         assert!(r.is_native_ok());
         assert_eq!(r.skipped_plugins, vec!["symfony/flex"]);
+    }
+
+    #[test]
+    fn no_plugins_makes_every_plugin_a_plain_library() {
+        let lock = lock_with(json!([
+            zip_pkg("acme/mystery-plugin", "composer-plugin"),
+            zip_pkg("cweagans/composer-patches", "composer-plugin"),
+            zip_pkg("symfony/flex", "composer-plugin"),
+        ]));
+        let r = analyze(&proj(), &lock, &json!({}), true, false);
+        assert!(r.is_native_ok(), "{:?}", r.issues);
+        assert!(r.skipped_plugins.is_empty());
+        assert_eq!(
+            r.layout.expect("layout").rel("acme/mystery-plugin"),
+            Some("vendor/acme/mystery-plugin")
+        );
     }
 
     #[test]

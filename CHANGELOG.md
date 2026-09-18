@@ -4,6 +4,21 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **`install --no-plugins` on a lock naming a plugin outside vivacity's
+  lists** (yiisoft/yii2-composer, roots/wordpress-core-installer,
+  craftcms/plugin-installer, drupal/core-composer-scaffold…) is now
+  installed natively instead of refused or handed to Composer: with the
+  flag Composer loads no plugin at all (`PluginManager::registerPackage`
+  returns at once) and every plugin is a plain library in `vendor/`.
+  `scope::analyze` already passed the plugin regime to the layout but
+  classified plugins without it. `harness/diff-vendor.sh` now replays each
+  plugin-allowing fixture under `--no-plugins` on both sides and requires
+  a native, identical `vendor/` (found through viv's bench corpus, where
+  four of ten projects were `n/a` for this reason).
+
 ## [0.13.0] — 2026-09-17
 
 ### Added

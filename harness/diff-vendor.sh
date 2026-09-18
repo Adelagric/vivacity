@@ -75,5 +75,24 @@ for fx in "${FIXTURES[@]}"; do
     head -20 "$WORK/$fx.diff"
     status=1
   fi
+  # Régime plugins désactivés sur une fixture qui les autorise : Composer
+  # --no-plugins ne charge rien (PluginManager::registerPackage rend la main),
+  # chaque plugin est une bibliothèque dans vendor/ ; vivacity doit installer
+  # nativement, même un lock nommant un plugin hors de ses listes (drupal :
+  # core-composer-scaffold), sans fallback.
+  if [ -z "$plugin_flag" ]; then
+    rm -rf "$ref/vendor" "$viv/vendor"
+    (cd "$ref" && composer install --no-interaction --no-plugins --no-scripts $AUTOLOAD_FLAG --quiet)
+    if ! (cd "$viv" && "$VIVACITY" install $AUTOLOAD_FLAG --no-plugins --no-fallback --offline 2>"$WORK/$fx.noplugins.vivacity.log"); then
+      echo "FAIL $fx --no-plugins : vivacity install a échoué (natif attendu) :"; tail -20 "$WORK/$fx.noplugins.vivacity.log"; status=1; continue
+    fi
+    if compare_vendor "$ref/vendor" "$viv/vendor" "$WORK/$fx.noplugins.diff"; then
+      echo "OK   $fx --no-plugins : vendor/ identique (natif)"
+    else
+      echo "FAIL $fx --no-plugins : vendor/ diffère ($(wc -l < "$WORK/$fx.noplugins.diff" | tr -d ' ') lignes, $WORK/$fx.noplugins.diff)"
+      head -20 "$WORK/$fx.noplugins.diff"
+      status=1
+    fi
+  fi
 done
 exit $status

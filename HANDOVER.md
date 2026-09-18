@@ -9,7 +9,7 @@ fixtures/make.sh                         # une fois : crée + qualifie les 6 fix
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 cargo test                               # inclut les tests oracle (php + composer dans le PATH)
 cargo build --release
-harness/diff-vendor.sh [--with-autoloader]   # parité vs Composer sur les 6 fixtures (projet entier pour wordpress et drupal) — harness/lib/compare.sh : diff -r + inventaire des modes et des liens
+harness/diff-vendor.sh [--with-autoloader]   # parité vs Composer sur les 6 fixtures (projet entier pour wordpress et drupal ; second passage --no-plugins des deux côtés, natif exigé) — harness/lib/compare.sh : diff -r + inventaire des modes et des liens
 harness/removal.sh                       # paquets retirés du lock : même projet que Composer après
 harness/transitions.sh                   # montée de version d'un plugin émulé → main rendue à Composer, disque intact
 harness/update.sh                        # `composer update` vs `vivacity update` (complet + 10 cas partiels, dont 3 sur `solver-held-branch` : branches dev tenues via leur branch-alias) : locks identiques sur l'instantané Packagist figé (drupal avec `--no-security-blocking` des deux côtés : les avis de packages.drupal.org ne sont pas figés)

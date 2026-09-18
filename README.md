@@ -50,7 +50,9 @@ GitHub Actions:
 projects (Laravel, the Symfony demo, Sylius, rector-src, a WordPress site
 using `composer/installers`, a Drupal `recommended-project`) and `diff -r`s
 the results — the whole project tree for the last two, since their files
-land outside `vendor/`. `harness/update.sh` does the same for
+land outside `vendor/`; each fixture that allows plugins is then installed
+again under `--no-plugins` on both sides, where every plugin is a plain
+library and vivacity must stay native. `harness/update.sh` does the same for
 `composer update --no-install` and `vivacity update --no-install` against
 frozen Packagist snapshots, comparing the lock files; `harness/path-repos.sh`
 plays install, update, remove and require on a project served by `path`
