@@ -99,6 +99,15 @@ numbers and the scripts that produce them are in [bench/](bench/); the
 short version is that a no-op install takes tens of milliseconds, a warm
 reinstall of Sylius under a second, and `update --no-install` on Sylius
 about a third of Composer's time. Cold network installs are not faster.
+Online, a no-op install is mostly one request: like Composer 2.10,
+`install` revalidates Packagist's blocking lists on every run (a
+conditional request, 70–200 ms depending on the network), so a locked
+version flagged as malware after the lock was written is refused. That
+check is not cached behind a TTL, by decision (DECISIONS 2026-09-19); the
+ways to skip it are Composer's own, with Composer's consequences:
+`--no-blocking` / `--no-security-blocking`, `config.policy.malware.block`
+/ `block-scope`, or `--offline` (cache, with a warning). With
+`--no-blocking` a Laravel no-op is ~50 ms on an M4 Max, ~35 ms on Linux.
 CI gates on the vivacity/Composer ratio per scenario (`bench/gate.py`,
 tolerance 15 % past `bench/results/baseline-ratio.json`), so a regression
 shows up as a red `bench` job rather than a slower table.

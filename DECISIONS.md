@@ -859,3 +859,43 @@ Bilan de la journée sur le no-op laravel (Mac, M4 Max) : 163 ms (matin) →
 décision qui reste pour le no-op en ligne est celle de la requête de listes
 (revalidation à chaque install, comme Composer, ou TTL).
 
+## 2026-09-19 — La requête de listes reste une revalidation par install (pas de TTL)
+
+Fait : depuis Composer 2.10, `install` depuis un lock passe le pool par le
+filtre des listes de blocage (`createFilterListPoolFilter(BLOCK_SCOPE_INSTALL)`,
+liste `malware` de Packagist) : `packages.json` pris en cache sous 600 s
+(`loadRootServerFile(600)`), le résumé des listes (`filter-summary.json`,
+quelques Ko) revalidé à **chaque** install par une requête conditionnelle
+(`If-Modified-Since`, 304). C'est la seule barrière post-lock : une version
+verrouillée ajoutée à la liste après l'écriture du lock fait refuser
+`composer install` (code 2) sans que le lock ait changé. Coût mesuré
+(2026-09-18) : 70–100 ms sur le conteneur Linux, 100–200 ms sur le Mac —
+un aller-retour TLS complet, rien de réutilisé d'un processus à l'autre ;
+après P1–P4 c'est ~90 % du no-op en ligne (Linux 95 ms dont 35 de travail,
+Mac 116 dont ~50).
+
+Options examinées : (A) revalider à chaque install ; (B) TTL sur le résumé
+— pendant la fenêtre, `vivacity install` installe une version que
+`composer install` refuserait, première exception *volontaire* au contrat et
+précisément sur le cas malware, invisible aux harnais (qui comparent contre
+Composer maintenant, pas contre une liste qui change entre deux runs), sans
+gain en CI (cache vide à chaque runner) ; l'argument « Composer cache déjà
+600 s » ne tient pas : Composer cache le gros fichier de découverte et
+revalide toujours le petit fichier qui décide ; (C) stale-while-revalidate
+— même divergence bornée à un install, plus une requête en vol à la fin du
+processus ; (D) opt-in `VIVACITY_LIST_TTL` — un bouton de plus alors que
+`--no-blocking` / `--no-security-blocking`, `config.policy.malware.block` /
+`block-scope` et `--offline` donnent déjà la vitesse **avec la sémantique
+de Composer** (no-op laravel Mac ≈ 50 ms avec `--no-blocking`, mesuré) ;
+(E) raccourcir la requête elle-même sans toucher au contrat : reprise de
+session TLS 1.3 entre processus (tickets rustls persistés), une seule
+connexion, pas de résolution DNS superflue — 20–40 ms par install, et le
+seul levier qui vaut aussi pour le premier install et la CI.
+
+Décision : **A, et E comme piste de code.** Le contrat n'a pas d'exception ;
+celle-ci porterait sur la sécurité. Ce qu'on documente : les drapeaux et la
+config qui coupent la vérification existent chez Composer et ont les mêmes
+conséquences ici, avec les chiffres. Si un jour un TTL est voulu, ce sera D
+(opt-in nommé), jamais un défaut. E entre dans le plan v0.15 comme P5, à
+mesurer avant de croire au chiffre.
+
