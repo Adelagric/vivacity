@@ -73,12 +73,13 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 105 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-09-17 (0.12.0,
-after `wikimedia/composer-merge-plugin`), against Composer 2.10.3
-`--no-scripts` with its plugins active, `vivacity install` laid out **66 of
-105 projects (63 %) natively with `--no-dev`** and 58 of 105 (55 %) with
-the dev packages, byte-identical down to file modes and link targets, and
-**no diff in either mode**: every other project was handed to Composer
+committed lock, pinned — `fixtures/corpus/`). On 2026-09-19 (after the
+0.14 `--no-plugins` fix and the install/dump speed-ups, which the corpus
+re-checks byte for byte), against Composer 2.10.3 `--no-scripts` with its
+plugins active, `vivacity install` laid out **66 of 105 projects (63 %)
+natively with `--no-dev`** and 58 of 105 (55 %) with the dev packages,
+byte-identical down to file modes and link targets, and **no diff in
+either mode**: every other project was handed to Composer
 before any write, for reasons the report ranks — packages without a zip
 dist, then plugins one by one. The reasons that headed that list a day
 earlier (`pestphp/pest-plugin`,
