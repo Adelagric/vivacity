@@ -952,3 +952,16 @@ ambiguity … exclude-from-classmap » ; les violations PSR sans préfixe
 `.`. `harness/root-scan.sh` compare désormais ces lignes (trois fichiers
 ambigus, une violation PSR-4) : 12/12, steps.sh 0 diff de stderr.
 
+## 2026-09-19 — Tolérance du gate à 25 %
+
+Fait : premier run gardé après la baseline (`c0b6313`, l'ordre readdir) :
+sylius/`dump -o` à 0,056 contre 0,048 — +16,7 %, +19 ms — alors que le même
+changement mesuré ici donne 69,8 → 70,1 ms (bruit). Le runner était rapide :
+Composer 2 476 ms au lieu de 3 165–3 236 sur trois des quatre runs de
+baseline, vivacity 138 au lieu de 150–157 ; nos ~140 ms sont pour moitié
+du disque (lecture des caches, écriture de 800 Ko), qui ne suit pas le CPU du
+runner. Le ratio garde donc une dépendance résiduelle au runner même sur les
+scénarios « CPU ». Décision : tolérance 25 % (deux fois la dispersion mesurée
+sur quatre runs identiques, 3–12 %), marge absolue 5 ms inchangée. Un gate
+qui sonne à faux est pire qu'un gate large : il finit ignoré.
+

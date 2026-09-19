@@ -40,7 +40,12 @@ import statistics
 import sys
 from pathlib import Path
 
-TOLERANCE_DEFAULT = 0.15
+# 25 %: the first gated run after the baseline (c0b6313) tripped sylius/dump-o
+# at +16.7 % with no local change (69.8 vs 70.1 ms on the same machine) — a
+# fast runner shrank Composer's CPU-bound 3.2 s to 2.5 s while vivacity's
+# 140 ms, half of it disk, did not follow. Twice the spread measured over
+# four identical runs (3–12 %); a real regression of a quarter still fails.
+TOLERANCE_DEFAULT = 0.25
 SLACK_SECONDS = 0.005
 SCENARIOS = ("noop", "warm", "dump-o")
 FIXTURES = ("laravel", "symfony", "sylius")
