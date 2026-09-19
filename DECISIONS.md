@@ -922,3 +922,33 @@ script mourait derrière un `| tee` qui avalait le code de sortie. Corrigé
 neuf fixture × scénario manque** : un bench mort à mi-chemin ne vaut pas
 « rien n'a régressé ».
 
+## 2026-09-19 — Le classmap suit l'ordre `readdir`, comme le Finder de Composer
+
+Fait : `ClassMapGenerator::scanPaths` itère `Finder::create()->files()->followLinks()->in($path)`
+**sans tri** — `RecursiveIteratorIterator::SELF_FIRST` sur
+`RecursiveDirectoryIterator`, l'ordre brut de `readdir()`, profondeur d'abord,
+un sous-répertoire descendu là où readdir le liste. M3 avait choisi un tri par
+nom (déterminisme) en notant que « seul le gagnant d'une ambiguïté en dépend ».
+Or ce gagnant est observable (`autoload_classmap.php`), les avertissements
+« Ambiguous class resolution » et les violations PSR le sont aussi (stderr),
+et l'ordre réel diffère du tri par octets partout (APFS et ext4 hachent, NTFS
+trie insensible à la casse). Décision : `walkdir` sans tri — la même séquence
+que PHP sur le même répertoire — `CACHE_FORMAT` v3. Pour les sources du projet
+(là où les doublons existent : du legacy avec des copies), c'est le répertoire
+même que Composer scanne : exact sur tout FS. Pour un paquet scanné dans le
+store, l'ordre est celui du store, pas de vendor/ — un doublon *interne* à un
+paquet avertirait tous ses utilisateurs, cas non rencontré dans le corpus ;
+l'ordre *entre* paquets ne dépend pas du FS. Écarté : reproduire l'ordre de
+création des petits répertoires ext4 (l'ordre d'extraction du zip) — Composer
+sur deux machines ne s'accorde pas non plus, le contrat est Composer sur la
+même machine.
+Trouvé en chemin, corrigé ensemble : le filtre par défaut de
+`getAmbiguousClasses` (`{/(test|fixture|example|stub)s?/}i` : un doublon sous
+tests/ n'est pas signalé) n'était pas porté ; l'ordre des avertissements est
+l'ordre de découverte (tableau PHP), pas l'ordre des noms ; la formulation
+« was found 3x: in » au-delà de deux fichiers ; la ligne « To resolve
+ambiguity … exclude-from-classmap » ; les violations PSR sans préfixe
+« Warning: » et avec le cwd (= le projet, Composer fait `chdir`) remplacé par
+`.`. `harness/root-scan.sh` compare désormais ces lignes (trois fichiers
+ambigus, une violation PSR-4) : 12/12, steps.sh 0 diff de stderr.
+

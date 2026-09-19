@@ -11,7 +11,7 @@ cargo test                               # inclut les tests oracle (php + compos
 cargo build --release
 harness/diff-vendor.sh [--with-autoloader]   # parité vs Composer sur les 6 fixtures (projet entier pour wordpress et drupal ; second passage --no-plugins des deux côtés, natif exigé) — harness/lib/compare.sh : diff -r + inventaire des modes et des liens
 harness/removal.sh                       # paquets retirés du lock : même projet que Composer après
-harness/root-scan.sh                     # cache par fichier des scans hors store : 9 éditions de sources racine vs Composer
+harness/root-scan.sh                     # scans hors store : 9 éditions de sources racine + classe ambiguë + violation PSR vs Composer (vendor/ et avertissements)
 bench/ci-bench.sh && bench/gate.py <dir> --baseline bench/results/baseline-ratio.json   # ratio vivacity/Composer par scénario (bench.yml en CI ; baseline = médiane de plusieurs runs, --merge)
 harness/transitions.sh                   # montée de version d'un plugin émulé → main rendue à Composer, disque intact
 harness/update.sh                        # `composer update` vs `vivacity update` (complet + 10 cas partiels, dont 3 sur `solver-held-branch` : branches dev tenues via leur branch-alias) : locks identiques sur l'instantané Packagist figé (drupal avec `--no-security-blocking` des deux côtés : les avis de packages.drupal.org ne sont pas figés)

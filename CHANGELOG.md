@@ -4,6 +4,21 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Changed
+- **Class-map scans follow `readdir` order**, like Composer's Finder (no
+  sort): the winner of an ambiguous class and the order of the warnings
+  are Composer's on the same directory (they were sorted by name, which
+  differs on every filesystem). Classmap cache format v3.
+
+### Fixed
+- Ambiguity warnings: duplicates under `tests/`, `fixtures/`, `examples/`,
+  `stubs/` are not reported (Composer's default filter, not ported before);
+  discovery order; the `was found 3x: in …` wording for more than two
+  files; the `exclude-from-classmap` hint line. PSR violations are printed
+  as Composer prints them (no `Warning:` prefix, project directory as `.`).
+
 ## [0.15.0] — 2026-09-19
 
 ### Changed

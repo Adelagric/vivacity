@@ -39,11 +39,18 @@ status=0
 both() { # applique une commande shell dans les deux copies
   (cd "$ref" && eval "$1"); (cd "$viv" && eval "$1")
 }
+# Les avertissements du dump (« Ambiguous class resolution », violations
+# PSR) : mêmes lignes, même ordre — les chemins absolus des deux copies
+# ramenés à un préfixe commun.
+warnings() { sed -e "s|$ref|<p>|g; s|$viv|<p>|g" "$1" | grep -E "Ambiguous class|does not comply|To resolve ambiguity" || true; }
 step() { # nom
   local name="$1" c_code=0 v_code=0
   (cd "$ref" && composer install --no-plugins --no-scripts --no-interaction --no-ansi -o >/dev/null 2>"$WORK/$name.composer.err") || c_code=$?
   (cd "$viv" && "$VIVACITY" install --no-plugins --no-fallback -o >/dev/null 2>"$WORK/$name.vivacity.err") || v_code=$?
   if [ "$c_code" != "$v_code" ]; then echo "FAIL $name : codes $c_code vs $v_code"; tail -3 "$WORK/$name.vivacity.err"; status=1; return; fi
+  if ! diff <(warnings "$WORK/$name.composer.err") <(warnings "$WORK/$name.vivacity.err") >"$WORK/$name.warnings.diff"; then
+    echo "FAIL $name : avertissements du dump différents"; head -6 "$WORK/$name.warnings.diff"; status=1; return
+  fi
   if compare_vendor "$ref/vendor" "$viv/vendor" "$WORK/$name.diff" >/dev/null; then
     local n; n=$(grep -c "=>" "$viv/vendor/composer/autoload_classmap.php" || true)
     echo "OK   $name : vendor/ identique ($n entrées de classmap)"
@@ -69,4 +76,12 @@ both 'printf "<?php\nnamespace App;\nclass FromPsr4 {}\n" > src/FromPsr4.php'
 step "classe psr-4 ajoutée (-o)"
 both 'rm -rf lib/sub src/FromPsr4.php'
 step "retour à l'état initial"
+# Le gagnant d'une classe ambiguë suit l'ordre readdir du répertoire, comme
+# le Finder de Composer (insensible à la casse sur APFS/NTFS : bar avant Foo).
+both 'printf "<?php\nclass LibDup {}\n" > lib/Foo.php; printf "<?php\nclass LibDup {}\n" > lib/bar.php; printf "<?php\nclass LibDup {}\n" > lib/Zed.php'
+step "classe ambiguë dans trois fichiers (Foo, bar, Zed)"
+both 'mkdir -p src/Sub && printf "<?php\nnamespace App\\\\Wrong;\nclass Misplaced {}\n" > src/Sub/Misplaced.php && printf "<?php\nnamespace App\\\\Sub;\nclass Misplaced {}\n" > src/Sub/Other.php'
+step "violation PSR-4 et doublon psr-4 (-o)"
+both 'rm -rf lib/Foo.php lib/bar.php lib/Zed.php src/Sub'
+step "nettoyage"
 exit $status

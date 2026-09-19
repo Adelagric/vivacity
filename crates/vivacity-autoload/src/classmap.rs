@@ -368,7 +368,8 @@ fn find_all(todo: &[(PathBuf, PathBuf, Vec<u8>)]) -> Result<Vec<Vec<Vec<u8>>>, C
 /// Version of the scan format/algorithm: bump it whenever detection (or the
 /// cache encoding) changes, to invalidate existing caches.
 /// v2: length-prefixed binary encoding (replaces the JSON+base64).
-const CACHE_FORMAT: &str = "v2";
+/// v3: entries in readdir order (was sorted by name).
+const CACHE_FORMAT: &str = "v3";
 
 /// Cache location for the scan of a store entry's directory:
 /// key = entry (name/version/ref) + relative subdirectory + format version.
@@ -628,8 +629,30 @@ pub struct ClassMap {
     /// class (raw bytes) -> normalized path; BTreeMap = ksort (bytes).
     pub map: BTreeMap<Vec<u8>, String>,
     pub ambiguous: BTreeMap<Vec<u8>, Vec<String>>,
+    /// Classes of `ambiguous` in the order they became ambiguous (PHP's
+    /// array keeps insertion order; the warnings come out in it).
+    pub ambiguous_order: Vec<Vec<u8>>,
     /// (message, class, path)
     pub psr_violations: Vec<(String, Vec<u8>, String)>,
+}
+
+/// `ClassMap::getAmbiguousClasses`' default `$duplicatesFilter`,
+/// `{/(test|fixture|example|stub)s?/}i` on the path with `\` as `/`: a
+/// duplicate under a tests/fixtures/examples/stubs directory is not
+/// reported.
+pub fn is_duplicate_filtered(path: &str) -> bool {
+    let p = path.replace('\\', "/").to_ascii_lowercase();
+    for word in ["test", "fixture", "example", "stub"] {
+        let mut from = 0;
+        while let Some(i) = p[from..].find(&format!("/{word}")) {
+            let after = &p[from + i + 1 + word.len()..];
+            if after.starts_with('/') || after.starts_with("s/") {
+                return true;
+            }
+            from += i + 1;
+        }
+    }
+    false
 }
 
 pub struct Scanner {
@@ -672,8 +695,8 @@ impl Scanner {
     /// `scanPaths($path, $excluded, $autoloadType, $namespace)`; `path` is
     /// absolute (file or directory). A missing path is an error for a classmap
     /// rule (as in Composer); missing PSR directories are filtered out upstream
-    /// by the caller. Files are visited in lexicographic order; Composer
-    /// follows filesystem order, which only affects the winner of an ambiguity.
+    /// by the caller. Files are visited in readdir order, like Composer's
+    /// Finder: the winner of an ambiguity is the same on the same directory.
     pub fn scan_path(
         &mut self,
         path: &Path,
@@ -858,11 +881,11 @@ impl Scanner {
             for class in classes {
                 if let Some(existing) = self.class_map.map.get(&class) {
                     if existing.as_str() != file_path.as_ref() {
-                        self.class_map
-                            .ambiguous
-                            .entry(class)
-                            .or_default()
-                            .push(file_path.to_string());
+                        let entry = self.class_map.ambiguous.entry(class.clone()).or_default();
+                        if entry.is_empty() {
+                            self.class_map.ambiguous_order.push(class);
+                        }
+                        entry.push(file_path.to_string());
                     }
                 } else {
                     self.class_map.map.insert(class, file_path.to_string());
@@ -885,9 +908,16 @@ impl Scanner {
             let base_real =
                 vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
             let mut symlinked_dirs: Vec<PathBuf> = Vec::new();
+            // Composer's ClassMapGenerator walks with Symfony Finder, no
+            // sort: `RecursiveIteratorIterator::SELF_FIRST` over
+            // `RecursiveDirectoryIterator` — raw readdir order, depth first,
+            // a subdirectory descended where readdir lists it. walkdir
+            // without a sorter is the same sequence on the same directory,
+            // so the winner of an ambiguous class and the order of the
+            // warnings are Composer's (2026-09-19; sorted by name before,
+            // which differed on case-insensitive-sorted APFS/NTFS listings).
             for entry in walkdir::WalkDir::new(path)
                 .follow_links(true)
-                .sort_by_file_name()
                 .into_iter()
                 .filter_entry(|e| {
                     if e.depth() == 0 {
@@ -1017,6 +1047,18 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicates_filter_matches_composer_regex() {
+        assert!(is_duplicate_filtered("/v/vendor/a/b/tests/Foo.php"));
+        assert!(is_duplicate_filtered("/v/vendor/a/b/Test/Foo.php"));
+        assert!(is_duplicate_filtered("C:\\v\\Fixtures\\Foo.php"));
+        assert!(is_duplicate_filtered("/v/examples/x/Foo.php"));
+        assert!(is_duplicate_filtered("/v/stub/Foo.php"));
+        assert!(!is_duplicate_filtered("/v/testing/Foo.php"));
+        assert!(!is_duplicate_filtered("/v/contest/Foo.php"));
+        assert!(!is_duplicate_filtered("/v/src/Tests.php"));
+    }
 
     fn classes(src: &str) -> Vec<String> {
         ClassFinder::new()

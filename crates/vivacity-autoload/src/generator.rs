@@ -480,22 +480,59 @@ pub fn plan(
         }
     }
     trace("merge", t0);
-    for (class, others) in &scanner.class_map.ambiguous {
+    // `AutoloadGenerator::dump`: the ambiguous classes in discovery order,
+    // duplicates under tests/fixtures/examples/stubs filtered out
+    // (`getAmbiguousClasses`' default filter), the wording for two and
+    // for more files, then the exclude-from-classmap hint once.
+    let mut any_ambiguous = false;
+    for class in &scanner.class_map.ambiguous_order {
+        let Some(paths) = scanner.class_map.ambiguous.get(class) else {
+            continue;
+        };
+        let others: Vec<&String> = paths
+            .iter()
+            .filter(|p| !crate::classmap::is_duplicate_filtered(p))
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+        any_ambiguous = true;
         let first = scanner
             .class_map
             .map
             .get(class)
             .cloned()
             .unwrap_or_default();
-        report.warnings.push(format!(
-            "Warning: Ambiguous class resolution, \"{}\" was found in both \"{first}\" and \"{}\", the first will be used.",
-            String::from_utf8_lossy(class),
-            others.join("\", \"")
-        ));
+        let listed = others
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\", \"");
+        let name = String::from_utf8_lossy(class);
+        report.warnings.push(if others.len() > 1 {
+            format!(
+                "Warning: Ambiguous class resolution, \"{name}\" was found {}x: in \"{first}\" and \"{listed}\", the first will be used.",
+                others.len() + 1
+            )
+        } else {
+            format!(
+                "Warning: Ambiguous class resolution, \"{name}\" was found in both \"{first}\" and \"{listed}\", the first will be used."
+            )
+        });
     }
+    if any_ambiguous {
+        report.warnings.push(
+            "To resolve ambiguity in classes not under your control you can ignore them by path using exclude-from-classmap".to_owned(),
+        );
+    }
+    // PSR violations outside vendor/ (`clearPsrViolationsByPath`), as
+    // `ClassMapGenerator` words them: the cwd — the project directory,
+    // Composer chdir()s to `--working-dir` — replaced by `.` at the start
+    // of the file path and of the rule's base path; no `Warning:` prefix.
     for (msg, _, path) in &scanner.class_map.psr_violations {
         if !path.starts_with(&format!("{vendor_path}/")) {
-            report.warnings.push(format!("Warning: {msg}"));
+            let short = msg.replace(&format!(" {base_path}"), " .");
+            report.warnings.push(short);
         }
     }
     scanner.add_class(
