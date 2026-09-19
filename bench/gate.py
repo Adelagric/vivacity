@@ -44,6 +44,10 @@ TOLERANCE_DEFAULT = 0.15
 SLACK_SECONDS = 0.005
 SCENARIOS = ("noop", "warm", "dump-o")
 FIXTURES = ("laravel", "symfony", "sylius")
+# Gated: the CPU-bound scenarios, whose ratio cancels the runner (spread
+# 3–12 % over four identical runs, 2026-09-19). `warm` writes ~40k files
+# and follows the runner's disk (spread 18–32 %): reported, not gated.
+GATED = ("noop", "dump-o")
 
 
 def medians(path):
@@ -75,6 +79,9 @@ def compare(current, baseline, tolerance):
         if base is None:
             rows.append((key, ratio, None, "no baseline"))
             continue
+        if key.rsplit("/", 1)[-1] not in GATED:
+            rows.append((key, ratio, base, "info (not gated)"))
+            continue
         cost = v - base * c
         if ratio > base * (1 + tolerance) and cost >= SLACK_SECONDS:
             rows.append((key, ratio, base, f"FAIL (+{cost * 1000:.0f} ms)"))
@@ -100,10 +107,15 @@ def self_test():
     cur = {"fx/noop": (0.12, 0.012, 0.100), "fx/warm": (0.20, 0.200, 1.000)}
     rows, failed = compare(cur, base, 0.15)
     assert not failed, rows
-    # 20 % worse on warm and 40 ms in seconds: failure.
+    # 20 % worse on warm and 40 ms in seconds: reported, warm is not gated.
     cur = {"fx/noop": (0.10, 0.010, 0.100), "fx/warm": (0.24, 0.240, 1.000)}
     rows, failed = compare(cur, base, 0.15)
-    assert failed and rows[1][3].startswith("FAIL"), rows
+    assert not failed and rows[1][3].startswith("info"), rows
+    # 20 % worse on noop and 40 ms in seconds: failure.
+    base2 = {"fx/noop": 0.10}
+    cur = {"fx/noop": (0.12, 0.240, 2.000)}
+    rows, failed = compare(cur, base2, 0.15)
+    assert failed and rows[0][3].startswith("FAIL"), rows
     # Unknown scenario: reported, not failed.
     cur = {"fx/dump-o": (9.0, 9.0, 1.0)}
     rows, failed = compare(cur, base, 0.15)

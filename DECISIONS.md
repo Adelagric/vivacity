@@ -899,3 +899,26 @@ conséquences ici, avec les chiffres. Si un jour un TTL est voulu, ce sera D
 (opt-in nommé), jamais un défaut. E entre dans le plan v0.15 comme P5, à
 mesurer avant de croire au chiffre.
 
+## 2026-09-19 — Le gate de perf : ce qu'un ratio simplifie, et ce qu'il ne simplifie pas
+
+Fait : quatre runs CI sur un code identique ont donné pour le no-op sylius
+446–926 ms chez Composer et 104–140 ms chez vivacity. Le ratio ne se
+simplifiait pas — la requête de listes (latence réseau fixe) dominait notre
+no-op, le CPU dominait celui de Composer ; deux runs sur quatre auraient
+échoué à 15 %. Le ratio de compare.py (svandragt/vivace) marche pour un
+no-op de 4 ms de CPU, pas pour le nôtre. Décision : `bench/ci-bench.sh`
+passe `--no-blocking` aux deux outils (le même drapeau, la même sémantique
+— la requête est un sujet à part, DECISIONS 2026-09-19 ci-dessus) : les deux
+côtés deviennent CPU-bound et déterministes (Mac : Composer 1,08 s → 0,68 s
+σ 21 ms, vivacity 134 → 49 ms σ 0,4). Rejoué : dispersion des ratios sur
+quatre runs identiques 3–12 % pour no-op et `dump -o`, mais 18–32 % pour
+warm (40 000 fichiers écrits : le disque du runner, pas son CPU). Décision :
+**no-op et dump -o gardés, warm rapporté sans garde**. Baseline =
+médiane des quatre runs `8533a09`, committée.
+Trouvé en chemin : les quatre premiers runs « verts » n'avaient produit que
+laravel no-op/warm — `composer dump-autoload --no-blocking` n'existe pas, le
+script mourait derrière un `| tee` qui avalait le code de sortie. Corrigé
+(`shell: bash` = pipefail, hyperfine bruyant) et le gate **échoue si un des
+neuf fixture × scénario manque** : un bench mort à mi-chemin ne vaut pas
+« rien n'a régressé ».
+
