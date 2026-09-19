@@ -15,7 +15,11 @@ Why a ratio: a GitHub runner's speed varies tens of percent from one run
 to the next on identical code, so a baseline in seconds chases the runner,
 not the code. `ratio = vivacity_median / composer_median` for the same
 scenario, measured in the same job, on the same runner, minutes apart:
-the runner's speed cancels out of the ratio.
+the runner's speed cancels out of the ratio — provided both sides scale
+with it. A network-bound scenario does not (measured 2026-09-19: Composer
+no-op 446–926 ms across identical runs, vivacity 104–140, ratio swinging
+past any tolerance), which is why ci-bench.sh runs both tools with
+`--no-blocking`: CPU-bound on both sides.
 
 Fails (exit 1) when a scenario's ratio exceeds `baseline * (1 + tolerance)`
 AND the regression costs at least 5 ms in this run's own seconds
