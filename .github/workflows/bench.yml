@@ -31,6 +31,8 @@ jobs:
       - run: cargo build --release
       - run: fixtures/make.sh
       - name: Benchmarks
+        # `shell: bash` = `-eo pipefail`: a script that dies behind `tee` fails the step.
+        shell: bash
         run: bench/ci-bench.sh | tee bench-linux.md
         env:
           VIVACE_BENCH_DIR: ${{ runner.temp }}/vivace-bench

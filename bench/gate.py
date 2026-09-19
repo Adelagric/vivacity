@@ -43,6 +43,7 @@ from pathlib import Path
 TOLERANCE_DEFAULT = 0.15
 SLACK_SECONDS = 0.005
 SCENARIOS = ("noop", "warm", "dump-o")
+FIXTURES = ("laravel", "symfony", "sylius")
 
 
 def medians(path):
@@ -107,6 +108,8 @@ def self_test():
     cur = {"fx/dump-o": (9.0, 9.0, 1.0)}
     rows, failed = compare(cur, base, 0.15)
     assert not failed and rows[0][3] == "no baseline", rows
+    # The full set the gate requires when a baseline exists.
+    assert len([f"{fx}/{sc}" for fx in FIXTURES for sc in SCENARIOS]) == 9
     print("self-test ok")
 
 
@@ -145,6 +148,14 @@ def main():
         print(render([(k, r, None, "no baseline") for k, (r, _, _) in sorted(current.items())]))
         return 0
     baseline = json.loads(args.baseline.read_text())
+    # Every fixture × scenario must be there: a bench that died half-way
+    # (2026-09-19: an invalid flag on dump-autoload, hidden behind `tee`)
+    # must not pass as "nothing regressed".
+    expected = [f"{fx}/{sc}" for fx in FIXTURES for sc in SCENARIOS]
+    missing = [k for k in expected if k not in current]
+    if missing:
+        print(f"::error::bench results missing for: {', '.join(missing)}")
+        return 1
     rows, failed = compare(current, baseline, args.tolerance)
     table = render(rows)
     print(table)

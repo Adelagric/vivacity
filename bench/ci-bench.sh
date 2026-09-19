@@ -15,6 +15,7 @@ RUNS="${BENCH_RUNS:-10}"
 # déterministes : Mac, composer 1,08 s → 0,68 s (σ 21 ms), vivacity 134 → 49 ms
 # (σ 0,4). La requête est mesurée à part (DECISIONS 2026-09-19), pas gardée.
 C="composer --no-interaction --no-plugins --no-scripts --no-blocking"
+C_DUMP="composer --no-interaction --no-plugins --no-scripts"   # dump-autoload n'a pas --no-blocking
 V_FLAGS="--offline --no-blocking"
 mkdir -p "$WORK"
 out="| fixture | scénario | Composer | vivace | gain |\n|---|---|---|---|---|\n"
@@ -28,8 +29,9 @@ for fx in laravel symfony sylius; do
     --prepare true -n "vivace-noop" "$VIVACE install $V_FLAGS" \
     --prepare "rm -rf vendor" -n "composer-warm" "$C install" \
     --prepare "rm -rf vendor" -n "vivace-warm" "$VIVACE install $V_FLAGS" \
-    --prepare true -n "composer-dump-o" "$C dump-autoload -o --quiet" \
-    --prepare true -n "vivace-dump-o" "$VIVACE dump-autoload -o" >/dev/null 2>&1
+    --prepare true -n "composer-dump-o" "$C_DUMP dump-autoload -o --quiet" \
+    --prepare true -n "vivace-dump-o" "$VIVACE dump-autoload -o" >"$WORK/$fx.hyperfine.log" 2>&1 \
+    || { echo "hyperfine a échoué sur $fx :" >&2; tail -20 "$WORK/$fx.hyperfine.log" >&2; exit 1; }
   for sc in noop warm dump-o; do
     c=$(jq -r ".results[] | select(.command==\"composer-$sc\") | (.median*1000|round)" "$WORK/$fx.json")
     v=$(jq -r ".results[] | select(.command==\"vivace-$sc\") | (.median*1000|round)" "$WORK/$fx.json")
