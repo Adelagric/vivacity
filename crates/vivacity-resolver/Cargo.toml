@@ -16,7 +16,7 @@ rustls-tls-ring = ["vivacity-core/rustls-tls-ring"]
 rustls-tls-no-provider = ["vivacity-core/rustls-tls-no-provider"]
 
 [dependencies]
-vivacity-core = { path = "../vivacity-core", version = "0.14.0", default-features = false }
+vivacity-core = { path = "../vivacity-core", version = "0.15.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
