@@ -614,6 +614,100 @@ pub fn check_install(
 mod tests {
     use super::*;
 
+    /// A probed platform: PHP 8.2.5 (64-bit) with mbstring and intl.
+    fn probed() -> Vec<Value> {
+        vec![
+            serde_json::json!({"kind": "php", "name": "php", "version": "8.2.5", "description": "The PHP interpreter"}),
+            serde_json::json!({"kind": "php", "name": "php-64bit", "version": "8.2.5", "description": "x"}),
+            serde_json::json!({"kind": "ext", "name": "mbstring", "version": "8.2.5"}),
+            serde_json::json!({"kind": "ext", "name": "intl", "version": "8.2.5"}),
+        ]
+    }
+
+    fn platform_with(overrides: Value) -> Vec<Package> {
+        let empty = Map::new();
+        let overrides = overrides.as_object().unwrap_or(&empty).clone();
+        platform_packages(&probed(), &overrides).expect("platform")
+    }
+
+    fn lock(platform: Value, packages: Value) -> vivacity_core::lock::Lock {
+        vivacity_core::lock::Lock::parse(
+            &serde_json::json!({ "packages": packages, "platform": platform }).to_string(),
+        )
+        .expect("lock")
+    }
+
+    #[test]
+    fn satisfied_lock_passes() {
+        let l = lock(
+            serde_json::json!({"php": ">=8.1", "ext-mbstring": "*"}),
+            serde_json::json!([{"name":"a/b","version":"1.0","require":{"php":"^8.0","ext-intl":"*"}}]),
+        );
+        assert!(check_install(&l, &platform_with(Value::Null), true, &[]).is_empty());
+    }
+
+    #[test]
+    fn reports_mismatch_and_missing() {
+        use vivacity_core::platform::FailureReason;
+        let l = lock(
+            serde_json::json!({"php": ">=8.3", "ext-gd": "*", "lib-icu": ">=70"}),
+            serde_json::json!([]),
+        );
+        let f = check_install(&l, &platform_with(Value::Null), true, &[]);
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert_eq!(
+            f[0].reason,
+            FailureReason::Mismatch {
+                installed: "8.2.5".to_owned()
+            }
+        );
+        assert_eq!(f[1].reason, FailureReason::Missing);
+        assert_eq!(f[2].reason, FailureReason::Missing);
+    }
+
+    #[test]
+    fn package_requirements_are_checked_and_attributed() {
+        let l = lock(
+            serde_json::json!({}),
+            serde_json::json!([{"name":"a/b","version":"1.0","require":{"php":">=8.3","some/dep":"^1.0"}}]),
+        );
+        let f = check_install(&l, &platform_with(Value::Null), true, &[]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].required_by.as_deref(), Some("a/b"));
+        assert_eq!(f[0].requirement, "php");
+    }
+
+    #[test]
+    fn ignore_patterns_work() {
+        let l = lock(
+            serde_json::json!({"php": ">=9.0", "ext-gd": "*"}),
+            serde_json::json!([]),
+        );
+        let p = platform_with(Value::Null);
+        assert_eq!(check_install(&l, &p, true, &[]).len(), 2);
+        assert!(check_install(&l, &p, true, &["*".to_owned()]).is_empty());
+        assert_eq!(check_install(&l, &p, true, &["ext-*".to_owned()]).len(), 1);
+        assert_eq!(check_install(&l, &p, true, &["php".to_owned()]).len(), 1);
+        assert_eq!(
+            check_install(&l, &p, true, &["ext-gd+".to_owned()]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn config_platform_overrides_apply_to_the_check() {
+        let l = lock(
+            serde_json::json!({"php": ">=8.3", "ext-gd": "*", "ext-intl": "*"}),
+            serde_json::json!([]),
+        );
+        let p = platform_with(
+            serde_json::json!({"php": "8.3.0", "ext-gd": "8.3.0", "ext-intl": false}),
+        );
+        let f = check_install(&l, &p, true, &[]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].requirement, "ext-intl");
+    }
+
     #[test]
     fn probe_cache_watches_every_ini_file_and_the_scan_dir() {
         let dir = tempfile::tempdir().expect("tempdir");

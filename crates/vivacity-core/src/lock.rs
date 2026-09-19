@@ -173,7 +173,13 @@ impl Lock {
             context: "composer.lock".to_owned(),
             source,
         })?;
-        Ok(Lock {
+        Ok(Self::from_value(&v))
+    }
+
+    /// From an already parsed lock (a caller that also needs the `Value`
+    /// parses once).
+    pub fn from_value(v: &Value) -> Self {
+        Lock {
             content_hash: v
                 .get("content-hash")
                 .and_then(Value::as_str)
@@ -191,7 +197,7 @@ impl Lock {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
-        })
+        }
     }
 
     pub fn read(path: &Path) -> Result<Self> {

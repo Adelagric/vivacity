@@ -488,7 +488,11 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         None => std::fs::read_to_string(&lock_path)
             .with_context(|| format!("cannot read {}", lock_path.display()))?,
     };
-    let lock = vivacity_core::lock::Lock::parse(&lock_text)?;
+    // Parsed once: the `Value` serves the transaction, the abandoned
+    // warnings and the missing-requirement check; the `Lock` everything else.
+    let lock_value: serde_json::Value =
+        serde_json::from_str(&lock_text).context("invalid composer.lock")?;
+    let lock = vivacity_core::lock::Lock::from_value(&lock_value);
     trace("read manifests", t0);
 
     let with_dev = !args.no_dev && std::env::var("COMPOSER_NO_DEV").as_deref() != Ok("1");
@@ -623,8 +627,6 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `LocalRepoTransaction` (installed.json against the lock): the
     // `Package operations` summary, and in a dry run the operation lines
     // in transaction order, then the abandoned warnings of `Installer::run`.
-    let lock_value: serde_json::Value =
-        serde_json::from_str(&lock_text).context("invalid composer.lock")?;
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
