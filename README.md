@@ -221,8 +221,20 @@ vivacity's lists) is installed and allowed, `update`, `require` and
 before any write, and say why; `--no-fallback` stops with exit 3
 instead. Plugins with no resolution-time listener (`composer/installers`,
 `symfony/runtime`, the extension-installers, `php-http/discovery`,
-`symfony/thanks`, `cweagans/composer-patches`…) do not trigger it. The
-Flex pool filter is next to be emulated.
+`symfony/thanks`, `cweagans/composer-patches`…) do not trigger it.
+
+`symfony/flex`'s pool filter is emulated for `update` and `remove` with
+`--no-install`: the index of its endpoints (`extra.symfony.endpoint`,
+`SYMFONY_ENDPOINT`, the two recipe indexes by default; cached in Flex's
+own format under Composer's cache) prunes the pool against
+`extra.symfony.require` / `SYMFONY_REQUIRE` exactly as
+`PackageFilter::removeLegacyPackages` does (`Restricting packages listed
+in "symfony/symfony" to …`), with `COMPOSER_PREFER_DEV_OVER_PRERELEASE`
+as Flex sets it; the lock is Composer's with Flex active (checked by
+`harness/update.sh` on the Symfony demo and Sylius). What Flex writes
+besides the lock stays Composer's: with install (recipes, `symfony.lock`),
+on `require` (aliases), a `.env.dist` to copy, a `package.json` or
+`importmap.php` to synchronise, a `symfony-pack` to unpack.
 
 Scripts stay Composer's business: `vivacity install --run-scripts` hands
 each event the project declares to `composer run-script`, at the points

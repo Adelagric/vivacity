@@ -64,12 +64,12 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius r
 #                           COMPOSER_TESTS_ARE_RUNNING (sinon `::error ::…` sur
 #                           stdout sous GitHub Actions). `@stderr` est accepté (no-op).
 STEPS=(
-  # Plan v0.16, décision 1 : symfony/flex installé et autorisé change la
-  # résolution (`Restricting packages listed in "symfony/symfony"…`) —
-  # vivacity rend la commande à Composer avant toute écriture ; même lock,
-  # mêmes explications (les deux côtés sont Composer avec Flex actif).
-  "symfony|update @plugin:symfony/flex @fallback"
-  "symfony|remove symfony/uid @plugin:symfony/flex @fallback"
+  # Plan v0.16 : symfony/flex installé et autorisé filtre le pool
+  # (`Restricting packages listed in "symfony/symfony"…`). `update` et
+  # `remove` sans install : émulé (B), lock et explications identiques à
+  # Composer avec Flex actif ; `require` : rendu à Composer (A).
+  "symfony|update @plugin:symfony/flex"
+  "symfony|remove symfony/uid @plugin:symfony/flex"
   "symfony|require psr/log @plugin:symfony/flex @fallback"
   "laravel|remove laravel/tinker"
   "laravel|remove laravel/tinker @nolock"
@@ -382,7 +382,12 @@ for fx in "${FIXTURES[@]}"; do
             jq --arg p "$p" '{packages: [(.packages[] | select(.name == $p) | . + {"install-path": ("../" + $p)})], dev: true, "dev-package-names": []}' "$d/composer.lock" > "$d/vendor/composer/installed.json"
             [ "$(jq '.packages | length' "$d/vendor/composer/installed.json")" = 1 ] || { echo "FAIL $fx : @plugin:$p absent du lock"; exit 1; }
             [ -d "$ROOT/fixtures/work/$fx/vendor/$p" ] || { echo "FAIL $fx : @plugin:$p absent de fixtures/work/$fx/vendor"; exit 1; }
-            mkdir -p "$d/vendor/$p"; (cd "$ROOT/fixtures/work/$fx/vendor/$p" && tar -cf - .) | (cd "$d/vendor/$p" && tar -xf -) ;;
+            mkdir -p "$d/vendor/$p"; (cd "$ROOT/fixtures/work/$fx/vendor/$p" && tar -cf - .) | (cd "$d/vendor/$p" && tar -xf -)
+            # Flex : l'index servi depuis fixtures/flex (pas de réseau).
+            if [ "$p" = symfony/flex ]; then
+              [ -n "${FLEX_INDEX_URL:-}" ] || flex_index_serve
+              jq --arg u "$FLEX_INDEX_URL" '.extra.symfony.endpoint = [$u] | .config["secure-http"] = false' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"
+            fi ;;
           @fallback) ;;
           *) echo "prep inconnu : $prep"; exit 1 ;;
         esac
@@ -458,4 +463,5 @@ for fx in "${FIXTURES[@]}"; do
     fi
   done
 done
+flex_index_stop
 exit $status

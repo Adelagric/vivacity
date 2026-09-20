@@ -6,6 +6,7 @@
 pub mod config_source;
 pub mod constraint;
 pub mod decisions;
+pub mod flex_filter;
 pub mod intervals;
 pub mod json_manipulator;
 pub mod loader;

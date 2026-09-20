@@ -1925,6 +1925,7 @@ version = "0.16.0"
 dependencies = [
  "anyhow",
  "clap",
+ "md-5",
  "serde_json",
  "tempfile",
  "tokio",

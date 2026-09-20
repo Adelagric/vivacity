@@ -277,7 +277,17 @@ impl UpdateOptions {
 }
 
 /// Everything `Installer::doUpdate` has at hand right before `createPool`.
+/// symfony/flex active for this resolution: its requirement and index.
+#[derive(Debug, Clone)]
+pub struct FlexSession {
+    pub symfony_require: String,
+    pub symfony: Constraint,
+    pub versions: crate::flex_filter::FlexVersions,
+}
+
 pub struct UpdateSession {
+    /// `None`: no Flex filter at `PRE_POOL_CREATE`.
+    pub flex: Option<FlexSession>,
     pub arena: Vec<Package>,
     pub root: RootPackage,
     /// Arena indices of the fixed root (requires emptied) and of its alias.
@@ -540,6 +550,7 @@ impl UpdateSession {
         }
 
         Ok(UpdateSession {
+            flex: None,
             arena,
             root,
             fixed_root,
@@ -561,16 +572,47 @@ impl UpdateSession {
     }
 
     pub fn create_pool(&mut self) -> Result<Pool, SessionError> {
-        Ok(self.set.create_pool(&mut self.request, &mut self.arena)?)
+        let pre_pool = self.flex.as_ref().map(|f| {
+            // `$rootPackage->getRequires() + $rootPackage->getDevRequires()`:
+            // a name in both keeps the `require` constraint.
+            let mut root_constraints = BTreeMap::new();
+            for link in self
+                .root
+                .package
+                .requires
+                .0
+                .iter()
+                .chain(self.root.package.dev_requires.0.iter())
+            {
+                root_constraints
+                    .entry(link.target.clone())
+                    .or_insert_with(|| link.constraint.clone());
+            }
+            crate::pool::PrePoolFilter {
+                symfony_require: f.symfony_require.clone(),
+                symfony: f.symfony.clone(),
+                root_constraints,
+                versions: f.versions.clone(),
+            }
+        });
+        Ok(self
+            .set
+            .create_pool(&mut self.request, &mut self.arena, pre_pool.as_ref())?)
     }
 
     /// `Installer::createPolicy(true, ...)` without `--minimal-changes`.
+    /// With Flex active, `COMPOSER_PREFER_DEV_OVER_PRERELEASE` is what Flex
+    /// sets before Composer builds the policy.
     pub fn policy(&self) -> DefaultPolicy {
-        DefaultPolicy::new(
+        let mut policy = DefaultPolicy::new(
             self.prefer_stable || self.root.prefer_stable,
             self.prefer_lowest,
             None,
-        )
+        );
+        if self.flex.is_some() {
+            policy.prefer_dev_over_prerelease = true;
+        }
+        policy
     }
 
     /// `Installer::extractDevPackages`: second solve without the
@@ -759,6 +801,13 @@ impl UpdateSession {
         };
         let mut policy = self.policy();
         let pool = self.create_filtered_pool()?;
+        // `Installer::doUpdate`: the pool is built (Flex's notice comes out
+        // of it), then `Updating dependencies`, then the policy filters'
+        // warnings as they happened.
+        if let Some(notice) = &pool.flex_notice {
+            eprintln!("{notice}");
+        }
+        eprintln!("Updating dependencies");
         for w in &pool.warnings {
             eprintln!("{w}");
         }
@@ -892,6 +941,9 @@ impl UpdateSession {
     pub fn create_filtered_pool(&mut self) -> Result<Pool, SessionError> {
         let mut pool = self.create_pool()?;
         let before = pool.len();
+        // The policy filters rebuild the pool: what PRE_POOL_CREATE noted
+        // rides along.
+        let flex_notice = pool.flex_notice.take();
         let mut warnings = Vec::new();
         pool = crate::pool_filters::security_advisory_filter(
             pool,
@@ -913,6 +965,7 @@ impl UpdateSession {
         )
         .map_err(|e| SessionError::new(e.0))?;
         pool.warnings.extend(warnings);
+        pool.flex_notice = flex_notice;
         if std::env::var_os("VIVACITY_TRACE").is_some() {
             eprintln!(
                 "trace: policy filters      {before} → {} package versions ({} removed by lists)",

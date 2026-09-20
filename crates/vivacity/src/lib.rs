@@ -8,6 +8,7 @@
 //! and get the same exit code.
 
 mod extension_installers;
+mod flex;
 mod require;
 mod scripts;
 
@@ -456,8 +457,28 @@ fn resolution_fallback(
     command: vivacity_core::scope::ResolutionCommand,
     no_plugins: bool,
     no_fallback: bool,
+    with_install: bool,
 ) -> anyhow::Result<Option<i32>> {
-    let issues = vivacity_core::scope::resolution_issues(project, manifest, command, !no_plugins);
+    let mut issues = vivacity_core::scope::resolution_issues(
+        project,
+        manifest,
+        command,
+        !no_plugins,
+        with_install,
+    );
+    // Flex emulated for this command: its file-writing behaviours are
+    // still Composer's.
+    let flex_active = vivacity_core::scope::active_plugins(project, manifest, !no_plugins)
+        .iter()
+        .any(|p| p == "symfony/flex");
+    if flex_active && !issues.iter().any(|i| matches!(i, vivacity_core::scope::ScopeIssue::ResolutionPlugin(n, _) if n == "symfony/flex")) {
+        if let Some(reason) = flex_write_guard(project, manifest) {
+            issues.push(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                "symfony/flex".to_owned(),
+                reason,
+            ));
+        }
+    }
     if issues.is_empty() {
         return Ok(None);
     }
@@ -1838,6 +1859,7 @@ fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 vivacity_core::scope::ResolutionCommand::Update,
                 args.no_plugins,
                 args.no_fallback,
+                !args.no_install && !args.dry_run,
             )? {
                 return Ok(code);
             }
@@ -1921,6 +1943,9 @@ pub(crate) struct Resolved {
     pub(crate) post: Vec<String>,
     /// The manifest as the (possibly patched) root package sees it.
     pub(crate) manifest: serde_json::Value,
+    /// symfony/flex was active for this resolution: its `POST_UPDATE_CMD`
+    /// output follows the report (`print_post_update`).
+    pub(crate) flex_active: bool,
 }
 
 /// Prints the post-update report of `Installer::run` once the install
@@ -1932,6 +1957,165 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
         eprintln!("{line}");
     }
     print_funding(project, &resolved.manifest);
+    if resolved.flex_active {
+        print_flex_post_update(&resolved.manifest);
+    }
+}
+
+/// `Flex::install` on `POST_UPDATE_CMD` after a resolution that installed
+/// nothing (no operations, hence no recipes): an empty line, then
+/// `finish()` — `synchronizePackageJson`'s notices (the synchronisation
+/// itself, with a package.json or importmap.php, is a fallback guard
+/// upstream), `symfony.lock` unchanged — then the recipes hint when the
+/// downloader is enabled (symfony/flex required by the root).
+fn print_flex_post_update(manifest: &serde_json::Value) {
+    eprintln!();
+    let sync = manifest
+        .get("extra")
+        .and_then(|e| e.get("symfony/flex"))
+        .and_then(|f| f.get("synchronize_package_json"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let enabled = ["require", "require-dev"].iter().any(|k| {
+        manifest
+            .get(k)
+            .and_then(|m| m.get("symfony/flex"))
+            .is_some()
+    });
+    if !sync {
+        eprintln!("Skip synchronizing package.json with PHP packages");
+    } else if !enabled {
+        eprintln!("Synchronizing package.json is disabled: \"symfony/flex\" not found in the root composer.json");
+    }
+    if enabled {
+        eprintln!("Run composer recipes at any time to see the status of your Symfony recipes.");
+        eprintln!();
+    }
+}
+
+/// The Flex behaviours at `POST_UPDATE_CMD` that write files, decided
+/// before resolving: `.env.dist` copied to `.env` (`Flex::install`) and
+/// package.json / importmap.php synchronised with the lock
+/// (`PackageJsonSynchronizer::shouldSynchronize`). Either → Composer.
+fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> Option<String> {
+    let root_dir = manifest
+        .get("extra")
+        .and_then(|e| e.get("symfony"))
+        .and_then(|s| s.get("root-dir"))
+        .and_then(serde_json::Value::as_str)
+        .map(|d| project.join(d))
+        .unwrap_or_else(|| project.to_path_buf());
+    let dotenv = manifest
+        .get("extra")
+        .and_then(|e| e.get("runtime"))
+        .and_then(|r| r.get("dotenv_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(|p| root_dir.join(p))
+        .unwrap_or_else(|| root_dir.join(".env"));
+    let dist = dotenv.with_file_name(format!(
+        "{}.dist",
+        dotenv
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let local = dotenv.with_file_name(format!(
+        "{}.local",
+        dotenv
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    if !dotenv.exists() && !local.exists() && dist.exists() {
+        let mentions_local = std::fs::read_to_string(&dist)
+            .map(|t| t.contains(".env.local"))
+            .unwrap_or(false);
+        if !mentions_local {
+            return Some(format!(
+                "would copy {} to {} (not emulated)",
+                dist.display(),
+                dotenv.display()
+            ));
+        }
+    }
+    let sync = manifest
+        .get("extra")
+        .and_then(|e| e.get("symfony/flex"))
+        .and_then(|f| f.get("synchronize_package_json"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let enabled = ["require", "require-dev"].iter().any(|k| {
+        manifest
+            .get(k)
+            .and_then(|m| m.get("symfony/flex"))
+            .is_some()
+    });
+    if sync
+        && enabled
+        && (root_dir.join("package.json").exists() || root_dir.join("importmap.php").exists())
+    {
+        return Some("would synchronize package.json / importmap.php with the lock (not emulated)".to_owned());
+    }
+    // `Flex::update` → `unpack()`: every root requirement is looked up
+    // (installed.json, else the repositories) and a `symfony-pack` with
+    // requirements is unpacked into composer.json. Decided here from
+    // installed.json and the lock: a requirement found in neither is left
+    // to Composer (its type is unknown before loading it).
+    if manifest.get("flex-require").is_none() && manifest.get("flex-require-dev").is_none() {
+        let installed = installed_packages(project, manifest);
+        let lock: Option<serde_json::Value> =
+            std::fs::read_to_string(project.join("composer.lock"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
+        let by_name = |name: &str| -> Option<serde_json::Value> {
+            let named = |p: &serde_json::Value| {
+                p.get("name").and_then(serde_json::Value::as_str) == Some(name)
+            };
+            installed.iter().find(|p| named(p)).cloned().or_else(|| {
+                lock.as_ref().and_then(|l| {
+                    ["packages", "packages-dev"].iter().find_map(|k| {
+                        l.get(k)
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|a| a.iter().find(|p| named(p)))
+                            .cloned()
+                    })
+                })
+            })
+        };
+        for key in ["require", "require-dev"] {
+            let Some(reqs) = manifest.get(key).and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for name in reqs.keys() {
+                let lname = name.to_ascii_lowercase();
+                if vivacity_resolver::platform::is_platform_package(&lname) {
+                    continue;
+                }
+                match by_name(&lname) {
+                    Some(p) => {
+                        let is_pack = p.get("type").and_then(serde_json::Value::as_str)
+                            == Some("symfony-pack");
+                        let has_links = ["require", "require-dev"].iter().any(|k| {
+                            p.get(k)
+                                .and_then(serde_json::Value::as_object)
+                                .is_some_and(|m| !m.is_empty())
+                        });
+                        if is_pack && has_links {
+                            return Some(format!(
+                                "would unpack the symfony-pack {lname} into composer.json (not emulated)"
+                            ));
+                        }
+                    }
+                    None => {
+                        return Some(format!(
+                            "looks up the root requirement {lname} (not installed nor locked) to decide an unpack (not emulated)"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The packages of vendor/composer/installed.json (list form of old
@@ -2029,6 +2213,31 @@ fn resolve_and_lock(
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     trace("prepare", t0);
+    // symfony/flex active (installed, allowed, `extra.symfony.require` or
+    // `SYMFONY_REQUIRE` set): its `PRE_POOL_CREATE` filter runs on the
+    // pool, from the index fetched like Flex's Downloader does. The
+    // with-install and `require` cases were handed to Composer before
+    // getting here (`resolution_fallback`).
+    let mut flex_active = false;
+    if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+        flex_active = vivacity_core::scope::active_plugins(&project, &m, !args.no_plugins)
+            .iter()
+            .any(|p| p == "symfony/flex");
+        if flex_active {
+            if let Some(symfony_require) = vivacity_resolver::flex_filter::symfony_require(&m) {
+                let parsed = vivacity_resolver::constraint::parse_constraints(&symfony_require)
+                    .map_err(|e| {
+                        anyhow::anyhow!("extra.symfony.require {symfony_require:?}: {e}")
+                    })?;
+                let versions = flex::versions(&project, &m, args.offline)?;
+                session.flex = Some(vivacity_resolver::session::FlexSession {
+                    symfony_require,
+                    symfony: parsed.constraint,
+                    versions,
+                });
+            }
+        }
+    }
     session.prefer_stable = prefer_stable;
     session.prefer_lowest = prefer_lowest;
     session.installer_dev_mode =
@@ -2058,7 +2267,8 @@ fn resolve_and_lock(
         PlatformRequirementFilter::IgnoreNothing
     };
     eprintln!("Loading composer repositories with package information");
-    eprintln!("Updating dependencies");
+    // (`Updating dependencies` is printed by the session once the pool is
+    // built — Flex's notice comes before it.)
     // `Installer::run`: an unsolvable set means exit code 2
     // (`SolverProblemsException`), any other error is an exception.
     let (lock, report) = match session.update(&manifest_text, &filter) {
@@ -2070,6 +2280,7 @@ fn resolve_and_lock(
                 lock: None,
                 post: Vec::new(),
                 manifest: serde_json::Value::Null,
+                flex_active: false,
             });
         }
         Err(e) => return Err(anyhow::anyhow!("{e}")),
@@ -2145,6 +2356,7 @@ fn resolve_and_lock(
         lock: Some(lock),
         post,
         manifest,
+        flex_active,
     })
 }
 
@@ -2423,6 +2635,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         vivacity_core::scope::ResolutionCommand::Remove,
         args.no_plugins,
         args.no_fallback,
+        !args.no_install && !args.dry_run,
     )? {
         return Ok(code);
     }

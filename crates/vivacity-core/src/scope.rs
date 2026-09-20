@@ -102,17 +102,33 @@ impl ResolutionCommand {
 }
 
 /// What an active plugin does to `command`, as far as the lock is
-/// concerned: nothing (inert), or something vivacity does not emulate
-/// yet (the reason, for the fallback line).
-pub fn resolution_effect(plugin: &str, command: ResolutionCommand) -> Option<String> {
+/// concerned: nothing (inert, or emulated for this command), or something
+/// vivacity does not emulate (the reason, for the fallback line).
+/// `with_install`: the command installs after resolving (no `--no-install`).
+pub fn resolution_effect(
+    plugin: &str,
+    command: ResolutionCommand,
+    with_install: bool,
+) -> Option<String> {
     if RESOLUTION_INERT.contains(&plugin) {
         return None;
     }
     Some(match plugin {
         // `PRE_POOL_CREATE` filters the pool against `extra.symfony.require`
-        // (`Restricting packages listed in "symfony/symfony" to …`),
-        // `require` resolves Flex aliases, `POST_UPDATE_CMD` applies recipes.
-        "symfony/flex" => "filters the resolution pool (extra.symfony.require) and applies recipes (not emulated yet)".to_owned(),
+        // (`Restricting packages listed in "symfony/symfony" to …`) —
+        // emulated (`vivacity_resolver::flex_filter`) for `update` and
+        // `remove` without install. `require` resolves Flex aliases and
+        // `POST_UPDATE_CMD` applies recipes to the installed packages
+        // (files, symfony.lock): with install, or on `require`, Composer.
+        "symfony/flex" => {
+            if command == ResolutionCommand::Require {
+                "resolves Flex aliases and applies recipes on require (not emulated)".to_owned()
+            } else if with_install {
+                "applies recipes to the packages it installs (not emulated; --no-install resolves natively)".to_owned()
+            } else {
+                return None;
+            }
+        }
         // INIT merges other manifests into the root before resolving.
         "wikimedia/composer-merge-plugin" => "merges other manifests into the root before resolving (emulated for install and dump-autoload only)".to_owned(),
         // `POST_UPDATE_CMD`, acting only in a `require` context: unpacks
@@ -137,7 +153,25 @@ pub fn resolution_issues(
     root_manifest: &Value,
     command: ResolutionCommand,
     plugins_enabled: bool,
+    with_install: bool,
 ) -> Vec<ScopeIssue> {
+    let mut issues = Vec::new();
+    for name in active_plugins(project_dir, root_manifest, plugins_enabled) {
+        if let Some(effect) = resolution_effect(&name, command, with_install) {
+            issues.push(ScopeIssue::ResolutionPlugin(name, effect));
+        }
+    }
+    issues
+}
+
+/// The plugins Composer loads for a command: `composer-plugin` packages of
+/// installed.json (project and `COMPOSER_HOME`) that `allow-plugins`
+/// allows. Empty under `--no-plugins`.
+pub fn active_plugins(
+    project_dir: &Path,
+    root_manifest: &Value,
+    plugins_enabled: bool,
+) -> Vec<String> {
     if !plugins_enabled {
         return Vec::new();
     }
@@ -162,19 +196,13 @@ pub fn resolution_issues(
             &home.join("vendor").join("composer"),
         ));
     }
-    let mut issues = Vec::new();
-    for name in names {
-        if !matches!(
-            crate::layout::plugin_allowed(root_manifest, &name),
+    names.retain(|name| {
+        matches!(
+            crate::layout::plugin_allowed(root_manifest, name),
             crate::layout::PluginVerdict::Allowed
-        ) {
-            continue;
-        }
-        if let Some(effect) = resolution_effect(&name, command) {
-            issues.push(ScopeIssue::ResolutionPlugin(name, effect));
-        }
-    }
-    issues
+        )
+    });
+    names
 }
 
 #[derive(Debug, PartialEq, Eq)]

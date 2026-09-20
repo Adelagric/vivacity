@@ -80,6 +80,42 @@ for fx in "${FIXTURES[@]}"; do
     echo "FAIL $fx : composer.lock diffère"
     diff "$WORK/ref-$fx/composer.lock" "$WORK/viv-$fx/composer.lock" | head -20 || true; status=1
   fi
+  # Flex actif (plan v0.16 B) : la référence tourne AVEC le plugin — son
+  # filtre `PRE_POOL_CREATE` restreint le pool à `extra.symfony.require` —
+  # et vivacity l'émule ; l'index est servi aux deux depuis
+  # fixtures/flex/index.json. Le lock doit coïncider, et Flex ne doit
+  # rien écrire d'autre (`symfony.lock` absent des deux côtés).
+  if jq -e '.extra.symfony.require' "$ROOT/fixtures/projects/$fx/composer.json" >/dev/null 2>&1 \
+     && jq -e '[.packages[].name] | index("symfony/flex")' "$ROOT/fixtures/projects/$fx/composer.lock" >/dev/null 2>&1; then
+    flex_index_serve
+    for side in ref viv; do
+      d="$WORK/$side-$fx-flex"; stage_project "$fx" "$d"; seed_flex "$d" "$fx" "$FLEX_INDEX_URL" || { flex_index_stop; status=1; continue 2; }
+    done
+    if ! (cd "$WORK/ref-$fx-flex" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+          composer update --no-install --no-scripts --no-interaction --no-audit --no-ansi ${blocking[@]+"${blocking[@]}"} >"$WORK/$fx.flex.composer.log" 2>&1); then
+      echo "FAIL $fx (flex) : composer update a échoué :"; tail -5 "$WORK/$fx.flex.composer.log"; status=1; flex_index_stop; continue
+    fi
+    if ! grep -q 'Restricting packages listed in "symfony/symfony"' "$WORK/$fx.flex.composer.log"; then
+      echo "FAIL $fx (flex) : Composer n'a pas restreint le pool (Flex inactif ? cas mal choisi)"; status=1; flex_index_stop; continue
+    fi
+    if ! (cd "$WORK/viv-$fx-flex" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+          "$VIVACITY" update --no-install --no-fallback ${blocking[@]+"${blocking[@]}"} >"$WORK/$fx.flex.vivacity.log" 2>&1); then
+      echo "FAIL $fx (flex) : vivacity update a échoué :"; tail -5 "$WORK/$fx.flex.vivacity.log"; status=1; flex_index_stop; continue
+    fi
+    if ! grep -q 'Restricting packages listed in "symfony/symfony"' "$WORK/$fx.flex.vivacity.log"; then
+      echo "FAIL $fx (flex) : vivacity n'a pas imprimé la restriction de Flex"; status=1; flex_index_stop; continue
+    fi
+    if [ -e "$WORK/ref-$fx-flex/symfony.lock" ] || [ -e "$WORK/viv-$fx-flex/symfony.lock" ]; then
+      echo "FAIL $fx (flex) : symfony.lock écrit (ref: $([ -e "$WORK/ref-$fx-flex/symfony.lock" ] && echo oui || echo non), viv: $([ -e "$WORK/viv-$fx-flex/symfony.lock" ] && echo oui || echo non))"; status=1; flex_index_stop; continue
+    fi
+    if diff -q "$WORK/ref-$fx-flex/composer.lock" "$WORK/viv-$fx-flex/composer.lock" >/dev/null; then
+      echo "OK   $fx (flex actif) : composer.lock identique, pool restreint des deux côtés"
+    else
+      echo "FAIL $fx (flex actif) : composer.lock diffère"
+      diff "$WORK/ref-$fx-flex/composer.lock" "$WORK/viv-$fx-flex/composer.lock" | head -20 || true; status=1
+    fi
+    flex_index_stop
+  fi
   # Mises à jour partielles (`update a/b [-w|-W]`) depuis le lock de la
   # fixture : les paquets hors liste restent verrouillés, la liste et ses
   # dépendances bougent selon le mode.

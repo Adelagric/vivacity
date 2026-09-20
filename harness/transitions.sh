@@ -35,11 +35,14 @@ after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort
 [ "$before" = "$after" ] || { echo "FAIL drupal: the tree was modified before the refusal"; exit 1; }
 echo "OK   drupal: core-composer-scaffold handed over to Composer without touching the disk"
 
-# The resolution commands (plan v0.16): an installed, allowed plugin that
-# changes what `update`/`require`/`remove` resolve — symfony/flex here —
-# hands the whole command to Composer BEFORE any write; `--no-fallback`
-# refuses with exit 3, naming the plugin, the tree untouched (composer.json
-# included: require/remove decide before their edit).
+# The resolution commands (plan v0.16): an installed, allowed plugin whose
+# effect vivacity does not emulate hands the whole command to Composer
+# BEFORE any write; `--no-fallback` refuses with exit 3, naming the plugin,
+# the tree untouched (composer.json included: require/remove decide before
+# their edit). symfony/flex here: `require` (aliases, recipes) always; the
+# symfony-demo fixture has an importmap.php, which Flex would synchronise on
+# `POST_UPDATE_CMD` — so `update` and `remove` too (the pool filter itself
+# is emulated: `harness/update.sh` and `steps.sh` prove the native path).
 src="$ROOT/fixtures/work/symfony"
 dir="$WORK/flex-resolution"
 rm -rf "$dir"; mkdir -p "$dir"
@@ -58,8 +61,12 @@ for cmd in "update --no-install" "require psr/log --no-install" "remove symfony/
   if ! grep -q 'symfony/flex' "$log"; then
     echo "FAIL flex \`$cmd\`: the refusal does not name the plugin:"; tail -5 "$log"; exit 1
   fi
+  case "$cmd" in
+    require*) grep -q 'aliases' "$log" || { echo "FAIL flex \`$cmd\`: expected the aliases/recipes reason:"; tail -5 "$log"; exit 1; } ;;
+    *) grep -q 'importmap.php' "$log" || { echo "FAIL flex \`$cmd\`: expected the importmap.php synchronisation reason:"; tail -5 "$log"; exit 1; } ;;
+  esac
   after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
   [ "$before" = "$after" ] || { echo "FAIL flex \`$cmd\`: the tree was modified before the refusal"; exit 1; }
 done
-echo "OK   flex: update/require/remove handed over to Composer without touching the disk"
+echo "OK   flex: require (aliases), update/remove (importmap.php sync) handed over to Composer without touching the disk"
 

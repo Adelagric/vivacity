@@ -277,10 +277,25 @@ impl RepositorySet {
         &self,
         request: &mut Request,
         arena: &mut Vec<Package>,
+        pre_pool: Option<&PrePoolFilter>,
     ) -> Result<Pool, PoolError> {
         let mut builder = PoolBuilder::new(self);
-        builder.build_pool(&self.repositories, request, arena)
+        builder.build_pool(&self.repositories, request, arena, pre_pool)
     }
+}
+
+/// What a `PRE_POOL_CREATE` listener does to the loaded packages before
+/// the pool exists — symfony/flex's `truncatePackages` is the one
+/// emulated (`flex_filter`): the root constraints it consults, the
+/// requirement and the index.
+#[derive(Debug, Clone)]
+pub struct PrePoolFilter {
+    /// `extra.symfony.require` as Flex reads it (`.x` → `.x-dev`), for the notice.
+    pub symfony_require: String,
+    pub symfony: Constraint,
+    /// `getRequires() + getDevRequires()` of the root package.
+    pub root_constraints: BTreeMap<String, Constraint>,
+    pub versions: crate::flex_filter::FlexVersions,
 }
 
 /// `Composer\DependencyResolver\Pool`: 1-based ids in construction order.
@@ -298,6 +313,9 @@ pub struct Pool {
     package_by_name: HashMap<String, Vec<usize>>,
     pub unacceptable_fixed_or_locked: Vec<usize>,
     pub warnings: Vec<String>,
+    /// Flex's `Restricting packages listed in "symfony/symfony" to …`
+    /// notice, printed once by the caller before `Updating dependencies`.
+    pub flex_notice: Option<String>,
     /// `filterListRemovedVersions`: what a filter list removed (the rule
     /// generator and the solver consult it).
     pub filter_list_removed: FilterListRemoved,
@@ -318,6 +336,7 @@ impl Pool {
     pub fn new(packages: Vec<usize>, unacceptable: Vec<usize>, arena: &[Package]) -> Pool {
         static NEXT_IDENTITY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut pool = Pool {
+            flex_notice: None,
             identity: NEXT_IDENTITY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             packages: Vec::with_capacity(packages.len()),
             id_of: HashMap::new(),
@@ -620,6 +639,7 @@ impl<'a> PoolBuilder<'a> {
         repositories: &[Repository],
         request: &mut Request,
         arena: &mut Vec<Package>,
+        pre_pool: Option<&PrePoolFilter>,
     ) -> Result<Pool, PoolError> {
         self.restricted = request
             .restricted_packages
@@ -753,9 +773,48 @@ impl<'a> PoolBuilder<'a> {
             }
         }
 
-        let packages = self.loaded_packages_in_pool();
+        let mut packages = self.loaded_packages_in_pool();
+        // `PRE_POOL_CREATE`: the listeners see the loaded packages and the
+        // request's fixed or locked packages, and may replace the list.
+        let mut flex_notice = None;
+        if let Some(f) = pre_pool {
+            let mut locked: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for idx in request.fixed_or_locked_packages() {
+                let p = &arena[idx];
+                let entry = locked.entry(p.name.clone()).or_default();
+                entry.push(p.version.clone());
+                if let Some(base) = p.alias_of {
+                    entry.push(arena[base].version.clone());
+                }
+            }
+            let (kept, restricting) = crate::flex_filter::remove_legacy_packages(
+                &packages,
+                arena,
+                &f.root_constraints,
+                &locked,
+                &f.symfony,
+                &f.versions,
+            );
+            if std::env::var_os("VIVACITY_TRACE").is_some() {
+                eprintln!(
+                    "trace: flex filter        {} → {} package versions (require {}, {} splits)",
+                    packages.len(),
+                    kept.len(),
+                    f.symfony_require,
+                    f.versions.splits.len()
+                );
+            }
+            packages = kept;
+            if restricting {
+                flex_notice = Some(format!(
+                    "Restricting packages listed in \"symfony/symfony\" to \"{}\"",
+                    f.symfony_require
+                ));
+            }
+        }
         let mut pool = Pool::new(packages, std::mem::take(&mut self.unacceptable), arena);
         pool.warnings = std::mem::take(&mut self.warnings);
+        pool.flex_notice = flex_notice;
         Ok(pool)
     }
 

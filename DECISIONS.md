@@ -1018,3 +1018,27 @@ Trouvé en chemin : Flex pose `COMPOSER_PREFER_DEV_OVER_PRERELEASE`, et
 Composer charge alors les métadonnées `~dev` — absentes d'un instantané
 enregistré sans plugins ; 47 fichiers ajoutés au snapshot symfony (additif).
 
+## 2026-09-20 — Le filtre de pool de Flex, émulé ; le reste de Flex, à Composer (v0.16 B)
+
+Fait : `Flex::truncatePackages` (`PRE_POOL_CREATE`) retire du pool, avant
+sa création, les versions des paquets listés dans `symfony/symfony` qui
+ne satisfont pas `extra.symfony.require` — les `splits` de l'index des
+recettes, élagués par `getVersions` (un paquet dont toutes les versions
+listées matchent, ou aucune, n'est pas filtré : porté tel quel). Décision :
+port ligne à ligne (`flex_filter.rs`), appliqué au même point que Composer
+(après le chargement, avant `Pool::new`, avant les filtres de politique),
+`COMPOSER_PREFER_DEV_OVER_PRERELEASE` posé sur la politique comme Flex le
+fait ; l'index lu comme `Downloader` (endpoints, cache au format de Flex
+sous `cache-repo-dir/flex`, partagé avec Composer). Émulé pour `update` et
+`remove` sans install seulement ; tout ce que Flex *écrit* reste à
+Composer, décidé avant de résoudre : `require` (alias, recettes), l'install
+(recettes, `symfony.lock`), `.env.dist`, package.json / importmap.php
+(`PackageJsonSynchronizer`), un `symfony-pack` à déballer (`Unpacker`,
+POST_UPDATE_CMD — qui charge chaque exigence racine depuis les dépôts :
+c'est de là que venaient les fichiers `~dev`, pas du pool). Écarté :
+`file://` comme endpoint dans les harnais (Flex exige un statut HTTP 200 —
+`php -S` + `secure-http: false` sur les copies) ; émuler la
+synchronisation package.json (elle écrit). Vérifié : lock identique à
+Composer avec Flex actif sur la démo Symfony et Sylius (harnais hermétique
+sur `fixtures/flex/index.json`), et en direct contre Packagist.
+

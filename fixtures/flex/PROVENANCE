@@ -1,0 +1,8 @@
+index.json: the `versions` entry of Flex's two default endpoints
+(https://raw.githubusercontent.com/symfony/recipes/flex/main/index.json,
+https://raw.githubusercontent.com/symfony/recipes-contrib/flex/main/index.json),
+merged first endpoint wins (`Downloader::initialize`), captured on
+2026-09-20 from a Composer cache. Only the key
+Flex's `PackageFilter` reads; no `recipes` (so a Flex-enabled Composer
+applies none), no `aliases`. Served to both tools by the harnesses through
+`extra.symfony.endpoint: ["file://<path>/index.json"]`.

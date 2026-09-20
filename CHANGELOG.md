@@ -23,6 +23,22 @@ byte-identical-output promise are the public API.
   symfony snapshot carries the `~dev` metadata a Flex-enabled Composer
   loads (`COMPOSER_PREFER_DEV_OVER_PRERELEASE`); `harness/transitions.sh`
   checks the three refusals leave the tree untouched.
+- **`symfony/flex`'s pool filter emulated** for `update` and `remove`
+  with `--no-install` (step B): `PackageFilter::removeLegacyPackages`
+  ported line by line (`vivacity-resolver::flex_filter`: the pruned
+  `splits`, locked versions, disjoint root constraints, the
+  `psr-http-message-bridge` special case, `symfony/symfony` kept when no
+  version matches, the `Restricting packages…` notice once), applied at
+  `PRE_POOL_CREATE` before the policy filters; the index fetched like
+  Flex's `Downloader` (endpoints, `SYMFONY_ENDPOINT`, cache in Flex's
+  format under `cache-repo-dir/flex`); `COMPOSER_PREFER_DEV_OVER_PRERELEASE`
+  applied to the policy; Flex's `POST_UPDATE_CMD` lines (`Run composer
+  recipes…`, the package.json notices) printed as Flex prints them.
+  Composer keeps: `require`, install, `.env.dist`, package.json /
+  importmap.php synchronisation, `symfony-pack` unpacking. `harness/update.sh`
+  gains a Flex-active pass (Symfony demo and Sylius: identical lock,
+  pool restricted on both sides, no `symfony.lock` written); the captured
+  index lives in `fixtures/flex/`, served by `php -S`.
 
 ## [0.16.0] — 2026-09-20
 

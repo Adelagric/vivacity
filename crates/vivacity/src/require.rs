@@ -351,6 +351,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 vivacity_core::scope::ResolutionCommand::Require,
                 args.no_plugins,
                 args.no_fallback,
+                !args.no_install && !args.dry_run,
             )? {
                 return Ok(code);
             }
