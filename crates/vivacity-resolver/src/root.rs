@@ -443,13 +443,21 @@ mod tests {
         // Explicit flag: the most unstable part of the constraint wins,
         // whatever the minimum stability; the name is lowercased.
         let mut f = BTreeMap::new();
-        flags_of(&mut f, "stable", &req(&[("Acme/Lib", "^1.0@beta || ^2.0@RC")]));
+        flags_of(
+            &mut f,
+            "stable",
+            &req(&[("Acme/Lib", "^1.0@beta || ^2.0@RC")]),
+        );
         assert_eq!(f.get("acme/lib"), Some(&10));
         // Parsed dev stability counts unless the minimum is more unstable
         // than it (`$this->minimumStability > $stability`), and never a
         // stable one; unlike the loader, no "single plain token" check.
         let mut f = BTreeMap::new();
-        flags_of(&mut f, "stable", &req(&[("a/b", "dev-main || ^1.0"), ("c/d", "^1.0")]));
+        flags_of(
+            &mut f,
+            "stable",
+            &req(&[("a/b", "dev-main || ^1.0"), ("c/d", "^1.0")]),
+        );
         assert_eq!(f.get("a/b"), Some(&20));
         assert!(!f.contains_key("c/d"));
         let mut f = BTreeMap::new();
@@ -458,7 +466,11 @@ mod tests {
         // `max($stability, current)`: an existing flag is never lowered,
         // and a requirement without a flag leaves it untouched.
         let mut f: BTreeMap<String, i32> = [("a/b".to_owned(), 20)].into();
-        flags_of(&mut f, "stable", &req(&[("a/b", "^1.0@beta"), ("a/b", "^1.0")]));
+        flags_of(
+            &mut f,
+            "stable",
+            &req(&[("a/b", "^1.0@beta"), ("a/b", "^1.0")]),
+        );
         assert_eq!(f.get("a/b"), Some(&20));
         // The alias is dropped before parsing.
         let mut f = BTreeMap::new();
