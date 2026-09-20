@@ -965,3 +965,20 @@ scénarios « CPU ». Décision : tolérance 25 % (deux fois la dispersion mesur
 sur quatre runs identiques, 3–12 %), marge absolue 5 ms inchangée. Un gate
 qui sonne à faux est pire qu'un gate large : il finit ignoré.
 
+## 2026-09-20 — Le coût de l'ordre readdir, mesuré, et la baseline refaite
+
+Fait : après `c0b6313` (ordre readdir), trois runs CI consécutifs mettent le
+no-op sylius à 0,274–0,304 contre 0,237–0,266 sur les quatre runs de baseline
+(+12 à +27 %), et `dump -o` sylius à +16–21 %. Mesuré hors runner : Mac
+62,9 → 63,4 ms (bruit) ; conteneur Linux (ext4-like, ordre de hachage) no-op
+56,5 → 60,0 ms (+6 %, σ 2–3 ms), `dump -o` 60,5 → 61,9 (+2 %). Le code
+explique au plus 3 ms ; le reste est le runner du jour sur le scénario le
+plus sensible au disque (~450 caches de store lus). Décision : le coût est
+accepté — c'est un correctif de contrat (le gagnant d'une classe ambiguë et
+les avertissements sont ceux de Composer), pas une optimisation à défaire —
+et la baseline est refaite sur le code courant (médiane de quatre runs sur
+`b128c23`). Trouvé en chemin : la version racine des fixtures venait du
+dépôt vivacity lui-même (git remonte) — `0.16.0` sur un tag, d'où un conflit
+`rector/rector <2.0` sur le bench lancé sur `v0.16.0` ; `fixtures/make.sh`
+donne maintenant un dépôt git à chaque fixture, comme les harnais.
+
