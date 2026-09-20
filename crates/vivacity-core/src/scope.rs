@@ -129,8 +129,12 @@ pub fn resolution_effect(
                 return None;
             }
         }
-        // INIT merges other manifests into the root before resolving.
-        "wikimedia/composer-merge-plugin" => "merges other manifests into the root before resolving (emulated for install and dump-autoload only)".to_owned(),
+        // INIT / `PRE_UPDATE_CMD` merge other manifests into the root
+        // before resolving: emulated (`vivacity_resolver::merge_plugin`),
+        // the merged links, stability flags, aliases and references in
+        // the pool. A merged `repositories` section is the exception,
+        // checked by the caller on the merge itself.
+        "wikimedia/composer-merge-plugin" => return None,
         // `POST_UPDATE_CMD`, acting only in a `require` context: unpacks
         // recipes into composer.json.
         "drupal/core-recipe-unpack" => {

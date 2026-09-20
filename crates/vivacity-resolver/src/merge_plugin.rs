@@ -119,6 +119,21 @@ pub struct Merged {
     pub merged_names: Vec<String>,
     /// The files merged, in order.
     pub files: Vec<String>,
+    /// Per merged file, in merge order: its own `require` and
+    /// `require-dev` entries (name, constraint text as written) — what
+    /// `mergeStabilityFlags` extracts flags from, before any merge.
+    pub include_links: Vec<IncludeLinks>,
+    /// A merged file declares `repositories` (`prependRepositories`):
+    /// not emulated at resolution.
+    pub repositories: Vec<String>,
+}
+
+/// The raw requirement sections of one merged file.
+#[derive(Debug, Clone, Default)]
+pub struct IncludeLinks {
+    pub file: String,
+    pub require: Vec<(String, String)>,
+    pub require_dev: Vec<(String, String)>,
 }
 
 struct Merger<'a> {
@@ -137,6 +152,8 @@ struct Merger<'a> {
     merged_names: Vec<String>,
     loaded: Vec<String>,
     files: Vec<String>,
+    include_links: Vec<IncludeLinks>,
+    repositories: Vec<String>,
 }
 
 /// `MergePlugin::onInit` + `onInstallUpdateOrDump` in one pass: the root
@@ -164,6 +181,8 @@ pub fn merge(
         merged_names: Vec::new(),
         loaded: Vec::new(),
         files: Vec::new(),
+        include_links: Vec::new(),
+        repositories: Vec::new(),
     };
     for key in ["require", "require-dev"] {
         let (map, order) = if key == "require" {
@@ -240,6 +259,8 @@ pub fn merge(
             .collect(),
         merged_names,
         files: m.files,
+        include_links: m.include_links,
+        repositories: m.repositories,
     })
 }
 
@@ -297,6 +318,28 @@ impl Merger<'_> {
             .unwrap_or_else(|| format!("merge-plugin/{}", path.replace('/', "-")));
         self.files.push(path.to_owned());
         self.loaded.push(path.to_owned());
+        let raw_links = |key: &str| -> Vec<(String, String)> {
+            json.get(key)
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|c| (k.clone(), c.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        self.include_links.push(IncludeLinks {
+            file: path.to_owned(),
+            require: raw_links("require"),
+            require_dev: if self.with_dev {
+                raw_links("require-dev")
+            } else {
+                Vec::new()
+            },
+        });
+        if json.get("repositories").is_some_and(|r| !php_empty(r)) {
+            self.repositories.push(path.to_owned());
+        }
 
         // mergeInto
         self.merge_requires("require", &json, &name, path)?;
@@ -562,6 +605,18 @@ fn split_or(text: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// PHP `empty()` on a JSON value.
+fn php_empty(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Bool(b) => !b,
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty() || s == "0",
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+    }
 }
 
 #[cfg(test)]

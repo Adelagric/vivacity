@@ -39,6 +39,21 @@ byte-identical-output promise are the public API.
   gains a Flex-active pass (Symfony demo and Sylius: identical lock,
   pool restricted on both sides, no `symfony.lock` written); the captured
   index lives in `fixtures/flex/`, served by `php -S`.
+- **`wikimedia/composer-merge-plugin` emulated at resolution** (step C):
+  `update`, `require` and `remove` resolve the merged root — the included
+  files' links, `conflict` / `replace` / `provide`, aliases and references
+  from the merged links, and the stability flags as the plugin extracts
+  them from each file's own constraints (`StabilityFlags::extractAll`
+  ported: explicit flag, else parsed dev stability not more stable than
+  the minimum, never lowered) on top of the loader's; content-hash from
+  the file. Until now these commands were refused on such a project. An
+  included file declaring `repositories` still goes to Composer (fallback
+  with the reason); the plugin required but not installed yet is still
+  refused (Composer resolves unmerged, then runs the implicit update).
+  `harness/merge-plugin.sh` gains the resolution cases: update, `--no-dev`,
+  `replace`, an `@dev` flag in an included file, require, remove, update
+  with install — lock (and project) identical to Composer with the plugin
+  active — plus the two refusals.
 
 ## [0.16.0] — 2026-09-20
 

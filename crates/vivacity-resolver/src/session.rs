@@ -256,6 +256,10 @@ pub struct UpdateOptions {
     /// Dry run of `require`/`remove`: the root package is patched in
     /// memory, composer.json is not touched.
     pub root_patch: Option<crate::root::RootPatch>,
+    /// composer-merge-plugin active: the root as its INIT /
+    /// `PRE_UPDATE_CMD` merges left it (the merged manifest, the
+    /// included files' own requirements for the stability flags).
+    pub merged: Option<crate::merge_plugin::Merged>,
 }
 
 impl UpdateOptions {
@@ -379,6 +383,34 @@ impl UpdateSession {
             .map_err(|e| SessionError::new(e.0))?;
         let mut root =
             RootPackage::load(&manifest, project_dir).map_err(|e| SessionError::new(e.0))?;
+        if let Some(merged) = &options.merged {
+            // `RootPackageLoader` ran on the file: its stability flags are
+            // the starting point. The plugin then merges each file's
+            // links, aliases and references into the root; the flags of a
+            // merged file come from its own `require` (and `require-dev`
+            // in dev mode), `mergeStabilityFlags` — not from the merged
+            // constraint text, which the loader never sees.
+            let flags = std::mem::take(&mut root.stability_flags);
+            root = RootPackage::load(&merged.manifest, project_dir)
+                .map_err(|e| SessionError::new(e.0))?;
+            root.stability_flags = flags;
+            // (`require_dev` is recorded only when the merge ran in dev
+            // mode — `mergeDevInto`, a second pass over the files.)
+            for include in &merged.include_links {
+                crate::root::merge_plugin_stability_flags(
+                    &mut root.stability_flags,
+                    &root.minimum_stability,
+                    &include.require,
+                );
+            }
+            for include in &merged.include_links {
+                crate::root::merge_plugin_stability_flags(
+                    &mut root.stability_flags,
+                    &root.minimum_stability,
+                    &include.require_dev,
+                );
+            }
+        }
         if let Some(patch) = &options.root_patch {
             root.apply_patch(patch)
                 .map_err(|e| SessionError::new(e.0))?;

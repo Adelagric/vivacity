@@ -13,8 +13,10 @@
 # false, recurse false. Puis les deux cas d'exigence fusionnée absente du
 # lock : vendor chaud → même code 4 et mêmes lignes que Composer ; vendor
 # vierge → vivacity rend la main avec la raison (code 3 en --no-fallback,
-# Composer lancerait sa mise à jour implicite) ; et `vivacity update`
-# refusé avec la raison.
+# Composer lancerait sa mise à jour implicite) ; `vivacity update` sur ce
+# vendor vierge refusé avec la raison. Enfin (v0.16) la résolution avec le
+# plugin installé : update (complet, --no-dev, replace, flag de stabilité
+# porté par un fichier inclus), require, remove — lock identique à Composer.
 #
 # Usage : harness/merge-plugin.sh [variante...]
 set -euo pipefail
@@ -134,13 +136,81 @@ if [ ${#ONLY[@]} -eq 0 ] || printf '%s\n' "${ONLY[@]}" | grep -qx missing; then
   else
     echo "FAIL missing (vendor vierge) : code $v_code"; tail -5 "$WORK/missing-bare.vivacity.err"; status=1
   fi
-  # c. update refusé.
-  viv="$WORK/viv-update"; stage "$viv" "."
-  v_code=0; (cd "$viv" && "$VIVACITY" update --no-install 2>"$WORK/update.vivacity.err" >/dev/null) || v_code=$?
-  if [ "$v_code" != 0 ] && grep -q "composer-merge-plugin" "$WORK/update.vivacity.err" && (cd "$viv" && git diff --quiet -- composer.lock); then
-    echo "OK   update : refusé avec la raison, lock intact"
+  # c. update sur vendor vierge : le plugin requis mais pas installé,
+  # Composer résoudrait sans la fusion puis relancerait sa mise à jour
+  # implicite — refusé avec la raison.
+  viv="$WORK/viv-update-bare"; stage "$viv" "."
+  v_code=0; (cd "$viv" && "$VIVACITY" update --no-install 2>"$WORK/update-bare.vivacity.err" >/dev/null) || v_code=$?
+  if [ "$v_code" != 0 ] && grep -q "composer-merge-plugin is not installed yet" "$WORK/update-bare.vivacity.err" && (cd "$viv" && git diff --quiet -- composer.lock); then
+    echo "OK   update (vendor vierge) : refusé avec la raison, lock intact"
   else
-    echo "FAIL update : code $v_code"; tail -3 "$WORK/update.vivacity.err"; status=1
+    echo "FAIL update (vendor vierge) : code $v_code"; tail -3 "$WORK/update-bare.vivacity.err"; status=1
+  fi
+fi
+
+# Résolution avec le plugin installé (v0.16) : la racine fusionnée dans le
+# pool. Les deux côtés partent du vendor de l'amorce (plugin actif), sans
+# installation ; le lock produit doit être identique à l'octet. Cas :
+# update complet ; --no-dev (les require-dev inclus ne sont pas fusionnés) ;
+# replace ; un flag de stabilité porté par un fichier inclus (le plugin
+# l'extrait de la contrainte du fichier, pas du texte fusionné) ; require
+# et remove d'un paquet.
+RESOLVE=(
+  "update~.~update --no-install"
+  "update-no-dev~.~update --no-install --no-dev"
+  "update-replace~.extra[\"merge-plugin\"].replace=true~update --no-install"
+  "update-flag~@beta~update --no-install"
+  "require~.~require psr/http-message:^2.0 --no-install"
+  "remove~.~remove monolog/monolog --no-install"
+  "update-install~.~update"
+)
+for spec in "${RESOLVE[@]}"; do
+  IFS='~' read -r name filter cmd <<< "$spec"
+  if [ ${#ONLY[@]} -gt 0 ]; then
+    keep=0; for o in "${ONLY[@]}"; do [ "$o" = "$name" ] && keep=1; done; [ $keep = 1 ] || continue
+  fi
+  ref="$WORK/ref-$name"; viv="$WORK/viv-$name"
+  root_filter="$filter"; [ "$filter" = "@beta" ] && root_filter="."
+  stage "$ref" "$root_filter"; stage "$viv" "$root_filter"
+  if [ "$filter" = "@beta" ]; then
+    for d in "$ref" "$viv"; do
+      jq '.require["symfony/polyfill-ctype"]="^1.31@dev"' "$d/modules/beta/composer.json" > "$d/b.json" && mv "$d/b.json" "$d/modules/beta/composer.json"
+    done
+  fi
+  for d in "$ref" "$viv"; do cp -R "$seed/vendor" "$d/vendor"; rm -f "$d/vendor/autoload.php"; done
+  read -r -a words <<< "$cmd"
+  c_code=0; v_code=0
+  (cd "$ref" && composer "${words[@]}" --no-scripts --no-interaction --no-ansi 2>"$WORK/$name.composer.err" >/dev/null) || c_code=$?
+  (cd "$viv" && "$VIVACITY" "${words[@]}" --no-fallback 2>"$WORK/$name.vivacity.err" >/dev/null) || v_code=$?
+  if [ "$c_code" != "$v_code" ]; then
+    echo "FAIL $name : codes $c_code vs $v_code"; tail -3 "$WORK/$name.composer.err"; tail -3 "$WORK/$name.vivacity.err"; status=1; continue
+  fi
+  if ! cmp -s "$ref/composer.lock" "$viv/composer.lock"; then
+    echo "FAIL $name : composer.lock différent"; diff "$ref/composer.lock" "$viv/composer.lock" | head -12; status=1; continue
+  fi
+  if ! cmp -s "$ref/composer.json" "$viv/composer.json"; then
+    echo "FAIL $name : composer.json différent"; diff "$ref/composer.json" "$viv/composer.json" | head -12; status=1; continue
+  fi
+  if [ "$name" = update-flag ] && [ "$(jq -r '."stability-flags"."symfony/polyfill-ctype"' "$viv/composer.lock")" != 20 ]; then
+    echo "FAIL $name : le flag @dev du fichier inclus n'est pas dans le lock"; status=1; continue
+  fi
+  if [ "$name" = update-install ] && ! compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
+    echo "FAIL $name : projet différent ($WORK/$name.diff)"; head -12 "$WORK/$name.diff"; status=1; continue
+  fi
+  n=$(jq '.packages | length' "$viv/composer.lock")
+  echo "OK   $name : lock identique à Composer ($n paquets, code $c_code)"
+done
+# Un fichier inclus qui déclare `repositories` (prependRepositories) : hors
+# émulation, rendu à Composer avec la raison avant toute résolution.
+if [ ${#ONLY[@]} -eq 0 ] || printf '%s\n' "${ONLY[@]}" | grep -qx update-repos; then
+  viv="$WORK/viv-update-repos"; stage "$viv" "."
+  cp -R "$seed/vendor" "$viv/vendor"
+  jq '.repositories=[{"type":"path","url":"../../ext"}]' "$viv/modules/beta/composer.json" > "$viv/b.json" && mv "$viv/b.json" "$viv/modules/beta/composer.json"
+  v_code=0; (cd "$viv" && "$VIVACITY" update --no-install --no-fallback 2>"$WORK/update-repos.vivacity.err" >/dev/null) || v_code=$?
+  if [ "$v_code" = 3 ] && grep -q "merges repositories from modules/beta/composer.json" "$WORK/update-repos.vivacity.err" && (cd "$viv" && git diff --quiet -- composer.lock); then
+    echo "OK   update-repos : rendu à Composer avec la raison, lock intact"
+  else
+    echo "FAIL update-repos : code $v_code"; tail -4 "$WORK/update-repos.vivacity.err"; status=1
   fi
 fi
 exit $status

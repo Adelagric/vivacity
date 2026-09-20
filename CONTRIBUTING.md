@@ -49,10 +49,10 @@ the roadmap below.
   resolution (`scope::resolution_issues`, plan v0.16 A); `symfony/flex`'s
   pool filter is emulated for `update`/`remove --no-install`
   (`vivacity-resolver::flex_filter`, `vivacity::flex`, plan v0.16 B).
-  Next: `wikimedia/composer-merge-plugin`'s merged requirements and
-  stability flags entering the pool (`vivacity-resolver::merge_plugin`
-  already produces the structured links); then Flex with install
-  (recipes, `symfony.lock`) as its own plan. The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
+  `wikimedia/composer-merge-plugin`'s merged root (links, stability
+  flags, aliases, references) enters the pool (plan v0.16 C;
+  `UpdateOptions.merged`). Next: Flex with install (recipes,
+  `symfony.lock`) as its own plan; a merged `repositories` section. The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
   `extension_installers.rs`, `merge_plugin.rs`) are the pattern: vendor
   the writer under `docs/reference/plugins/`, prove it on a fixture and
   the corpus entries.

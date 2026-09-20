@@ -300,6 +300,57 @@ fn split(re: &Regex, subject: &str) -> Vec<String> {
     out
 }
 
+/// composer-merge-plugin's `ExtraPackage::mergeStabilityFlags` for one
+/// merged file: `StabilityFlags::extractAll` over the file's own
+/// requirements (an explicit `@flag`, the most unstable across the
+/// constraint's parts, else the parsed stability when it is dev and not
+/// more stable than the minimum), each raised to at least the root's
+/// current flag, then `array_merge`d over the root's flags.
+pub fn merge_plugin_stability_flags(
+    flags: &mut BTreeMap<String, i32>,
+    minimum_stability: &str,
+    requires: &[(String, String)],
+) {
+    static AT: OnceLock<Regex> = OnceLock::new();
+    static AS: OnceLock<Regex> = OnceLock::new();
+    let at = regex(&AT, &format!("^[^@]*?@({STABILITIES_REGEX})$"), true);
+    let as_re = regex(&AS, r"^([^,\s@]+) as .+$", false);
+    let minimum = stability_rank(minimum_stability);
+    for (req_name, pretty) in requires {
+        let name = req_name.to_lowercase();
+        let mut explicit: Option<i32> = None;
+        for c in split_constraints(pretty) {
+            if let Ok(Some(caps)) = at.captures(c.as_bytes()) {
+                let Ok(stab) = normalize_stability(group(&caps, 1)) else {
+                    continue;
+                };
+                let rank = stability_rank(&stab);
+                explicit = Some(explicit.map_or(rank, |e| e.max(rank)));
+            }
+        }
+        let stability = match explicit {
+            Some(e) => Some(e),
+            None => {
+                // Drop aliasing if used.
+                let v = match as_re.captures(pretty.as_bytes()) {
+                    Ok(Some(caps)) => group(&caps, 1).to_owned(),
+                    _ => pretty.clone(),
+                };
+                let rank = stability_rank(version::parse_stability(&v));
+                if rank == stability_rank("stable") || minimum > rank {
+                    None
+                } else {
+                    Some(rank)
+                }
+            }
+        };
+        if let Some(st) = stability {
+            let current = flags.get(&name).copied();
+            flags.insert(name, current.map_or(st, |c| c.max(st)));
+        }
+    }
+}
+
 /// `RootPackageLoader::extractStabilityFlags`.
 pub fn extract_stability_flags(
     requires: &[(String, String)],
@@ -379,6 +430,42 @@ pub fn root_constraint(pretty: &str) -> Result<crate::constraint::Constraint, Ve
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merge_plugin_flags_follow_the_plugin() {
+        use super::merge_plugin_stability_flags as flags_of;
+        use std::collections::BTreeMap;
+        let req = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(n, c)| ((*n).to_owned(), (*c).to_owned()))
+                .collect()
+        };
+        // Explicit flag: the most unstable part of the constraint wins,
+        // whatever the minimum stability; the name is lowercased.
+        let mut f = BTreeMap::new();
+        flags_of(&mut f, "stable", &req(&[("Acme/Lib", "^1.0@beta || ^2.0@RC")]));
+        assert_eq!(f.get("acme/lib"), Some(&10));
+        // Parsed dev stability counts unless the minimum is more unstable
+        // than it (`$this->minimumStability > $stability`), and never a
+        // stable one; unlike the loader, no "single plain token" check.
+        let mut f = BTreeMap::new();
+        flags_of(&mut f, "stable", &req(&[("a/b", "dev-main || ^1.0"), ("c/d", "^1.0")]));
+        assert_eq!(f.get("a/b"), Some(&20));
+        assert!(!f.contains_key("c/d"));
+        let mut f = BTreeMap::new();
+        flags_of(&mut f, "dev", &req(&[("a/b", "1.0.0-beta")]));
+        assert!(f.is_empty(), "beta is more stable than the dev minimum");
+        // `max($stability, current)`: an existing flag is never lowered,
+        // and a requirement without a flag leaves it untouched.
+        let mut f: BTreeMap<String, i32> = [("a/b".to_owned(), 20)].into();
+        flags_of(&mut f, "stable", &req(&[("a/b", "^1.0@beta"), ("a/b", "^1.0")]));
+        assert_eq!(f.get("a/b"), Some(&20));
+        // The alias is dropped before parsing.
+        let mut f = BTreeMap::new();
+        flags_of(&mut f, "stable", &req(&[("a/b", "dev-main as 1.0.0")]));
+        assert_eq!(f.get("a/b"), Some(&20));
+    }
+
     use super::*;
     use serde_json::json;
 

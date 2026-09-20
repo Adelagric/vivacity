@@ -215,13 +215,28 @@ installed plugins before resolving, and some change what gets resolved
 or written — `symfony/flex` filters the pool against
 `extra.symfony.require` and applies recipes, `wikimedia/composer-merge-plugin`
 merges other manifests into the root, `drupal/core-recipe-unpack` edits
-composer.json on `require`. When one of those (or a plugin outside
-vivacity's lists) is installed and allowed, `update`, `require` and
-`remove` hand the whole command to Composer with the same arguments,
-before any write, and say why; `--no-fallback` stops with exit 3
-instead. Plugins with no resolution-time listener (`composer/installers`,
-`symfony/runtime`, the extension-installers, `php-http/discovery`,
-`symfony/thanks`, `cweagans/composer-patches`…) do not trigger it.
+composer.json on `require`. When one of those does something vivacity
+does not emulate (or a plugin outside vivacity's lists is installed and
+allowed), `update`, `require` and `remove` hand the whole command to
+Composer with the same arguments, before any write, and say why;
+`--no-fallback` stops with exit 3 instead. Plugins with no
+resolution-time listener (`composer/installers`, `symfony/runtime`, the
+extension-installers, `php-http/discovery`, `symfony/thanks`,
+`cweagans/composer-patches`…) do not trigger it.
+
+`wikimedia/composer-merge-plugin` is emulated at resolution as it is at
+install: the root `update`, `require` and `remove` resolve is the merged
+one — the included files' links (with the plugin's duplicate rules,
+`replace`, `ignore-duplicates`, `merge-dev`, `recurse`), their
+`conflict` / `replace` / `provide`, their stability flags as the plugin
+extracts them from each file's own constraints, their aliases and
+references — and the lock is Composer's with the plugin active
+(`harness/merge-plugin.sh`: update, `--no-dev`, `replace`, an `@dev`
+flag in an included file, require, remove). Two cases stay Composer's: an
+included file that declares `repositories` (fallback), and the plugin
+required but not installed yet, where Composer resolves the unmerged
+root and then runs the plugin's implicit update (refused with the
+reason).
 
 `symfony/flex`'s pool filter is emulated for `update` and `remove` with
 `--no-install`: the index of its endpoints (`extra.symfony.endpoint`,

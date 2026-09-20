@@ -1042,3 +1042,30 @@ synchronisation package.json (elle écrit). Vérifié : lock identique à
 Composer avec Flex actif sur la démo Symfony et Sylius (harnais hermétique
 sur `fixtures/flex/index.json`), et en direct contre Packagist.
 
+## 2026-09-20 — composer-merge-plugin à la résolution : la racine fusionnée dans le pool (v0.16 C)
+
+Fait : le plugin fusionne les manifestes inclus dans la racine à INIT (sans
+dev) puis à `PRE_UPDATE_CMD` (les `require-dev`, avec le mode dev de
+l'installateur) ; `update`, `require` et `remove` résolvent cette racine-là.
+Décision : la fusion déjà portée pour `install` (`merge_plugin::merge`)
+alimente la session (`UpdateOptions.merged`) — la racine est chargée depuis
+le manifeste fusionné (liens, conflict/replace/provide, alias et références
+recalculés par le plugin depuis les liens fusionnés, `mergeAliases` /
+`mergeReferences`), **sauf les flags de stabilité** : `RootPackageLoader`
+les a extraits du fichier original, et le plugin ajoute ceux de chaque
+fichier inclus depuis ses *propres* contraintes (`StabilityFlags::extractAll`
+— explicite `@flag` le plus instable des parties, sinon stabilité analysée
+quand elle est dev et pas plus stable que le minimum, jamais abaissée, sans
+le test « jeton unique » du loader), pas depuis le texte fusionné. Le
+content-hash reste celui du fichier. Écarté : résoudre la racine non
+fusionnée quand le plugin est requis mais pas installé — Composer le fait
+puis relance sa mise à jour implicite à l'install, deux résolutions ;
+refusé avec la raison (comme avant). Un fichier inclus qui déclare
+`repositories` (`prependRepositories`) : rendu à Composer avant toute
+écriture. `--no-plugins` : racine non fusionnée des deux côtés. Vérifié
+(`harness/merge-plugin.sh`, plugin amorcé des deux côtés, Packagist en
+direct) : lock identique à l'octet sur update, `--no-dev`, `replace`, un
+`@dev` dans un fichier inclus (flag 20 dans le lock, `1.x-dev` choisi),
+`require`, `remove`, `update` avec install (projet identique) ; le refus
+et le repli laissent le lock intact.
+

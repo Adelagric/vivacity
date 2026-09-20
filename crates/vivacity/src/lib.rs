@@ -479,6 +479,25 @@ fn resolution_fallback(
             ));
         }
     }
+    // The merge plugin emulated: a merged file's `repositories`
+    // (`prependRepositories`) is not. Dev mode does not matter here — the
+    // files are merged whatever the mode, only their `require-dev` waits.
+    let merge_active = vivacity_core::scope::active_plugins(project, manifest, !no_plugins)
+        .iter()
+        .any(|p| p == vivacity_resolver::merge_plugin::PLUGIN_NAME);
+    if merge_active {
+        if let Ok(Some(merged)) = merge_root_when(project, manifest, true, true) {
+            if !merged.repositories.is_empty() {
+                issues.push(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                    vivacity_resolver::merge_plugin::PLUGIN_NAME.to_owned(),
+                    format!(
+                        "merges repositories from {} (not emulated at resolution)",
+                        merged.repositories.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
     if issues.is_empty() {
         return Ok(None);
     }
@@ -1411,7 +1430,7 @@ fn merge_plugin_root(
     with_dev: bool,
     plugins_enabled: bool,
 ) -> Result<Option<vivacity_resolver::merge_plugin::Merged>, String> {
-    use vivacity_resolver::merge_plugin::{self, Settings};
+    use vivacity_resolver::merge_plugin;
     // `PluginManager::loadInstalledPlugins` activates the plugin from
     // installed.json whatever the mode (a dev-only plugin still merges at
     // INIT on an `install --no-dev` over a dev vendor), and an install
@@ -1422,8 +1441,20 @@ fn merge_plugin_root(
         || installed_packages(project, manifest)
             .iter()
             .any(|p| p.get("name").and_then(|n| n.as_str()) == Some(merge_plugin::PLUGIN_NAME));
-    if !plugins_enabled
-        || !present
+    merge_root_when(project, manifest, with_dev, plugins_enabled && present)
+}
+
+/// The merge itself, once the caller knows whether Composer would load
+/// the plugin on this run (`present`): `None` unless it is allowed and a
+/// merge configuration is declared.
+fn merge_root_when(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    present: bool,
+) -> Result<Option<vivacity_resolver::merge_plugin::Merged>, String> {
+    use vivacity_resolver::merge_plugin::{self, Settings};
+    if !present
         || !matches!(
             vivacity_core::layout::plugin_allowed(manifest, merge_plugin::PLUGIN_NAME),
             vivacity_core::layout::PluginVerdict::Allowed
@@ -1461,10 +1492,13 @@ fn merge_plugin_root(
     Ok(Some(merged))
 }
 
-/// The resolution commands do not emulate the merge (the merged
-/// requirements and repositories would be missing from the pool): a
-/// project that requires, allows and configures the plugin is refused.
+/// composer-merge-plugin required, allowed and configured but not
+/// installed yet: Composer does not load it (`PluginManager` reads
+/// installed.json), resolves the root unmerged, then — once the plugin
+/// lands — runs the plugin's implicit `update` of the merged names, a
+/// second resolution. Not emulated: refused with the reason.
 fn refuse_merge_plugin_resolution(
+    project: &std::path::Path,
     manifest: &serde_json::Value,
     plugins_enabled: bool,
 ) -> anyhow::Result<()> {
@@ -1475,8 +1509,12 @@ fn refuse_merge_plugin_resolution(
             .and_then(|m| m.get(merge_plugin::PLUGIN_NAME))
             .is_some()
     });
+    let installed = vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+        .iter()
+        .any(|p| p == merge_plugin::PLUGIN_NAME);
     if plugins_enabled
         && required
+        && !installed
         && matches!(
             vivacity_core::layout::plugin_allowed(manifest, merge_plugin::PLUGIN_NAME),
             vivacity_core::layout::PluginVerdict::Allowed
@@ -1484,7 +1522,7 @@ fn refuse_merge_plugin_resolution(
         && Settings::declared(manifest)
     {
         anyhow::bail!(
-            "wikimedia/composer-merge-plugin merges other manifests into the root before resolving; vivacity emulates it for `install` and `dump-autoload` only — run `composer update` for this project"
+            "wikimedia/composer-merge-plugin is not installed yet: Composer would resolve without the merge, then run the plugin's implicit update once it is installed (not emulated) — run `composer update` for this project"
         );
     }
     Ok(())
@@ -2054,7 +2092,10 @@ fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> 
         && enabled
         && (root_dir.join("package.json").exists() || root_dir.join("importmap.php").exists())
     {
-        return Some("would synchronize package.json / importmap.php with the lock (not emulated)".to_owned());
+        return Some(
+            "would synchronize package.json / importmap.php with the lock (not emulated)"
+                .to_owned(),
+        );
     }
     // `Flex::update` → `unpack()`: every root requirement is looked up
     // (installed.json, else the repositories) and a `symfony-pack` with
@@ -2193,12 +2234,29 @@ fn resolve_and_lock(
     let manifest_path = project.join("composer.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+    let installer_dev_mode =
+        !(args.no_dev || std::env::var("COMPOSER_NO_DEV").is_ok_and(|v| !v.is_empty() && v != "0"));
+    let mut options = options;
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
-        // A merge plugin that is required but not installed yet (bare
-        // vendor) is not loaded by Composer either — its implicit update
-        // would run at install; the fallback above covers the installed
-        // case, this keeps the refusal for the not-yet-installed one.
-        refuse_merge_plugin_resolution(&m, !args.no_plugins)?;
+        refuse_merge_plugin_resolution(&project, &m, !args.no_plugins)?;
+        // composer-merge-plugin installed and allowed: the root Composer
+        // resolves is the merged one (INIT, then `PRE_UPDATE_CMD` with the
+        // installer's dev mode for the `require-dev` sections). A merged
+        // `repositories` section was handed to Composer before getting
+        // here (`resolution_fallback`).
+        let active = vivacity_core::scope::active_plugins(&project, &m, !args.no_plugins)
+            .iter()
+            .any(|p| p == vivacity_resolver::merge_plugin::PLUGIN_NAME);
+        options.merged = merge_root_when(&project, &m, installer_dev_mode, active)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(merged) = &options.merged {
+            if !merged.repositories.is_empty() {
+                anyhow::bail!(
+                    "wikimedia/composer-merge-plugin: {} declares repositories (not emulated at resolution)",
+                    merged.repositories.join(", ")
+                );
+            }
+        }
     }
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
@@ -2240,8 +2298,7 @@ fn resolve_and_lock(
     }
     session.prefer_stable = prefer_stable;
     session.prefer_lowest = prefer_lowest;
-    session.installer_dev_mode =
-        !(args.no_dev || std::env::var("COMPOSER_NO_DEV").is_ok_and(|v| !v.is_empty() && v != "0"));
+    session.installer_dev_mode = installer_dev_mode;
     // BaseCommand: COMPOSER_IGNORE_PLATFORM_REQS counts as the option,
     // COMPOSER_IGNORE_PLATFORM_REQ (comma-separated list) counts as the
     // list when it is empty.
@@ -2600,7 +2657,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .with_context(|| format!("cannot read {}", file.display()))?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
         .with_context(|| format!("{} does not contain valid JSON", file.display()))?;
-    refuse_merge_plugin_resolution(&manifest, !args.no_plugins)?;
+    refuse_merge_plugin_resolution(&project, &manifest, !args.no_plugins)?;
     if serde_json::from_str::<serde_json::Value>(&manifest_text)
         .ok()
         .and_then(|m| m.get("config")?.get("update-with-minimal-changes").cloned())
