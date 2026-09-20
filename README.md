@@ -240,7 +240,9 @@ store, installers; `vivacity-resolver`: the resolver port; `vivacity-autoload`:
 the autoloader generator).
 
 Embedded by [ePHPm](https://github.com/ephpm/ephpm) since
-[v0.11.0](https://github.com/ephpm/ephpm/releases/tag/v0.11.0): its
+[v0.11.0](https://github.com/ephpm/ephpm/releases/tag/v0.11.0)
+(vivacity 0.15 as of its
+[v0.11.1](https://github.com/ephpm/ephpm/releases/tag/v0.11.1)): its
 [`ephpm composer`](https://ephpm.dev/reference/cli/composer/) subcommand
 forwards every argument to vivacity compiled into the same binary, so
 `ephpm composer install` needs neither a PHP runtime nor `composer.phar`.
