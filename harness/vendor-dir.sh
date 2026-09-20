@@ -51,7 +51,7 @@ for spec in "${VARIANTS[@]}"; do
   ref="$WORK/ref-$name"; viv="$WORK/viv-$name"
   rm -rf "$ref" "$viv"; mkdir -p "$ref" "$viv"
   for d in "$ref" "$viv"; do
-    (cd "$src" && tar --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$d" && tar -xf -)
+    (cd "$src" && tar --exclude=./.git --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$d" && tar -xf -)
     jq "$filter" "$src/composer.json" > "$d/composer.json"
     (cd "$d" && git init -q -b main && git add -A >/dev/null && \
       GIT_AUTHOR_NAME=vivacity GIT_AUTHOR_EMAIL=v@v GIT_AUTHOR_DATE="2026-09-10T00:00:00Z" \

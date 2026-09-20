@@ -40,8 +40,8 @@ for fx in "${FIXTURES[@]}"; do
   # committés par le harness seraient « trackés et inchangés » des deux côtés
   # et le scaffold n'aurait rien à prouver. Les règles d'autoload de la racine
   # (src/Kernel.php, app/…) restent présentes.
-  (cd "$src" && tar --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$ref" && tar -xf -)
-  (cd "$src" && tar --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$viv" && tar -xf -)
+  (cd "$src" && tar --exclude=./.git --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$ref" && tar -xf -)
+  (cd "$src" && tar --exclude=./.git --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$viv" && tar -xf -)
   # Dépôt git identique des deux côtés (même arbre, même auteur/date → même SHA) :
   # Composer devine la version racine depuis git, vivacity doit faire pareil.
   for d in "$ref" "$viv"; do

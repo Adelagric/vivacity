@@ -20,7 +20,7 @@ harness_git_env "$WORK"
 src="$ROOT/fixtures/work/drupal"
 dir="$WORK/drupal-scaffold"
 rm -rf "$dir"; mkdir -p "$dir"
-(cd "$src" && tar --exclude=./vendor --exclude=./web --exclude=./recipes -cf - .) | (cd "$dir" && tar -xf -)
+(cd "$src" && tar --exclude=./.git --exclude=./vendor --exclude=./web --exclude=./recipes -cf - .) | (cd "$dir" && tar -xf -)
 cd "$dir"
 before=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
 code=0
