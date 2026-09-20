@@ -210,6 +210,20 @@ upgrade in progress — is detected
 before `vendor/` is touched, and vivacity execs the real `composer install`
 instead (`--no-fallback` to make it fail).
 
+The resolution commands have the same policy. Composer loads the
+installed plugins before resolving, and some change what gets resolved
+or written — `symfony/flex` filters the pool against
+`extra.symfony.require` and applies recipes, `wikimedia/composer-merge-plugin`
+merges other manifests into the root, `drupal/core-recipe-unpack` edits
+composer.json on `require`. When one of those (or a plugin outside
+vivacity's lists) is installed and allowed, `update`, `require` and
+`remove` hand the whole command to Composer with the same arguments,
+before any write, and say why; `--no-fallback` stops with exit 3
+instead. Plugins with no resolution-time listener (`composer/installers`,
+`symfony/runtime`, the extension-installers, `php-http/discovery`,
+`symfony/thanks`, `cweagans/composer-patches`…) do not trigger it. The
+Flex pool filter is next to be emulated.
+
 Scripts stay Composer's business: `vivacity install --run-scripts` hands
 each event the project declares to `composer run-script`, at the points
 where Composer dispatches them — `pre-install-cmd` before anything,

@@ -521,14 +521,26 @@ impl Layout {
 }
 
 fn installed_packages(root: &Path, dirs: &Dirs) -> Vec<Value> {
-    let path = dirs.composer_dir(root).join("installed.json");
-    let Some(v) = crate::jsonfile::read(&path) else {
+    installed_packages_at(&dirs.composer_dir(root))
+}
+
+/// The `packages` of `<dir>/installed.json`, raw, or nothing.
+pub fn installed_packages_at(composer_dir: &Path) -> Vec<Value> {
+    let Some(v) = crate::jsonfile::read(&composer_dir.join("installed.json")) else {
         return Vec::new();
     };
     v.get("packages")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// The project's installed.json packages, raw, under the manifest's
+/// vendor-dir (or `vendor/` when that configuration is one the layout
+/// refuses — it will say so).
+pub fn installed_packages_of(root: &Path, manifest: &Value) -> Vec<Value> {
+    let dirs = Dirs::resolve(manifest).unwrap_or_default();
+    installed_packages(root, &dirs)
 }
 
 #[cfg(test)]

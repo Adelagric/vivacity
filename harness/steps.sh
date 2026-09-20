@@ -44,6 +44,12 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius r
 #   @registry-jq:expr       applique l'expression jq au packages.json de l'instantané (le cas seulement)
 #   @repofilter:json        redéclare le dépôt `snapshot` dans le manifeste avec cette option `filter`
 #   @env:NAME=VALUE         variable d'environnement des deux côtés (le cas seulement)
+#   @plugin:a/b             a/b (un plugin verrouillé de la fixture) installé pour de
+#                           vrai : son entrée du lock dans installed.json et ses
+#                           fichiers depuis vendor/ de la fixture ; la référence
+#                           tourne AVEC ses plugins (sans --no-plugins)
+#   @fallback               la sortie d'erreur de vivacity doit contenir sa ligne
+#                           « delegating to » (la commande rendue à Composer)
 #   @dry-install            n'ajoute pas --no-install : la phase d'installation
 #                           d'un --dry-run (« Installing dependencies… »,
 #                           « Package operations », « - Installing … ») est comparée
@@ -58,6 +64,13 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius r
 #                           COMPOSER_TESTS_ARE_RUNNING (sinon `::error ::…` sur
 #                           stdout sous GitHub Actions). `@stderr` est accepté (no-op).
 STEPS=(
+  # Plan v0.16, décision 1 : symfony/flex installé et autorisé change la
+  # résolution (`Restricting packages listed in "symfony/symfony"…`) —
+  # vivacity rend la commande à Composer avant toute écriture ; même lock,
+  # mêmes explications (les deux côtés sont Composer avec Flex actif).
+  "symfony|update @plugin:symfony/flex @fallback"
+  "symfony|remove symfony/uid @plugin:symfony/flex @fallback"
+  "symfony|require psr/log @plugin:symfony/flex @fallback"
   "laravel|remove laravel/tinker"
   "laravel|remove laravel/tinker @nolock"
   "laravel|remove laravel/tinker @badlock"
@@ -313,7 +326,7 @@ for fx in "${FIXTURES[@]}"; do
     [ "${spec%%|*}" = "$fx" ] || continue
     n=$((n + 1))
     read -r -a sargs <<< "${spec#*|}"
-    preps=(); stubs=(); envs=(); registry_edited=0; compare_stderr=1; dry_install=0
+    preps=(); stubs=(); envs=(); registry_edited=0; compare_stderr=1; dry_install=0; plugins_on=0; expect_fallback=0
     while [ ${#sargs[@]} -gt 0 ]; do
       last=$(( ${#sargs[@]} - 1 ))
       case "${sargs[$last]}" in
@@ -336,6 +349,8 @@ for fx in "${FIXTURES[@]}"; do
         @stderr) compare_stderr=1 ;;
         @nostderr) compare_stderr=0 ;;
         @dry-install) dry_install=1 ;;
+        @plugin:*) plugins_on=1 ;;
+        @fallback) expect_fallback=1 ;;
       esac
     done
     for side in ref viv; do
@@ -363,6 +378,12 @@ for fx in "${FIXTURES[@]}"; do
             funding=""; [ "${prep%%:*}" = "@installed-funding" ] && funding=', "funding": [{"type": "github", "url": "https://github.com/sponsors/x"}]'
             printf '{"packages": [{"name": "%s", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "install-path": "../%s"%s}], "dev": true, "dev-package-names": []}\n' "$p" "$p" "$funding" > "$d/vendor/composer/installed.json"
             [ "${prep%%:*}" = "@installed-nodir" ] || mkdir -p "$d/vendor/$p" ;;
+          @plugin:*) p="${prep#@plugin:}"; mkdir -p "$d/vendor/composer"
+            jq --arg p "$p" '{packages: [(.packages[] | select(.name == $p) | . + {"install-path": ("../" + $p)})], dev: true, "dev-package-names": []}' "$d/composer.lock" > "$d/vendor/composer/installed.json"
+            [ "$(jq '.packages | length' "$d/vendor/composer/installed.json")" = 1 ] || { echo "FAIL $fx : @plugin:$p absent du lock"; exit 1; }
+            [ -d "$ROOT/fixtures/work/$fx/vendor/$p" ] || { echo "FAIL $fx : @plugin:$p absent de fixtures/work/$fx/vendor"; exit 1; }
+            mkdir -p "$d/vendor/$p"; (cd "$ROOT/fixtures/work/$fx/vendor/$p" && tar -cf - .) | (cd "$d/vendor/$p" && tar -xf -) ;;
+          @fallback) ;;
           *) echo "prep inconnu : $prep"; exit 1 ;;
         esac
       done
@@ -378,8 +399,9 @@ for fx in "${FIXTURES[@]}"; do
       extra=(--no-audit); viv_extra=()
     fi
     quiet=(--quiet); [ "$compare_stderr" = 1 ] && quiet=(--no-ansi)
+    plugin_flag=(--no-plugins); [ "$plugins_on" = 1 ] && plugin_flag=()
     (cd "$WORK/ref-$fx-$n" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="${COMPOSER_ROOT_VERSION:-$root_version}" COMPOSER_TESTS_ARE_RUNNING=1 \
-      composer "${sargs[@]}" "${extra[@]}" --no-scripts --no-plugins --no-interaction "${quiet[@]}" >"$WORK/$fx-$n.composer.log" 2>"$WORK/$fx-$n.composer.err") || ref_code=$?
+      composer "${sargs[@]}" "${extra[@]}" --no-scripts "${plugin_flag[@]+"${plugin_flag[@]}"}" --no-interaction "${quiet[@]}" >"$WORK/$fx-$n.composer.log" 2>"$WORK/$fx-$n.composer.err") || ref_code=$?
     viv_code=0
     (cd "$WORK/viv-$fx-$n" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="${COMPOSER_ROOT_VERSION:-$root_version}" \
       "$VIVACITY" "${sargs[@]}" "${viv_extra[@]+"${viv_extra[@]}"}" >"$WORK/$fx-$n.vivacity.log" 2>"$WORK/$fx-$n.vivacity.err") || viv_code=$?
@@ -394,6 +416,9 @@ for fx in "${FIXTURES[@]}"; do
       tail -3 "$WORK/$fx-$n.composer.err" "$WORK/$fx-$n.vivacity.err"; status=1; continue
     fi
     ok=1
+    if [ "$expect_fallback" = 1 ] && ! grep -q 'delegating to `composer' "$WORK/$fx-$n.vivacity.err"; then
+      echo "FAIL $label : vivacity n'a pas rendu la commande à Composer (@fallback)"; head -5 "$WORK/$fx-$n.vivacity.err"; ok=0
+    fi
     if [ "$compare_stderr" = 1 ]; then
       # De la ligne d'ancrage à la fin ; les lignes de progression avant
       # (« Loading composer repositories… ») ne sont pas comparées.

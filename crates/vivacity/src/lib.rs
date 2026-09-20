@@ -418,7 +418,13 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = match Cli::try_parse_from(args) {
+    let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    // Kept for the resolution fallback, which re-runs the whole command
+    // under Composer with the same arguments.
+    if let Ok(mut a) = ARGV.lock() {
+        *a = argv.clone();
+    }
+    let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) => {
             // `e.exit()` writes the help to stdout, the error to stderr.
@@ -433,6 +439,81 @@ where
             1
         }
     }
+}
+
+static ARGV: std::sync::Mutex<Vec<std::ffi::OsString>> = std::sync::Mutex::new(Vec::new());
+
+/// The resolution commands' fallback (plan v0.16, decision 1), symmetric
+/// to `install`'s: an installed, allowed plugin that changes what the
+/// command resolves or writes, and that vivacity does not emulate for it,
+/// hands the whole command to Composer with the same arguments — before
+/// any write (the caller reverts its manifest edit first). `--no-fallback`
+/// stops with exit 3 instead. `Some(code)` when the command was handled
+/// here; `None` when vivacity goes on natively.
+fn resolution_fallback(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    command: vivacity_core::scope::ResolutionCommand,
+    no_plugins: bool,
+    no_fallback: bool,
+) -> anyhow::Result<Option<i32>> {
+    let issues = vivacity_core::scope::resolution_issues(project, manifest, command, !no_plugins);
+    if issues.is_empty() {
+        return Ok(None);
+    }
+    delegate_resolution(project, command, &issues, no_fallback).map(Some)
+}
+
+/// Prints the reasons, then re-runs the command under Composer (or stops
+/// with exit 3 under `--no-fallback`). vivacity-only options are dropped;
+/// `--no-scripts` is added: vivacity never runs scripts, so Composer does
+/// not either.
+fn delegate_resolution(
+    project: &std::path::Path,
+    command: vivacity_core::scope::ResolutionCommand,
+    issues: &[vivacity_core::scope::ScopeIssue],
+    no_fallback: bool,
+) -> anyhow::Result<i32> {
+    eprintln!(
+        "vivacity: `{}` on this project is outside what vivacity handles natively:",
+        command.name()
+    );
+    for issue in issues {
+        eprintln!("  - {issue}");
+    }
+    if no_fallback {
+        eprintln!("--no-fallback given: stopping here (nothing was written).");
+        return Ok(3);
+    }
+    let Some(composer) = which_composer() else {
+        eprintln!(
+            "composer not found for the fallback — install Composer or run with --no-plugins."
+        );
+        return Ok(3);
+    };
+    let argv = ARGV.lock().map(|a| a.clone()).unwrap_or_default();
+    let forwarded: Vec<std::ffi::OsString> = argv
+        .iter()
+        .skip(1)
+        .filter(|a| a.to_string_lossy() != "--no-fallback" && a.to_string_lossy() != "--offline")
+        .cloned()
+        .collect();
+    let mut forwarded = forwarded;
+    if !forwarded.iter().any(|a| a == "--no-scripts") {
+        forwarded.push("--no-scripts".into());
+    }
+    eprintln!(
+        "vivacity: delegating to `composer {}`…",
+        forwarded
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut cmd = std::process::Command::new(composer);
+    cmd.args(&forwarded).current_dir(project);
+    let status = cmd.status().context("cannot run composer")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn dispatch(cli: Cli) -> anyhow::Result<i32> {
@@ -1745,6 +1826,23 @@ fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     // the options.
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
     let prefer_lowest = args.prefer_lowest || env_flag("COMPOSER_PREFER_LOWEST");
+    {
+        let project = project_dir(args.working_dir.as_deref())?;
+        if let Ok(manifest) = std::fs::read_to_string(project.join("composer.json"))
+            .map_err(anyhow::Error::from)
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(Into::into))
+        {
+            if let Some(code) = resolution_fallback(
+                &project,
+                &manifest,
+                vivacity_core::scope::ResolutionCommand::Update,
+                args.no_plugins,
+                args.no_fallback,
+            )? {
+                return Ok(code);
+            }
+        }
+    }
     run_update_resolved(args, options, prefer_stable, prefer_lowest)
 }
 
@@ -1912,6 +2010,10 @@ fn resolve_and_lock(
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+        // A merge plugin that is required but not installed yet (bare
+        // vendor) is not loaded by Composer either — its implicit update
+        // would run at install; the fallback above covers the installed
+        // case, this keeps the refusal for the not-yet-installed one.
         refuse_merge_plugin_resolution(&m, !args.no_plugins)?;
     }
     let home = vivacity_core::fetch::composer_home();
@@ -2315,6 +2417,15 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         }
     }
 
+    if let Some(code) = resolution_fallback(
+        &project,
+        &manifest,
+        vivacity_core::scope::ResolutionCommand::Remove,
+        args.no_plugins,
+        args.no_fallback,
+    )? {
+        return Ok(code);
+    }
     let backup = manifest_text.clone();
     let json = JsonConfigSource::new(&file);
     let (link_type, alt_type) = if args.dev {

@@ -44,12 +44,14 @@ the roadmap below.
   the pieces a `vcs` port reuses: the git-like version guesser
   (`root_version::guess_version`), the reference dump, the operation
   appendix.
-- **`wikimedia/composer-merge-plugin` for the resolution commands** —
-  `install` and `dump-autoload` emulate it (0.12.0); `update` / `require` /
-  `remove` refuse a project that configures it: the merged requirements,
-  stability flags and prepended repositories would have to enter the
-  pool (`vivacity-resolver::merge_plugin` already produces the structured
-  links). The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
+- **Plugins at resolution time** — `update` / `require` / `remove` hand
+  the command to Composer when an installed, allowed plugin changes the
+  resolution (`scope::resolution_issues`, plan v0.16 step A). Next:
+  `symfony/flex`'s pool filter (`PackageFilter::removeLegacyPackages`
+  against `versions.json`, for `update --no-install`), then
+  `wikimedia/composer-merge-plugin`'s merged requirements and stability
+  flags entering the pool (`vivacity-resolver::merge_plugin` already
+  produces the structured links). The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
   `extension_installers.rs`, `merge_plugin.rs`) are the pattern: vendor
   the writer under `docs/reference/plugins/`, prove it on a fixture and
   the corpus entries.

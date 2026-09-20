@@ -4,6 +4,26 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Added
+- **`update`, `require` and `remove` hand over to Composer when an
+  installed plugin changes the resolution** (plan v0.16, step A):
+  `symfony/flex`, `wikimedia/composer-merge-plugin`,
+  `drupal/core-recipe-unpack` on `require`, and any plugin outside
+  vivacity's lists — decided from installed.json (project and global)
+  and `allow-plugins`, before any write (`require`/`remove` decide before
+  their manifest edit), re-running the same command under Composer with
+  `--no-scripts`; `--no-fallback` stops with exit 3. Plugins with no
+  resolution-time listener are inert. Until now `update` on a Flex
+  project resolved the whole pool where Composer restricts it
+  (`Restricting packages listed in "symfony/symfony" to …`), writing a
+  lock Composer would not. `harness/steps.sh` gains `@plugin:` (the real
+  plugin installed, reference with plugins on) and `@fallback`; the
+  symfony snapshot carries the `~dev` metadata a Flex-enabled Composer
+  loads (`COMPOSER_PREFER_DEV_OVER_PRERELEASE`); `harness/transitions.sh`
+  checks the three refusals leave the tree untouched.
+
 ## [0.16.0] — 2026-09-20
 
 ### Changed

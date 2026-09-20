@@ -338,6 +338,24 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     let lock = project.join("composer.lock");
     let file_label = "./composer.json".to_owned();
     let newly_created = !json.exists();
+    // Plugins that change what `require` resolves or writes: decided on
+    // the manifest as it is, before this command edits it.
+    if !newly_created {
+        if let Ok(manifest) = std::fs::read_to_string(&json)
+            .map_err(anyhow::Error::from)
+            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(Into::into))
+        {
+            if let Some(code) = crate::resolution_fallback(
+                &project,
+                &manifest,
+                vivacity_core::scope::ResolutionCommand::Require,
+                args.no_plugins,
+                args.no_fallback,
+            )? {
+                return Ok(code);
+            }
+        }
+    }
     if newly_created {
         std::fs::write(&json, "{\n}\n")
             .with_context(|| format!("{file_label} could not be created."))?;

@@ -34,3 +34,32 @@ fi
 after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
 [ "$before" = "$after" ] || { echo "FAIL drupal: the tree was modified before the refusal"; exit 1; }
 echo "OK   drupal: core-composer-scaffold handed over to Composer without touching the disk"
+
+# The resolution commands (plan v0.16): an installed, allowed plugin that
+# changes what `update`/`require`/`remove` resolve — symfony/flex here —
+# hands the whole command to Composer BEFORE any write; `--no-fallback`
+# refuses with exit 3, naming the plugin, the tree untouched (composer.json
+# included: require/remove decide before their edit).
+src="$ROOT/fixtures/work/symfony"
+dir="$WORK/flex-resolution"
+rm -rf "$dir"; mkdir -p "$dir"
+(cd "$src" && tar --exclude=./.git --exclude=./var --exclude=./node_modules -cf - .) | (cd "$dir" && tar -xf -)
+cd "$dir"
+jq -e '.config["allow-plugins"]["symfony/flex"] == true' composer.json >/dev/null || { echo "FAIL flex: fixture does not allow symfony/flex"; exit 1; }
+grep -q '"name": "symfony/flex"' vendor/composer/installed.json || { echo "FAIL flex: symfony/flex not in installed.json"; exit 1; }
+before=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+for cmd in "update --no-install" "require psr/log --no-install" "remove symfony/uid --no-install"; do
+  code=0; log="$WORK/flex-${cmd%% *}.log"
+  # shellcheck disable=SC2086
+  "$VIVACITY" $cmd --no-fallback --offline >"$log" 2>&1 || code=$?
+  if [ "$code" != 3 ]; then
+    echo "FAIL flex \`$cmd\`: expected exit 3, got $code:"; tail -5 "$log"; exit 1
+  fi
+  if ! grep -q 'symfony/flex' "$log"; then
+    echo "FAIL flex \`$cmd\`: the refusal does not name the plugin:"; tail -5 "$log"; exit 1
+  fi
+  after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+  [ "$before" = "$after" ] || { echo "FAIL flex \`$cmd\`: the tree was modified before the refusal"; exit 1; }
+done
+echo "OK   flex: update/require/remove handed over to Composer without touching the disk"
+

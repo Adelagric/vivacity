@@ -997,3 +997,24 @@ commiter (P2, P3b, readdir l'ont tous eu), et le corpus pour la parité.
 Baseline = médiane des trois runs `b128c23` (fixtures avec `.git`, comme un
 projet réel).
 
+## 2026-09-20 — Les commandes de résolution rendent la main à Composer devant un plugin actif (v0.16 A)
+
+Fait : `composer update --no-install` sur la fixture symfony imprime
+« Restricting packages listed in "symfony/symfony" to "8.1.*" » — le
+filtre `PRE_POOL_CREATE` de Flex ; vivacity résolvait le pool entier et
+écrivait un lock que Composer n'écrirait pas, en silence. Le harnais ne
+le voyait pas : l'instantané est résolu `--no-plugins`. Décision : la
+même politique que pour `install` — un plugin installé (installed.json du
+projet et de `COMPOSER_HOME`), autorisé, et qui touche la résolution
+(`scope::resolution_effect` : Flex, merge-plugin, core-recipe-unpack sur
+`require`, tout plugin hors liste) fait rendre la commande entière à
+Composer avec les mêmes arguments, avant toute écriture, avec la raison ;
+`--no-fallback` → code 3. Les plugins sans écouteur de résolution sont
+inertes (liste `RESOLUTION_INERT`, lue dans leurs sources). Écarté :
+émuler Flex d'abord (c'est l'étape B ; sans le repli, chaque projet Flex
+reste faux entre-temps) ; décider sur le lock plutôt que sur installed.json
+(Composer charge ce qui est installé, pas ce qui est verrouillé).
+Trouvé en chemin : Flex pose `COMPOSER_PREFER_DEV_OVER_PRERELEASE`, et
+Composer charge alors les métadonnées `~dev` — absentes d'un instantané
+enregistré sans plugins ; 47 fichiers ajoutés au snapshot symfony (additif).
+

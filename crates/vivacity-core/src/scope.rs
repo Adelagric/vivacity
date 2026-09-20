@@ -54,10 +54,136 @@ pub const LAYOUT_PLUGINS: &[&str] = &[
     "mnsami/composer-custom-directory-installer",
 ];
 
+/// The resolution commands (`update`, `require`, `remove`): Composer loads
+/// the installed plugins before resolving (`PluginManager::loadInstalledPlugins`
+/// from installed.json, global ones included), and some of them change what
+/// gets resolved or written. Read in the plugins' sources (plan v0.16):
+/// these have no listener that touches the resolution or the lock —
+/// `POST_INSTALL/UPDATE_CMD` writers of files under vendor/ (handled at
+/// install), install-path mappers, message printers.
+pub const RESOLUTION_INERT: &[&str] = &[
+    "composer/installers",
+    "symfony/runtime",
+    "pestphp/pest-plugin",
+    "dealerdirect/phpcodesniffer-composer-installer",
+    "phpstan/extension-installer",
+    "rector/extension-installer",
+    "composer/package-versions-deprecated",
+    "symfony/thanks",
+    // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
+    // implementation only when one is missing — with a complete lock, a
+    // no-op (verified on install with the corpus).
+    "php-http/discovery",
+    "drupal/core-project-message",
+    // `PRE_UPDATE_CMD` gathers patches, `POST_PACKAGE_*` applies them: the
+    // lock is untouched; the install side already hands these to Composer.
+    "cweagans/composer-patches",
+    "mlocati/composer-patcher",
+    "oomphinc/composer-installers-extender",
+    "mnsami/composer-custom-directory-installer",
+];
+
+/// A resolution command, for the per-plugin rules below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionCommand {
+    Update,
+    Require,
+    Remove,
+}
+
+impl ResolutionCommand {
+    pub fn name(self) -> &'static str {
+        match self {
+            ResolutionCommand::Update => "update",
+            ResolutionCommand::Require => "require",
+            ResolutionCommand::Remove => "remove",
+        }
+    }
+}
+
+/// What an active plugin does to `command`, as far as the lock is
+/// concerned: nothing (inert), or something vivacity does not emulate
+/// yet (the reason, for the fallback line).
+pub fn resolution_effect(plugin: &str, command: ResolutionCommand) -> Option<String> {
+    if RESOLUTION_INERT.contains(&plugin) {
+        return None;
+    }
+    Some(match plugin {
+        // `PRE_POOL_CREATE` filters the pool against `extra.symfony.require`
+        // (`Restricting packages listed in "symfony/symfony" to …`),
+        // `require` resolves Flex aliases, `POST_UPDATE_CMD` applies recipes.
+        "symfony/flex" => "filters the resolution pool (extra.symfony.require) and applies recipes (not emulated yet)".to_owned(),
+        // INIT merges other manifests into the root before resolving.
+        "wikimedia/composer-merge-plugin" => "merges other manifests into the root before resolving (emulated for install and dump-autoload only)".to_owned(),
+        // `POST_UPDATE_CMD`, acting only in a `require` context: unpacks
+        // recipes into composer.json.
+        "drupal/core-recipe-unpack" => {
+            if command == ResolutionCommand::Require {
+                "unpacks recipes into composer.json on require (not emulated)".to_owned()
+            } else {
+                return None;
+            }
+        }
+        _ => "is not on vivacity's known-plugin list".to_owned(),
+    })
+}
+
+/// The plugins Composer would load for a resolution command, and what
+/// each does to it: those installed (installed.json of the project and
+/// of `COMPOSER_HOME`) that `allow-plugins` allows. Empty under
+/// `--no-plugins`. One issue per plugin that is not inert for `command`.
+pub fn resolution_issues(
+    project_dir: &Path,
+    root_manifest: &Value,
+    command: ResolutionCommand,
+    plugins_enabled: bool,
+) -> Vec<ScopeIssue> {
+    if !plugins_enabled {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut collect = |packages: Vec<Value>| {
+        for p in packages {
+            if p.get("type").and_then(Value::as_str) == Some("composer-plugin") {
+                if let Some(n) = p.get("name").and_then(Value::as_str) {
+                    if !names.iter().any(|x| x == n) {
+                        names.push(n.to_owned());
+                    }
+                }
+            }
+        }
+    };
+    collect(crate::layout::installed_packages_of(
+        project_dir,
+        root_manifest,
+    ));
+    if let Some(home) = crate::fetch::composer_home() {
+        collect(crate::layout::installed_packages_at(
+            &home.join("vendor").join("composer"),
+        ));
+    }
+    let mut issues = Vec::new();
+    for name in names {
+        if !matches!(
+            crate::layout::plugin_allowed(root_manifest, &name),
+            crate::layout::PluginVerdict::Allowed
+        ) {
+            continue;
+        }
+        if let Some(effect) = resolution_effect(&name, command) {
+            issues.push(ScopeIssue::ResolutionPlugin(name, effect));
+        }
+    }
+    issues
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScopeIssue {
     /// Plugin absent from the known lists: unpredictable behaviour.
     UnknownPlugin(String),
+    /// An installed, allowed plugin that changes what `update`/`require`/
+    /// `remove` resolve or write (name, what it does).
+    ResolutionPlugin(String, String),
     /// Plugin known to change the layout (patches, installers-extender...).
     LayoutPlugin(String),
     /// Non-reproducible layout (composer/installers: version not ported,
@@ -85,6 +211,7 @@ impl std::fmt::Display for ScopeIssue {
             ScopeIssue::LayoutPlugin(p) => {
                 write!(f, "plugin {p} changes the install layout (not emulated)")
             }
+            ScopeIssue::ResolutionPlugin(p, what) => write!(f, "plugin {p} {what}"),
             ScopeIssue::Layout(why) => write!(f, "{why}"),
             ScopeIssue::NoUsableDist(p) => {
                 write!(f, "package {p} has no usable dist (no zip, no path source)")
