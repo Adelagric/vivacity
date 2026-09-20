@@ -54,6 +54,18 @@ create() { # name create-project-package boot-command...
     # sans réseau. Le vendor/ existant est conservé pour la qualification.
     mkdir -p "$WORK/$name"
     (cd "$DIR/projects/$name" && tar -cf - .) | (cd "$WORK/$name" && tar -xf -)
+    # Un dépôt git à la fixture, sinon Composer remonte jusqu'à celui de
+    # vivacity et en prend la version racine : `dev-main` sur main, `0.16.0`
+    # sur un tag (HEAD détaché) — et rector-src, qui remplace `rector/rector
+    # self.version`, entre alors en conflit avec `rector/rector <2.0`
+    # (2026-09-20, bench lancé sur v0.16.0). Même identité fixe que les
+    # harnais : la version racine est celle de la fixture, `dev-main`.
+    if [ ! -d "$WORK/$name/.git" ]; then
+      (cd "$WORK/$name" && git init -q -b main && git add -A >/dev/null && \
+        GIT_AUTHOR_NAME=vivacity GIT_AUTHOR_EMAIL=v@v GIT_AUTHOR_DATE="2026-09-10T00:00:00Z" \
+        GIT_COMMITTER_NAME=vivacity GIT_COMMITTER_EMAIL=v@v GIT_COMMITTER_DATE="2026-09-10T00:00:00Z" \
+        git -c commit.gpgsign=false commit -q -m fixture)
+    fi
   elif [ ! -d "$WORK/$name" ]; then
     echo "== create-project $pkg -> $name (sans scripts ni plugins : aucun PHP exécuté)"
     (cd "$WORK" && composer create-project --no-interaction --no-scripts --no-plugins --no-install --quiet "$pkg" "$name")
