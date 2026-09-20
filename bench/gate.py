@@ -40,12 +40,14 @@ import statistics
 import sys
 from pathlib import Path
 
-# 25 %: the first gated run after the baseline (c0b6313) tripped sylius/dump-o
-# at +16.7 % with no local change (69.8 vs 70.1 ms on the same machine) — a
-# fast runner shrank Composer's CPU-bound 3.2 s to 2.5 s while vivacity's
-# 140 ms, half of it disk, did not follow. Twice the spread measured over
-# four identical runs (3–12 %); a real regression of a quarter still fails.
-TOLERANCE_DEFAULT = 0.25
+# The job FAILS only past 50 %: a shared runner moves a scenario's ratio by
+# 15–30 % between identical runs (2026-09-19/20: three false alarms in two
+# days at 15 % then 25 %), so a red job at that level measures the runner.
+# Anything between WARN and the failure threshold is flagged in the summary
+# (⚠) without failing — a doubling of the classmap merge, the kind of
+# regression P2 undid, still turns the job red.
+TOLERANCE_DEFAULT = 0.50
+WARN_TOLERANCE = 0.15
 SLACK_SECONDS = 0.005
 SCENARIOS = ("noop", "warm", "dump-o")
 FIXTURES = ("laravel", "symfony", "sylius")
@@ -91,8 +93,8 @@ def compare(current, baseline, tolerance):
         if ratio > base * (1 + tolerance) and cost >= SLACK_SECONDS:
             rows.append((key, ratio, base, f"FAIL (+{cost * 1000:.0f} ms)"))
             failed = True
-        elif ratio > base * (1 + tolerance):
-            rows.append((key, ratio, base, f"ok (within {SLACK_SECONDS * 1000:.0f} ms slack)"))
+        elif ratio > base * (1 + WARN_TOLERANCE) and cost >= SLACK_SECONDS:
+            rows.append((key, ratio, base, f"⚠ +{(ratio / base - 1) * 100:.0f} % (+{cost * 1000:.0f} ms), not failing"))
         else:
             rows.append((key, ratio, base, "ok"))
     return rows, failed
@@ -110,20 +112,24 @@ def self_test():
     base = {"fx/noop": 0.10, "fx/warm": 0.20}
     # 20 % worse on noop but 2 ms in seconds: slack, not a failure.
     cur = {"fx/noop": (0.12, 0.012, 0.100), "fx/warm": (0.20, 0.200, 1.000)}
-    rows, failed = compare(cur, base, 0.15)
+    rows, failed = compare(cur, base, TOLERANCE_DEFAULT)
     assert not failed, rows
     # 20 % worse on warm and 40 ms in seconds: reported, warm is not gated.
     cur = {"fx/noop": (0.10, 0.010, 0.100), "fx/warm": (0.24, 0.240, 1.000)}
-    rows, failed = compare(cur, base, 0.15)
+    rows, failed = compare(cur, base, TOLERANCE_DEFAULT)
     assert not failed and rows[1][3].startswith("info"), rows
-    # 20 % worse on noop and 40 ms in seconds: failure.
+    # 20 % worse on noop and 40 ms in seconds: a warning, not a failure.
     base2 = {"fx/noop": 0.10}
     cur = {"fx/noop": (0.12, 0.240, 2.000)}
-    rows, failed = compare(cur, base2, 0.15)
+    rows, failed = compare(cur, base2, TOLERANCE_DEFAULT)
+    assert not failed and rows[0][3].startswith("⚠"), rows
+    # 60 % worse and 120 ms: failure.
+    cur = {"fx/noop": (0.16, 0.320, 2.000)}
+    rows, failed = compare(cur, base2, TOLERANCE_DEFAULT)
     assert failed and rows[0][3].startswith("FAIL"), rows
     # Unknown scenario: reported, not failed.
     cur = {"fx/dump-o": (9.0, 9.0, 1.0)}
-    rows, failed = compare(cur, base, 0.15)
+    rows, failed = compare(cur, base, TOLERANCE_DEFAULT)
     assert not failed and rows[0][3] == "no baseline", rows
     # The full set the gate requires when a baseline exists.
     assert len([f"{fx}/{sc}" for fx in FIXTURES for sc in SCENARIOS]) == 9
