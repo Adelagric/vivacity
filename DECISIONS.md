@@ -982,3 +982,18 @@ dépôt vivacity lui-même (git remonte) — `0.16.0` sur un tag, d'où un confl
 `rector/rector <2.0` sur le bench lancé sur `v0.16.0` ; `fixtures/make.sh`
 donne maintenant un dépôt git à chaque fixture, comme les harnais.
 
+## 2026-09-20 — Le gate de perf ne fait plus échouer le job
+
+Fait : six faux positifs en deux jours, à 15 % puis 25 % ; sur trois runs
+identiques lancés ensemble, Composer va de 698 à 995 ms sur le no-op laravel
+(runners différents) quand vivacity va de 55 à 85 — nos 50–150 ms sont pour
+moitié du disque et des sous-processus (git pour la version racine, depuis
+que les fixtures ont leur dépôt), qui ne suivent pas le CPU du runner. Le
+ratio n'est pas un instrument à 15 % ici, ni même à 50 % (sylius no-op à
++52 % sur un run). Décision : l'étape est en `continue-on-error` — tableau et
+avertissements ⚠ dans le résumé du job, jamais de job rouge. Ce qui garde
+réellement contre une régression : hyperfine sur la même machine avant de
+commiter (P2, P3b, readdir l'ont tous eu), et le corpus pour la parité.
+Baseline = médiane des trois runs `b128c23` (fixtures avec `.git`, comme un
+projet réel).
+
