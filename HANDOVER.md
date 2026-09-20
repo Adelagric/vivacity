@@ -33,7 +33,7 @@ binaire `composer` du PATH vers `$TMPDIR/vivacity-oracle-composer.phar` et
 appellent ses classes via `php -r`. Sans php/composer ils ÉCHOUENT avec un
 message explicite (jamais de skip silencieux).
 
-## Publication sur crates.io (dernière : 0.15.0 le 2026-09-19)
+## Publication sur crates.io (dernière : 0.16.0 le 2026-09-20)
 
 Six crates (`vivacity-pcre2-sys`, `vivacity-pcre2`, `vivacity-core`,
 `vivacity-autoload`, `vivacity-resolver`, `vivacity`) s'empaquettent
