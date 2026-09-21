@@ -86,6 +86,10 @@ pub type HttpFetch =
 pub type HttpFetchMany =
     std::sync::Arc<dyn Fn(&[Request]) -> Vec<Result<Fetched, String>> + Send + Sync>;
 
+/// `ComposerRepository::ADVISORY_API_BATCH_SIZE` (Composer 2.11): names per
+/// security-advisories request.
+pub const ADVISORY_API_BATCH_SIZE: usize = 500;
+
 /// POST of an encoded form; `Ok(None)` on 404.
 pub type HttpPost = std::sync::Arc<dyn Fn(&str, &str) -> Result<Fetched, String> + Send + Sync>;
 /// A caller's three network closures: conditional GET, batch, POST.
@@ -1149,51 +1153,73 @@ impl ComposerRepository {
             map.retain(|(n, _)| !done.contains(&n.to_lowercase()));
         }
         if let (Some(api_url), false) = (&config.api_url, map.is_empty()) {
-            let body: Vec<String> = map
-                .iter()
-                .map(|(n, _)| format!("packages%5B%5D={}", urlencode(n)))
-                .collect();
-            let fetched = self.transport.post_form(api_url, &body.join("&"))?;
-            let bytes = match fetched {
-                Fetched::Body { bytes, .. } => bytes,
-                Fetched::NotFound => {
-                    return Err(RepoError::transport(format!(
-                        "The \"{api_url}\" file could not be downloaded (HTTP/404)"
-                    )))
-                }
-                Fetched::NotModified => Vec::new(),
-            };
-            let data: Value = serde_json::from_slice(&bytes)
-                .map_err(|e| RepoError::data(format!("{api_url}: {e}")))?;
-            let mut warned = false;
-            for (name, list) in data
-                .get("advisories")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-            {
-                let Some((_, constraint)) = map.iter().find(|(n, _)| n == name) else {
-                    if !warned {
-                        eprintln!(
-                            "{} returned names which were not requested in response to the security-advisories API. {name} was not requested but is present in the response. Requested names were: {}",
-                            self.repo_name(),
-                            map.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-                        );
-                        warned = true;
+            // Composer 2.11 (`ADVISORY_API_BATCH_SIZE`, ported ahead of the
+            // 2.10.3 reference): one POST per 500 names. Each name is one
+            // form input, and PHP truncates `$_POST` past `max_input_vars`
+            // (1000 by default) without an error — a bigger lock lost
+            // advisories silently. Responses handled in batch order.
+            let mut responses: Vec<Value> = Vec::new();
+            for batch in map.chunks(ADVISORY_API_BATCH_SIZE) {
+                let body: Vec<String> = batch
+                    .iter()
+                    .map(|(n, _)| format!("packages%5B%5D={}", urlencode(n)))
+                    .collect();
+                let fetched = self.transport.post_form(api_url, &body.join("&"))?;
+                let bytes = match fetched {
+                    Fetched::Body { bytes, .. } => bytes,
+                    Fetched::NotFound => {
+                        return Err(RepoError::transport(format!(
+                            "The \"{api_url}\" file could not be downloaded (HTTP/404)"
+                        )))
                     }
-                    continue;
+                    Fetched::NotModified => Vec::new(),
                 };
-                let list = list.as_array().cloned().unwrap_or_default();
-                if !list.is_empty() {
-                    let mut found = Vec::new();
-                    for d in &list {
-                        if let Some(a) = create(d, name, constraint)? {
-                            found.push(a);
+                responses.push(
+                    serde_json::from_slice(&bytes)
+                        .map_err(|e| RepoError::data(format!("{api_url}: {e}")))?,
+                );
+            }
+            let mut warned = false;
+            for data in &responses {
+                for (name, list) in data
+                    .get("advisories")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some((_, constraint)) = map.iter().find(|(n, _)| n == name) else {
+                        if !warned {
+                            let requested: Vec<&str> =
+                                map.iter().map(|(n, _)| n.as_str()).collect();
+                            let requested_list = if requested.len() > 20 {
+                                format!(
+                                    "{} and {} more",
+                                    requested[..20].join(", "),
+                                    requested.len() - 20
+                                )
+                            } else {
+                                requested.join(", ")
+                            };
+                            eprintln!(
+                                "{} returned names which were not requested in response to the security-advisories API. {name} was not requested but is present in the response. Requested names were: {requested_list}",
+                                self.repo_name()
+                            );
+                            warned = true;
                         }
+                        continue;
+                    };
+                    let list = list.as_array().cloned().unwrap_or_default();
+                    if !list.is_empty() {
+                        let mut found = Vec::new();
+                        for d in &list {
+                            if let Some(a) = create(d, name, constraint)? {
+                                found.push(a);
+                            }
+                        }
+                        advisories.push((name.clone(), found));
                     }
-                    advisories.push((name.clone(), found));
+                    names_found.push(name.clone());
                 }
-                names_found.push(name.clone());
             }
         }
         Ok((names_found, advisories))
@@ -2058,5 +2084,72 @@ mod cache_tests {
         assert_eq!(seen[0].1.as_deref(), Some("Sat, 12 Sep 2026 10:00:00 GMT"));
         assert_eq!(seen[1].0, "https://satis.example.org/p2/acme/lib.json");
         assert_eq!(seen[1].1.as_deref(), Some("Sun, 13 Sep 2026 09:00:00 GMT"));
+    }
+}
+
+#[cfg(test)]
+mod advisory_api_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Serves packages.json, records every POST body and answers each with
+    /// an advisory for the last name of that batch.
+    struct Posting {
+        bodies: std::rc::Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Transport for Posting {
+        fn fetch(&self, url: &str, _ims: Option<&str>) -> Result<Fetched, RepoError> {
+            assert!(url.ends_with("/packages.json"), "{url}");
+            Ok(Fetched::Body {
+                bytes: br#"{"packages": [], "metadata-url": "/p2/%package%.json", "security-advisories": {"metadata": false, "api-url": "https://api.example.org/advisories"}}"#.to_vec(),
+                last_modified: None,
+            })
+        }
+        fn post_form(&self, url: &str, body: &str) -> Result<Fetched, RepoError> {
+            assert_eq!(url, "https://api.example.org/advisories");
+            self.bodies.borrow_mut().push(body.to_owned());
+            let last = body.rsplit("packages%5B%5D=").next().expect("a name");
+            let name = last.replace("%2F", "/");
+            let json = format!(
+                r#"{{"advisories": {{"{name}": [{{"advisoryId": "PKSA-{name}", "packageName": "{name}", "affectedVersions": ">=1.0", "title": "t", "sources": [], "reportedAt": "2026-01-01 00:00:00"}}]}}}}"#
+            );
+            Ok(Fetched::Body {
+                bytes: json.into_bytes(),
+                last_modified: None,
+            })
+        }
+    }
+
+    #[test]
+    fn advisories_requested_in_batches_of_500() {
+        let bodies = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let repo = ComposerRepository::open(
+            "https://satis.example.org",
+            Box::new(Posting {
+                bodies: bodies.clone(),
+            }),
+        )
+        .expect("open");
+        let map: Vec<(String, Constraint)> = (0..1201)
+            .map(|i| (format!("acme/p{i:04}"), Constraint::MatchAll))
+            .collect();
+        let (found, advisories) = repo
+            .get_security_advisories(&map, true)
+            .expect("advisories");
+        let bodies = bodies.borrow();
+        assert_eq!(bodies.len(), 3, "500 + 500 + 201 names");
+        let count = |b: &String| b.matches("packages%5B%5D=").count();
+        assert_eq!(
+            bodies.iter().map(count).collect::<Vec<_>>(),
+            [500, 500, 201]
+        );
+        assert!(bodies[0].starts_with("packages%5B%5D=acme%2Fp0000"));
+        assert!(bodies[2].ends_with("acme%2Fp1200"));
+        // One advisory per batch, in batch order: the names past the first
+        // batch are not lost.
+        assert_eq!(found, ["acme/p0499", "acme/p0999", "acme/p1200"]);
+        assert_eq!(advisories.len(), 3);
+        assert_eq!(advisories[2].0, "acme/p1200");
     }
 }

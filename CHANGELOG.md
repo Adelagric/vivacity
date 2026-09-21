@@ -55,6 +55,16 @@ byte-identical-output promise are the public API.
   with install — lock (and project) identical to Composer with the plugin
   active — plus the two refusals.
 
+### Fixed
+- **Security-advisories request sent in batches of 500 names**, as
+  Composer 2.11 does (`ADVISORY_API_BATCH_SIZE`, found by the drift job
+  on the 2.11 snapshot): every name is one form input and PHP truncates
+  `$_POST` past `max_input_vars` (1000 by default) without an error, so a
+  lock of more than ~1000 packages got its advisories silently dropped —
+  in Composer 2.10.3 as in vivacity until now. Responses are handled in
+  batch order; the "names which were not requested" warning lists at most
+  20 names. Identical behaviour up to 500 names.
+
 ## [0.16.0] — 2026-09-20
 
 ### Changed

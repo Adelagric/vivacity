@@ -1069,3 +1069,30 @@ direct) : lock identique à l'octet sur update, `--no-dev`, `replace`, un
 `require`, `remove`, `update` avec install (projet identique) ; le refus
 et le repli laissent le lock intact.
 
+## 2026-09-21 — Un correctif de Composer 2.11 porté avant la référence : la requête d'avis par lots de 500
+
+Fait : le drift hebdomadaire (snapshot 2.11-dev `85ae025`) signale
+`ComposerRepository::getSecurityAdvisories` : la requête POST à l'API
+security-advisories est désormais découpée par lots de 500 noms
+(`ADVISORY_API_BATCH_SIZE`). Raison upstream : chaque nom est une variable
+de formulaire, PHP tronque `$_POST` au-delà de `max_input_vars` (1000 par
+défaut) **sans erreur** — un lock de plus de ~1000 paquets perdait ses
+avis en silence, chez Composer 2.10.3 comme chez nous (même requête
+unique, [repository.rs](crates/vivacity-resolver/src/repository.rs)). Nos
+fixtures plafonnent vers 450 paquets : invisible au harnais, réel sur un
+gros Drupal / Magento, et c'est la politique de blocage qui laisserait
+passer. Décision : porter le lot de 500 tout de suite, référence maintenue
+à 2.10.3 — la règle « même sortie que 2.10.3 » cède devant un correctif
+upstream d'une perte silencieuse, parce que la sortie est identique
+jusqu'à 500 noms et que l'autre choix est de reproduire un bug connu. Le
+message « names which were not requested » prend le texte 2.11 (liste
+tronquée à 20 noms) : jamais exercé par le harnais, on suit le code porté.
+Requêtes séquentielles (Composer les lance en parallèle via sa boucle
+curl) : 3 requêtes pour 1201 noms, pas de raison de paralléliser avant
+mesure. Écarté : rafraîchir le jumeau `docs/reference/resolver/
+ComposerRepository.php` (les références sont un instantané cohérent de
+2.10.3 ; le drift continuera de le signaler, noté dans HANDOVER).
+`PlatformRepository.php` (oniguruma absent dès PHP 8.6) : à porter avec
+le passage en 2.11, sans effet avant. Vérifié : test unitaire, 1201 noms
+→ 3 corps de 500/500/201 dans l'ordre, l'avis du dernier lot trouvé.
+

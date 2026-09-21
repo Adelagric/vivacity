@@ -129,7 +129,12 @@ Rien n'est porté d'un logiciel GPL.
   manuel) teste `composer:v2` et `snapshot` en deux étages (jumeaux de
   docs/reference/, puis tests + harness) et ouvre une issue `drift`. Le
   template symfony/runtime n'a pas de jumeau vendoré (pas dans le phar) :
-  son drift n'est vu que par le boot de la fixture symfony.
+  son drift n'est vu que par le boot de la fixture symfony. Drift connu
+  du snapshot 2.11 (2026-09-21) : `ComposerRepository.php` (requête
+  security-advisories par lots de 500 — **porté**, la référence reste
+  2.10.3, donc le jumeau restera signalé jusqu'au passage en 2.11) ;
+  `PlatformRepository.php` (`lib-mbstring-oniguruma` absent dès PHP 8.6
+  — à porter avec la référence 2.11, sans effet avant).
 - **composer/installers** : émulé pour les tags 2.0.0…2.3.0 et les 58
   frameworks « table seule » ; les 38 à logique custom (agl, akaunting,
   asgard, bitrix, cakephp, cockpit, croogo, dokuwiki, ee2, ee3, fork, grav,
