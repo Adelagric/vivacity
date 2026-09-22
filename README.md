@@ -76,20 +76,20 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 105 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-09-19 (after the
-0.14 `--no-plugins` fix and the install/dump speed-ups, which the corpus
+committed lock, pinned — `fixtures/corpus/`). On 2026-09-22 (after the
+`tar` dists and six more plugins of this week, which the corpus
 re-checks byte for byte), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **66 of 105 projects (63 %)
-natively with `--no-dev`** and 58 of 105 (55 %) with the dev packages,
+plugins active, `vivacity install` laid out **72 of 105 projects (69 %)
+natively with `--no-dev`** and 70 of 105 (67 %) with the dev packages,
 byte-identical down to file modes and link targets, and **no diff in
 either mode**: every other project was handed to Composer
-before any write, for reasons the report ranks — packages with neither a
-zip nor a tar dist, then plugins one by one. The reasons that headed that list a day
-earlier (`pestphp/pest-plugin`,
-`dealerdirect/phpcodesniffer-composer-installer`,
-`phpstan/extension-installer`, `config.vendor-dir`, `bin-dir`,
-`wikimedia/composer-merge-plugin`) are handled now. The corpus also found
-twelve parity bugs that six fixtures never could; all are fixed.
+before any write, for reasons the report ranks — the Drupal scaffold
+(GPL, not ported), git-only packages, then plugins one by one. The
+reasons that headed that list three days earlier (`symfony/thanks`,
+`yiisoft/yii2-composer`, asset-packagist's tarballs,
+`bamarni/composer-bin-plugin`, `roots/wordpress-core-installer`,
+`ergebnis/composer-normalize`) are handled now. The corpus also found
+thirteen parity bugs that six fixtures never could; all are fixed.
 
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
 

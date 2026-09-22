@@ -171,7 +171,7 @@ run_one() { # nom, mode, ligne JSON du scan
       # le même arbre diffèrent (wallabag, cycle hoa/*). vivacity écrit la
       # forme de `dump-autoload` (installed.json, trié par nom). Quand seule
       # cette différence subsiste, l'entrée compte native, annotée.
-      if (cd "$ref" && composer dump-autoload --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1) \
+      if (cd "$ref" && composer dump-autoload --no-scripts --no-interaction --no-ansi "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >/dev/null 2>&1) \
          && VENDOR_REL="$vrel" compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff2" >/dev/null; then
         detail="autoload order: Composer's fresh install differs from its own dump-autoload on this tree (require cycle); vivacity matches the dump-autoload form"
       else

@@ -133,7 +133,7 @@ def main():
                     nodist_packages[pkg] += 1
                 keys = {k for k in keys if k[0] != "no-dist"}
                 if nodist:
-                    keys.add(("no-dist", "(packages without a zip dist)"))
+                    keys.add(("no-dist", "(packages with neither a zip nor a tar dist)"))
                 for key in keys:
                     reasons[key] += 1
         if reasons:

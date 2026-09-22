@@ -518,13 +518,52 @@ fn prune_stale_bat_proxies(
     }
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name
-            .strip_suffix(".bat")
-            .is_some_and(|stem| expected.contains(stem))
+        // A declared bin named `<x>.bat` (paratest ships one) is a proxy
+        // in its own right, written like any other on unix: never stale.
+        if !expected.contains(&file_name)
+            && file_name
+                .strip_suffix(".bat")
+                .is_some_and(|stem| expected.contains(stem))
         {
             let p = entry.path();
             std::fs::remove_file(&p).map_err(Error::io(&p))?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod bat_prune_tests {
+    use super::*;
+
+    #[test]
+    fn a_declared_bat_bin_is_not_pruned() {
+        let d = tempfile::tempdir().expect("tmp");
+        let bin_dir = d.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin");
+        for f in ["paratest", "paratest.bat", "phpunit", "phpunit.bat"] {
+            std::fs::write(bin_dir.join(f), "x").expect("write");
+        }
+        // paratest declares `bin/paratest.bat` (a proxy of its own on unix);
+        // phpunit does not: its `.bat` is a leftover of a full-mode install.
+        let lock = Lock::parse(
+            &serde_json::json!({"packages": [
+                {"name": "brianium/paratest", "version": "7.3.2", "bin": ["bin/paratest", "bin/paratest.bat"]},
+                {"name": "phpunit/phpunit", "version": "11.0.0", "bin": ["phpunit"]}
+            ], "packages-dev": []})
+            .to_string(),
+        )
+        .expect("lock");
+        let wanted: Vec<&LockPackage> = lock.packages.iter().collect();
+        prune_stale_bat_proxies(&bin_dir, &wanted, crate::binproxy::BinCompat::Proxy)
+            .expect("prune");
+        assert!(
+            bin_dir.join("paratest.bat").exists(),
+            "a declared .bat bin was pruned"
+        );
+        assert!(
+            !bin_dir.join("phpunit.bat").exists(),
+            "the stale .bat was kept"
+        );
+    }
 }

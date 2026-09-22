@@ -133,6 +133,13 @@ byte-identical-output promise are the public API.
   no-op, map emptied, `--no-plugins`) in CI.
 
 ### Fixed
+- **A declared `<x>.bat` bin is no longer deleted as a stale Windows
+  proxy** (found by the corpus on akaunting: brianium/paratest declares
+  `bin/paratest.bat`, which Composer proxies on unix like any other bin;
+  vivacity wrote the proxy then pruned it — since 0.11.0).
+- `harness/corpus.sh`: the `dump-autoload` re-check for the require-cycle
+  exception runs `--no-scripts` (a `post-autoload-dump` script failing in
+  the fixture counted as a diff).
 - **`symfony/thanks` on `update` with install goes to Composer**: it was
   listed as inert for the resolution commands (0.16 A), but after a
   package update its `POST_UPDATE_CMD` reminder queries GitHub's GraphQL
