@@ -26,6 +26,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "wikimedia/composer-merge-plugin",
     "yiisoft/yii2-composer",
     "codeception/c3",
+    "bamarni/composer-bin-plugin",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose
@@ -83,6 +84,10 @@ pub const RESOLUTION_INERT: &[&str] = &[
     // `POST_INSTALL_CMD` / `POST_UPDATE_CMD` copy `c3.php` to the root:
     // the install side's business, emulated there.
     "codeception/c3",
+    // `COMMAND` forwards `install` / `update` to vendor-bin/* when
+    // `forward-command` is true — nested installs, the root lock untouched;
+    // the install side refuses that configuration.
+    "bamarni/composer-bin-plugin",
     // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
     // implementation only when one is missing — with a complete lock, a
     // no-op (verified on install with the corpus).
@@ -344,6 +349,31 @@ pub fn analyze(
             crate::yii2_composer::YII2_DEV
         )));
     }
+    // bamarni/composer-bin-plugin: `forward-command: true` runs nested
+    // installs under vendor-bin/ (not emulated); a wrong setting type is
+    // Composer's abort.
+    if plugins_enabled
+        && matches!(
+            crate::layout::plugin_allowed(root_manifest, crate::bamarni_bin::PLUGIN_NAME),
+            crate::layout::PluginVerdict::Allowed
+        )
+        && lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == crate::bamarni_bin::PLUGIN_NAME)
+    {
+        match crate::bamarni_bin::config(root_manifest.get("extra")) {
+            Ok(cfg) if cfg.forward_command => report.issues.push(ScopeIssue::UnknownPlugin(
+                format!(
+                    "{} with extra.bamarni-bin.forward-command true (forwards the command to vendor-bin/*, not emulated); it",
+                    crate::bamarni_bin::PLUGIN_NAME
+                ),
+            )),
+            Ok(_) => {}
+            Err(msg) => report.issues.push(ScopeIssue::Config(format!(
+                "extra.bamarni-bin ({msg})"
+            ))),
+        }
+    }
     report.issues.extend(
         config_issues(root_manifest)
             .into_iter()
@@ -526,6 +556,40 @@ mod tests {
         );
         // Under --no-plugins the shims are not written by Composer either.
         assert!(analyze(&proj(), &lock, &allow, true, false).is_native_ok());
+    }
+
+    #[test]
+    fn bamarni_bin_native_unless_it_forwards() {
+        let lock = lock_with(json!([zip_pkg(
+            "bamarni/composer-bin-plugin",
+            "composer-plugin"
+        )]));
+        let allow = |extra: serde_json::Value| json!({"config": {"allow-plugins": {"bamarni/composer-bin-plugin": true}}, "extra": extra});
+        assert!(analyze(&proj(), &lock, &allow(json!({})), true, true).is_native_ok());
+        let r = analyze(
+            &proj(),
+            &lock,
+            &allow(json!({"bamarni-bin": {"forward-command": true}})),
+            true,
+            true,
+        );
+        assert!(
+            r.issues[0].to_string().contains("forward-command true"),
+            "{}",
+            r.issues[0]
+        );
+        let r = analyze(
+            &proj(),
+            &lock,
+            &allow(json!({"bamarni-bin": {"bin-links": "no"}})),
+            true,
+            true,
+        );
+        assert!(
+            r.issues[0].to_string().contains("boolean value"),
+            "{}",
+            r.issues[0]
+        );
     }
 
     #[test]

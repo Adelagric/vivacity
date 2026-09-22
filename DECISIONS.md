@@ -1191,3 +1191,22 @@ Composer, hors contrat). Vérifié : fixture yii2-composer avec c3 en dev —
 c3.php identique après install, absent des deux côtés en `--no-dev`,
 recopié au retour en dev.
 
+## 2026-09-22 — bamarni/composer-bin-plugin : émulé quand il ne transfère pas (v0.17)
+
+Fait : à 1.9.1 le plugin écoute `COMMAND` et `POST_AUTOLOAD_DUMP` ; aux
+deux, il lit `extra.bamarni-bin`, imprime sur stderr une ligne
+`[bamarni-bin] …` par réglage laissé au défaut que la 2.x inverse
+(`bin-links`, `forward-command`), et — seulement si `forward-command` est
+vrai et la commande `install` ou `update` — relance la commande dans chaque
+espace `vendor-bin/*` (installs imbriqués, avec leurs propres locks).
+nextcloud le règle explicitement à faux, owncloud le laisse au défaut
+(faux). Décision : émulation des lignes aux mêmes points (à `COMMAND` si
+installed.json a déjà le plugin, à `POST_AUTOLOAD_DUMP` si le lock voulu
+l'a — donc une ligne sur install à froid et sur `--no-dev` qui le retire,
+deux sur no-op et dump) ; `forward-command: true` → repli avec la raison
+avant toute écriture ; un type de réglage invalide → refus avec le message
+du plugin (Composer s'arrête dessus). Écarté : émuler le transfert (ce
+sont des installs complets dans d'autres répertoires ; possible un jour en
+appelant vivacity lui-même, hors de ce sprint). Vérifié : harnais
+bin-plugin, stderr complète identique à Composer sur les quatre étapes.
+

@@ -115,3 +115,5 @@ jobs:
         run: harness/tar-dist.sh
       - name: yiisoft/yii2-composer
         run: harness/yii2-composer.sh
+      - name: bamarni/composer-bin-plugin
+        run: harness/bin-plugin.sh

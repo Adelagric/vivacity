@@ -655,6 +655,16 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             return Ok(code);
         }
     }
+    // bamarni/composer-bin-plugin's `COMMAND` listener (the plugin
+    // already installed: loaded from installed.json before the command).
+    if vivacity_core::scope::active_plugins(&project, &manifest, !args.no_plugins)
+        .iter()
+        .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
+    {
+        if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
+            vivacity_core::bamarni_bin::print_deprecations(&cfg);
+        }
+    }
     let config_lock = config_lock_enabled(&manifest_text);
     // `Installer::doInstall`: the headline, then the platform verification
     // notice (the lock is solved against the platform when not coming
@@ -1132,6 +1142,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 args.after_update,
                 !args.no_plugins,
             )?;
+            emulate_bamarni_bin(local, &manifest, with_dev, !args.no_plugins);
         }
         // `AutoloadGenerator::dump`: post-autoload-dump once the files are
         // written (the emulated post-autoload-dump plugins included).
@@ -1338,6 +1349,32 @@ fn emulate_c3(
         _ => {}
     }
     Ok(())
+}
+
+/// bamarni/composer-bin-plugin's `POST_AUTOLOAD_DUMP` listener: the
+/// deprecation lines again (the plugin now installed and allowed).
+fn emulate_bamarni_bin(
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) {
+    use vivacity_core::bamarni_bin as bin;
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, bin::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if !plugins_enabled
+        || !allowed
+        || !local
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == bin::PLUGIN_NAME)
+    {
+        return;
+    }
+    if let Ok(cfg) = bin::config(manifest.get("extra")) {
+        bin::print_deprecations(&cfg);
+    }
 }
 
 /// `  - <operation><appendix>` for every operation of a real install.
@@ -1675,6 +1712,15 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     )
     .context("invalid composer.json")?;
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
+    // bamarni/composer-bin-plugin's `COMMAND` listener.
+    if vivacity_core::scope::active_plugins(&project, &manifest, !args.no_plugins)
+        .iter()
+        .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
+    {
+        if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
+            vivacity_core::bamarni_bin::print_deprecations(&cfg);
+        }
+    }
     // Dev mode: that of the installed state (installed.json), like Composer.
     let installed_json =
         vivacity_core::jsonfile::read(&composer_dir_of(&project, &manifest).join("installed.json"));
@@ -1801,6 +1847,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &[],
             !args.no_plugins,
         )?;
+        emulate_bamarni_bin(&lock, &manifest, dev_mode, !args.no_plugins);
     }
     if let Some(r) = &runner {
         let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;

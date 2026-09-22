@@ -102,6 +102,16 @@ byte-identical-output promise are the public API.
   (`--no-dev`); the plugin's stdout lines printed. Covered by
   `harness/yii2-composer.sh` (c3 in the fixture's `require-dev`).
 
+- **`bamarni/composer-bin-plugin` emulated** (1.9.1): with
+  `forward-command` off (its default) the plugin only prints its
+  deprecation lines (`[bamarni-bin] The setting …`) — at the `COMMAND`
+  event when already installed, at `POST_AUTOLOAD_DUMP` when installed by
+  the run — printed at the same points; a wrong setting type is Composer's
+  error. `forward-command: true` (nested `vendor-bin/*` installs) goes to
+  Composer with the reason. New `fixtures/projects/bin-plugin` and
+  `harness/bin-plugin.sh` (project and full stderr identical on install,
+  no-op, dump, `--no-dev`; the forwarding refused) in CI.
+
 ### Fixed
 - **`symfony/thanks` on `update` with install goes to Composer**: it was
   listed as inert for the resolution commands (0.16 A), but after a

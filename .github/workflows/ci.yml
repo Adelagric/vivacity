@@ -91,6 +91,8 @@ jobs:
         run: harness/tar-dist.sh
       - name: yiisoft/yii2-composer (extensions.php from the yii2-extension packages)
         run: harness/yii2-composer.sh
+      - name: bamarni/composer-bin-plugin (deprecation lines, forward-command refused)
+        run: harness/bin-plugin.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

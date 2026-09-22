@@ -1,0 +1,4 @@
+Lock written by Composer 2.10.3 on 2026-09-22 from this composer.json.
+bamarni/composer-bin-plugin 1.9.1 (the corpus's version) in require-dev,
+`bin-links` set explicitly and `forward-command` left at its default: one
+deprecation line per event, no vendor-bin/ directory.
