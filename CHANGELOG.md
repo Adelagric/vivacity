@@ -4,6 +4,20 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **`Generating optimized autoload files`**, as Composer announces it
+  whenever the effective optimize flag is on — `-o`,
+  `config.optimize-autoloader`, or `--classmap-authoritative` /
+  `config.classmap-authoritative`, which imply it. vivacity always
+  printed the plain `Generating autoload files`, on stderr only: the
+  autoloader it wrote was already optimized (vendor/ matched byte for
+  byte), the line did not say so. Found by installing the Doppar
+  framework skeleton, which sets `config.optimize-autoloader`.
+  `harness/path-repos.sh` gains four install steps (config, authoritative,
+  `-o`, and back to plain) whose stderr is compared line by line.
+
 ## [0.17.0] — 2026-09-22
 
 ### Added

@@ -1056,7 +1056,22 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 return Ok(code);
             }
         }
-        eprintln!("Generating autoload files");
+        // `Installer::doInstall`: "optimized" as soon as the effective
+        // optimize flag is on — the option, `config.optimize-autoloader`,
+        // or class-map authoritative (which implies it), the same
+        // computation `dump_autoload_plan` makes.
+        eprintln!(
+            "Generating{} autoload files",
+            if effective_optimize(
+                &manifest,
+                args.optimize_autoloader,
+                args.classmap_authoritative
+            ) {
+                " optimized"
+            } else {
+                ""
+            }
+        );
         // `AutoloadGenerator::dump($localRepo)`: the local repository, not
         // the lock (they differ for an unchanged package whose lock entry
         // moved).
@@ -1442,6 +1457,25 @@ fn operation_lines(
     Ok(lines)
 }
 
+/// `config.<key>` of the manifest, as `Config::get` reads a boolean.
+fn config_bool(manifest: &serde_json::Value, key: &str) -> bool {
+    manifest
+        .get("config")
+        .and_then(|c| c.get(key))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `InstallCommand` + `Installer::setClassMapAuthoritative`: the option,
+/// `config.optimize-autoloader`, or anything that makes the class map
+/// authoritative — which turns optimization on.
+fn effective_optimize(manifest: &serde_json::Value, optimize: bool, authoritative: bool) -> bool {
+    optimize
+        || authoritative
+        || config_bool(manifest, "classmap-authoritative")
+        || config_bool(manifest, "optimize-autoloader")
+}
+
 /// The computing half of the dump (`vivacity_autoload::plan` with the
 /// options InstallCommand derives): nothing written under vendor/.
 #[allow(clippy::too_many_arguments)]
@@ -1465,15 +1499,9 @@ fn dump_autoload_plan(
         _ => vivacity_autoload::PlatformCheckMode::PhpOnly,
     };
     // Like InstallCommand: the flags OR the composer.json config.
-    let cfg_bool = |key: &str| {
-        manifest
-            .get("config")
-            .and_then(|c| c.get(key))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    };
+    let cfg_bool = |key: &str| config_bool(manifest, key);
     let authoritative = authoritative || cfg_bool("classmap-authoritative");
-    let optimize = optimize || authoritative || cfg_bool("optimize-autoloader");
+    let optimize = effective_optimize(manifest, optimize, authoritative);
     // `$apcu = $apcuPrefix !== null || --apcu-autoloader || config.apcu-autoloader`;
     // without a prefix Composer draws bin2hex(random_bytes(10)).
     let apcu_prefix = if apcu.1.is_some() || apcu.0 || cfg_bool("apcu-autoloader") {

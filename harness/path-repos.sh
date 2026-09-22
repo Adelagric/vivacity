@@ -149,6 +149,18 @@ step "install-after-deleted-link" install
 # à l'option par défaut sur un vendor/ déjà en miroir.
 stage_project path-repos "$ref"; stage_project path-repos "$viv"
 export COMPOSER_MIRROR_PATH_REPOS=1
+# `Installer::doInstall` annonce « Generating optimized autoload files »
+# dès que le drapeau effectif est levé : l'option `-o`,
+# `config.optimize-autoloader`, ou `classmap-authoritative` qui l'implique
+# (le dump lui-même est comparé par le reste de l'étape).
+for d in "$ref" "$viv"; do jq '.config["optimize-autoloader"]=true' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "install-optimize-config" install
+for d in "$ref" "$viv"; do jq 'del(.config["optimize-autoloader"]) | .config["classmap-authoritative"]=true' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "install-authoritative-config" install
+for d in "$ref" "$viv"; do jq 'del(.config)' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "install-optimize-flag" install -o
+step "install-back-to-plain" install
+
 step "install-mirror" install
 unset COMPOSER_MIRROR_PATH_REPOS
 step "install-over-mirror" install

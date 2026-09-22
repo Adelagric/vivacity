@@ -24,7 +24,7 @@ harness/bin-plugin.sh                    # bamarni/composer-bin-plugin : lignes 
 harness/wp-core.sh                       # roots/wordpress-core-installer : wordpress-core à wordpress-install-dir (chaîne, carte, défaut), --no-plugins, `.` refusé — projet identique
 harness/custom-dirs.sh                   # mnsami/composer-custom-directory-installer : bibliothèques nommées dans installer-paths (install, no-op, carte vidée, --no-plugins) — projet identique
 harness/vendor-dir.sh [variante...]      # config.vendor-dir / bin-dir : 6 variantes (symfony ×5, wordpress ×1) — install, dump -o, no-op ; projet entier comparé, lignes « Skipped installation of bin » comparées
-harness/path-repos.sh                    # dépôts `path` (10 étapes) : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)
+harness/path-repos.sh                    # dépôts `path` (14 étapes, dont 4 sur la ligne « Generating [optimized] autoload files ») : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)
 tools/snapshot-packagist.sh <fixture>    # (re)capture un instantané Packagist + lock de référence
 harness/boot.sh                          # les 6 fixtures démarrent sur un vendor 100 % vivacity
 harness/drift-reference.sh [phar]        # docs/reference/ == fichiers du phar (2.10.3 ou autre)
