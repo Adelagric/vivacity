@@ -89,6 +89,8 @@ jobs:
         run: harness/scripts.sh
       - name: tar dists (asset-packagist tarballs, modes from the header, cache shared)
         run: harness/tar-dist.sh
+      - name: yiisoft/yii2-composer (extensions.php from the yii2-extension packages)
+        run: harness/yii2-composer.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

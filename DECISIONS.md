@@ -1146,3 +1146,48 @@ honnête : +1 (humhub attend yii2-composer, friendica reste sur git +
 installers-extender) ; le vrai gain est l'écosystème Yii, bâti sur
 asset-packagist.
 
+## 2026-09-22 — yiisoft/yii2-composer émulé ; l'ordre d'extensions.php, comme pest (v0.17)
+
+Fait : le plugin (2.0.11 dans les trois entrées du corpus qui l'ont) fait
+deux choses à l'install — `activate` crée `vendor/yiisoft/extensions.php`
+(`return [];`) s'il manque, et son installateur du type `yii2-extension`
+réécrit la carte (nom, version normalisée, alias déduits des psr-0/psr-4,
+`bootstrap`) après chaque opération, via `var_export` avec
+`$vendorDir . '…'` pour les chemins sous vendor/. Il fait aussi deux
+choses hors install : les statiques `postInstall` / `postCreateProject`
+(chmod, clé de cookie) sont des **scripts** de composer.json, pas des
+écouteurs — `--run-scripts` les confie à Composer ; et
+`POST_UPDATE_CMD` imprime les notes d'UPGRADE.md quand yiisoft/yii2 a été
+mis à jour. Décision : émulation à l'install et au dump (`yii2_composer`),
+carte réécrite d'un bloc quand une extension entre, sort ou change ;
+ordre = celui du dépôt local reconstruit comme pour pest (installed.json
+précédent moins les partis, puis les opérations) — l'ordre de Composer
+suit l'achèvement des extractions parallèles et n'est pas reproductible,
+`compare.sh` compare la carte clés triées via `php -r` (`$vendorDir`
+évalué puis neutralisé). Une entrée écrite à la main dans la carte est
+perdue (Composer la garderait : il recharge le fichier) — même limite que
+pest, documentée. `yiisoft/yii2-dev` (trois shims `Yii.php` dans
+`yiisoft/yii2`) refusé avec la raison ; `update` avec install rendu à
+Composer (les notes de mise à niveau ne sont connues qu'après résolution
+— un contrôle post-résolution le rendrait natif, différé). Vérifié :
+harnais 7 étapes identiques du premier coup (dont `--no-dev` qui retire
+deux extensions, le retour en dev, le vendor vierge, `--no-plugins` sans
+fichier des deux côtés).
+
+## 2026-09-22 — codeception/c3 émulé : la copie, jamais l'écrasement (v0.17)
+
+Fait : dernier bloqueur de yiisoft-yii2-app-basic en dev. Sous Composer 2
+le plugin écoute `POST_INSTALL_CMD` / `POST_UPDATE_CMD` : copie
+`vendor/codeception/c3/c3.php` à la racine (`getcwd()`) si absent ; s'il
+existe et diffère, `askConfirmation` (défaut non) — sous
+`--no-interaction`, jamais remplacé, rien imprimé ; s'il est identique
+(md5), « already up-to-date » à l'install seulement. `uninstall` du plugin
+supprime le fichier. Décision : port tel quel dans `c3_plugin` (copie,
+garde, suppression quand le plugin quitte le vendor — installed.json
+précédent l'avait, le lock voulu ne l'a plus), messages sur stdout comme
+`$io->write` ; c3 inerte à la résolution (ses écouteurs sont ceux de
+l'install, émulés là). Écarté : reproduire l'invite (interactive chez
+Composer, hors contrat). Vérifié : fixture yii2-composer avec c3 en dev —
+c3.php identique après install, absent des deux côtés en `--no-dev`,
+recopié au retour en dev.
+

@@ -1107,6 +1107,31 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 !args.no_plugins,
                 previously_present,
             )?;
+            // yiisoft/yii2-composer: `activate` then its installer's
+            // per-operation rewrites of extensions.php — one write here,
+            // when an extension was installed, updated or removed.
+            let touched: Vec<&str> = gone.iter().chain(fresh.iter()).copied().collect();
+            emulate_yii2_composer(
+                &project,
+                local,
+                &manifest,
+                with_dev,
+                &order,
+                &touched,
+                !args.no_plugins,
+            )?;
+            // codeception/c3: its `uninstall` when the plugin leaves the
+            // vendor (during the transaction), its `POST_INSTALL_CMD` /
+            // `POST_UPDATE_CMD` copy afterwards.
+            emulate_c3(
+                &project,
+                local,
+                &manifest,
+                with_dev,
+                previous.contains(&vivacity_core::c3_plugin::PLUGIN_NAME),
+                args.after_update,
+                !args.no_plugins,
+            )?;
         }
         // `AutoloadGenerator::dump`: post-autoload-dump once the files are
         // written (the emulated post-autoload-dump plugins included).
@@ -1208,6 +1233,110 @@ fn emulate_pest_plugin(
         .map(|p| p.raw.get("extra"))
         .collect();
     vivacity_core::pest_plugin::write_pest_plugins(&vendor, &extras, manifest.get("extra"))?;
+    Ok(())
+}
+
+/// `yiisoft/yii2-composer`, emulated: with plugins on and the plugin
+/// installed and allowed, `vendor/yiisoft/extensions.php` exists
+/// (`activate`), and when a `yii2-extension` package was among the
+/// operations (`touched`) the map is rewritten from the installed
+/// extensions in local-repository order (`order`).
+fn emulate_yii2_composer(
+    project: &std::path::Path,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    order: &[&str],
+    touched: &[&str],
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::yii2_composer as yii;
+    let wanted: std::collections::BTreeMap<&str, &vivacity_core::lock::LockPackage> = local
+        .wanted_packages(with_dev)
+        .map(|p| (p.name(), p))
+        .collect();
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, yii::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if !plugins_enabled || !allowed || !wanted.contains_key(yii::PLUGIN_NAME) {
+        return Ok(());
+    }
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
+    yii::ensure_extensions_file(&vendor)?;
+    let is_extension = |n: &str| {
+        wanted
+            .get(n)
+            .is_some_and(|p| p.package_type() == yii::EXTENSION_TYPE)
+    };
+    let extension_touched = touched.iter().any(|n| {
+        is_extension(n)
+            || local
+                .packages
+                .iter()
+                .chain(local.packages_dev.iter())
+                .any(|p| p.name() == *n && p.package_type() == yii::EXTENSION_TYPE)
+    });
+    if !extension_touched {
+        return Ok(());
+    }
+    let entries: Vec<(&str, serde_json::Value)> = order
+        .iter()
+        .filter(|n| is_extension(n))
+        .map(|n| (*n, yii::extension_entry(wanted[n])))
+        .collect();
+    yii::write_extensions(&vendor, &entries)?;
+    Ok(())
+}
+
+/// `codeception/c3`, emulated: with plugins on, `c3.php` copied to the
+/// project root after the install (`copyC3V2`; `askForUpdateV2` after an
+/// update: no "up-to-date" line), or deleted when the plugin was
+/// uninstalled by this run. Messages on stdout, as `$io->write` prints.
+fn emulate_c3(
+    project: &std::path::Path,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    previously_present: bool,
+    after_update: bool,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::c3_plugin as c3;
+    if !plugins_enabled {
+        return Ok(());
+    }
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, c3::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    let wanted = local
+        .wanted_packages(with_dev)
+        .any(|p| p.name() == c3::PLUGIN_NAME);
+    if !wanted {
+        if previously_present && allowed && c3::delete_c3(project)? {
+            println!("[codeception/c3] Deleting c3.php from the root of your project...");
+        }
+        return Ok(());
+    }
+    if !allowed {
+        return Ok(());
+    }
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
+    match c3::copy_c3(&vendor, project)? {
+        c3::C3Action::UpToDate if !after_update => {
+            println!("[codeception/c3] c3.php is already up-to-date");
+        }
+        c3::C3Action::Copied => {
+            println!("[codeception/c3] Copying c3.php to the root of your project...");
+            println!("[codeception/c3] Include c3.php into index.php in order to collect codecoverage from server scripts");
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -1661,6 +1790,16 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &order,
             !args.no_plugins,
             previously_present,
+        )?;
+        // yii2-composer's `activate` alone: no installer operation on a dump.
+        emulate_yii2_composer(
+            &project,
+            &lock,
+            &manifest,
+            dev_mode,
+            &order,
+            &[],
+            !args.no_plugins,
         )?;
     }
     if let Some(r) = &runner {

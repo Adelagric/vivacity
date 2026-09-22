@@ -1,6 +1,7 @@
 //! vivacity-core: manifests, platform, fetch and installation.
 
 pub mod binproxy;
+pub mod c3_plugin;
 pub mod clone;
 pub mod constraint;
 pub mod content_hash;
@@ -28,6 +29,7 @@ pub mod scope;
 pub mod state;
 pub mod store;
 pub mod version;
+pub mod yii2_composer;
 
 pub use error::{Error, Result};
 

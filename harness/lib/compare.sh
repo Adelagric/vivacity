@@ -15,7 +15,9 @@
 #     `<project>` de chaque côté avant comparaison ;
 #   - vendor/pest-plugins.json : le plugin lit le dépôt local dans l'ordre
 #     d'achèvement des installations asynchrones (constaté : le petit
-#     pest-plugin-laravel finit avant pest) ; comparé trié.
+#     pest-plugin-laravel finit avant pest) ; comparé trié ;
+#   - vendor/yiisoft/extensions.php (yii2-composer) : même ordre
+#     d'achèvement ; comparé clés triées via `php -r`.
 # Les modes des fichiers et les cibles des liens sont comparés par un
 # inventaire `stat` (`diff -r` ne voit ni les uns ni les autres) : une
 # extraction par `unzip` (Composer) préserve les modes du zip, vivacity aussi.
@@ -43,6 +45,18 @@ compare_vendor() {
     echo "pest-plugins.json diffère même trié" > "$out"; diff <(sed 's/,$//' "$pp_ref" | sort) <(sed 's/,$//' "$pp_viv" | sort) | head >> "$out"
     head -20 "$out"; return 1
   fi
+  # vendor/yiisoft/extensions.php (yii2-composer) : même cause encore —
+  # l'installateur du plugin réécrit la carte à chaque opération, dans
+  # l'ordre d'achèvement ; comparée clés triées, `$vendorDir` évalué puis
+  # ramené à un marqueur.
+  local ex_ref="${ip_ref%composer/include_paths.php}yiisoft/extensions.php" ex_viv="${ip_viv%composer/include_paths.php}yiisoft/extensions.php"
+  if [ -f "$ex_ref" ] && [ -f "$ex_viv" ]; then
+    local ex_norm='$a = require $argv[1]; ksort($a); $v = dirname(dirname($argv[1])); array_walk_recursive($a, function (&$x) use ($v) { if (is_string($x)) { $x = str_replace($v, "<vendor>", $x); } }); echo var_export($a, true), "\n";'
+    if ! diff -q <(php -r "$ex_norm" "$ex_ref") <(php -r "$ex_norm" "$ex_viv") >/dev/null; then
+      echo "yiisoft/extensions.php diffère même trié" > "$out"; diff <(php -r "$ex_norm" "$ex_ref") <(php -r "$ex_norm" "$ex_viv") | head >> "$out"
+      head -20 "$out"; return 1
+    fi
+  fi
   local ref_real viv_real ref_win="" viv_win="" ref_winf="" viv_winf=""
   ref_real="$(cd "$ref" && pwd -P)"; viv_real="$(cd "$viv" && pwd -P)"
   # Windows (Git Bash) : Composer écrit le chemin sous sa forme `D:\a\…`,
@@ -58,7 +72,7 @@ compare_vendor() {
   : > "$out"
   # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
   # diffèrent — celles-ci sont recomparées normalisées.
-  diff -rq --no-dereference --exclude=.git --exclude=include_paths.php --exclude=pest-plugins.json "$ref" "$viv" 2>&1 \
+  diff -rq --no-dereference --exclude=.git --exclude=include_paths.php --exclude=pest-plugins.json --exclude=extensions.php "$ref" "$viv" 2>&1 \
     | grep -v 'autoload_runtime.php' | grep -v 'No such file or directory' \
     | while IFS= read -r line; do
       case "$line" in

@@ -179,7 +179,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Seven plugins are emulated and checked against the
+Nine plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
@@ -192,7 +192,13 @@ root — autoload, requirements, links, `extra` — for `install` and
 plugin would run an implicit `composer update` of the merged requirements
 and rewrite `composer.lock`, vivacity never does — a lock that misses a
 merged requirement is handed to Composer instead, and `update` on such a
-project is refused). A plugin listed as `false` in `allow-plugins` is
+project is refused), and `yiisoft/yii2-composer` (`vendor/yiisoft/extensions.php`
+from the `yii2-extension` packages — aliases from their `psr-0` / `psr-4`,
+`bootstrap` from their `extra` — rewritten as extensions come and go;
+`yiisoft/yii2-dev`'s `Yii.php` shims are not emulated), and
+`codeception/c3` (`c3.php` copied to the project root, never over a
+modified one, deleted when the plugin leaves). A plugin listed
+as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `symfony/thanks`,
 `ergebnis/composer-normalize`, …) is installed as plain libraries. `drupal/core-composer-scaffold` is not

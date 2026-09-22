@@ -24,6 +24,8 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "phpstan/extension-installer",
     "rector/extension-installer",
     "wikimedia/composer-merge-plugin",
+    "yiisoft/yii2-composer",
+    "codeception/c3",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose
@@ -78,6 +80,9 @@ pub const RESOLUTION_INERT: &[&str] = &[
     "rector/extension-installer",
     "composer/package-versions-deprecated",
     "ergebnis/composer-normalize",
+    // `POST_INSTALL_CMD` / `POST_UPDATE_CMD` copy `c3.php` to the root:
+    // the install side's business, emulated there.
+    "codeception/c3",
     // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
     // implementation only when one is missing — with a complete lock, a
     // no-op (verified on install with the corpus).
@@ -147,6 +152,16 @@ pub fn resolution_effect(
         "symfony/thanks" => {
             if command == ResolutionCommand::Update && with_install {
                 "prints a reminder after a package update, after querying GitHub (not emulated; --no-install resolves natively)".to_owned()
+            } else {
+                return None;
+            }
+        }
+        // `POST_PACKAGE_UPDATE` records updates, `POST_UPDATE_CMD` prints
+        // yiisoft/yii2's UPGRADE.md notes when it was updated — only with
+        // install, and only known after resolving: with install, Composer.
+        "yiisoft/yii2-composer" => {
+            if with_install {
+                "prints yiisoft/yii2's upgrade notes after an update with install (not emulated; --no-install resolves natively)".to_owned()
             } else {
                 return None;
             }
@@ -309,6 +324,26 @@ pub fn analyze(
     for p in lock.wanted_packages(with_dev) {
         classify_package(project_dir, p, plugins_enabled, &mut report);
     }
+    // yii2-composer's installer writes three `Yii.php` shims for
+    // `yiisoft/yii2-dev` (`linkBaseYiiFiles`): not emulated.
+    if plugins_enabled
+        && matches!(
+            crate::layout::plugin_allowed(root_manifest, crate::yii2_composer::PLUGIN_NAME),
+            crate::layout::PluginVerdict::Allowed
+        )
+        && lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == crate::yii2_composer::PLUGIN_NAME)
+        && lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == crate::yii2_composer::YII2_DEV)
+    {
+        report.issues.push(ScopeIssue::UnknownPlugin(format!(
+            "{} with {} (the Yii.php shims are not emulated); it",
+            crate::yii2_composer::PLUGIN_NAME,
+            crate::yii2_composer::YII2_DEV
+        )));
+    }
     report.issues.extend(
         config_issues(root_manifest)
             .into_iter()
@@ -468,6 +503,29 @@ mod tests {
         assert!(effect(Require, true).is_none());
         assert!(effect(Remove, true).is_none());
         assert!(resolution_effect("ergebnis/composer-normalize", Update, true).is_none());
+    }
+
+    #[test]
+    fn yii2_composer_is_emulated_except_with_yii2_dev() {
+        let allow = json!({"config": {"allow-plugins": {"yiisoft/yii2-composer": true}}});
+        let lock = lock_with(json!([
+            zip_pkg("yiisoft/yii2-composer", "composer-plugin"),
+            zip_pkg("yiisoft/yii2-gii", "yii2-extension"),
+        ]));
+        assert!(analyze(&proj(), &lock, &allow, true, true).is_native_ok());
+        let lock = lock_with(json!([
+            zip_pkg("yiisoft/yii2-composer", "composer-plugin"),
+            zip_pkg("yiisoft/yii2-dev", "yii2-extension"),
+        ]));
+        let r = analyze(&proj(), &lock, &allow, true, true);
+        assert!(!r.is_native_ok());
+        assert!(
+            r.issues[0].to_string().contains("yiisoft/yii2-dev"),
+            "{}",
+            r.issues[0]
+        );
+        // Under --no-plugins the shims are not written by Composer either.
+        assert!(analyze(&proj(), &lock, &allow, true, false).is_native_ok());
     }
 
     #[test]

@@ -1,0 +1,34 @@
+{
+  "name": "vivacity/yii2-composer-fixture",
+  "description": "yiisoft/yii2-composer: vendor/yiisoft/extensions.php from the yii2-extension packages (aliases from psr-4, bootstrap), dev extensions removed on --no-dev; codeception/c3: c3.php copied to the root, deleted when the plugin leaves",
+  "type": "project",
+  "license": "MIT",
+  "version": "1.0.0",
+  "minimum-stability": "stable",
+  "require": {
+    "yiisoft/yii2": "^2.0.53",
+    "yiisoft/yii2-bootstrap5": "2.0.51",
+    "yiisoft/yii2-symfonymailer": "2.0.4",
+    "yiisoft/yii2-composer": "2.0.11"
+  },
+  "require-dev": {
+    "yiisoft/yii2-debug": "2.1.28",
+    "yiisoft/yii2-gii": "2.2.7",
+    "codeception/c3": "2.9.0"
+  },
+  "config": {
+    "allow-plugins": {
+      "yiisoft/yii2-composer": true,
+      "codeception/c3": true
+    },
+    "fxp-asset": {
+      "enabled": false
+    }
+  },
+  "repositories": [
+    {
+      "type": "composer",
+      "url": "https://asset-packagist.org"
+    }
+  ]
+}

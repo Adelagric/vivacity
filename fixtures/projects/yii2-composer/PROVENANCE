@@ -1,0 +1,6 @@
+Lock written by Composer 2.10.3 on 2026-09-22 (`composer update
+--no-security-blocking`: yiisoft/yii2 2.0.55 carries advisories) from this
+composer.json; Packagist plus asset-packagist.org for the bower assets
+yii2 requires. Four yii2-extension packages (two dev-only), one with an
+`extra.bootstrap`; the plugin at 2.0.11, the version every corpus entry
+locks.

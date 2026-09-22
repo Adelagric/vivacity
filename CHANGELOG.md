@@ -77,6 +77,31 @@ byte-identical-output promise are the public API.
   archives (`oracle_tar.rs`). Corpus: elgg (289 packages, 186 tar) native
   in both modes, 0 diff.
 
+- **`yiisoft/yii2-composer` emulated** (2.0.11, the version every corpus
+  entry locks): `vendor/yiisoft/extensions.php` exists after any install
+  or dump (`activate`), and is rewritten from the installed
+  `yii2-extension` packages — `name`, normalized `version`, `alias` from
+  `psr-0` / `psr-4` (a psr-4 list skipped, paths under vendor/ as
+  `$vendorDir . '…'`), `bootstrap` from `extra` — whenever an extension is
+  installed, updated or removed, `--no-dev` included. The map's order is
+  the local repository's (Composer's follows extraction completion, not
+  reproducible: the harnesses compare it with sorted keys). `yiisoft/yii2-dev`
+  (three `Yii.php` shims) is refused with the reason; the plugin's
+  `postInstall` / `postCreateProject` statics are scripts (`--run-scripts`).
+  `update` with install goes to Composer (upgrade notes after a
+  `yiisoft/yii2` update). New `fixtures/projects/yii2-composer` and
+  `harness/yii2-composer.sh` (install, no-op, `--no-dev`, back to dev,
+  `dump-autoload -o`, bare `--no-dev`, `--no-plugins`) in CI on the three
+  OSes.
+
+- **`codeception/c3` emulated** (2.9.0): `c3.php` copied from
+  `vendor/codeception/c3/` to the project root after an install or update
+  when absent or identical (`c3.php is already up-to-date`), never over a
+  modified copy (the confirmation Composer would ask is declined under
+  `--no-interaction`), deleted when the plugin is uninstalled
+  (`--no-dev`); the plugin's stdout lines printed. Covered by
+  `harness/yii2-composer.sh` (c3 in the fixture's `require-dev`).
+
 ### Fixed
 - **`symfony/thanks` on `update` with install goes to Composer**: it was
   listed as inert for the resolution commands (0.16 A), but after a
