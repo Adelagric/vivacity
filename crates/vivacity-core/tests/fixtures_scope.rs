@@ -47,5 +47,7 @@ fn expected_benign_plugins_are_reported() {
     let sylius = analyze("sylius").skipped_plugins;
     assert!(sylius.contains(&"symfony/flex".to_owned()));
     assert!(sylius.contains(&"php-http/discovery".to_owned()));
-    assert_eq!(sylius.len(), 3, "unexpected benign list: {sylius:?}");
+    // `composer/package-versions-deprecated` was counted here until it
+    // moved to the emulated list (it rewrites its own `Versions.php`).
+    assert_eq!(sylius.len(), 2, "unexpected benign list: {sylius:?}");
 }

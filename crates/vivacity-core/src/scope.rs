@@ -24,6 +24,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "phpstan/extension-installer",
     "rector/extension-installer",
     "wikimedia/composer-merge-plugin",
+    "composer/package-versions-deprecated",
     "yiisoft/yii2-composer",
     "codeception/c3",
     "bamarni/composer-bin-plugin",
@@ -39,9 +40,33 @@ pub const EMULATED_PLUGINS: &[&str] = &[
 /// (vendor/pest-plugins.json), phpstan/extension-installer and
 /// rector/extension-installer (GeneratedConfig.php),
 /// dealerdirect/phpcodesniffer-composer-installer (CodeSniffer.conf).
+/// `metasyntactical/composer-plugin-license-check` checks each installed
+/// package's licence against the root's `extra` lists and throws when one
+/// is denied — Composer stops, vendor/ half written. With no list
+/// configured every package passes and the plugin writes nothing: benign
+/// then, handed over when it is configured.
+pub const LICENSE_CHECK_PLUGIN: &str = "metasyntactical/composer-plugin-license-check";
+
+/// Its configuration, as `ComposerConfig` reads it: `array_filter` over
+/// `allow-list`, `deny-list` and `allowed-packages`, so empty (or absent)
+/// lists mean no check at all.
+pub fn license_check_configured(root_manifest: &Value) -> bool {
+    let Some(cfg) = root_manifest
+        .get("extra")
+        .and_then(|e| e.get(LICENSE_CHECK_PLUGIN))
+    else {
+        return false;
+    };
+    ["allow-list", "deny-list"].iter().any(|k| {
+        cfg.get(*k).and_then(Value::as_array).is_some_and(|l| {
+            l.iter()
+                .any(|v| !matches!(v, Value::Null | Value::Bool(false)))
+        })
+    })
+}
+
 pub const BENIGN_PLUGINS: &[&str] = &[
     "symfony/flex",
-    "composer/package-versions-deprecated",
     "php-http/discovery",
     // Only listens to POST_CREATE_PROJECT_CMD / POST_INSTALL_CMD to print a
     // message (MessagePlugin::getSubscribedEvents): no disk effect.
@@ -49,6 +74,10 @@ pub const BENIGN_PLUGINS: &[&str] = &[
     // Only listens to POST_UPDATE_CMD / POST_CREATE_PROJECT_CMD, and only acts
     // in a `require` context (Plugin::getSubscribedEvents): inert at install.
     "drupal/core-recipe-unpack",
+    LICENSE_CHECK_PLUGIN,
+    // A `CommandProvider` (`ibexa setup`) whose activate/deactivate only
+    // write at DEBUG verbosity; no listener (read at v5.0.10).
+    "ibexa/post-install",
     // `Thanks::activate` arms its reminder only when the command is
     // `update`; `POST_PACKAGE_UPDATE` then `POST_UPDATE_CMD` print it after
     // a GitHub GraphQL call. On `install`: two commands added, nothing
@@ -91,6 +120,10 @@ pub const RESOLUTION_INERT: &[&str] = &[
     "bamarni/composer-bin-plugin",
     // An installer for the `wordpress-core` type: install paths only.
     "roots/wordpress-core-installer",
+    // `COMMAND` (a verbose-only line) and `POST_PACKAGE_INSTALL/UPDATE`,
+    // where it only ever throws: the lock is untouched either way.
+    "metasyntactical/composer-plugin-license-check",
+    "ibexa/post-install",
     // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
     // implementation only when one is missing — with a complete lock, a
     // no-op (verified on install with the corpus).
@@ -352,6 +385,22 @@ pub fn analyze(
             crate::yii2_composer::YII2_DEV
         )));
     }
+    // The licence check, configured: a denied licence stops Composer
+    // mid-install, which vivacity does not reproduce.
+    if plugins_enabled
+        && license_check_configured(root_manifest)
+        && matches!(
+            crate::layout::plugin_allowed(root_manifest, LICENSE_CHECK_PLUGIN),
+            crate::layout::PluginVerdict::Allowed
+        )
+        && lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == LICENSE_CHECK_PLUGIN)
+    {
+        report.issues.push(ScopeIssue::UnknownPlugin(format!(
+            "{LICENSE_CHECK_PLUGIN} with an allow-list or deny-list in `extra` (it stops the install on a denied licence); it"
+        )));
+    }
     // bamarni/composer-bin-plugin: `forward-command: true` runs nested
     // installs under vendor-bin/ (not emulated); a wrong setting type is
     // Composer's abort.
@@ -559,6 +608,38 @@ mod tests {
         );
         // Under --no-plugins the shims are not written by Composer either.
         assert!(analyze(&proj(), &lock, &allow, true, false).is_native_ok());
+    }
+
+    #[test]
+    fn license_check_native_unless_configured() {
+        let lock = lock_with(json!([zip_pkg(
+            "metasyntactical/composer-plugin-license-check",
+            "composer-plugin"
+        )]));
+        let manifest = |extra: serde_json::Value| json!({"config": {"allow-plugins": {"metasyntactical/composer-plugin-license-check": true}}, "extra": extra});
+        // No list: `ComposerConfig` filters everything away, nothing checked.
+        for extra in [
+            json!({}),
+            json!({"metasyntactical/composer-plugin-license-check": {}}),
+            json!({"metasyntactical/composer-plugin-license-check": {"allow-list": []}}),
+            json!({"metasyntactical/composer-plugin-license-check": {"allowed-packages": {"a/b": "why"}}}),
+        ] {
+            let r = analyze(&proj(), &lock, &manifest(extra.clone()), true, true);
+            assert!(
+                r.is_native_ok(),
+                "{extra} should stay native: {:?}",
+                r.issues
+            );
+        }
+        for key in ["allow-list", "deny-list"] {
+            let extra = json!({"metasyntactical/composer-plugin-license-check": {key: ["MIT"]}});
+            let r = analyze(&proj(), &lock, &manifest(extra), true, true);
+            assert!(
+                r.issues[0].to_string().contains("allow-list or deny-list"),
+                "{key}: {:?}",
+                r.issues
+            );
+        }
     }
 
     #[test]

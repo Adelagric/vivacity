@@ -180,7 +180,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Twelve plugins are emulated and checked against the
+Thirteen plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
@@ -204,11 +204,14 @@ modified one, deleted when the plugin leaves), and
 Composer), `roots/wordpress-core-installer` (the `wordpress-core`
 package at `extra.wordpress-install-dir`, Bedrock's layout), and
 `mnsami/composer-custom-directory-installer` (a library named in
-`extra.installer-paths` laid out there). A plugin listed
+`extra.installer-paths` laid out there), and
+`composer/package-versions-deprecated` (its own `Versions.php`, rewritten
+from the lock at autoload-dump time — the shipped file is a stub). A plugin listed
 as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `symfony/thanks`,
-`ergebnis/composer-normalize`, …) is installed as plain libraries. `drupal/core-composer-scaffold` is not
+`ergebnis/composer-normalize`, `ibexa/post-install`, …) is installed as
+plain libraries. `drupal/core-composer-scaffold` is not
 emulated (its source is GPL-2.0-or-later, see NOTICE.md): a project that
 uses it goes through the Composer fallback below.
 

@@ -7,6 +7,12 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`ibexa/post-install` installed as a plain library** (read at v5.0.10:
+  a command provider whose only writes are at DEBUG verbosity), and
+  **`metasyntactical/composer-plugin-license-check` too when it is not
+  configured** — with no `allow-list` or `deny-list` in `extra` it checks
+  nothing; with one it stops the install on a denied licence, so that
+  configuration goes to Composer.
 - **`update --with` (temporary constraints)**, and the `update a/b:^1`
   shorthand with it — both were refused outright. A constraint given for
   the run narrows the pool exactly where Composer narrows it (after
@@ -41,6 +47,23 @@ byte-identical-output promise are the public API.
   Sylius 76 → 63 ms (276) — the gain grows with the lock.
 
 ### Fixed
+- **`composer/package-versions-deprecated` was classified as harmless and
+  is not.** When `allow-plugins` allows it, its `POST_AUTOLOAD_DUMP`
+  listener rewrites its own
+  `vendor/composer/package-versions-deprecated/src/PackageVersions/Versions.php`
+  with the root package's name and a `name => version@reference` map of
+  the whole lock — the shipped file is a stub that says as much. vivacity
+  left the stub in place, so a project reading `PackageVersions\Versions`
+  got the fallback instead of its own versions. Now emulated
+  (`vivacity-core::package_versions`, the plugin's template verbatim:
+  lock packages then dev unless `--no-dev`, the root's `replace` targets
+  with `self.version` resolved, the root last; 0664 through a temporary
+  file and a rename), and moved from the benign list to the emulated one.
+  Four corpus entries were affected (bolt-project, concretecms,
+  ibexa-oss-skeleton, mautic and the two mautic/laminas skeletons among
+  those that allow it); `harness/package-versions.sh` covers install,
+  no-op, `--no-dev`, back to dev, `dump-autoload`, `allow-plugins: false`
+  and `--no-plugins`.
 - **A partial update without a lock** now prints Composer's message alone
   and returns 3, instead of an `Error:` prefix and 1 (pre-existing; found
   while adding the `update a/b:^1` shorthand).

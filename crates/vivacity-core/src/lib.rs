@@ -16,6 +16,7 @@ pub mod installers;
 pub mod jsonfile;
 pub mod layout;
 pub mod lock;
+pub mod package_versions;
 pub mod path_install;
 pub mod pathutil;
 pub mod pest_plugin;

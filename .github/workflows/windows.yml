@@ -121,3 +121,5 @@ jobs:
         run: harness/wp-core.sh
       - name: mnsami/composer-custom-directory-installer
         run: harness/custom-dirs.sh
+      - name: composer/package-versions-deprecated
+        run: harness/package-versions.sh

@@ -1183,6 +1183,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 !args.no_plugins,
             )?;
             emulate_bamarni_bin(local, &manifest, with_dev, !args.no_plugins);
+            emulate_package_versions(&project, local, &manifest, with_dev, !args.no_plugins)?;
         }
         // `AutoloadGenerator::dump`: post-autoload-dump once the files are
         // written (the emulated post-autoload-dump plugins included).
@@ -1415,6 +1416,55 @@ fn emulate_bamarni_bin(
     if let Ok(cfg) = bin::config(manifest.get("extra")) {
         bin::print_deprecations(&cfg);
     }
+}
+
+/// `composer/package-versions-deprecated`'s `POST_AUTOLOAD_DUMP`
+/// listener, emulated: with plugins on and the plugin installed and
+/// allowed, its `Versions.php` is rewritten from the lock and the root
+/// package (`vivacity_core::package_versions`).
+fn emulate_package_versions(
+    project: &std::path::Path,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::package_versions as pv;
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, pv::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if !plugins_enabled
+        || !allowed
+        || !local
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == pv::PLUGIN_NAME)
+    {
+        return Ok(());
+    }
+    let root = vivacity_core::state::RootPackage::detect(manifest, project, with_dev);
+    let replaces: Vec<(String, String)> = manifest
+        .get("replace")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|c| (k.to_lowercase(), c.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let versions = pv::versions(
+        local,
+        with_dev,
+        &root.name,
+        &root.pretty_version,
+        root.reference.as_deref().unwrap_or(""),
+        &replaces,
+    );
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
+    pv::write(&vendor, &pv::render(&root.name, &versions))?;
+    Ok(())
 }
 
 /// `  - <operation><appendix>` for every operation of a real install.
@@ -1901,6 +1951,7 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             !args.no_plugins,
         )?;
         emulate_bamarni_bin(&lock, &manifest, dev_mode, !args.no_plugins);
+        emulate_package_versions(&project, &lock, &manifest, dev_mode, !args.no_plugins)?;
     }
     if let Some(r) = &runner {
         let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;

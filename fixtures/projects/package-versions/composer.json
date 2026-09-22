@@ -1,0 +1,23 @@
+{
+    "name": "vivacity/package-versions-fixture",
+    "description": "composer/package-versions-deprecated: Versions.php generated from the lock at autoload-dump time",
+    "type": "project",
+    "license": "MIT",
+    "version": "1.2.3",
+    "require": {
+        "composer/package-versions-deprecated": "1.11.99.5",
+        "psr/log": "3.0.2"
+    },
+    "require-dev": {
+        "psr/container": "2.0.2"
+    },
+    "replace": {
+        "vivacity/replaced-one": "self.version",
+        "vivacity/replaced-two": "1.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true
+        }
+    }
+}

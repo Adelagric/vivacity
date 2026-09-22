@@ -1304,3 +1304,33 @@ alphabétique au lieu de l'ordre du fichier. Vérifié : 6 cas `steps.sh` rouges
 sans le changement, les formes exactes de la CI de Doppar donnent un lock
 identique à l'octet dans les deux modes de stabilité.
 
+## 2026-09-23 — `composer/package-versions-deprecated` n'était pas bénin : il réécrit son propre fichier
+
+Fait : en classant deux plugins de la traîne du corpus (`ibexa/post-install`,
+inerte ; `metasyntactical/…-license-check`, inerte tant qu'il n'est pas
+configuré), l'entrée ibexa est passée de repli à comparaison réelle — et a
+montré un diff sur
+`vendor/composer/package-versions-deprecated/src/PackageVersions/Versions.php`.
+Lecture du plugin (1.11.99.5) : à `POST_AUTOLOAD_DUMP` il régénère ce
+fichier avec le nom du paquet racine et la carte `nom => version@référence`
+de tout le lock ; le fichier livré dans le dist est un stub qui l'annonce
+(« in place only for scenarios where PackageVersions is installed with a
+`--no-scripts` flag »). Il était dans `BENIGN_PLUGINS` depuis la 0.10 en
+violation de notre propre règle (« un plugin qui écrit un fichier est soit
+émulé, soit inconnu »). Pourquoi c'était resté invisible : le plugin n'agit
+que si `allow-plugins` l'autorise, et les seules entrées natives qui
+l'installent (forkcms, suitecrm) ne l'autorisent pas ; les quatre qui
+l'autorisent étaient toutes en repli pour un autre motif. Décision : émuler
+(le gabarit du plugin repris tel quel, la carte dans l'ordre du générateur —
+paquets du lock, puis dev sauf `--no-dev`, puis les `replace` de la racine
+avec `self.version` résolu, puis la racine ; 0664 par fichier temporaire et
+rename, rien si le répertoire du paquet a disparu) plutôt que de le déclasser
+en inconnu : le contenu est déterministe et un projet qui lit
+`PackageVersions\Versions` obtenait sinon le repli du stub. Écarté :
+`drupol/composer-packages` (génère aussi une classe, mais depuis un gabarit
+plus large — sa propre entrée) ; `liborm85/composer-vendor-cleaner` et
+`mlocati/composer-patcher` (suppriment ou patchent). Vérifié : fixture
+`package-versions` + harnais 7 étapes (dont `allow-plugins: false` et
+`--no-plugins`, où le stub doit rester), rouge sans le correctif ; corpus
+ibexa, forkcms et suitecrm natifs 0 diff ; 248 tests, steps 240/240.
+

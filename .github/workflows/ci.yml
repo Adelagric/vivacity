@@ -97,6 +97,8 @@ jobs:
         run: harness/wp-core.sh
       - name: mnsami/composer-custom-directory-installer (libraries at extra.installer-paths)
         run: harness/custom-dirs.sh
+      - name: composer/package-versions-deprecated (Versions.php generated from the lock)
+        run: harness/package-versions.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh
