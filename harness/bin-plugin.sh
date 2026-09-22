@@ -40,7 +40,9 @@ step() { # nom, lignes attendues, args composer..., "--", args vivacity...
   (cd "$ref" && composer "${c[@]}" --no-interaction --no-ansi >/dev/null 2>"$WORK/$name.composer.err") || c_code=$?
   (cd "$viv" && "$VIVACITY" "${v[@]}" >/dev/null 2>"$WORK/$name.vivacity.err") || v_code=$?
   if [ "$c_code" != "$v_code" ]; then echo "FAIL $name : codes $c_code vs $v_code"; tail -3 "$WORK/$name.vivacity.err"; status=1; return; fi
-  if ! diff <(grep -v '^vivacity: ' "$WORK/$name.vivacity.err") "$WORK/$name.composer.err" >"$WORK/$name.err.diff"; then
+  # `  - Downloading …` : Composer l'imprime sur cache froid (CI), vivacity
+  # jamais (feuille de route) ; hors comparaison, comme dans les autres harnais.
+  if ! diff <(grep -v '^vivacity: ' "$WORK/$name.vivacity.err") <(grep -v '^  - Downloading ' "$WORK/$name.composer.err") >"$WORK/$name.err.diff"; then
     echo "FAIL $name : stderr différente"; head -8 "$WORK/$name.err.diff"; status=1; return
   fi
   local n; n=$(grep -c '^\[bamarni-bin\]' "$WORK/$name.vivacity.err" || true)
