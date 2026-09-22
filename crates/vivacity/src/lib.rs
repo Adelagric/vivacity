@@ -596,8 +596,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     };
     if args.virtual_lock.is_none() && !lock_path.is_file() {
         anyhow::bail!(
-            "no composer.lock in {} — vivacity does not resolve dependencies yet, \
-             run `composer update` first",
+            "no composer.lock in {} — `install` needs one; run `vivacity update` \
+             to resolve and write it (Composer's `install` resolves instead, \
+             which vivacity does not do)",
             project.display()
         );
     }

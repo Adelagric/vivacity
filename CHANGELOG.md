@@ -24,6 +24,10 @@ byte-identical-output promise are the public API.
   Sylius 76 → 63 ms (276) — the gain grows with the lock.
 
 ### Fixed
+- **`install` without a lock names the right command.** The refusal still
+  said vivacity "does not resolve dependencies yet", which stopped being
+  true in 0.4: it now points at `vivacity update`, and says that
+  Composer's `install` resolves in that case where vivacity does not.
 - **`Generating optimized autoload files`**, as Composer announces it
   whenever the effective optimize flag is on — `-o`,
   `config.optimize-autoloader`, or `--classmap-authoritative` /
