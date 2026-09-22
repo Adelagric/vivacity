@@ -119,3 +119,5 @@ jobs:
         run: harness/bin-plugin.sh
       - name: roots/wordpress-core-installer
         run: harness/wp-core.sh
+      - name: mnsami/composer-custom-directory-installer
+        run: harness/custom-dirs.sh

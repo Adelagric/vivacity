@@ -122,6 +122,16 @@ byte-identical-output promise are the public API.
   `fixtures/projects/wp-core` and `harness/wp-core.sh` (string, map,
   default, `--no-plugins`, the refusal) in CI.
 
+- **`mnsami/composer-custom-directory-installer` emulated** (2.0.0): a
+  `library` or `composer-plugin` package named in the root's
+  `extra.installer-paths` is laid out at that path (`{$name}` /
+  `{$vendor}`, the package's `installer-name`), the others at their
+  default; it was a layout plugin sent to Composer. Together with
+  composer/installers the installer precedence follows the plugins'
+  activation order — that combination still goes to Composer. New
+  `fixtures/projects/custom-dirs` and `harness/custom-dirs.sh` (install,
+  no-op, map emptied, `--no-plugins`) in CI.
+
 ### Fixed
 - **`symfony/thanks` on `update` with install goes to Composer**: it was
   listed as inert for the resolution commands (0.16 A), but after a

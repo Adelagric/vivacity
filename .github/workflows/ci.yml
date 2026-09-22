@@ -95,6 +95,8 @@ jobs:
         run: harness/bin-plugin.sh
       - name: roots/wordpress-core-installer (wordpress-core placed at wordpress-install-dir)
         run: harness/wp-core.sh
+      - name: mnsami/composer-custom-directory-installer (libraries at extra.installer-paths)
+        run: harness/custom-dirs.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

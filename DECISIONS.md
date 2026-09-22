@@ -1227,3 +1227,21 @@ l'entrée demande aussi composer/installers 1.12, non porté. Vérifié :
 harnais wp-core — chaîne, carte, défaut, `--no-plugins` (sous vendor/ des
 deux côtés), `.` refusé — projet identique.
 
+## 2026-09-22 — mnsami/composer-custom-directory-installer : de « plugin de layout refusé » à placeur (v0.17)
+
+Fait : listé depuis la 0.2 parmi les plugins qui changent le layout,
+toujours refusés. Lu à 2.0.0 (akaunting) : il remplace l'installateur des
+types `library` et `composer-plugin` par un placeur « nom exact →
+chemin » depuis `extra.installer-paths` de la racine (templates `{$name}`
+/ `{$vendor}`, `installer-name` du paquet), défaut sinon — rien d'autre.
+Décision : troisième placeur de `Layout` (après composer/installers et
+wordpress-core), mêmes contrôles de cible, conflits et règle de
+transition ; retiré de `LAYOUT_PLUGINS`. Refusé : la coexistence avec
+composer/installers — les deux font `array_unshift` de leur installateur,
+l'ordre de préséance suit l'ordre d'activation des plugins (l'ordre
+d'installed.json chez Composer), un détail que rien ne fixe. Constaté en
+harnais : quand la carte est vidée, Composer réinstalle sous vendor/ et
+laisse l'ancien répertoire en place (le paquet n'est plus « installé » à
+son ancien chemin) — vivacity fait pareil, le harnais le vérifie plutôt
+que l'inverse que j'avais d'abord écrit.
+

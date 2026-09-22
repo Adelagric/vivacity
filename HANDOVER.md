@@ -22,6 +22,7 @@ harness/tar-dist.sh                      # dists `tar` (asset-packagist) : insta
 harness/yii2-composer.sh                 # yiisoft/yii2-composer + codeception/c3 : extensions.php et c3.php (install, no-op, --no-dev, retour dev, dump -o, vendor vierge --no-dev, --no-plugins) — projet identique, carte comparée clés triées
 harness/bin-plugin.sh                    # bamarni/composer-bin-plugin : lignes de dépréciation aux mêmes points (install, no-op, dump, --no-dev ; stderr complète identique), forward-command → repli
 harness/wp-core.sh                       # roots/wordpress-core-installer : wordpress-core à wordpress-install-dir (chaîne, carte, défaut), --no-plugins, `.` refusé — projet identique
+harness/custom-dirs.sh                   # mnsami/composer-custom-directory-installer : bibliothèques nommées dans installer-paths (install, no-op, carte vidée, --no-plugins) — projet identique
 harness/vendor-dir.sh [variante...]      # config.vendor-dir / bin-dir : 6 variantes (symfony ×5, wordpress ×1) — install, dump -o, no-op ; projet entier comparé, lignes « Skipped installation of bin » comparées
 harness/path-repos.sh                    # dépôts `path` (10 étapes) : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)
 tools/snapshot-packagist.sh <fixture>    # (re)capture un instantané Packagist + lock de référence

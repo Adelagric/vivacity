@@ -28,6 +28,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "codeception/c3",
     "bamarni/composer-bin-plugin",
     "roots/wordpress-core-installer",
+    "mnsami/composer-custom-directory-installer",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose
@@ -63,7 +64,6 @@ pub const BENIGN_PLUGINS: &[&str] = &[
 pub const LAYOUT_PLUGINS: &[&str] = &[
     "cweagans/composer-patches",
     "oomphinc/composer-installers-extender",
-    "mnsami/composer-custom-directory-installer",
 ];
 
 /// The resolution commands (`update`, `require`, `remove`): Composer loads

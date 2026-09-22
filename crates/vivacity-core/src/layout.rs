@@ -162,6 +162,9 @@ fn vendor_rel(vendor: &str, name: &str, target_dir: Option<&str>) -> String {
 struct Placers<'a> {
     table: Option<&'a installers::Table>,
     wp_core: bool,
+    /// mnsami/composer-custom-directory-installer places `library` and
+    /// `composer-plugin` packages named in `extra.installer-paths`.
+    custom_dirs: bool,
 }
 
 /// Decision for a package (name, type, extra) under the current configuration.
@@ -174,6 +177,11 @@ fn place(
     package_extra: Option<&Value>,
     target_dir: Option<&str>,
 ) -> Result<String, String> {
+    if placers.custom_dirs && matches!(package_type, "library" | "composer-plugin") {
+        if let Some(p) = custom_dir(root_extra, name, package_extra) {
+            return custom_target(vendor, name, &p, "custom-directory-installer");
+        }
+    }
     // roots/wordpress-core-installer's `getInstallPath` for its type.
     if placers.wp_core && package_type == WP_CORE_TYPE {
         return match wp_core_dir(root_extra, name, package_extra, vendor) {
@@ -226,6 +234,43 @@ fn custom_target(vendor: &str, name: &str, p: &str, who: &str) -> Result<String,
 /// (a string, or a map by pretty name; PHP `empty()` rules), else the
 /// package's own, else `wordpress`; `.` and the vendor directory refused
 /// with the plugin's exception.
+pub const CUSTOM_DIRS_PLUGIN: &str = "mnsami/composer-custom-directory-installer";
+
+/// mnsami/composer-custom-directory-installer (docs/reference/plugins/
+/// composer-custom-directory-installer/, read at 2.0.0):
+/// `PackageUtils::getPackageInstallPath` — the first `extra.installer-paths`
+/// entry of the root whose list names the package (exact pretty name),
+/// with `{$name}` / `{$vendor}` filled in (`extra.installer-name` of the
+/// package overrides the name); `None` (the default path) otherwise.
+fn custom_dir(
+    root_extra: Option<&Value>,
+    pretty_name: &str,
+    package_extra: Option<&Value>,
+) -> Option<String> {
+    let paths = root_extra
+        .and_then(|e| e.get("installer-paths"))
+        .and_then(Value::as_object)
+        .filter(|m| !m.is_empty())?;
+    let path = paths.iter().find_map(|(path, names)| {
+        names
+            .as_array()
+            .is_some_and(|l| l.iter().any(|n| n.as_str() == Some(pretty_name)))
+            .then(|| path.clone())
+    })?;
+    let (vendor, mut name) = match pretty_name.split_once('/') {
+        Some((v, n)) => (v.to_owned(), n.to_owned()),
+        None => (String::new(), pretty_name.to_owned()),
+    };
+    if let Some(n) = package_extra
+        .and_then(|e| e.get("installer-name"))
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty() && *n != "0")
+    {
+        name = n.to_owned();
+    }
+    Some(path.replace("{$name}", &name).replace("{$vendor}", &vendor))
+}
+
 pub const WP_CORE_PLUGIN: &str = "roots/wordpress-core-installer";
 pub const WP_CORE_TYPE: &str = "wordpress-core";
 
@@ -434,6 +479,58 @@ impl Layout {
             }
         }
 
+        // mnsami/composer-custom-directory-installer: same views rule;
+        // with composer/installers also active the installer order
+        // follows the plugins' activation order — not reproduced.
+        let cd_lock = wanted.iter().any(|p| p.name() == CUSTOM_DIRS_PLUGIN);
+        let cd_prev = previous
+            .iter()
+            .any(|p| p["name"].as_str() == Some(CUSTOM_DIRS_PLUGIN));
+        let mut custom_dirs = false;
+        if plugins_enabled && (cd_lock || cd_prev) {
+            let allow = merged_allow_plugins(
+                manifest.get("config").and_then(|c| c.get("allow-plugins")),
+                global_allow_plugins().as_ref(),
+            );
+            match plugin_verdict(allow.as_ref(), CUSTOM_DIRS_PLUGIN) {
+                PluginVerdict::Allowed => {
+                    if table.is_some() {
+                        return Err(vec![format!(
+                            "{CUSTOM_DIRS_PLUGIN} together with composer/installers: the installer precedence follows the plugins' activation order (not emulated)"
+                        )]);
+                    }
+                    let root_extra = manifest.get("extra");
+                    let mapped = |name: &str, ty: &str, extra: Option<&Value>| {
+                        matches!(ty, "library" | "composer-plugin")
+                            && custom_dir(root_extra, name, extra).is_some()
+                    };
+                    let any_mapped = wanted
+                        .iter()
+                        .any(|p| mapped(p.name(), p.package_type(), p.raw.get("extra")))
+                        || previous.iter().any(|p| {
+                            mapped(
+                                p["name"].as_str().unwrap_or(""),
+                                p["type"].as_str().unwrap_or("library"),
+                                p.get("extra"),
+                            )
+                        });
+                    if has_state && cd_lock != cd_prev && any_mapped {
+                        return Err(vec![format!(
+                            "{CUSTOM_DIRS_PLUGIN} is being {} an existing install (installed.json and composer.lock disagree): let Composer handle this transition",
+                            if cd_lock { "added to" } else { "removed from" }
+                        )]);
+                    }
+                    custom_dirs = cd_lock;
+                }
+                PluginVerdict::Blocked => {}
+                PluginVerdict::Unlisted => {
+                    return Err(vec![format!(
+                        "{CUSTOM_DIRS_PLUGIN} is a plugin not covered by config.allow-plugins (Composer would refuse to run it)"
+                    )]);
+                }
+            }
+        }
+
         let root_extra = manifest.get("extra");
         let flex_packs = lock.flex_packs(manifest, with_dev, plugins_enabled);
         let mut paths: BTreeMap<String, String> = BTreeMap::new();
@@ -443,7 +540,11 @@ impl Layout {
             }
             match place(
                 &vendor,
-                Placers { table, wp_core },
+                Placers {
+                    table,
+                    wp_core,
+                    custom_dirs,
+                },
                 root_extra,
                 p.name(),
                 p.package_type(),
@@ -458,7 +559,7 @@ impl Layout {
         }
 
         // Conflicting targets: two packages at the same place, or one under the other.
-        if table.is_some() || wp_core {
+        if table.is_some() || wp_core || custom_dirs {
             let mut by_path: BTreeMap<&str, &str> = BTreeMap::new();
             for (name, rel) in &paths {
                 if let Some(other) = by_path.insert(rel.as_str(), name.as_str()) {
@@ -514,7 +615,11 @@ impl Layout {
             };
             let expected = place(
                 &vendor,
-                Placers { table, wp_core },
+                Placers {
+                    table,
+                    wp_core,
+                    custom_dirs,
+                },
                 root_extra,
                 name,
                 prev.get("type")
@@ -812,6 +917,31 @@ mod tests {
 
         let missing = json!({});
         assert!(Layout::resolve(&root(), &lock, &missing, true, true).is_err());
+    }
+
+    #[test]
+    fn custom_dir_like_package_utils() {
+        use serde_json::json;
+        let root = json!({"installer-paths": {"modules/Log": ["psr/log"], "lib/{$vendor}-{$name}": ["psr/container", "acme/x"]}});
+        assert_eq!(
+            custom_dir(Some(&root), "psr/log", None).unwrap(),
+            "modules/Log"
+        );
+        assert_eq!(
+            custom_dir(Some(&root), "psr/container", None).unwrap(),
+            "lib/psr-container"
+        );
+        assert_eq!(
+            custom_dir(
+                Some(&root),
+                "acme/x",
+                Some(&json!({"installer-name": "renamed"}))
+            )
+            .unwrap(),
+            "lib/acme-renamed"
+        );
+        assert!(custom_dir(Some(&root), "psr/other", None).is_none());
+        assert!(custom_dir(None, "psr/log", None).is_none());
     }
 
     #[test]

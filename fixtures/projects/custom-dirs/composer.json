@@ -1,0 +1,24 @@
+{
+    "name": "vivacity/custom-dirs-fixture",
+    "description": "mnsami/composer-custom-directory-installer: library packages named in extra.installer-paths laid out there ({$vendor}/{$name} templates)",
+    "type": "project",
+    "license": "MIT",
+    "version": "1.0.0",
+    "require": {
+        "mnsami/composer-custom-directory-installer": "2.0.0",
+        "psr/log": "3.0.2",
+        "psr/container": "2.0.2",
+        "monolog/monolog": "3.9.0"
+    },
+    "extra": {
+        "installer-paths": {
+            "modules/Log": ["psr/log"],
+            "lib/{$vendor}-{$name}": ["psr/container"]
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "mnsami/composer-custom-directory-installer": true
+        }
+    }
+}
