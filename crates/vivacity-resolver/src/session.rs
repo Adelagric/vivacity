@@ -30,6 +30,10 @@ use std::sync::OnceLock;
 pub struct SessionError {
     pub message: String,
     pub kind: SessionErrorKind,
+    /// A line Composer writes on STDOUT next to the error (`$io->write`
+    /// after `$io->writeError`), as `UpdateCommand` does for a temporary
+    /// constraint that misses the root's.
+    pub stdout: Option<String>,
 }
 
 /// What Composer does with the error: an unsolvable set
@@ -39,6 +43,11 @@ pub struct SessionError {
 pub enum SessionErrorKind {
     Other,
     Unsolvable,
+    /// The command prints the message itself and returns a code, with no
+    /// `Error:` prefix and nothing written: `UpdateCommand`'s temporary
+    /// constraint refusal (1), `Installer::run`'s partial update without a
+    /// lock (3).
+    Printed(i32),
 }
 
 impl SessionError {
@@ -46,6 +55,7 @@ impl SessionError {
         Self {
             message: message.into(),
             kind: SessionErrorKind::Other,
+            stdout: None,
         }
     }
 }
@@ -260,6 +270,10 @@ pub struct UpdateOptions {
     /// `PRE_UPDATE_CMD` merges left it (the merged manifest, the
     /// included files' own requirements for the stability flags).
     pub merged: Option<crate::merge_plugin::Merged>,
+    /// `update --with a/b:^1` (and the `update a/b:^1` shorthand), as
+    /// written: name → constraint text, in command order. Parsed and
+    /// checked against the root requirements by `prepare_update`.
+    pub temporary_requirements: Vec<(String, String)>,
 }
 
 impl UpdateOptions {
@@ -278,6 +292,86 @@ impl UpdateOptions {
             ..Default::default()
         }
     }
+}
+
+/// `UpdateCommand::execute`'s temporary-constraint block: the root's
+/// references and stability flags take the requirements in, a name with
+/// `*` expands over the root requirements, and every constraint must
+/// intersect the one in composer.json — otherwise the command fails with
+/// its own message (exit 1), before anything is written.
+fn temporary_constraints(
+    reqs: &[(String, String)],
+    root: &mut RootPackage,
+) -> Result<BTreeMap<String, crate::pool::TemporaryConstraint>, SessionError> {
+    if reqs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let pairs: Vec<(String, String)> = reqs.to_vec();
+    crate::root::extract_references(&pairs, &mut root.references);
+    let minimum = root.minimum_stability.clone();
+    crate::root::extract_stability_flags(&pairs, &minimum, &mut root.stability_flags);
+    // `$rootRequirements = array_merge(getRequires(), getDevRequires())`:
+    // composer.json's order, which is the order a wildcard reports its
+    // first mismatch in.
+    let root_requires: Vec<(String, String, Constraint)> = root
+        .all_requires()
+        .iter()
+        .map(|l| {
+            (
+                l.target.clone(),
+                l.pretty_constraint.clone(),
+                l.constraint.clone(),
+            )
+        })
+        .collect();
+    let fail = |message: String, stdout: Option<String>| SessionError {
+        message,
+        kind: SessionErrorKind::Printed(1),
+        stdout,
+    };
+    let mut out: BTreeMap<String, crate::pool::TemporaryConstraint> = BTreeMap::new();
+    for (name, text) in &pairs {
+        let name = name.to_lowercase();
+        let parsed = crate::pool::TemporaryConstraint {
+            pretty: text.clone(),
+            constraint: crate::constraint::parse_constraints(text)
+                .map_err(|e| SessionError::new(format!("{name}: {e}")))?
+                .constraint,
+        };
+        if name.contains('*') {
+            let re = crate::pool::package_name_regexp(&name);
+            for (target, pretty, constraint) in &root_requires {
+                if !re.is_match(target.as_bytes()).unwrap_or(false) {
+                    continue;
+                }
+                out.insert(target.clone(), parsed.clone());
+                if !crate::intervals::have_intersections(&parsed.constraint, constraint) {
+                    return Err(fail(
+                        format!(
+                            "The temporary constraint \"{text}\" for \"{name}\" matching \"{target}\" must be a subset of the constraint in your composer.json ({pretty})"
+                        ),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            out.insert(name.clone(), parsed.clone());
+            if let Some((_, pretty, constraint)) = root_requires.iter().find(|(t, _, _)| *t == name)
+            {
+                if !crate::intervals::have_intersections(&parsed.constraint, constraint) {
+                    return Err(fail(
+                        format!(
+                            "The temporary constraint \"{text}\" for \"{name}\" must be a subset of the constraint in your composer.json ({pretty})"
+                        ),
+                        Some(format!(
+                            "Run `composer require {name}` or `composer require {name}:{text}` instead to replace the constraint"
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Everything `Installer::doUpdate` has at hand right before `createPool`.
@@ -415,6 +509,11 @@ impl UpdateSession {
             root.apply_patch(patch)
                 .map_err(|e| SessionError::new(e.0))?;
         }
+        // `UpdateCommand`: the temporary requirements feed the root's
+        // references and stability flags before anything else reads them,
+        // then become the pool's temporary constraints.
+        let temporary_constraints =
+            temporary_constraints(&options.temporary_requirements, &mut root)?;
         let probed = probe().map_err(|e| SessionError::new(e.0))?;
         // `PHP_MAJOR_VERSION.PHP_MINOR_VERSION.PHP_RELEASE_VERSION` of the
         // actual PHP (no `config.platform.php` here): the first three
@@ -524,7 +623,7 @@ impl UpdateSession {
             &root.aliases,
             root.references.clone(),
             root_requires,
-            Default::default(),
+            temporary_constraints,
         );
         set.add_repository(Repository::Root(root_members));
         set.add_repository(Repository::Platform(platform.clone()));
@@ -543,11 +642,14 @@ impl UpdateSession {
             set.add_repository(Repository::Locked(ids.clone()));
         }
 
-        // `Installer::run`: a partial update requires a lock.
+        // `Installer::run`: a partial update requires a lock — the message
+        // alone on stderr, exit 3.
         if partial_update && locked.is_none() {
-            return Err(SessionError::new(
-                "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.",
-            ));
+            return Err(SessionError {
+                message: "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.".to_owned(),
+                kind: SessionErrorKind::Printed(3),
+                stdout: None,
+            });
         }
         let mut request = Request::new(locked.clone());
         if partial_update {
@@ -752,6 +854,7 @@ impl UpdateSession {
                 return Err(SessionError {
                     message: format!("Unable to find a compatible set of packages based on your non-dev requirements alone.\nYour requirements can be resolved successfully when require-dev packages are present.\nYou may need to move packages from require-dev or some of their dependencies to require.\n{pretty}"),
                     kind: SessionErrorKind::Unsolvable,
+                    stdout: None,
                 });
             }
             Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),
@@ -865,6 +968,7 @@ impl UpdateSession {
                 return Err(SessionError {
                     message,
                     kind: SessionErrorKind::Unsolvable,
+                    stdout: None,
                 });
             }
             Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),

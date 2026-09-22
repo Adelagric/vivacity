@@ -16,7 +16,8 @@ composer dump-autoload →  vivacity dump-autoload
 ```
 
 Flags: `--no-dev`, `-o`, `-a`, `--no-autoloader`, `--no-install`,
-`--prefer-stable`, `--prefer-lowest`, `--ignore-platform-reqs`,
+`--prefer-stable`, `--prefer-lowest`, `--with` (and the
+`update vendor/name:^1` shorthand), `--ignore-platform-reqs`,
 `--ignore-platform-req`, `--working-dir`. `config.optimize-autoloader`,
 `config.classmap-authoritative`, `config.platform`, `config.allow-plugins`
 and `config.lock` are read from `composer.json` the way Composer reads them.

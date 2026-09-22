@@ -223,7 +223,7 @@ pub struct RepositorySet {
     pub acceptable_stabilities: BTreeMap<String, i32>,
     pub stability_flags: BTreeMap<String, i32>,
     pub root_requires: OrderedMap<Constraint>,
-    pub temporary_constraints: BTreeMap<String, Constraint>,
+    pub temporary_constraints: BTreeMap<String, TemporaryConstraint>,
     pub repositories: Vec<Repository>,
 }
 
@@ -234,7 +234,7 @@ impl RepositorySet {
         root_aliases: &[RootAlias],
         root_references: BTreeMap<String, String>,
         root_requires: OrderedMap<Constraint>,
-        temporary_constraints: BTreeMap<String, Constraint>,
+        temporary_constraints: BTreeMap<String, TemporaryConstraint>,
     ) -> RepositorySet {
         let mut aliases: BTreeMap<String, BTreeMap<String, (String, String)>> = BTreeMap::new();
         for a in root_aliases {
@@ -296,6 +296,21 @@ pub struct PrePoolFilter {
     /// `getRequires() + getDevRequires()` of the root package.
     pub root_constraints: BTreeMap<String, Constraint>,
     pub versions: crate::flex_filter::FlexVersions,
+}
+
+/// A `--with` constraint, with the text it was written as: an explanation
+/// of an unsolvable set quotes that text (`getPrettyString`), not the
+/// compiled interval.
+#[derive(Debug, Clone)]
+pub struct TemporaryConstraint {
+    pub pretty: String,
+    pub constraint: Constraint,
+}
+
+impl std::fmt::Display for TemporaryConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.pretty)
+    }
 }
 
 /// `Composer\DependencyResolver\Pool`: 1-based ids in construction order.
@@ -763,7 +778,7 @@ impl<'a> PoolBuilder<'a> {
                     }
                     let found = package_and_aliases
                         .iter()
-                        .any(|(_, p)| constraint.matches_version(&arena[*p].version));
+                        .any(|(_, p)| constraint.constraint.matches_version(&arena[*p].version));
                     if !found {
                         for (pool_index, _) in package_and_aliases {
                             self.packages[pool_index] = None;

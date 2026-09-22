@@ -1445,7 +1445,8 @@ fn missing_package_reason(
         for name in first_names {
             if let Some(temp) = ctx.set.temporary_constraints.get(&name) {
                 if !packages.iter().any(|&idx| {
-                    temp.matches(&Constraint::new(Op::Eq, ctx.arena[idx].version.clone()))
+                    temp.constraint
+                        .matches(&Constraint::new(Op::Eq, ctx.arena[idx].version.clone()))
                 }) {
                     return (
                         format!("- Root composer.json requires {name}{ctt}, "),

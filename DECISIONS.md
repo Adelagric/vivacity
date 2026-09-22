@@ -1274,3 +1274,33 @@ Vérifié : 243 tests (dont 2 sur le garde-fou : chaque différence que la
 transaction verrait doit faire décliner), 14 harnais + steps 232/232 +
 update 19/19 — tous exercent des no-op.
 
+## 2026-09-22 — `update --with` : le résolveur l'avait déjà, la CLI le refusait (v0.18)
+
+Fait : en regardant si vivacity pouvait entrer dans la CI de Doppar, les six
+jobs de `doppar/framework` installent tous par
+`composer update --prefer-lowest|--prefer-stable --with="phpunit/phpunit:~13.3.x"`.
+C'est la forme de toute CI à matrice (Laravel, Symfony, Sylius font pareil) :
+épingler une dépendance pour le run sans toucher composer.json. vivacity la
+refusait d'emblée — donc aucune CI de ce format ne pouvait l'utiliser, quelle
+que soit la parité par ailleurs. Constat en ouvrant le code : le résolveur
+portait déjà tout depuis la v0.4 (`RepositorySet.temporary_constraints`, le
+filtre du pool après chargement et avant `PRE_POOL_CREATE`, et jusqu'à la
+phrase d'explication d'insoluble) ; seuls la CLI et le câblage manquaient.
+Décision : porter le bloc de `UpdateCommand` tel quel — `formatRequirements`
+sur `--with` et sur les arguments portant une contrainte (le nom seul va dans
+la liste d'autorisation), `extractReferences` / `extractStabilityFlags` sur la
+racine, expansion des jokers sur les exigences racine **dans l'ordre de
+composer.json**, refus si l'intersection avec composer.json est vide. Un refus
+de commande n'est pas une exception : `SessionErrorKind::Printed(code)` imprime
+le message seul et rend le code de Composer (1 ici), avec `SessionError.stdout`
+pour la ligne que Composer écrit sur stdout à côté. Écarté : `--patch-only` et
+`-i`, qui alimentent la même carte mais ne sont pas des formes de CI.
+Trois bugs de parité trouvés par le harnais, tous corrigés : l'explication
+imprimait l'intervalle compilé au lieu du texte écrit (`psr/log:1.1.*`) — d'où
+`pool::TemporaryConstraint` qui porte les deux ; un update partiel sans lock
+sortait en 1 avec un préfixe `Error:` au lieu du message nu et du code 3 de
+Composer (préexistant) ; le joker signalait la première exigence par ordre
+alphabétique au lieu de l'ordre du fichier. Vérifié : 6 cas `steps.sh` rouges
+sans le changement, les formes exactes de la CI de Doppar donnent un lock
+identique à l'octet dans les deux modes de stabilité.
+

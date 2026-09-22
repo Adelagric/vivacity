@@ -7,6 +7,18 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`update --with` (temporary constraints)**, and the `update a/b:^1`
+  shorthand with it — both were refused outright. A constraint given for
+  the run narrows the pool exactly where Composer narrows it (after
+  loading, before `PRE_POOL_CREATE`), feeds the root's references and
+  stability flags, and expands over the root requirements when the name
+  carries a `*`; a constraint disjoint from composer.json is refused by
+  the command itself, with Composer's message on stderr, its hint on
+  stdout and exit 1. This is the form every matrix CI uses
+  (`composer update --prefer-lowest --with="phpunit/phpunit:~13.3"`), so
+  vivacity could not run in one at all. Checked on the Doppar
+  framework's own CI forms: same lock as Composer, byte for byte, in
+  `--prefer-lowest` and `--prefer-stable`.
 - **The Doppar framework skeleton joins the corpus** (`doppar/doppar` 4.0.1,
   74 packages, native and 0 diff in both modes): a fourth framework family
   after Laravel, Symfony and Yii, checked byte for byte at every release.
@@ -29,6 +41,9 @@ byte-identical-output promise are the public API.
   Sylius 76 → 63 ms (276) — the gain grows with the lock.
 
 ### Fixed
+- **A partial update without a lock** now prints Composer's message alone
+  and returns 3, instead of an `Error:` prefix and 1 (pre-existing; found
+  while adding the `update a/b:^1` shorthand).
 - **`install` without a lock names the right command.** The refusal still
   said vivacity "does not resolve dependencies yet", which stopped being
   true in 0.4: it now points at `vivacity update`, and says that

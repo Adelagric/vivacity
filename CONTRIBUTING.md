@@ -72,8 +72,10 @@ the roadmap below.
   harness, never assumed. Ports of GPL-licensed plugins are not accepted
   (NOTICE.md).
 - **Auth** — `gitlab-token`/`gitlab-oauth`; custom CAs (`SSL_CERT_FILE`) with rustls.
-- **Remaining `update` options** — `--with`, `--minimal-changes`,
-  `bump-after-update`, the audit, `--verbose` explanations.
+- **Remaining `update` options** — `--minimal-changes`,
+  `bump-after-update`, `--patch-only`, `-i`, the audit, `--verbose`
+  explanations. (`--with` and the `a/b:^1` shorthand are done, plan
+  v0.18.)
 
 ## Ground rules that keep the project honest
 

@@ -74,6 +74,14 @@ STEPS=(
   "laravel|remove laravel/tinker"
   "laravel|remove laravel/tinker @nolock"
   "laravel|remove laravel/tinker @badlock"
+  # Contraintes temporaires sur une résolution qui aboutit : la version
+  # retenue change, le lock doit être celui de Composer.
+  "laravel|update --with=psr/log:1.1.* @nolock"
+  "laravel|update psr/log:1.1.* @nolock @nostderr"
+  "laravel|update --with=psr/lo*:1.1.* @nolock"
+  "laravel|update --with=laravel/tinker:3.0.0 @nolock"
+  "laravel|update --with=laravel/tin*:3.0.0 @nolock"
+  "laravel|update laravel/tinker:3.0.0"
   "laravel|remove laravel/tinker @installed:laravel/tinker"
   "laravel|remove laravel/tinker @installed-nodir:laravel/tinker"
   "laravel|remove --unused @drop:laravel/tinker"
@@ -166,6 +174,12 @@ STEPS=(
   "solver-policies|install @lockfile:composer.lock.malware @jq:.config.policy.malware[\"block-scope\"]=\"update\""
   "solver-policies|install @lockfile:composer.lock.malware @jq:.config.policy.malware.ignore={\"acme/bad\":{\"constraint\":\"1.1.0\"}}"
   "solver-policies|install"
+  # `UpdateCommand` : contraintes temporaires (`--with`, raccourci
+  # `a/b:^1`, joker) — le pool perd les versions hors contrainte ; une
+  # contrainte disjointe de composer.json est refusée par la commande
+  # elle-même (message sur stderr, conseil sur stdout, code 1).
+  "solver-policies|update --with=acme/*:^2.0 @nolock"
+  "solver-policies|update --with=acme/lib:^9.0 @nolock"
   "solver-policies|install @lockfile:composer.lock.malware @jq:.repositories={\"dead\":{\"type\":\"composer\",\"url\":\"https://127.0.0.1:1\"}} @nostderr"
   "solver-policies|install @lockfile:composer.lock.malware @jq:.config.policy.malware.ignore={\"acme/bad\":[]}"
   "solver-policies|install @lockfile:composer.lock.malware @jq:.config.policy.malware[\"block-scope\"]=\"install\""
@@ -427,7 +441,7 @@ for fx in "${FIXTURES[@]}"; do
     if [ "$compare_stderr" = 1 ]; then
       # De la ligne d'ancrage à la fin ; les lignes de progression avant
       # (« Loading composer repositories… ») ne sont pas comparées.
-      anchor='^(Your requirements could not be resolved|Unable to find a compatible set|Your lock file does not contain|Lock file operations|Nothing to modify in lock file|Installing dependencies from lock file)'
+      anchor='^(Your requirements could not be resolved|Unable to find a compatible set|Your lock file does not contain|Lock file operations|Nothing to modify in lock file|Installing dependencies from lock file|The temporary constraint )'
       for side in composer vivacity; do
         sed -E -n "/$anchor/,\$p" "$WORK/$fx-$n.$side.err" > "$WORK/$fx-$n.$side.tail"
       done
@@ -437,7 +451,7 @@ for fx in "${FIXTURES[@]}"; do
       mv "$WORK/$fx-$n.vivacity.tail2" "$WORK/$fx-$n.vivacity.tail"
       if ! [ -s "$WORK/$fx-$n.composer.tail" ]; then
         echo "FAIL $label : pas de ligne d'ancrage dans la sortie de Composer (cas mal choisi)"; ok=0
-      elif ! grep -q '^ *- \|^Nothing to modify\|^Nothing to install' "$WORK/$fx-$n.composer.tail"; then
+      elif ! grep -q '^ *- \|^Nothing to modify\|^Nothing to install\|^The temporary constraint ' "$WORK/$fx-$n.composer.tail"; then
         echo "FAIL $label : oracle aveugle — Composer n'a écrit aucune raison ni opération (\`  - …\`)"; ok=0
       elif ! diff -q "$WORK/$fx-$n.composer.tail" "$WORK/$fx-$n.vivacity.tail" >/dev/null 2>&1; then
         echo "FAIL $label : les explications diffèrent"

@@ -221,6 +221,9 @@ struct UpdateArgs {
     /// Packages to update (the others stay locked); `vendor/*` patterns accepted.
     #[arg(value_name = "PACKAGES")]
     packages: Vec<String>,
+    /// Temporary version constraint for this run, e.g. `foo/bar:1.0.0`.
+    #[arg(long = "with", value_name = "REQ")]
+    with: Vec<String>,
     /// Also update their dependencies, except those required by the root (`-w`).
     #[arg(short = 'w', long)]
     with_dependencies: bool,
@@ -2091,6 +2094,53 @@ fn http_transport(
     Ok((http, Some(http_many), Some(http_post)))
 }
 
+/// `{\S+[ =:]\S+}`: a `packages` entry that carries a constraint. The
+/// name alone is what the allow list takes (`{^([^ =:]+)[ =:].*$}`).
+fn package_of_requirement(entry: &str) -> &str {
+    match entry.find([' ', '=', ':']) {
+        Some(i)
+            if entry[i + 1..]
+                .trim_start_matches([' ', '=', ':'])
+                .is_empty() =>
+        {
+            entry
+        }
+        Some(i) => &entry[..i],
+        None => entry,
+    }
+}
+
+/// `UpdateCommand`: `formatRequirements(--with)` plus the `packages`
+/// entries that carry a constraint — `a/b:^1`, `a/b=^1`, `a/b ^1`
+/// (`VersionParser::parseNameVersionPairs`). A pair without a version is
+/// the command's own error.
+fn temporary_requirements(
+    with: &[String],
+    packages: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let carrying: Vec<String> = packages
+        .iter()
+        .filter(|p| package_of_requirement(p) != p.as_str())
+        .cloned()
+        .collect();
+    for source in [with, &carrying] {
+        for (name, version) in vivacity_resolver::version::parse_name_version_pairs(source) {
+            let Some(version) = version else {
+                anyhow::bail!(
+                    "Option {name} is missing a version constraint, use e.g. {name}:^1.0"
+                );
+            };
+            // `$requires[$name] = $version`: the last one wins.
+            match out.iter_mut().find(|(n, _)| *n == name) {
+                Some(slot) => slot.1 = version,
+                None => out.push((name, version)),
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
@@ -2100,9 +2150,6 @@ fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 "`vivacity update {p}` (lock file metadata refresh) is not supported yet"
             );
         }
-        if p.contains([' ', '=', ':']) {
-            anyhow::bail!("temporary constraints (`update {p}`, `--with`) are not supported yet");
-        }
     }
     let transitive = if args.with_all_dependencies || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES") {
         vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDeps
@@ -2111,12 +2158,22 @@ fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     } else {
         vivacity_resolver::pool::UpdateMode::OnlyListed
     };
-    let mut options = if args.packages.is_empty() {
+    // `UpdateCommand`: `--with a/b:^1` and the `update a/b:^1` shorthand
+    // are temporary constraints; the shorthand's package keeps its name in
+    // the allow list.
+    let reqs = temporary_requirements(&args.with, &args.packages)?;
+    let allow_list: Vec<String> = args
+        .packages
+        .iter()
+        .map(|p| package_of_requirement(p).to_owned())
+        .collect();
+    let mut options = if allow_list.is_empty() {
         vivacity_resolver::session::UpdateOptions::default()
     } else {
-        vivacity_resolver::session::UpdateOptions::partial(&args.packages, transitive)
+        vivacity_resolver::session::UpdateOptions::partial(&allow_list, transitive)
     };
     options.no_blocking = args.no_blocking || args.no_security_blocking;
+    options.temporary_requirements = reqs;
     // BaseCommand: COMPOSER_PREFER_STABLE / COMPOSER_PREFER_LOWEST count as
     // the options.
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
@@ -2581,15 +2638,40 @@ fn resolve_and_lock(
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
     let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
-    let mut session = UpdateSession::prepare_update(
+    let mut session = match UpdateSession::prepare_update(
         &project,
         home.as_deref(),
         true,
         Some(http),
         Some(&cache_repo_dir),
         &options,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    ) {
+        Ok(s) => s,
+        // The command prints and returns the code itself: the message
+        // alone on stderr, nothing written.
+        Err(e)
+            if matches!(
+                e.kind,
+                vivacity_resolver::session::SessionErrorKind::Printed(_)
+            ) =>
+        {
+            eprintln!("{}", e.message);
+            if let Some(line) = &e.stdout {
+                println!("{line}");
+            }
+            let vivacity_resolver::session::SessionErrorKind::Printed(code) = e.kind else {
+                unreachable!()
+            };
+            return Ok(Resolved {
+                status: code,
+                lock: None,
+                post: Vec::new(),
+                manifest: serde_json::Value::Null,
+                flex_active: false,
+            });
+        }
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
+    };
     trace("prepare", t0);
     // symfony/flex active (installed, allowed, `extra.symfony.require` or
     // `SYMFONY_REQUIRE` set): its `PRE_POOL_CREATE` filter runs on the
@@ -3165,6 +3247,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        with: Vec::new(),
         packages: Vec::new(),
         with_dependencies: false,
         with_all_dependencies: false,
@@ -3463,6 +3546,54 @@ fn unused_locked_packages(manifest: &serde_json::Value, lock: &serde_json::Value
                 .to_lowercase()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod temporary_requirement_tests {
+    use super::{package_of_requirement, temporary_requirements};
+
+    fn v(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn parses_the_three_forms_and_the_shorthand() {
+        // `--with` takes `a/b:^1`, `a/b=^1` and `a/b ^1`.
+        let reqs =
+            temporary_requirements(&v(&["a/b:^1", "c/d=^2", "e/f ^3"]), &[]).expect("parsed");
+        assert_eq!(
+            reqs,
+            vec![
+                ("a/b".to_owned(), "^1".to_owned()),
+                ("c/d".to_owned(), "^2".to_owned()),
+                ("e/f".to_owned(), "^3".to_owned())
+            ]
+        );
+        // A `packages` entry carrying a constraint joins them; a bare name
+        // does not.
+        let reqs = temporary_requirements(&[], &v(&["a/b:^1", "c/d"])).expect("parsed");
+        assert_eq!(reqs, vec![("a/b".to_owned(), "^1".to_owned())]);
+        // `$reqs[$package] = $constraint`: the argument wins over `--with`.
+        let reqs = temporary_requirements(&v(&["a/b:^1"]), &v(&["a/b:^2"])).expect("parsed");
+        assert_eq!(reqs, vec![("a/b".to_owned(), "^2".to_owned())]);
+        // The allow list takes the name alone.
+        assert_eq!(package_of_requirement("a/b:^1"), "a/b");
+        assert_eq!(package_of_requirement("a/b=^1"), "a/b");
+        assert_eq!(package_of_requirement("a/b ^1"), "a/b");
+        assert_eq!(package_of_requirement("a/b"), "a/b");
+        assert_eq!(package_of_requirement("a/*"), "a/*");
+    }
+
+    #[test]
+    fn a_pair_without_a_version_is_an_error() {
+        let e = temporary_requirements(&v(&["a/b"]), &[])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "Option a/b is missing a version constraint, use e.g. a/b:^1.0"
+        );
+    }
 }
 
 #[cfg(test)]

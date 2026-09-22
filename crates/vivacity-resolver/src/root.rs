@@ -405,7 +405,10 @@ pub fn extract_stability_flags(
 }
 
 /// `RootPackageLoader::extractReferences`.
-fn extract_references(requires: &[(String, String)], references: &mut BTreeMap<String, String>) {
+pub fn extract_references(
+    requires: &[(String, String)],
+    references: &mut BTreeMap<String, String>,
+) {
     static AS: OnceLock<Regex> = OnceLock::new();
     static REF: OnceLock<Regex> = OnceLock::new();
     let as_re = regex(&AS, r"^([^,\s@]+) as .+$", false);
