@@ -75,12 +75,12 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
-105 real PHP projects (application templates and applications with a
+106 real PHP projects (application templates and applications with a
 committed lock, pinned — `fixtures/corpus/`). On 2026-09-22 (after the
 `tar` dists and six more plugins of this week, which the corpus
 re-checks byte for byte), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **72 of 105 projects (69 %)
-natively with `--no-dev`** and 70 of 105 (67 %) with the dev packages,
+plugins active, `vivacity install` laid out **73 of 106 projects (69 %)
+natively with `--no-dev`** and 71 of 106 (67 %) with the dev packages,
 byte-identical down to file modes and link targets, and **no diff in
 either mode**: every other project was handed to Composer
 before any write, for reasons the report ranks — the Drupal scaffold

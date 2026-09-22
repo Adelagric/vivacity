@@ -6,6 +6,11 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Added
+- **The Doppar framework skeleton joins the corpus** (`doppar/doppar` 4.0.1,
+  74 packages, native and 0 diff in both modes): a fourth framework family
+  after Laravel, Symfony and Yii, checked byte for byte at every release.
+
 ### Changed
 - **A no-op `install` no longer loads the two package repositories.** The
   local-repository transaction (installed.json against the lock) was

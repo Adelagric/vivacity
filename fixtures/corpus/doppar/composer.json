@@ -1,0 +1,71 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "doppar/doppar",
+    "type": "project",
+    "description": "The skeleton application for the Doppar framework",
+    "license": "MIT",
+    "keywords": [
+        "framework",
+        "Doppar"
+    ],
+    "require": {
+        "php": "^8.5",
+        "doppar/framework": "4.*"
+    },
+    "require-dev": {
+        "fakerphp/faker": "^1.24",
+        "mockery/mockery": "^1.6",
+        "phpunit/phpunit": "^13.2"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/",
+            "Database\\Seeders\\": "schema/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-master": "4.x-dev"
+        }
+    },
+    "scripts": {
+        "setup": [
+            "composer install",
+            "@php -r \"file_exists('env.toml') || copy('env.toml.example', 'env.toml');\"",
+            "@php pool key:generate",
+            "@php pool migrate"
+        ],
+        "dev": [
+            "Composer\\Config::disableProcessTimeout"
+        ],
+        "test": [
+            "@php pool config:clear --ansi"
+        ],
+        "post-create-project-cmd": [
+            "Phaseolies\\Installer::postCreateProject",
+            "@php pool key:generate --ansi",
+            "@php -r \"file_exists('schema/database.sqlite') || touch('schema/database.sqlite');\"",
+            "@php pool boost --ansi",
+            "@php pool migrate --ansi",
+            "@php pool frontend:install --force"
+        ],
+        "post-root-package-install": [
+            "@php -r \"file_exists('env.toml') || copy('env.toml.example', 'env.toml');\""
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
