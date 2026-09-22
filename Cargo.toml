@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/vivacity", "crates/vivacity-core", "crates/vivacity-autoload", "crates/vivacity-resolver", "crates/vivacity-pcre2-sys", "crates/vivacity-pcre2", "crates/pcre2-link-test"]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Adelagric/vivacity"
@@ -33,7 +33,7 @@ sha1 = "=0.10.7"
 md-5 = "=0.10.6"
 thiserror = "=2.0.20"
 clap = { version = "=4.6.6", features = ["derive"] }
-pcre2 = { package = "vivacity-pcre2", version = "=0.16.0", path = "crates/vivacity-pcre2" }
+pcre2 = { package = "vivacity-pcre2", version = "=0.17.0", path = "crates/vivacity-pcre2" }
 walkdir = "=2.5.0"
 proptest = "=1.11.0"
 base64 = "=0.23.1"

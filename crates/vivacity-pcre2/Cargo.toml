@@ -23,4 +23,4 @@ all = "allow"
 [dependencies]
 libc = "=0.2.189"
 log = "=0.4.34"
-pcre2-sys = { package = "vivacity-pcre2-sys", version = "=0.16.0", path = "../vivacity-pcre2-sys" }
+pcre2-sys = { package = "vivacity-pcre2-sys", version = "=0.17.0", path = "../vivacity-pcre2-sys" }
