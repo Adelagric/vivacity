@@ -761,12 +761,28 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
-    let as_lock = serde_json::json!({"packages": installed_packages(&project, &manifest), "packages-dev": []});
-    let present = vivacity_resolver::repository::locked_repository_with(&as_lock, &mut arena, true)
-        .map_err(|e| anyhow::anyhow!("installed.json: {}", e.0))?;
-    let result =
-        vivacity_resolver::repository::locked_repository_with(&lock_value, &mut arena, with_dev)
-            .map_err(|e| anyhow::anyhow!("composer.lock: {}", e.0))?;
+    let installed_now = installed_packages(&project, &manifest);
+    trace("installed.json", t0);
+    // Nothing to do at all (the commonest install): proved on the raw
+    // entries, so the two repositories are not loaded into the arena —
+    // ~8 ms of constraint parsing on a 100-package lock. `None` falls back
+    // to the full computation.
+    let unchanged_names = unchanged_local_repository(&installed_now, &lock_value, with_dev);
+    let (present, result) = if unchanged_names.is_some() {
+        (Vec::new(), Vec::new())
+    } else {
+        let as_lock = serde_json::json!({"packages": installed_now, "packages-dev": []});
+        let present =
+            vivacity_resolver::repository::locked_repository_with(&as_lock, &mut arena, true)
+                .map_err(|e| anyhow::anyhow!("installed.json: {}", e.0))?;
+        let result = vivacity_resolver::repository::locked_repository_with(
+            &lock_value,
+            &mut arena,
+            with_dev,
+        )
+        .map_err(|e| anyhow::anyhow!("composer.lock: {}", e.0))?;
+        (present, result)
+    };
     // `Locker::getMissingRequirementInfo`: a root requirement the lock does
     // not satisfy (a hand-edited composer.json) stops here with code 4.
     let merged_links = merged
@@ -781,6 +797,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         &root_pkg.pretty_version,
         merged_links,
     )?;
+    trace("local repositories", t0);
     let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
     // The scope analysis is pure (lock, manifest, installed.json, global
     // config): computed here, reported after the join.
@@ -796,6 +813,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         ))
     };
 
+    trace("scope analysis", t0);
     // The autoloader, planned during the network wait when the install has
     // nothing to place (every wanted package present, same identity): its
     // inputs are then all known — the local repository the install would
@@ -1106,7 +1124,10 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         // the removed and updated packages, then the operations' order.
         {
             use vivacity_resolver::transaction::Operation;
-            let previous: Vec<&str> = present.iter().map(|&i| arena[i].name.as_str()).collect();
+            let previous: Vec<&str> = match &unchanged_names {
+                Some(names) => names.iter().map(String::as_str).collect(),
+                None => present.iter().map(|&i| arena[i].name.as_str()).collect(),
+            };
             let mut gone: Vec<&str> = Vec::new();
             let mut fresh: Vec<&str> = Vec::new();
             for op in &transaction.operations {
@@ -2377,6 +2398,90 @@ fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> 
 /// Composers accepted), minus those whose install path is gone
 /// (`Factory::purgePackages` through `LibraryInstaller::isInstalled`; a
 /// metapackage is always installed).
+/// `LocalRepoTransaction` over installed.json and the lock, when the raw
+/// entries prove it empty: same names, and for each the same version,
+/// dist and source references, and `abandoned` state — what
+/// `Transaction::new` compares. Returns the present names in
+/// installed.json order (the local repository's order, which the emulated
+/// plugins read). `None` when anything differs, or when either side could
+/// carry an alias (a root alias in the lock, a `branch-alias` on a dev
+/// version): aliases add operations of their own, and the full
+/// computation handles them.
+fn unchanged_local_repository(
+    installed: &[serde_json::Value],
+    lock: &serde_json::Value,
+    with_dev: bool,
+) -> Option<Vec<String>> {
+    use serde_json::Value;
+    if lock
+        .get("aliases")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        return None;
+    }
+    let wanted: Vec<&Value> = ["packages", "packages-dev"]
+        .iter()
+        .take(if with_dev { 2 } else { 1 })
+        .filter_map(|k| lock.get(*k))
+        .filter_map(Value::as_array)
+        .flatten()
+        .collect();
+    if with_dev && lock.get("packages-dev").is_none() {
+        return None; // the loader errors on this: let it
+    }
+    if wanted.len() != installed.len() {
+        return None;
+    }
+    // `ArrayLoader::getBranchAlias` only looks at a dev version (and at
+    // `default-branch`): a stable entry never grows an alias, whatever its
+    // `extra`. Anything else declines, and the full computation decides.
+    let aliased = |p: &Value| {
+        let dev = p
+            .get("version")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.starts_with("dev-") || v.ends_with("-dev"));
+        (dev && p
+            .get("extra")
+            .and_then(|e| e.get("branch-alias"))
+            .is_some_and(|b| !b.is_null()))
+            || p.get("default-branch") == Some(&Value::Bool(true))
+    };
+    let key = |p: &Value| -> Option<String> {
+        p.get("name")
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    let field = |p: &Value, a: &str, b: &str| p.get(a).and_then(|d| d.get(b)).cloned();
+    let identity = |p: &Value| {
+        (
+            p.get("version").cloned(),
+            field(p, "dist", "reference"),
+            field(p, "source", "reference"),
+            p.get("abandoned").cloned(),
+        )
+    };
+    let mut by_name: std::collections::BTreeMap<String, &Value> = Default::default();
+    for p in &wanted {
+        if aliased(p) {
+            return None;
+        }
+        by_name.insert(key(p)?, p);
+    }
+    let mut names = Vec::with_capacity(installed.len());
+    for p in installed {
+        if aliased(p) {
+            return None;
+        }
+        let name = key(p)?;
+        if identity(by_name.get(&name)?) != identity(p) {
+            return None;
+        }
+        names.push(name);
+    }
+    (names.len() == by_name.len()).then_some(names)
+}
+
 fn installed_packages(
     project: &std::path::Path,
     manifest: &serde_json::Value,
@@ -3357,4 +3462,98 @@ fn unused_locked_packages(manifest: &serde_json::Value, lock: &serde_json::Value
                 .to_lowercase()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod local_repository_tests {
+    use super::unchanged_local_repository;
+    use serde_json::{json, Value};
+
+    fn pkg(name: &str, version: &str) -> Value {
+        json!({"name": name, "version": version, "dist": {"reference": "abc"}})
+    }
+
+    fn lock(packages: Vec<Value>, dev: Vec<Value>) -> Value {
+        json!({"packages": packages, "packages-dev": dev, "aliases": []})
+    }
+
+    #[test]
+    fn accepts_only_a_truly_unchanged_repository() {
+        let installed = vec![pkg("a/b", "1.0.0"), pkg("c/d", "2.0.0")];
+        let l = lock(vec![pkg("a/b", "1.0.0")], vec![pkg("c/d", "2.0.0")]);
+        assert_eq!(
+            unchanged_local_repository(&installed, &l, true),
+            Some(vec!["a/b".to_owned(), "c/d".to_owned()]),
+            "same packages, same versions and references"
+        );
+        // --no-dev over a dev vendor: the dev package must be uninstalled.
+        assert!(unchanged_local_repository(&installed, &l, false).is_none());
+    }
+
+    #[test]
+    fn declines_every_difference_the_transaction_would_see() {
+        let installed = vec![pkg("a/b", "1.0.0")];
+        let same = || vec![pkg("a/b", "1.0.0")];
+        let decline = |packages: Vec<Value>, why: &str| {
+            assert!(
+                unchanged_local_repository(&installed, &lock(packages, vec![]), true).is_none(),
+                "{why}"
+            );
+        };
+        decline(vec![pkg("a/b", "1.1.0")], "a new version is an update");
+        decline(
+            vec![json!({"name": "a/b", "version": "1.0.0", "dist": {"reference": "zzz"}})],
+            "a new dist reference is an update",
+        );
+        decline(
+            vec![
+                json!({"name": "a/b", "version": "1.0.0", "dist": {"reference": "abc"}, "source": {"reference": "s"}}),
+            ],
+            "a new source reference is an update",
+        );
+        decline(
+            vec![
+                json!({"name": "a/b", "version": "1.0.0", "dist": {"reference": "abc"}, "abandoned": true}),
+            ],
+            "becoming abandoned is an update",
+        );
+        decline(
+            vec![pkg("e/f", "1.0.0")],
+            "another package is install + uninstall",
+        );
+        decline(vec![], "an empty lock uninstalls");
+        decline(
+            vec![pkg("a/b", "1.0.0"), pkg("e/f", "1.0.0")],
+            "one more package is an install",
+        );
+        // Aliases add operations of their own: never the fast path.
+        let mut aliased = lock(same(), vec![]);
+        aliased["aliases"] =
+            json!([{"package": "a/b", "alias": "1.0", "alias_normalized": "1.0.0.0"}]);
+        assert!(unchanged_local_repository(&installed, &aliased, true).is_none());
+        let dev_alias = json!({"name": "a/b", "version": "dev-main", "dist": {"reference": "abc"},
+                               "extra": {"branch-alias": {"dev-main": "1.x-dev"}}});
+        assert!(
+            unchanged_local_repository(
+                std::slice::from_ref(&dev_alias),
+                &lock(vec![dev_alias.clone()], vec![]),
+                true
+            )
+            .is_none(),
+            "a dev version with a branch-alias grows an alias package"
+        );
+        // A stable version keeps its `extra` and grows nothing.
+        let stable_extra = json!({"name": "a/b", "version": "1.0.0", "dist": {"reference": "abc"},
+                                  "extra": {"branch-alias": {"dev-main": "1.x-dev"}}});
+        assert!(unchanged_local_repository(
+            std::slice::from_ref(&stable_extra),
+            &lock(vec![stable_extra.clone()], vec![]),
+            true
+        )
+        .is_some());
+        // A lock without `packages-dev` is the loader's error, not ours.
+        assert!(
+            unchanged_local_repository(&installed, &json!({"packages": same()}), true).is_none()
+        );
+    }
 }

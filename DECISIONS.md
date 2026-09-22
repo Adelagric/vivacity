@@ -1245,3 +1245,32 @@ laisse l'ancien répertoire en place (le paquet n'est plus « installé » à
 son ancien chemin) — vivacity fait pareil, le harnais le vérifie plutôt
 que l'inverse que j'avais d'abord écrit.
 
+## 2026-09-22 — Le no-op d'`install` ne charge plus les deux dépôts (mesuré sur Doppar)
+
+Fait : test de vivacity sur le squelette du framework Doppar (74 paquets) —
+lock identique à l'octet, projet identique, une ligne de stderr en écart
+(corrigée séparément). Profil du no-op (37 ms) : ~8 ms entre le contrôle de
+plateforme et la transaction, pour construire deux arènes de paquets
+résolveur (installed.json et le lock) dont la seule sortie utile est
+« aucune opération ». Le chemin chaud le plus fréquent payait l'analyse de
+toutes les contraintes de tous les paquets pour ne rien faire.
+Décision : comparer d'abord les entrées brutes sur exactement ce que
+`Transaction::new` regarde (nom, version, références dist et source,
+`abandoned`) ; si c'est identique des deux côtés, ne pas charger les dépôts.
+Tout le reste — un alias racine dans le lock, une version dev avec
+`branch-alias`, un `default-branch`, un écart quelconque, un `packages-dev`
+absent — retombe sur le chemin complet inchangé : le raccourci ne décide
+jamais d'une opération, il ne fait que prouver qu'il n'y en a aucune.
+Écarté : rendre `Package::raw` partagé (`Arc`) — le clone du tableau de
+paquets mesuré à 1,1 ms seulement, le reste est l'analyse des contraintes,
+que ce raccourci évite entièrement ; et le parallélisme de la pose sur macOS,
+revérifié sur Doppar (128 ms contre 130 ms séquentiel, σ 4 : rien, la
+décision de 2026-09-11 tient). Mesuré (M4 Max, caches chauds, hyperfine
+25 runs, `--offline --no-blocking`) : Doppar 38 → 35 ms, Laravel 57 → 53 ms,
+Sylius 76 → 63 ms (−17 %) — le gain suit la taille du lock. Le warm
+(vendor supprimé) est inchangé : ses 99 ms de pose sont un plancher noyau
+(`clonefile` par paquet ; `cp -Rc` du même arbre prend 780 ms).
+Vérifié : 243 tests (dont 2 sur le garde-fou : chaque différence que la
+transaction verrait doit faire décliner), 14 harnais + steps 232/232 +
+update 19/19 — tous exercent des no-op.
+

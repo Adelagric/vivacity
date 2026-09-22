@@ -6,6 +6,23 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Changed
+- **A no-op `install` no longer loads the two package repositories.** The
+  local-repository transaction (installed.json against the lock) was
+  computed by parsing every entry of both into resolver packages — every
+  constraint of every `require`, `conflict`, `provide` — only to find
+  nothing to do, which is what an `install` finds most of the time. The
+  same comparison `Transaction::new` makes (name, version, dist and
+  source references, `abandoned`) is now done first on the raw entries;
+  when it proves the transaction empty, the repositories are not loaded
+  at all. Anything else — an alias on either side, a root alias in the
+  lock, the slightest difference — takes the full path unchanged.
+  `locked_repository_with` also borrows the lock's `packages` array
+  instead of copying it. Measured on this machine (M4 Max, warm caches,
+  hyperfine, 25 runs, `--offline --no-blocking`): a no-op install of the
+  Doppar skeleton 38 → 35 ms (74 packages), Laravel 57 → 53 ms (109),
+  Sylius 76 → 63 ms (276) — the gain grows with the lock.
+
 ### Fixed
 - **`Generating optimized autoload files`**, as Composer announces it
   whenever the effective optimize flag is on — `-o`,

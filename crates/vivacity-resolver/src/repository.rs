@@ -1830,14 +1830,16 @@ pub fn locked_repository_with(
     arena: &mut Vec<Package>,
     with_dev: bool,
 ) -> Result<Vec<usize>, RepoError> {
-    let mut configs: Vec<Value> = lock
+    // Borrowed, not copied: the lock's `packages` array can be hundreds of
+    // kilobytes and every entry is cloned again into `Package::raw`.
+    let mut configs: Vec<&Value> = lock
         .get("packages")
         .and_then(Value::as_array)
-        .cloned()
+        .map(|a| a.iter().collect())
         .unwrap_or_default();
     if with_dev {
         match lock.get("packages-dev").and_then(Value::as_array) {
-            Some(dev) => configs.extend(dev.iter().cloned()),
+            Some(dev) => configs.extend(dev.iter()),
             None => {
                 return Err(RepoError::data(
                     "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.",
@@ -1848,7 +1850,7 @@ pub fn locked_repository_with(
     if configs.is_empty() {
         return Ok(Vec::new());
     }
-    let ids = loader::load_packages(&configs, Origin::Locked, arena, false)
+    let ids = loader::load_package_refs(&configs, Origin::Locked, arena, false)
         .map_err(|e| RepoError::data(e.0))?;
     let mut out = ids.clone();
     // `$packageByName[$name] = $package`: for an alias, both names point

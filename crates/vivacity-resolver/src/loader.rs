@@ -324,6 +324,19 @@ pub fn load_packages(
     arena: &mut Vec<Package>,
     batch: bool,
 ) -> Result<Vec<usize>, LoadError> {
+    let refs: Vec<&Value> = configs.iter().collect();
+    load_package_refs(&refs, origin, arena, batch)
+}
+
+/// `load_packages` over borrowed configs: a caller reading them out of a
+/// larger document (a lock's `packages`) hands the entries over without
+/// copying the document first.
+pub fn load_package_refs(
+    configs: &[&Value],
+    origin: Origin,
+    arena: &mut Vec<Package>,
+    batch: bool,
+) -> Result<Vec<usize>, LoadError> {
     let mut out = Vec::new();
     for c in configs {
         let (p, alias) = load(c, origin, batch)?;
