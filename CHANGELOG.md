@@ -112,6 +112,16 @@ byte-identical-output promise are the public API.
   `harness/bin-plugin.sh` (project and full stderr identical on install,
   no-op, dump, `--no-dev`; the forwarding refused) in CI.
 
+- **`roots/wordpress-core-installer` emulated** (v4.0.0): the
+  `wordpress-core` package is laid out at `extra.wordpress-install-dir`
+  (a string, or a map by package name), else the package's own, else
+  `wordpress` — Bedrock's and WordPlate's layout; `.` and the vendor
+  directory are refused with the plugin's message (Composer throws).
+  Same conflict checks as `composer/installers`, same transition rule
+  (plugin added to or removed from an existing install → Composer). New
+  `fixtures/projects/wp-core` and `harness/wp-core.sh` (string, map,
+  default, `--no-plugins`, the refusal) in CI.
+
 ### Fixed
 - **`symfony/thanks` on `update` with install goes to Composer**: it was
   listed as inert for the resolution commands (0.16 A), but after a

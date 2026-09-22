@@ -1210,3 +1210,20 @@ sont des installs complets dans d'autres répertoires ; possible un jour en
 appelant vivacity lui-même, hors de ce sprint). Vérifié : harnais
 bin-plugin, stderr complète identique à Composer sur les quatre étapes.
 
+## 2026-09-22 — roots/wordpress-core-installer : un placeur de plus dans Layout (v0.17)
+
+Fait : bedrock et wordplate ne tenaient qu'à ce plugin — un installateur
+pur du type `wordpress-core` : `getInstallPath` = `extra.wordpress-install-dir`
+de la racine (chaîne, ou carte par nom, avec la sémantique `empty()` de
+PHP), sinon celui du paquet, sinon `wordpress` ; `.` et le vendor-dir
+lèvent une exception. Décision : le placeur entre dans `Layout::place`
+à côté de la table composer/installers, avec les mêmes contrôles de cible
+(relatif, hors racine, hors vendor/), la même détection de conflits et la
+même règle de transition (plugin ajouté à ou retiré d'un install existant
+→ Composer) ; les refus du plugin deviennent des raisons de repli (Composer
+s'arrête sur l'exception, nous avant d'écrire). Écarté :
+`johnpbloch/wordpress-core-installer` (themosis), presque identique mais
+l'entrée demande aussi composer/installers 1.12, non porté. Vérifié :
+harnais wp-core — chaîne, carte, défaut, `--no-plugins` (sous vendor/ des
+deux côtés), `.` refusé — projet identique.
+

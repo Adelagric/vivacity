@@ -117,3 +117,5 @@ jobs:
         run: harness/yii2-composer.sh
       - name: bamarni/composer-bin-plugin
         run: harness/bin-plugin.sh
+      - name: roots/wordpress-core-installer
+        run: harness/wp-core.sh

@@ -1,0 +1,20 @@
+{
+    "name": "vivacity/wp-core-fixture",
+    "description": "roots/wordpress-core-installer: the wordpress-core package laid out at extra.wordpress-install-dir",
+    "type": "project",
+    "license": "MIT",
+    "version": "1.0.0",
+    "require": {
+        "roots/wordpress-core-installer": "4.0.0",
+        "roots/wordpress-no-content": "6.8.2",
+        "psr/log": "3.0.2"
+    },
+    "extra": {
+        "wordpress-install-dir": "web/wp"
+    },
+    "config": {
+        "allow-plugins": {
+            "roots/wordpress-core-installer": true
+        }
+    }
+}

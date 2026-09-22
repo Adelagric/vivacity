@@ -1,0 +1,4 @@
+Lock written by Composer 2.10.3 on 2026-09-22 from this composer.json
+(Packagist). roots/wordpress-core-installer 4.0.0 is the version bedrock
+and wordplate lock; roots/wordpress-no-content 6.8.2 is WordPress without
+wp-content (the `wordpress-core` package the installer places).

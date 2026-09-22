@@ -156,47 +156,128 @@ fn vendor_rel(vendor: &str, name: &str, target_dir: Option<&str>) -> String {
     }
 }
 
+/// The active installers of a run: composer/installers' table, and
+/// whether roots/wordpress-core-installer places `wordpress-core`.
+#[derive(Clone, Copy, Default)]
+struct Placers<'a> {
+    table: Option<&'a installers::Table>,
+    wp_core: bool,
+}
+
 /// Decision for a package (name, type, extra) under the current configuration.
 fn place(
     vendor: &str,
-    table: Option<&installers::Table>,
+    placers: Placers<'_>,
     root_extra: Option<&Value>,
     name: &str,
     package_type: &str,
     package_extra: Option<&Value>,
     target_dir: Option<&str>,
 ) -> Result<String, String> {
-    let Some(table) = table else {
+    // roots/wordpress-core-installer's `getInstallPath` for its type.
+    if placers.wp_core && package_type == WP_CORE_TYPE {
+        return match wp_core_dir(root_extra, name, package_extra, vendor) {
+            Ok(p) => custom_target(vendor, name, &p, "wordpress-core-installer"),
+            Err(e) => Err(format!("wordpress-core-installer: {e}")),
+        };
+    }
+    let Some(table) = placers.table else {
         return Ok(vendor_rel(vendor, name, target_dir));
     };
     match installers::placement(table, root_extra, name, package_type, package_extra) {
         Ok(Placement::Vendor) => Ok(vendor_rel(vendor, name, target_dir)),
-        Ok(Placement::Custom(p)) => {
-            if crate::pathutil::is_absolute_path(&p) {
+        Ok(Placement::Custom(p)) => custom_target(vendor, name, &p, "installers"),
+        Err(e) => Err(format!("installers: {name} ({package_type}): {e}")),
+    }
+}
+
+/// A custom install path's checks: relative, not the project root, not
+/// outside it, not inside vendor/.
+fn custom_target(vendor: &str, name: &str, p: &str, who: &str) -> Result<String, String> {
+    {
+        {
+            if crate::pathutil::is_absolute_path(p) {
                 return Err(format!(
-                    "installers: {name} would install at an absolute path `{p}`"
+                    "{who}: {name} would install at an absolute path `{p}`"
                 ));
             }
-            let rel = normalize_path(&p);
+            let rel = normalize_path(p);
             if rel.is_empty() || rel == "." {
-                return Err(format!(
-                    "installers: {name} would install at the project root"
-                ));
+                return Err(format!("{who}: {name} would install at the project root"));
             }
             if rel.starts_with("../") || rel == ".." {
                 return Err(format!(
-                    "installers: {name} would install outside the project (`{p}`)"
+                    "{who}: {name} would install outside the project (`{p}`)"
                 ));
             }
             if rel == vendor || rel.starts_with(&format!("{vendor}/")) {
                 return Err(format!(
-                    "installers: {name} targets `{p}` inside {vendor}/ (not emulated: use the default vendor layout)"
+                    "{who}: {name} targets `{p}` inside {vendor}/ (not emulated: use the default vendor layout)"
                 ));
             }
             Ok(rel)
         }
-        Err(e) => Err(format!("installers: {name} ({package_type}): {e}")),
     }
+}
+
+/// roots/wordpress-core-installer (docs/reference/plugins/
+/// wordpress-core-installer/, read at v4.0.0 — 85d3589): the package type it
+/// installs, and `getInstallPath` — the root's `extra.wordpress-install-dir`
+/// (a string, or a map by pretty name; PHP `empty()` rules), else the
+/// package's own, else `wordpress`; `.` and the vendor directory refused
+/// with the plugin's exception.
+pub const WP_CORE_PLUGIN: &str = "roots/wordpress-core-installer";
+pub const WP_CORE_TYPE: &str = "wordpress-core";
+
+fn wp_core_dir(
+    root_extra: Option<&Value>,
+    pretty_name: &str,
+    package_extra: Option<&Value>,
+    vendor: &str,
+) -> Result<String, String> {
+    let php_empty = |v: Option<&Value>| match v {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => !*b,
+        Some(Value::String(s)) => s.is_empty() || s == "0",
+        Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
+    };
+    let as_dir = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(true) => Some("1".to_owned()),
+            _ => None,
+        }
+    };
+    let mut dir: Option<String> = None;
+    let top = root_extra.and_then(|e| e.get("wordpress-install-dir"));
+    if !php_empty(top) {
+        match top {
+            Some(Value::Object(map)) => {
+                let entry = map.get(pretty_name);
+                if !php_empty(entry) {
+                    dir = entry.and_then(as_dir);
+                }
+            }
+            Some(v) => dir = as_dir(v),
+            None => {}
+        }
+    }
+    if dir.is_none() {
+        let own = package_extra.and_then(|e| e.get("wordpress-install-dir"));
+        if !php_empty(own) {
+            dir = own.and_then(as_dir);
+        }
+    }
+    let dir = dir.unwrap_or_else(|| "wordpress".to_owned());
+    if dir == "." || dir == vendor {
+        return Err(format!(
+            "Warning! {dir} is an invalid WordPress install directory (from {pretty_name})!"
+        ));
+    }
+    Ok(dir)
 }
 
 impl Layout {
@@ -318,6 +399,41 @@ impl Layout {
             }
         }
 
+        // roots/wordpress-core-installer: the same two views must agree
+        // (installed.json and the lock), like composer/installers above.
+        let wp_lock = wanted.iter().any(|p| p.name() == WP_CORE_PLUGIN);
+        let wp_prev = previous
+            .iter()
+            .any(|p| p["name"].as_str() == Some(WP_CORE_PLUGIN));
+        let mut wp_core = false;
+        if plugins_enabled && (wp_lock || wp_prev) {
+            let allow = merged_allow_plugins(
+                manifest.get("config").and_then(|c| c.get("allow-plugins")),
+                global_allow_plugins().as_ref(),
+            );
+            match plugin_verdict(allow.as_ref(), WP_CORE_PLUGIN) {
+                PluginVerdict::Allowed => {
+                    let any_core = wanted.iter().any(|p| p.package_type() == WP_CORE_TYPE)
+                        || previous
+                            .iter()
+                            .any(|p| p["type"].as_str() == Some(WP_CORE_TYPE));
+                    if has_state && wp_lock != wp_prev && any_core {
+                        return Err(vec![format!(
+                            "{WP_CORE_PLUGIN} is being {} an existing install (installed.json and composer.lock disagree): let Composer handle this transition",
+                            if wp_lock { "added to" } else { "removed from" }
+                        )]);
+                    }
+                    wp_core = wp_lock;
+                }
+                PluginVerdict::Blocked => {}
+                PluginVerdict::Unlisted => {
+                    return Err(vec![format!(
+                        "{WP_CORE_PLUGIN} is a plugin not covered by config.allow-plugins (Composer would refuse to run it)"
+                    )]);
+                }
+            }
+        }
+
         let root_extra = manifest.get("extra");
         let flex_packs = lock.flex_packs(manifest, with_dev, plugins_enabled);
         let mut paths: BTreeMap<String, String> = BTreeMap::new();
@@ -327,7 +443,7 @@ impl Layout {
             }
             match place(
                 &vendor,
-                table,
+                Placers { table, wp_core },
                 root_extra,
                 p.name(),
                 p.package_type(),
@@ -342,13 +458,11 @@ impl Layout {
         }
 
         // Conflicting targets: two packages at the same place, or one under the other.
-        if table.is_some() {
+        if table.is_some() || wp_core {
             let mut by_path: BTreeMap<&str, &str> = BTreeMap::new();
             for (name, rel) in &paths {
                 if let Some(other) = by_path.insert(rel.as_str(), name.as_str()) {
-                    issues.push(format!(
-                        "installers: {name} and {other} would both install at `{rel}`"
-                    ));
+                    issues.push(format!("{name} and {other} would both install at `{rel}`"));
                 }
             }
             let customs: Vec<(&str, &str)> = paths
@@ -360,7 +474,7 @@ impl Layout {
                 for (other, other_rel) in &paths {
                     if other.as_str() != *name && other_rel.starts_with(&format!("{rel}/")) {
                         issues.push(format!(
-                            "installers: {name} at `{rel}` would contain {other} at `{other_rel}`"
+                            "{name} at `{rel}` would contain {other} at `{other_rel}`"
                         ));
                     }
                 }
@@ -400,7 +514,7 @@ impl Layout {
             };
             let expected = place(
                 &vendor,
-                table,
+                Placers { table, wp_core },
                 root_extra,
                 name,
                 prev.get("type")
@@ -698,6 +812,50 @@ mod tests {
 
         let missing = json!({});
         assert!(Layout::resolve(&root(), &lock, &missing, true, true).is_err());
+    }
+
+    #[test]
+    fn wordpress_core_dir_like_the_plugin() {
+        use serde_json::json;
+        let d = |root: Option<serde_json::Value>, own: Option<serde_json::Value>| {
+            wp_core_dir(
+                root.as_ref(),
+                "roots/wordpress-no-content",
+                own.as_ref(),
+                "vendor",
+            )
+        };
+        assert_eq!(d(None, None).unwrap(), "wordpress");
+        assert_eq!(
+            d(Some(json!({"wordpress-install-dir": "web/wp"})), None).unwrap(),
+            "web/wp"
+        );
+        // A map by pretty name; a missing or empty entry falls through.
+        assert_eq!(
+            d(
+                Some(json!({"wordpress-install-dir": {"roots/wordpress-no-content": "cms"}})),
+                None
+            )
+            .unwrap(),
+            "cms"
+        );
+        assert_eq!(
+            d(
+                Some(json!({"wordpress-install-dir": {"other/pkg": "cms"}})),
+                Some(json!({"wordpress-install-dir": "own"}))
+            )
+            .unwrap(),
+            "own"
+        );
+        // PHP `empty()`: "" and "0" do not count.
+        assert_eq!(
+            d(Some(json!({"wordpress-install-dir": ""})), None).unwrap(),
+            "wordpress"
+        );
+        assert!(d(Some(json!({"wordpress-install-dir": "."})), None)
+            .unwrap_err()
+            .contains("invalid WordPress install directory"));
+        assert!(d(Some(json!({"wordpress-install-dir": "vendor"})), None).is_err());
     }
 
     #[test]

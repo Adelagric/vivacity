@@ -93,6 +93,8 @@ jobs:
         run: harness/yii2-composer.sh
       - name: bamarni/composer-bin-plugin (deprecation lines, forward-command refused)
         run: harness/bin-plugin.sh
+      - name: roots/wordpress-core-installer (wordpress-core placed at wordpress-install-dir)
+        run: harness/wp-core.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

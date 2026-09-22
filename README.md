@@ -179,7 +179,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Ten plugins are emulated and checked against the
+Eleven plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
@@ -200,7 +200,8 @@ from the `yii2-extension` packages — aliases from their `psr-0` / `psr-4`,
 modified one, deleted when the plugin leaves), and
 `bamarni/composer-bin-plugin` (its deprecation lines; a project with
 `forward-command: true` — nested installs under `vendor-bin/` — goes to
-Composer). A plugin listed
+Composer), and `roots/wordpress-core-installer` (the `wordpress-core`
+package at `extra.wordpress-install-dir`, Bedrock's layout). A plugin listed
 as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`symfony/flex`, `php-http/discovery`, `symfony/thanks`,

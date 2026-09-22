@@ -27,6 +27,7 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "yiisoft/yii2-composer",
     "codeception/c3",
     "bamarni/composer-bin-plugin",
+    "roots/wordpress-core-installer",
 ];
 
 /// Plugins proven to write nothing at install time under a Composer whose
@@ -88,6 +89,8 @@ pub const RESOLUTION_INERT: &[&str] = &[
     // `forward-command` is true — nested installs, the root lock untouched;
     // the install side refuses that configuration.
     "bamarni/composer-bin-plugin",
+    // An installer for the `wordpress-core` type: install paths only.
+    "roots/wordpress-core-installer",
     // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
     // implementation only when one is missing — with a complete lock, a
     // no-op (verified on install with the corpus).
