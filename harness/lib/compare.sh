@@ -51,7 +51,10 @@ compare_vendor() {
   # ramené à un marqueur.
   local ex_ref="${ip_ref%composer/include_paths.php}yiisoft/extensions.php" ex_viv="${ip_viv%composer/include_paths.php}yiisoft/extensions.php"
   if [ -f "$ex_ref" ] && [ -f "$ex_viv" ]; then
-    local ex_norm='$a = require $argv[1]; ksort($a); $v = dirname(dirname($argv[1])); array_walk_recursive($a, function (&$x) use ($v) { if (is_string($x)) { $x = str_replace($v, "<vendor>", $x); } }); echo var_export($a, true), "\n";'
+    # (Le préfixe absolu jusqu'à `vendor` ramené à un marqueur — sous
+    # Windows il vient avec des antislashs, l'argument de bash avec des
+    # slashes ou en forme `/c/…` : on ne compare que la suite.)
+    local ex_norm='$a = require $argv[1]; ksort($a); array_walk_recursive($a, function (&$x) { if (is_string($x)) { $x = preg_replace("#^.*[\\\\/]vendor(?=[\\\\/])#", "<vendor>", $x); } }); echo var_export($a, true), "\n";'
     if ! diff -q <(php -r "$ex_norm" "$ex_ref") <(php -r "$ex_norm" "$ex_viv") >/dev/null; then
       echo "yiisoft/extensions.php diffère même trié" > "$out"; diff <(php -r "$ex_norm" "$ex_ref") <(php -r "$ex_norm" "$ex_viv") | head >> "$out"
       head -20 "$out"; return 1
