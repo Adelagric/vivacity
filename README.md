@@ -57,8 +57,11 @@ library and vivacity must stay native. `harness/update.sh` does the same for
 frozen Packagist snapshots, comparing the lock files; `harness/path-repos.sh`
 plays install, update, remove and require on a project served by `path`
 repositories and compares stderr, the lock and `vendor/` down to file modes
-and link targets. All must report no difference; CI runs them on Linux and
-macOS on every push.
+and link targets; `harness/tar-dist.sh` installs `tar` dists (asset-packagist's
+npm tarballs) on both sides and compares the tree, modes included — the
+modes come from the tar headers, as `PharData` writes them, and the
+tarballs are read from Composer's own cache. All must report no
+difference; CI runs them on Linux and macOS on every push.
 
 Underneath, each generated file and each step of the resolver is a port of
 the corresponding Composer function; the source files ported are vendored
@@ -80,8 +83,8 @@ plugins active, `vivacity install` laid out **66 of 105 projects (63 %)
 natively with `--no-dev`** and 58 of 105 (55 %) with the dev packages,
 byte-identical down to file modes and link targets, and **no diff in
 either mode**: every other project was handed to Composer
-before any write, for reasons the report ranks — packages without a zip
-dist, then plugins one by one. The reasons that headed that list a day
+before any write, for reasons the report ranks — packages with neither a
+zip nor a tar dist, then plugins one by one. The reasons that headed that list a day
 earlier (`pestphp/pest-plugin`,
 `dealerdirect/phpcodesniffer-composer-installer`,
 `phpstan/extension-installer`, `config.vendor-dir`, `bin-dir`,
@@ -191,8 +194,8 @@ and rewrite `composer.lock`, vivacity never does — a lock that misses a
 merged requirement is handed to Composer instead, and `update` on such a
 project is refused). A plugin listed as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
-time (`symfony/flex`, `php-http/discovery`, `phpstan/extension-installer`,
-…) is installed as plain libraries. `drupal/core-composer-scaffold` is not
+time (`symfony/flex`, `php-http/discovery`, `symfony/thanks`,
+`ergebnis/composer-normalize`, …) is installed as plain libraries. `drupal/core-composer-scaffold` is not
 emulated (its source is GPL-2.0-or-later, see NOTICE.md): a project that
 uses it goes through the Composer fallback below.
 
@@ -221,8 +224,10 @@ allowed), `update`, `require` and `remove` hand the whole command to
 Composer with the same arguments, before any write, and say why;
 `--no-fallback` stops with exit 3 instead. Plugins with no
 resolution-time listener (`composer/installers`, `symfony/runtime`, the
-extension-installers, `php-http/discovery`, `symfony/thanks`,
-`cweagans/composer-patches`…) do not trigger it.
+extension-installers, `php-http/discovery`, `ergebnis/composer-normalize`,
+`cweagans/composer-patches`…) do not trigger it; `symfony/thanks` only on
+`update` with install (its reminder queries GitHub after a package
+update).
 
 `wikimedia/composer-merge-plugin` is emulated at resolution as it is at
 install: the root `update`, `require` and `remove` resolve is the merged

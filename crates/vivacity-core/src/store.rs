@@ -6,7 +6,14 @@
 //! discards its temporary directory).
 
 use crate::error::{Error, Result};
-use crate::extract::extract_zip;
+use crate::extract::{extract_tar, extract_zip};
+
+/// The archive format of a dist in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistKind {
+    Zip,
+    Tar,
+}
 use std::path::PathBuf;
 
 pub struct Store {
@@ -50,7 +57,8 @@ impl Store {
         name: &str,
         version: &str,
         dist_ref: Option<&str>,
-        zip_bytes: &[u8],
+        dist_bytes: &[u8],
+        kind: DistKind,
     ) -> Result<PathBuf> {
         let final_path = self.entry_path(name, version, dist_ref);
         if final_path.is_dir() {
@@ -62,7 +70,10 @@ impl Store {
             .prefix(".tmp-")
             .tempdir_in(&parent)
             .map_err(Error::io(&parent))?;
-        extract_zip(zip_bytes, tmp.path())?;
+        match kind {
+            DistKind::Zip => extract_zip(dist_bytes, tmp.path())?,
+            DistKind::Tar => extract_tar(dist_bytes, tmp.path())?,
+        }
         let tmp_path = tmp.keep();
         match std::fs::rename(&tmp_path, &final_path) {
             Ok(()) => Ok(final_path),
@@ -108,19 +119,33 @@ mod tests {
         let store = Store::at(dir.path().join("store"));
         let zip = sample_zip();
         let p1 = store
-            .ensure("a/b", "1.0.0", Some("deadbeefcafe1234"), &zip)
+            .ensure(
+                "a/b",
+                "1.0.0",
+                Some("deadbeefcafe1234"),
+                &zip,
+                DistKind::Zip,
+            )
             .expect("ensure");
         assert!(p1.join("composer.json").is_file());
         assert!(store.contains("a/b", "1.0.0", Some("deadbeefcafe1234")));
         // Second call: same bytes or not, the existing entry wins.
         let p2 = store
-            .ensure("a/b", "1.0.0", Some("deadbeefcafe1234"), b"garbage")
+            .ensure(
+                "a/b",
+                "1.0.0",
+                Some("deadbeefcafe1234"),
+                b"garbage",
+                DistKind::Zip,
+            )
             .expect("hit");
         assert_eq!(p1, p2);
         // Different key -> other entry.
         assert!(!store.contains("a/b", "1.0.0", Some("feedfacefeed5678")));
         // Hostile version sanitised (no traversal).
-        let p3 = store.ensure("a/b", "../../evil", None, &zip).expect("sane");
+        let p3 = store
+            .ensure("a/b", "../../evil", None, &zip, DistKind::Zip)
+            .expect("sane");
         assert!(p3.starts_with(dir.path().join("store").join("a/b")));
     }
 }

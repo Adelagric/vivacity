@@ -1,0 +1,5 @@
+Lock written by Composer 2.10.3 on 2026-09-22 from this composer.json
+(asset-packagist.org metadata; the four npm tarballs come from
+registry.npmjs.org). Chosen for their modes: blob 0.0.5 has 0666 files,
+after 0.8.2 has 0664, animate.css 4.1.1 has one 0755 file, color-name
+1.1.4's root directory is `v1.1/` (not `package/`). psr/log is the one zip.

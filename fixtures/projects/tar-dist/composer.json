@@ -1,0 +1,22 @@
+{
+    "name": "vivacity/tar-dist-fixture",
+    "description": "tar dists (asset-packagist): file modes kept from the tar header, single root stripped, cache shared with Composer",
+    "type": "project",
+    "license": "MIT",
+    "version": "1.0.0",
+    "repositories": [
+        {"type": "composer", "url": "https://asset-packagist.org"}
+    ],
+    "require": {
+        "npm-asset/blob": "0.0.5",
+        "npm-asset/animate.css": "4.1.1",
+        "npm-asset/color-name": "1.1.4",
+        "psr/log": "3.0.2"
+    },
+    "require-dev": {
+        "npm-asset/after": "0.8.2"
+    },
+    "config": {
+        "allow-plugins": false
+    }
+}

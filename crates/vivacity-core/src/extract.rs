@@ -43,24 +43,34 @@ fn entry_path(entry: &zip::read::ZipFile<'_>, dest: &Path) -> Result<PathBuf> {
 /// directory), 0 otherwise, in which case everything is moved, `.DS_Store`
 /// included (`rename($temporaryDir, $path)` onto an empty target).
 fn root_strip(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, dest: &Path) -> Result<usize> {
-    let mut top: std::collections::BTreeMap<std::ffi::OsString, bool> =
-        std::collections::BTreeMap::new();
+    let mut entries: Vec<(PathBuf, bool)> = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(Error::zip(dest))?;
-        let raw = entry_path(&entry, dest)?;
+        entries.push((entry_path(&entry, dest)?, entry.is_dir()));
+    }
+    Ok(root_strip_of(
+        entries.iter().map(|(p, d)| (p.as_path(), *d)),
+    ))
+}
+
+/// The rule itself, over `(entry path, is a directory entry)`.
+fn root_strip_of<'a>(entries: impl Iterator<Item = (&'a Path, bool)>) -> usize {
+    let mut top: std::collections::BTreeMap<std::ffi::OsString, bool> =
+        std::collections::BTreeMap::new();
+    for (raw, dir_entry) in entries {
         let mut comps = raw
             .components()
             .filter(|c| matches!(c, Component::Normal(_)));
         let Some(Component::Normal(first)) = comps.next() else {
             continue;
         };
-        let is_dir = entry.is_dir() || comps.next().is_some();
+        let is_dir = dir_entry || comps.next().is_some();
         if !is_dir && first == ".DS_Store" {
             continue;
         }
         *top.entry(first.to_owned()).or_insert(false) |= is_dir;
     }
-    Ok(usize::from(top.len() == 1 && top.values().all(|d| *d)))
+    usize::from(top.len() == 1 && top.values().all(|d| *d))
 }
 
 /// Memoized `create_dir_all`: avoids one `create_dir_all` (hence one stat +
@@ -164,6 +174,128 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extraction of a `tar` dist (asset-packagist: npm's `.tgz`), as
+/// `TarDownloader` does it through `PharData::extractTo` — measured on
+/// PHP 8.5 (docs/plans/v0.17-tar-dist.md):
+/// - a file gets the exact mode of its header (no umask);
+/// - a directory entry's mode is ignored (0777 & ~umask, like the
+///   implicit parents — npm archives have no directory entries at all);
+/// - a symlink or hard-link entry becomes an EMPTY regular file with the
+///   header mode (PharData never creates links: nothing to check);
+/// - any other entry type (device, fifo) is refused.
+///
+/// Then `ArchiveDownloader`'s single-root rule, shared with zip. Paths
+/// with `..` or absolute are refused (PharData normalises them lexically;
+/// no real archive has one).
+pub fn extract_tar(tgz_bytes: &[u8], dest: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let hostile = |reason: String| Error::HostileArchive {
+        dest: dest.to_path_buf(),
+        reason,
+    };
+    let path_of = |bytes: &[u8]| -> Result<PathBuf> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| hostile("entry path is not UTF-8".to_owned()))?;
+        let p = Path::new(text);
+        if p.is_absolute()
+            || !p
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(hostile(format!("invalid entry path: {text:?}")));
+        }
+        Ok(p.to_path_buf())
+    };
+    // Whole archive read once: the single-root rule needs every path
+    // before the first write, and a tar stream is not seekable.
+    struct Entry {
+        path: PathBuf,
+        kind: tar::EntryType,
+        #[cfg_attr(not(unix), allow(dead_code))]
+        mode: u32,
+        data: Vec<u8>,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut total: u64 = 0;
+    let decoder = flate2::read::GzDecoder::new(tgz_bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let iter = archive.entries().map_err(Error::io(dest))?;
+    for entry in iter {
+        let mut entry = entry.map_err(Error::io(dest))?;
+        let kind = entry.header().entry_type();
+        let path = {
+            let raw = entry.path_bytes();
+            path_of(&raw)?
+        };
+        let mode = entry.header().mode().map_err(Error::io(dest))? & 0o7777;
+        let size = entry.header().size().map_err(Error::io(dest))?;
+        total = total.saturating_add(size);
+        if total > MAX_UNCOMPRESSED {
+            return Err(hostile(format!(
+                "uncompressed size > {MAX_UNCOMPRESSED} bytes"
+            )));
+        }
+        let data = match kind {
+            tar::EntryType::Regular | tar::EntryType::Continuous => {
+                let mut buf = Vec::with_capacity(size.min(MAX_UNCOMPRESSED) as usize);
+                entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
+                buf
+            }
+            tar::EntryType::Directory | tar::EntryType::Symlink | tar::EntryType::Link => {
+                Vec::new()
+            }
+            // pax / GNU long-name headers are consumed by the crate; what
+            // reaches here with another type is not a file tree.
+            other => {
+                return Err(hostile(format!(
+                    "unsupported entry type {other:?} for {}",
+                    path.display()
+                )))
+            }
+        };
+        entries.push(Entry {
+            path,
+            kind,
+            mode,
+            data,
+        });
+    }
+    let strip = root_strip_of(
+        entries
+            .iter()
+            .map(|e| (e.path.as_path(), e.kind == tar::EntryType::Directory)),
+    );
+    let mut made: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    ensure_dir(dest, &mut made)?;
+    for e in &entries {
+        let stripped: PathBuf = e
+            .path
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .skip(strip)
+            .collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let out = dest.join(&stripped);
+        if e.kind == tar::EntryType::Directory {
+            ensure_dir(&out, &mut made)?;
+            continue;
+        }
+        if let Some(p) = out.parent() {
+            ensure_dir(p, &mut made)?;
+        }
+        std::fs::write(&out, &e.data).map_err(Error::io(&out))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(e.mode))
+                .map_err(Error::io(&out))?;
+        }
+    }
+    Ok(())
+}
+
 /// A symlink target must be relative and stay lexically inside the extracted
 /// root (the classic attack: `link -> ../../../../etc/passwd`).
 fn check_symlink_target(link_rel: &Path, target: &str, dest: &Path) -> Result<()> {
@@ -198,6 +330,96 @@ fn check_symlink_target(link_rel: &Path, target: &str, dest: &Path) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tar_tests {
+    use super::*;
+
+    fn tgz(entries: &[(&str, tar::EntryType, u32, &[u8])]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (path, kind, mode, data) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(*kind);
+            h.set_mode(*mode);
+            h.set_size(data.len() as u64);
+            h.set_mtime(0);
+            match kind {
+                tar::EntryType::Symlink | tar::EntryType::Link => {
+                    b.append_link(&mut h, path, "target").expect("link")
+                }
+                // The builder refuses `..` and absolute paths: raw header
+                // for the hostile cases.
+                _ if path.contains("..") || path.starts_with('/') => {
+                    let gnu = h.as_gnu_mut().expect("gnu");
+                    gnu.name[..path.len()].copy_from_slice(path.as_bytes());
+                    h.set_cksum();
+                    b.append(&h, *data).expect("raw")
+                }
+                _ => b.append_data(&mut h, path, *data).expect("data"),
+            }
+        }
+        let raw = b.into_inner().expect("tar");
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut e, &raw).expect("gz");
+        e.finish().expect("gz")
+    }
+
+    #[test]
+    fn strips_single_root_keeps_modes_and_flattens_links() {
+        use tar::EntryType as T;
+        let d = tempfile::tempdir().expect("tmp");
+        let out = d.path().join("out");
+        extract_tar(
+            &tgz(&[
+                ("package/a.txt", T::Regular, 0o664, b"a"),
+                ("package/bin/x", T::Regular, 0o755, b"#!"),
+                ("package/dir/", T::Directory, 0o700, b""),
+                ("package/link", T::Symlink, 0o777, b""),
+            ]),
+            &out,
+        )
+        .expect("extract");
+        assert_eq!(std::fs::read(out.join("a.txt")).expect("a"), b"a");
+        assert!(out.join("dir").is_dir());
+        let link = std::fs::symlink_metadata(out.join("link")).expect("link");
+        assert!(
+            link.is_file() && link.len() == 0,
+            "a link becomes an empty file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |p: &str| {
+                std::fs::metadata(out.join(p))
+                    .expect(p)
+                    .permissions()
+                    .mode()
+                    & 0o7777
+            };
+            assert_eq!(mode("a.txt"), 0o664);
+            assert_eq!(mode("bin/x"), 0o755);
+            assert_eq!(mode("link"), 0o777);
+            assert_ne!(mode("dir"), 0o700, "directory modes are not applied");
+        }
+    }
+
+    #[test]
+    fn refuses_escapes_and_devices() {
+        use tar::EntryType as T;
+        let d = tempfile::tempdir().expect("tmp");
+        for (path, kind) in [
+            ("package/../escape", T::Regular),
+            ("/abs", T::Regular),
+            ("package/dev", T::Char),
+        ] {
+            let r = extract_tar(&tgz(&[(path, kind, 0o644, b"x")]), &d.path().join("o"));
+            assert!(
+                matches!(r, Err(Error::HostileArchive { .. })),
+                "{path} should be refused: {r:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

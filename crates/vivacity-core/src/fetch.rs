@@ -204,6 +204,13 @@ pub fn composer_cache_dir() -> PathBuf {
 /// (deliberate in Composer: prevents cross-repository poisoning), key
 /// sanitised to `[a-z0-9._/-]`.
 pub fn dist_cache_path(cache_root: &Path, name: &str, url: &str) -> PathBuf {
+    dist_cache_path_of(cache_root, name, url, "zip")
+}
+
+/// `FileDownloader`'s cache key: `<name>/<sha1(url)>.<dist type>` — a
+/// `tar` dist is cached as `.tar`, so Composer and vivacity find each
+/// other's files.
+pub fn dist_cache_path_of(cache_root: &Path, name: &str, url: &str, dist_type: &str) -> PathBuf {
     let mut h = Sha1::new();
     h.update(url.as_bytes());
     let sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
@@ -221,7 +228,7 @@ pub fn dist_cache_path(cache_root: &Path, name: &str, url: &str) -> PathBuf {
     cache_root
         .join("files")
         .join(sane_name)
-        .join(format!("{sha}.zip"))
+        .join(format!("{sha}.{dist_type}"))
 }
 
 fn sha1_hex(bytes: &[u8]) -> String {
@@ -278,7 +285,20 @@ impl Fetcher {
         expected_sha1: Option<&str>,
         offline: bool,
     ) -> Result<(Vec<u8>, Provenance)> {
-        let cache_path = dist_cache_path(&self.cache_root, name, url);
+        self.dist_bytes_of(name, url, "zip", expected_sha1, offline)
+            .await
+    }
+
+    /// `dist_bytes` for a given dist type (the cache file's extension).
+    pub async fn dist_bytes_of(
+        &self,
+        name: &str,
+        url: &str,
+        dist_type: &str,
+        expected_sha1: Option<&str>,
+        offline: bool,
+    ) -> Result<(Vec<u8>, Provenance)> {
+        let cache_path = dist_cache_path_of(&self.cache_root, name, url, dist_type);
         if let Ok(bytes) = std::fs::read(&cache_path) {
             match expected_sha1 {
                 Some(exp) if sha1_hex(&bytes) != exp => {

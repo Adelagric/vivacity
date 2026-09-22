@@ -44,6 +44,14 @@ pub const BENIGN_PLUGINS: &[&str] = &[
     // Only listens to POST_UPDATE_CMD / POST_CREATE_PROJECT_CMD, and only acts
     // in a `require` context (Plugin::getSubscribedEvents): inert at install.
     "drupal/core-recipe-unpack",
+    // `Thanks::activate` arms its reminder only when the command is
+    // `update`; `POST_PACKAGE_UPDATE` then `POST_UPDATE_CMD` print it after
+    // a GitHub GraphQL call. On `install`: two commands added, nothing
+    // else (read at v1.4.1).
+    "symfony/thanks",
+    // A `CommandProvider` (`composer normalize`) with an empty `activate`
+    // and no listener (NormalizePlugin, read at 2.45.0).
+    "ergebnis/composer-normalize",
 ];
 
 /// Plugins known to change the install layout or the package contents:
@@ -69,7 +77,7 @@ pub const RESOLUTION_INERT: &[&str] = &[
     "phpstan/extension-installer",
     "rector/extension-installer",
     "composer/package-versions-deprecated",
-    "symfony/thanks",
+    "ergebnis/composer-normalize",
     // `POST_INSTALL/UPDATE_CMD`: an in-process `require` of a PSR
     // implementation only when one is missing — with a complete lock, a
     // no-op (verified on install with the corpus).
@@ -125,6 +133,20 @@ pub fn resolution_effect(
                 "resolves Flex aliases and applies recipes on require (not emulated)".to_owned()
             } else if with_install {
                 "applies recipes to the packages it installs (not emulated; --no-install resolves natively)".to_owned()
+            } else {
+                return None;
+            }
+        }
+        // `POST_PACKAGE_UPDATE` arms the reminder, `POST_UPDATE_CMD` prints
+        // it after a GitHub GraphQL query (`GitHubClient`): without a token
+        // that is Composer's GitHub auth prompt (an exception under
+        // `--no-interaction`) — stderr and exit code differ. Only once a
+        // package was actually updated, which is not known before
+        // resolving: `update` with install, Composer (`activate` arms it
+        // for the `update` command only: `require` / `remove` stay inert).
+        "symfony/thanks" => {
+            if command == ResolutionCommand::Update && with_install {
+                "prints a reminder after a package update, after querying GitHub (not emulated; --no-install resolves natively)".to_owned()
             } else {
                 return None;
             }
@@ -246,7 +268,10 @@ impl std::fmt::Display for ScopeIssue {
             ScopeIssue::ResolutionPlugin(p, what) => write!(f, "plugin {p} {what}"),
             ScopeIssue::Layout(why) => write!(f, "{why}"),
             ScopeIssue::NoUsableDist(p) => {
-                write!(f, "package {p} has no usable dist (no zip, no path source)")
+                write!(
+                    f,
+                    "package {p} has no usable dist (no zip or tar dist, no path source)"
+                )
             }
             ScopeIssue::Config(why) => write!(f, "config {why} is not supported natively"),
             ScopeIssue::MergePlugin(why) => write!(f, "wikimedia/composer-merge-plugin: {why}"),
@@ -351,7 +376,7 @@ fn classify_package(
         return;
     }
     let usable = match p.dist_kind() {
-        DistKind::Zip => true,
+        DistKind::Zip | DistKind::Tar => true,
         // A `path` package is laid out natively (symlink or mirror) on
         // Linux/macOS when its source directory is there; Windows
         // (junctions) is left to Composer.
@@ -418,6 +443,31 @@ mod tests {
         let r = analyze(&proj(), &lock, &json!({}), true, true);
         assert!(r.is_native_ok());
         assert_eq!(r.skipped_plugins, vec!["symfony/flex"]);
+    }
+
+    #[test]
+    fn thanks_and_normalize_are_benign_at_install() {
+        let lock = lock_with(json!([
+            zip_pkg("symfony/thanks", "composer-plugin"),
+            zip_pkg("ergebnis/composer-normalize", "composer-plugin"),
+        ]));
+        let r = analyze(&proj(), &lock, &json!({}), true, true);
+        assert!(r.is_native_ok(), "{:?}", r.issues);
+        assert_eq!(
+            r.skipped_plugins,
+            vec!["symfony/thanks", "ergebnis/composer-normalize"]
+        );
+    }
+
+    #[test]
+    fn thanks_reminder_only_on_update_with_install() {
+        use ResolutionCommand::*;
+        let effect = |c, i| resolution_effect("symfony/thanks", c, i);
+        assert!(effect(Update, true).is_some());
+        assert!(effect(Update, false).is_none());
+        assert!(effect(Require, true).is_none());
+        assert!(effect(Remove, true).is_none());
+        assert!(resolution_effect("ergebnis/composer-normalize", Update, true).is_none());
     }
 
     #[test]

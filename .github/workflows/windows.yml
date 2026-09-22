@@ -111,3 +111,5 @@ jobs:
           harness/diff-vendor.sh --with-autoloader
       - name: config.vendor-dir / bin-dir
         run: harness/vendor-dir.sh
+      - name: tar dists
+        run: harness/tar-dist.sh

@@ -55,7 +55,34 @@ byte-identical-output promise are the public API.
   with install — lock (and project) identical to Composer with the plugin
   active — plus the two refusals.
 
+- **`symfony/thanks` and `ergebnis/composer-normalize` installed as plain
+  libraries** instead of sending the project to Composer (read in their
+  sources: `Thanks::activate` arms its reminder for the `update` command
+  only, `NormalizePlugin` is a command provider with no listener). Five
+  corpus entries become native in both modes (heimdall, nette-web-project,
+  sulu-skeleton, prestashop, wallabag: 0 diff).
+
+- **`tar` dists are installed** (asset-packagist's npm tarballs; until now
+  such a lock went to Composer): extracted as `TarDownloader` →
+  `PharData::extractTo` does it, measured on PHP 8.5 — every file gets the
+  exact mode of its tar header (0666, 0664, 0755 kept), directory entries'
+  modes are ignored, a symlink or hard-link entry becomes an empty file
+  (PharData creates no link), `..` and absolute paths are refused; then
+  the single top-level directory is stripped like a zip's. The tarball is
+  read from and written to Composer's cache under
+  `files/<name>/<sha1(url)>.tar`. New `fixtures/projects/tar-dist` and
+  `harness/tar-dist.sh` (install, no-op without a download, `--no-dev`,
+  `dump-autoload -o`; modes compared) in CI on the three OSes; the
+  extraction is also checked against `PharData` itself on crafted
+  archives (`oracle_tar.rs`). Corpus: elgg (289 packages, 186 tar) native
+  in both modes, 0 diff.
+
 ### Fixed
+- **`symfony/thanks` on `update` with install goes to Composer**: it was
+  listed as inert for the resolution commands (0.16 A), but after a
+  package update its `POST_UPDATE_CMD` reminder queries GitHub's GraphQL
+  API — without a token, Composer's auth prompt, or an exception under
+  `--no-interaction`. `--no-install`, `require` and `remove` stay native.
 - **Security-advisories request sent in batches of 500 names**, as
   Composer 2.11 does (`ADVISORY_API_BATCH_SIZE`, found by the drift job
   on the 2.11 snapshot): every name is one form input and PHP truncates

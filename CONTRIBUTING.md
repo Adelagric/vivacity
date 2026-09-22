@@ -38,12 +38,14 @@ the roadmap below.
 
 ## Bigger pieces, roughly in order of impact
 
-- **`vcs` repositories** (v0.10 candidate) — `VcsRepository`, the
-  git/GitHub/GitLab drivers, source checkouts on install. `path`
-  repositories (0.9, `docs/plans/v0.9-path-repositories.md`) already hold
-  the pieces a `vcs` port reuses: the git-like version guesser
-  (`root_version::guess_version`), the reference dump, the operation
-  appendix.
+- **git-only packages** — a lock entry with a `source` and no `dist`
+  (`GitDownloader`: mirror clone under `cache/vcs`, checkout into vendor
+  with its `.git/`). Three packages in the corpus (ampache, friendica,
+  kovah-linkace). The parity contract needs a decision first: a `.git/`
+  directory is not byte-deterministic (packs, dated reflogs). `path`
+  repositories (0.9) hold the pieces a port reuses: the git-like version
+  guesser (`root_version::guess_version`), the reference dump. `tar`
+  dists (asset-packagist) are done (plan v0.17).
 - **Plugins at resolution time** — `update` / `require` / `remove` hand
   the command to Composer when an installed, allowed plugin changes the
   resolution (`scope::resolution_issues`, plan v0.16 A); `symfony/flex`'s

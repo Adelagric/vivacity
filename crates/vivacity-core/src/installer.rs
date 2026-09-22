@@ -198,8 +198,8 @@ pub async fn install(
         if unchanged {
             unchanged_names.insert(p.name());
             report.unchanged += 1;
-            if p.dist_kind() == DistKind::Zip
-                && !store.contains(p.name(), p.version(), p.dist_reference())
+            if matches!(p.dist_kind(), DistKind::Zip | DistKind::Tar)
+                && !store.contains(p.name(), p.version(), p.store_reference().as_deref())
             {
                 to_warm.push(p);
             }
@@ -227,14 +227,19 @@ pub async fn install(
         if p.dist_kind() == DistKind::Path {
             continue;
         }
-        if store.contains(p.name(), p.version(), p.dist_reference()) {
+        if store.contains(p.name(), p.version(), p.store_reference().as_deref()) {
             report.store_hits += 1;
             continue;
         }
         let warm_only =
             warm_names.contains(p.name()) && !to_install.iter().any(|q| q.name() == p.name());
         let (name, version) = (p.name().to_owned(), p.version().to_owned());
-        let dist_ref = p.dist_reference().map(str::to_owned);
+        let dist_ref = p.store_reference();
+        let kind = if p.dist_kind() == DistKind::Tar {
+            crate::store::DistKind::Tar
+        } else {
+            crate::store::DistKind::Zip
+        };
         let url = p.dist_url_expanded().ok_or_else(|| Error::Http {
             url: name.clone(),
             message:
@@ -249,8 +254,12 @@ pub async fn install(
                 url: url.clone(),
                 message: "semaphore closed".to_owned(),
             })?;
+            let dist_type = match kind {
+                crate::store::DistKind::Zip => "zip",
+                crate::store::DistKind::Tar => "tar",
+            };
             let fetched = fetcher
-                .dist_bytes(&name, &url, shasum.as_deref(), offline)
+                .dist_bytes_of(&name, &url, dist_type, shasum.as_deref(), offline)
                 .await;
             let (bytes, provenance) = match fetched {
                 Ok(v) => v,
@@ -262,7 +271,7 @@ pub async fn install(
             let version2 = version.clone();
             let dist_ref2 = dist_ref.clone();
             tokio::task::spawn_blocking(move || {
-                store.ensure(&store_name, &version2, dist_ref2.as_deref(), &bytes)
+                store.ensure(&store_name, &version2, dist_ref2.as_deref(), &bytes, kind)
             })
             .await
             .map_err(|e| Error::Http {
@@ -338,7 +347,7 @@ pub async fn install(
         if std::fs::symlink_metadata(&pkg_root).is_ok() {
             crate::path_install::remove_path(&pkg_root)?;
         }
-        let src = store.entry_path(p.name(), p.version(), p.dist_reference());
+        let src = store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
         crate::clone::clone_tree(&src, &dest)?;
         Ok(true)
     };

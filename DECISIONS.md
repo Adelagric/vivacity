@@ -1096,3 +1096,53 @@ ComposerRepository.php` (les références sont un instantané cohérent de
 le passage en 2.11, sans effet avant. Vérifié : test unitaire, 1201 noms
 → 3 corps de 500/500/201 dans l'ordre, l'avis du dernier lot trouvé.
 
+## 2026-09-22 — Deux plugins déclarés bénins à l'install sur lecture de leur source ; un inerte de trop corrigé
+
+Fait : le corpus du 19/09 rendait cinq entrées à Composer pour un seul
+plugin chacune — `symfony/thanks` (heimdall, nette-web-project,
+sulu-skeleton) et `ergebnis/composer-normalize` (prestashop, wallabag).
+Lecture des sources (thanks v1.4.1, normalize 2.45.0) : normalize est un
+`CommandProvider` sans écouteur ; thanks n'arme son rappel que si la
+commande est `update` (`activate` inspecte l'`ArgvInput`), et ne l'affiche
+qu'après un `POST_PACKAGE_UPDATE`, après un POST GraphQL GitHub. Décision :
+les deux en `BENIGN_PLUGINS` (install natif) ; normalize inerte à la
+résolution ; **thanks retiré de `RESOLUTION_INERT`** où la 0.16 A l'avait
+mis à tort — `update` avec install part chez Composer (sans token, c'est
+l'invite d'authentification ou une exception en `--no-interaction` ;
+impossible de savoir avant de résoudre s'il y aura une mise à jour),
+`--no-install`, `require`, `remove` restent natifs. Écarté : émuler le
+rappel (il dépend de l'état « starred » du compte GitHub de l'utilisateur).
+Vérifié : les cinq entrées natives 0 diff dans les deux modes contre
+Composer plugins actifs ; corpus complet relancé pour les compteurs.
+
+## 2026-09-22 — Dists `tar` : reproduire PharData, y compris ses bizarreries (v0.17)
+
+Fait : « paquets sans dist » (8 entrées du corpus) recouvre trois choses
+distinctes — 263 paquets à dist `tar` (asset-packagist → tarballs npm :
+elgg 186, humhub 54, friendica 23), 3 paquets git-only, des sources `path`
+absentes de la fixture. La feuille de route disait « vcs » ; c'était faux
+sur les nombres. Composer installe un `tar` par `TarDownloader` =
+`new PharData($file); extractTo($path, null, true)` puis la règle de racine
+unique d'`ArchiveDownloader`. Mesuré sur PHP 8.5.10 (umask 022) : fichiers
+au mode exact de l'en-tête (0666, 0664, 0755 gardés, pas d'umask), mode
+des entrées répertoire ignoré (0777 & ~umask), **symlinks et hard links
+écrits comme des fichiers vides** au mode de l'en-tête (PharData ne crée
+aucun lien), `a/../b` normalisé lexicalement. Décision : port de ce
+comportement tel quel — la parité vaut aussi pour la bizarrerie des liens
+(si PHP la corrige un jour, le job drift le verra) ; `..` et chemins
+absolus refusés (plus strict, aucune archive réelle n'en a) ; crate `tar`
+0.4.46 épinglée (lecture d'en-têtes seulement, sans C ; gzip par flate2
+déjà présent via zip, backend Rust) ; clé de store d'un dist sans
+référence = sha1 de l'URL (les tarballs npm n'ont pas de `reference`),
+comme la clé de cache de Composer ; fichier de cache `.tar` sous
+`files/<nom>/<sha1>.tar` pour que Composer et vivacity lisent le même.
+Écarté : un mode « exécutable → 0755 sinon défaut » comme pour le zip
+(faux pour PharData, prouvé par les 0666/0664 de blob et after). Vérifié :
+oracle PharData sur archives fabriquées (modes, répertoires, liens, noms
+longs pax, racine `v1.1/`), harnais fixture 4 tar + 1 zip (projet identique
+modes compris, no-op sans réseau, tarballs lus dans le cache de Composer),
+corpus elgg natif 0 diff (289 paquets) dans les deux modes. Gain corpus
+honnête : +1 (humhub attend yii2-composer, friendica reste sur git +
+installers-extender) ; le vrai gain est l'écosystème Yii, bâti sur
+asset-packagist.
+

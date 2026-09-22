@@ -27,6 +27,8 @@ pub struct LockPackage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistKind {
     Zip,
+    /// `TarDownloader` (asset-packagist's npm tarballs).
+    Tar,
     /// A `path` repository package: `dist.url` is the source directory.
     Path,
     Other,
@@ -95,6 +97,23 @@ impl LockPackage {
             .filter(|s| !s.is_empty())
     }
 
+    /// What identifies the dist's content in the store: its reference,
+    /// or — a `tar` dist from asset-packagist has none — the sha1 of its
+    /// URL, as Composer's own cache keys it (two URLs for one version must
+    /// not share an entry).
+    pub fn store_reference(&self) -> Option<String> {
+        match self.dist_reference() {
+            Some(r) => Some(r.to_owned()),
+            None => self.dist_url().map(|u| {
+                use sha1::Digest as _;
+                sha1::Sha1::digest(u.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            }),
+        }
+    }
+
     pub fn dist_kind(&self) -> DistKind {
         match self
             .raw
@@ -103,6 +122,7 @@ impl LockPackage {
             .and_then(Value::as_str)
         {
             Some("zip") => DistKind::Zip,
+            Some("tar") => DistKind::Tar,
             Some("path") => DistKind::Path,
             Some(_) => DistKind::Other,
             None => DistKind::Missing,

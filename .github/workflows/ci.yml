@@ -87,6 +87,8 @@ jobs:
         run: harness/merge-plugin.sh
       - name: --run-scripts (the scripts, by Composer, in Composer's order)
         run: harness/scripts.sh
+      - name: tar dists (asset-packagist tarballs, modes from the header, cache shared)
+        run: harness/tar-dist.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh
