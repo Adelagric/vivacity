@@ -1,0 +1,17 @@
+{
+    "name": "vivacity/flex-install-fixture",
+    "description": "symfony/flex at POST_INSTALL_CMD: .env copied from .env.dist, its two lines, and a symfony-pack laid out as a metapackage",
+    "type": "project",
+    "license": "MIT",
+    "version": "1.0.0",
+    "require": {
+        "symfony/flex": "2.11.0",
+        "symfony/apache-pack": "1.0.1",
+        "psr/log": "3.0.2"
+    },
+    "config": {
+        "allow-plugins": {
+            "symfony/flex": true
+        }
+    }
+}

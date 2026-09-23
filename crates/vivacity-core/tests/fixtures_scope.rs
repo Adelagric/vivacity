@@ -43,11 +43,12 @@ fn all_fixtures_are_native() {
 #[test]
 fn expected_benign_plugins_are_reported() {
     assert!(analyze("laravel").skipped_plugins.is_empty());
-    assert_eq!(analyze("symfony").skipped_plugins, vec!["symfony/flex"]);
-    let sylius = analyze("sylius").skipped_plugins;
-    assert!(sylius.contains(&"symfony/flex".to_owned()));
-    assert!(sylius.contains(&"php-http/discovery".to_owned()));
-    // `composer/package-versions-deprecated` was counted here until it
-    // moved to the emulated list (it rewrites its own `Versions.php`).
-    assert_eq!(sylius.len(), 2, "unexpected benign list: {sylius:?}");
+    // `symfony/flex` and `composer/package-versions-deprecated` were
+    // counted here until they moved to the emulated list (both write at
+    // install time); `php-http/discovery` is the one left on sylius.
+    assert!(analyze("symfony").skipped_plugins.is_empty());
+    assert_eq!(
+        analyze("sylius").skipped_plugins,
+        vec!["php-http/discovery"]
+    );
 }

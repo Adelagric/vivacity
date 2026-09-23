@@ -99,6 +99,8 @@ jobs:
         run: harness/custom-dirs.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
         run: harness/package-versions.sh
+      - name: symfony/flex at install (.env from .env.dist, its lines, symfony-pack)
+        run: harness/flex-install.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

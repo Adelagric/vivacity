@@ -1334,3 +1334,37 @@ plus large — sa propre entrée) ; `liborm85/composer-vendor-cleaner` et
 `--no-plugins`, où le stub doit rester), rouge sans le correctif ; corpus
 ibexa, forkcms et suitecrm natifs 0 diff ; 248 tests, steps 240/240.
 
+## 2026-09-23 — Flex avec install : la tranche prévue était fausse, la revue l'a dit (v0.19)
+
+Fait : dernier grand manque fonctionnel — `update` avec install sur un
+projet Symfony part chez Composer. Plan écrit avec une première tranche
+« Flex n'écrit que symfony.lock », puis méta-analyse adversariale par un
+relecteur frais, comme le veut la méthodologie au niveau 2. Verdict :
+abandonner cette tranche. Trois raisons que j'ai reproduites avant de les
+accepter : les opérations que Flex voit ne sont pas celles de la
+transaction de mise à jour mais celles de `recordOperations`
+(`PRE_OPERATIONS_EXEC`), reconstruites depuis `symfony.lock` — 123
+opérations d'install sur la fixture symfony là où la transaction est
+vide ; le point de repli prévu se situe **après** l'écriture de
+composer.lock, ce qui casse le contrat « rien d'écrit avant de rendre la
+main » et ferait re-résoudre Composer contre notre lock ; et le chemin
+heureux diverge déjà sur la stderr (rappel `symfony/thanks`). En prime
+`SymfonyBundle::getClassNames` lit vendor/, donc la question n'est pas
+calculable avant l'install pour les paquets que la transaction touche —
+et se tromper dans le sens permissif perd silencieusement l'enregistrement
+d'un bundle. Décision : faire d'abord la tranche A — fermer les
+divergences de Flex sur les chemins que vivacity prend **déjà** en natif —
+qui n'ouvre aucune surface d'émulation nouvelle et supprime une casse
+silencieuse vivante : `vivacity install` sur un projet Symfony ne copiait
+pas `.env` depuis `.env.dist` et n'en disait rien. Les tranches B (install
+dont la transaction locale est vide) et C (lire la classe candidate dans
+l'archive du store) gardent leur plan. Trouvés en chemin, tous corrigés :
+le suffixe `: Extracting archive` sur un `symfony-pack` (posé en
+métapaquet par Flex), la ligne `Symfony recipes are disabled…` absente, la
+précédence réelle de `root-dir` dans `initOptions`, et — trouvé par le
+nouveau harnais — `The "<nom>" plugin was not loaded as plugins are
+disabled.` que Composer imprime sous `--no-plugins` après chaque plugin
+installé et que nous n'imprimions jamais. Vérifié : fixture `flex-install`,
+7 cas, stderr complète comparée ; install Symfony complet (152 paquets)
+stderr identique et `.env` identique ; 248 tests, steps 240/240, 16 harnais.
+

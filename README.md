@@ -77,11 +77,11 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 106 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-09-22 (after the
-`tar` dists and six more plugins of this week, which the corpus
-re-checks byte for byte), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **73 of 106 projects (69 %)
-natively with `--no-dev`** and 71 of 106 (67 %) with the dev packages,
+committed lock, pinned — `fixtures/corpus/`). On 2026-09-23 (after the
+`tar` dists and the plugins of this week, which the corpus re-checks byte
+for byte), against Composer 2.10.3 `--no-scripts` with its
+plugins active, `vivacity install` laid out **75 of 106 projects (71 %)
+natively with `--no-dev`** and 73 of 106 (69 %) with the dev packages,
 byte-identical down to file modes and link targets, and **no diff in
 either mode**: every other project was handed to Composer
 before any write, for reasons the report ranks — the Drupal scaffold
@@ -180,7 +180,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Thirteen plugins are emulated and checked against the
+Fourteen plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
@@ -206,10 +206,13 @@ package at `extra.wordpress-install-dir`, Bedrock's layout), and
 `mnsami/composer-custom-directory-installer` (a library named in
 `extra.installer-paths` laid out there), and
 `composer/package-versions-deprecated` (its own `Versions.php`, rewritten
-from the lock at autoload-dump time — the shipped file is a stub). A plugin listed
+from the lock at autoload-dump time — the shipped file is a stub), and
+`symfony/flex` at install time (`.env` copied from `.env.dist`, its own
+lines, `symfony-pack` packages laid out as metapackages; what it does
+when resolving is described below). A plugin listed
 as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
-time (`symfony/flex`, `php-http/discovery`, `symfony/thanks`,
+time (`php-http/discovery`, `symfony/thanks`,
 `ergebnis/composer-normalize`, `ibexa/post-install`, …) is installed as
 plain libraries. `drupal/core-composer-scaffold` is not
 emulated (its source is GPL-2.0-or-later, see NOTICE.md): a project that

@@ -123,3 +123,5 @@ jobs:
         run: harness/custom-dirs.sh
       - name: composer/package-versions-deprecated
         run: harness/package-versions.sh
+      - name: symfony/flex at install
+        run: harness/flex-install.sh

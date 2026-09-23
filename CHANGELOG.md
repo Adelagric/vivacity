@@ -47,6 +47,25 @@ byte-identical-output promise are the public API.
   Sylius 76 → 63 ms (276) — the gain grows with the lock.
 
 ### Fixed
+- **`vivacity install` on a Symfony project left the app without its
+  `.env`.** `symfony/flex` listens to `POST_INSTALL_CMD` and copies
+  `.env.dist` to `.env` when neither `.env` nor `.env.local` exists and
+  the `.dist` does not mention `.env.local`; vivacity did nothing and
+  said nothing — the divergence this project exists to prevent, live on
+  the most-used command. Now emulated, with the two lines Flex prints
+  (`Run composer recipes …`, when `symfony/flex` is a root requirement)
+  and `initOptions`' real `root-dir` precedence (a top-level
+  `extra.root-dir` overrides `extra.symfony.root-dir`).
+- **A `symfony-pack` no longer gets `: Extracting archive`** in the
+  operation lines: with Flex active it is laid out as a metapackage
+  (`SymfonyPackInstaller extends MetapackageInstaller`), which vendor/
+  already reflected — only the line was wrong.
+- **`--no-plugins` prints `The "<name>" plugin was not loaded as plugins
+  are disabled.`** after each plugin package's own install line, as
+  `PluginManager::registerPackage` does. vivacity printed nothing.
+- **`Symfony recipes are disabled: "symfony/flex" not found in the root
+  composer.json`** is printed on the update path when Flex is installed
+  but not a root requirement (`fetchRecipes`, before the blank line).
 - **`composer/package-versions-deprecated` was classified as harmless and
   is not.** When `allow-plugins` allows it, its `POST_AUTOLOAD_DUMP`
   listener rewrites its own

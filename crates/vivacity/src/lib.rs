@@ -1020,7 +1020,14 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // Composer does right before each operation. They are printed once the
     // transaction has succeeded: the placements run in parallel, and a
     // failure is reported alone.
-    let operation_lines = operation_lines(&project, &arena, &transaction.operations, layout)?;
+    let operation_lines = operation_lines(
+        &project,
+        &arena,
+        &transaction.operations,
+        layout,
+        lock.flex_packs(&manifest, with_dev, !args.no_plugins),
+        !args.no_plugins,
+    )?;
 
     // Transaction.
     let store = Arc::new(vivacity_core::store::Store::default_location());
@@ -1222,6 +1229,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     if !args.after_update {
         print_funding(&project, &manifest);
+        // symfony/flex's `POST_INSTALL_CMD` listener (after an update it is
+        // `POST_UPDATE_CMD` that fires, handled by the update path).
+        emulate_flex_install(&project, &manifest, !args.no_plugins)?;
     }
     if let Some(r) = &runner {
         let code = r.run(scripts::POST_INSTALL_CMD)?;
@@ -1473,6 +1483,8 @@ fn operation_lines(
     arena: &[vivacity_resolver::package::Package],
     operations: &[vivacity_resolver::transaction::Operation],
     layout: &vivacity_core::layout::Layout,
+    flex_packs: bool,
+    plugins_enabled: bool,
 ) -> anyhow::Result<Vec<String>> {
     use vivacity_resolver::transaction::Operation;
     let mut lines = Vec::new();
@@ -1499,7 +1511,13 @@ fn operation_lines(
                             Err(e) => return Err(e.into()),
                         }
                     }
-                    Some(_) if pkg.package_type != "metapackage" => {
+                    // `SymfonyPackInstaller extends MetapackageInstaller`:
+                    // with Flex active a `symfony-pack` is laid out like a
+                    // metapackage — nothing downloaded, nothing appended.
+                    Some(_)
+                        if pkg.package_type != "metapackage"
+                            && !(flex_packs && pkg.package_type == "symfony-pack") =>
+                    {
                         ": Extracting archive".to_owned()
                     }
                     _ => String::new(),
@@ -1528,6 +1546,23 @@ fn operation_lines(
             _ => String::new(),
         };
         lines.push(format!("  - {shown}{appendix}"));
+        // `PluginInstaller::install|update` registers the package right
+        // after laying it out, and `PluginManager::registerPackage` says so
+        // when plugins are off.
+        if !plugins_enabled {
+            if let Operation::Install(p) | Operation::Update(_, p) = *op {
+                let pkg = &arena[p];
+                if matches!(
+                    pkg.package_type.as_str(),
+                    "composer-plugin" | "composer-installer"
+                ) {
+                    lines.push(format!(
+                        "The \"{}\" plugin was not loaded as plugins are disabled.",
+                        pkg.name
+                    ));
+                }
+            }
+        }
     }
     Ok(lines)
 }
@@ -2351,19 +2386,20 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
 /// upstream), `symfony.lock` unchanged — then the recipes hint when the
 /// downloader is enabled (symfony/flex required by the root).
 fn print_flex_post_update(manifest: &serde_json::Value) {
-    eprintln!();
     let sync = manifest
         .get("extra")
         .and_then(|e| e.get("symfony/flex"))
         .and_then(|f| f.get("synchronize_package_json"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let enabled = ["require", "require-dev"].iter().any(|k| {
-        manifest
-            .get(k)
-            .and_then(|m| m.get("symfony/flex"))
-            .is_some()
-    });
+    let enabled = flex_downloader_enabled(manifest);
+    // `fetchRecipes` writes this one before `install`'s blank line.
+    if !enabled {
+        eprintln!(
+            "Symfony recipes are disabled: \"symfony/flex\" not found in the root composer.json"
+        );
+    }
+    eprintln!();
     if !sync {
         eprintln!("Skip synchronizing package.json with PHP packages");
     } else if !enabled {
@@ -2375,18 +2411,93 @@ fn print_flex_post_update(manifest: &serde_json::Value) {
     }
 }
 
+/// `Flex::initOptions`: `array_merge([… 'root-dir' => extra.symfony.root-dir
+/// ?? '.' …], $extra)` — a TOP-LEVEL `extra.root-dir` overrides the one
+/// under `extra.symfony`, because `$extra` is merged second.
+fn flex_root_dir(project: &std::path::Path, manifest: &serde_json::Value) -> std::path::PathBuf {
+    let extra = manifest.get("extra");
+    extra
+        .and_then(|e| e.get("root-dir"))
+        .or_else(|| {
+            extra
+                .and_then(|e| e.get("symfony"))
+                .and_then(|s| s.get("root-dir"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(|d| project.join(d))
+        .unwrap_or_else(|| project.to_path_buf())
+}
+
+/// `Flex::install`'s `.env` copy: `<root-dir>/<runtime.dotenv_path ?? .env>`
+/// is created from its `.dist` when neither it nor its `.local` exists and
+/// the `.dist` does not mention `.env.local`.
+fn flex_dotenv_paths(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root_dir = flex_root_dir(project, manifest);
+    let dotenv = manifest
+        .get("extra")
+        .and_then(|e| e.get("runtime"))
+        .and_then(|r| r.get("dotenv_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(|p| root_dir.join(p))
+        .unwrap_or_else(|| root_dir.join(".env"));
+    let dist = std::path::PathBuf::from(format!("{}.dist", dotenv.to_string_lossy()));
+    (dotenv, dist)
+}
+
+/// `Downloader::isEnabled`: recipes apply only when `symfony/flex` is a
+/// root requirement.
+fn flex_downloader_enabled(manifest: &serde_json::Value) -> bool {
+    ["require", "require-dev"].iter().any(|k| {
+        manifest
+            .get(k)
+            .and_then(|m| m.get("symfony/flex"))
+            .is_some()
+    })
+}
+
+/// `Flex::install` on `POST_INSTALL_CMD` (an `install`, not an update):
+/// `fetchRecipes` is not called — the event is not POST_UPDATE_CMD — so
+/// the listener only copies `.env` and prints. Returns the `.env` it
+/// created, for the caller's note.
+fn emulate_flex_install(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    if !plugins_enabled
+        || !vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+            .iter()
+            .any(|p| p == "symfony/flex")
+    {
+        return Ok(());
+    }
+    let (dotenv, dist) = flex_dotenv_paths(project, manifest);
+    let local = std::path::PathBuf::from(format!("{}.local", dotenv.to_string_lossy()));
+    if !dotenv.exists() && !local.exists() && dist.is_file() {
+        let content = std::fs::read_to_string(&dist).unwrap_or_default();
+        if !content.contains(".env.local") {
+            std::fs::copy(&dist, &dotenv).with_context(|| {
+                format!("cannot copy {} to {}", dist.display(), dotenv.display())
+            })?;
+        }
+    }
+    eprintln!();
+    if flex_downloader_enabled(manifest) {
+        eprintln!("Run composer recipes at any time to see the status of your Symfony recipes.");
+        eprintln!();
+    }
+    Ok(())
+}
+
 /// The Flex behaviours at `POST_UPDATE_CMD` that write files, decided
 /// before resolving: `.env.dist` copied to `.env` (`Flex::install`) and
 /// package.json / importmap.php synchronised with the lock
 /// (`PackageJsonSynchronizer::shouldSynchronize`). Either → Composer.
 fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> Option<String> {
-    let root_dir = manifest
-        .get("extra")
-        .and_then(|e| e.get("symfony"))
-        .and_then(|s| s.get("root-dir"))
-        .and_then(serde_json::Value::as_str)
-        .map(|d| project.join(d))
-        .unwrap_or_else(|| project.to_path_buf());
+    let root_dir = flex_root_dir(project, manifest);
     let dotenv = manifest
         .get("extra")
         .and_then(|e| e.get("runtime"))

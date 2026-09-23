@@ -25,6 +25,11 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "rector/extension-installer",
     "wikimedia/composer-merge-plugin",
     "composer/package-versions-deprecated",
+    // At install: `POST_INSTALL_CMD` copies `.env` from its `.dist` and
+    // prints, `symfony-pack` packages are laid out as metapackages, and
+    // nothing else fires (`fetchRecipes` is POST_UPDATE_CMD only). The
+    // resolution commands have their own rules (`resolution_effect`).
+    "symfony/flex",
     "yiisoft/yii2-composer",
     "codeception/c3",
     "bamarni/composer-bin-plugin",
@@ -66,7 +71,6 @@ pub fn license_check_configured(root_manifest: &Value) -> bool {
 }
 
 pub const BENIGN_PLUGINS: &[&str] = &[
-    "symfony/flex",
     "php-http/discovery",
     // Only listens to POST_CREATE_PROJECT_CMD / POST_INSTALL_CMD to print a
     // message (MessagePlugin::getSubscribedEvents): no disk effect.
@@ -559,7 +563,9 @@ mod tests {
         ]));
         let r = analyze(&proj(), &lock, &json!({}), true, true);
         assert!(r.is_native_ok());
-        assert_eq!(r.skipped_plugins, vec!["symfony/flex"]);
+        // Both are emulated now (symfony/flex since its POST_INSTALL_CMD
+        // listener is): nothing to report as merely skipped.
+        assert!(r.skipped_plugins.is_empty(), "{:?}", r.skipped_plugins);
     }
 
     #[test]

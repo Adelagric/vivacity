@@ -1,0 +1,7 @@
+Lock written by Composer 2.10.3 on 2026-09-23 with `--no-plugins` (the
+root sets no `extra.symfony.require`, so Flex's pool filter would change
+nothing and the lock is the same either way; resolving without the plugin
+keeps recipes from touching this composer.json). symfony/flex 2.11.0 is
+the version the symfony and sylius fixtures lock; symfony/apache-pack is
+a `symfony-pack`, which Flex lays out as a metapackage.
+`env.dist.tpl` is the `.env.dist` the harness stages.
