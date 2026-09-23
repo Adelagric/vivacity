@@ -181,9 +181,12 @@ pub fn resolution_effect(
         "symfony/flex" => {
             if command == ResolutionCommand::Require {
                 "resolves Flex aliases and applies recipes on require (not emulated)".to_owned()
-            } else if with_install {
+            } else if with_install && command == ResolutionCommand::Remove {
                 "applies recipes to the packages it installs (not emulated; --no-install resolves natively)".to_owned()
             } else {
+                // `update` with install is decided once the lock is solved
+                // (`flex_install_reason`): what Flex would do depends on the
+                // packages the install lays out.
                 return None;
             }
         }

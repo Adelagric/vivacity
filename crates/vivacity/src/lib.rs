@@ -1039,6 +1039,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let opts = vivacity_core::installer::InstallOptions {
         with_dev,
         offline: args.offline,
+        plugins_enabled: !args.no_plugins,
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;
@@ -2458,6 +2459,69 @@ fn flex_downloader_enabled(manifest: &serde_json::Value) -> bool {
     })
 }
 
+/// Why `symfony/flex` has to handle this `update` itself, or `None` when
+/// it would write nothing but what vivacity already reproduces.
+///
+/// Flex's operations are not the update transaction's: `recordOperations`
+/// (`PRE_OPERATIONS_EXEC`) rebuilds them from `symfony.lock` against the
+/// packages the install will lay out, and records an install for each
+/// name `symfony.lock` does not hold (updates and uninstalls are dropped
+/// there). For each of those it looks for a recipe in the endpoints'
+/// index and, failing that, for a bundle class under vendor/ — either one
+/// means files written into the project.
+///
+/// Only the case where the install lays out nothing new is emulated: then
+/// every recorded package is already extracted at exactly the version the
+/// new lock names, so both questions are answerable without writing
+/// anything. Anything else hands over.
+fn flex_install_reason(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock_value: &serde_json::Value,
+    with_dev: bool,
+    offline: bool,
+) -> anyhow::Result<Option<String>> {
+    let lock = vivacity_core::lock::Lock::from_value(lock_value);
+    let installed = installed_packages(project, manifest);
+    if unchanged_local_repository(&installed, lock_value, with_dev).is_none() {
+        return Ok(Some(
+            "applies recipes to the packages it installs (not emulated; only an update that lays out nothing new is)"
+                .to_owned(),
+        ));
+    }
+    // `recordOperations`: an install operation per resolved package absent
+    // from symfony.lock.
+    let locked = flex::lock_names(project);
+    let recorded: Vec<&vivacity_core::lock::LockPackage> = lock
+        .wanted_packages(with_dev)
+        .filter(|p| !locked.contains(p.name()))
+        .collect();
+    if recorded.is_empty() {
+        return Ok(None);
+    }
+    let index = flex::recipe_index(project, manifest, offline)?;
+    for p in &recorded {
+        if index.applies_to(p.name(), p.version(), p.raw.get("extra")) {
+            return Ok(Some(format!(
+                "would apply the recipe of {} (not emulated)",
+                p.name()
+            )));
+        }
+    }
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
+    for p in &recorded {
+        if flex::has_bundle_class(&vendor, p.name(), &serde_json::Value::Object(p.raw.clone())) {
+            return Ok(Some(format!(
+                "would register {}'s bundle in config/bundles.php (not emulated)",
+                p.name()
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// `Flex::install` on `POST_INSTALL_CMD` (an `install`, not an update):
 /// `fetchRecipes` is not called — the event is not POST_UPDATE_CMD — so
 /// the listener only copies `.env` and prints. Returns the `.env` it
@@ -2907,6 +2971,35 @@ fn resolve_and_lock(
         Err(e) => return Err(anyhow::anyhow!("{e}")),
     };
     trace("resolve", t0);
+
+    // symfony/flex with install: its `POST_UPDATE_CMD` applies recipes to
+    // what the install lays out. vivacity emulates that only where Flex
+    // would apply none — and the question is answerable exactly here, on
+    // the solved lock, before anything is written.
+    if flex_active && !args.no_install && !args.dry_run {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            if let Some(reason) =
+                flex_install_reason(&project, &m, &lock, installer_dev_mode, args.offline)?
+            {
+                let code = delegate_resolution(
+                    &project,
+                    vivacity_core::scope::ResolutionCommand::Update,
+                    &[vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                        "symfony/flex".to_owned(),
+                        reason,
+                    )],
+                    args.no_fallback,
+                )?;
+                return Ok(Resolved {
+                    status: code,
+                    lock: None,
+                    post: Vec::new(),
+                    manifest: serde_json::Value::Null,
+                    flex_active: false,
+                });
+            }
+        }
+    }
 
     let lock_path = project.join("composer.lock");
     let mut text = vivacity_core::phpjson::php_json_encode_with(

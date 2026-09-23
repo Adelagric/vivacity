@@ -6,3 +6,15 @@ merged first endpoint wins (`Downloader::initialize`), captured on
 Flex's `PackageFilter` reads; no `recipes` (so a Flex-enabled Composer
 applies none), no `aliases`. Served to both tools by the harnesses through
 `extra.symfony.endpoint: ["file://<path>/index.json"]`.
+
+index-recipes.json: the same `versions`, plus the REAL `recipes` entries of
+symfony/flex, symfony/console and symfony/framework-bundle (captured from
+https://raw.githubusercontent.com/symfony/recipes/flex/main/index.json on
+2026-09-23) and nothing else — enough for a harness to exercise both
+directions of `Downloader::getRecipes`' version selection without carrying
+the 255-package map. `_links` is kept as captured (Flex reads it the moment a recipe matches),
+but no harness case lets a recipe match on the Composer side, so no recipe
+is ever downloaded. `recipe-conflicts` is deliberately absent: vivacity
+ignores it (it only ever removes entries, so ignoring it can only cause a
+needless hand-over), and a harness that fed it would not tell the two
+apart.

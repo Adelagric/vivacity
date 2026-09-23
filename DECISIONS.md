@@ -1368,3 +1368,33 @@ installé et que nous n'imprimions jamais. Vérifié : fixture `flex-install`,
 7 cas, stderr complète comparée ; install Symfony complet (152 paquets)
 stderr identique et `.env` identique ; 248 tests, steps 240/240, 16 harnais.
 
+## 2026-09-23 — Flex, tranche B : `update` avec install quand aucune recette ne s'applique
+
+Fait : suite de la tranche A, dans l'ordre que le relecteur avait fixé. Le
+point dur est que les opérations de Flex ne sont pas celles de la
+transaction : `recordOperations` les reconstruit depuis `symfony.lock` et
+enregistre un install par paquet du lock résolu que ce fichier ne contient
+pas. Décision : émuler le seul cas où la question est décidable avant
+d'écrire — l'install ne pose rien de neuf, donc tout est déjà extrait à la
+bonne version, donc la recherche de recette (index) et la détection de
+bundle (lecture de vendor/) sont possibles ; la décision est prise entre la
+résolution et l'écriture du lock, pas après (le constat 5 de la revue).
+Portés pour ça : le domaine de `recordOperations`, la sélection de version
+de `Downloader::getRecipes`, et `SymfonyBundle::getClassNames` +
+`isBundleClass`. `recipe-conflicts` volontairement non appliqué : il ne
+fait que retirer des entrées de l'index, donc l'ignorer ne peut causer
+qu'un repli inutile, jamais une recette manquée — le seul sens d'erreur
+acceptable ici, puisque se tromper dans l'autre sens perdrait
+silencieusement l'enregistrement d'un bundle. Trois bugs de parité trouvés
+par le harnais, tous corrigés : `installation-source` vient de la phase de
+téléchargement (donc un `symfony-pack` l'a quand Flex s'installe dans le
+même run, et pas quand Flex était déjà là — `MetapackageInstaller::download`
+ne télécharge rien), un paquet inchangé garde ce que son entrée avait (la
+décision passe du sérialiseur à l'installateur), et `purgePackages` ne doit
+pas retirer l'entrée d'un paquet qu'on ne pose nulle part, ce qui faisait
+réécrire l'entrée d'un pack Flex à chaque no-op. Limite connue laissée
+telle quelle : nous écrivons installed.json avec notre indentation là où
+Composer reprend celle du fichier — visible seulement sur un fichier édité
+à la main. Vérifié : harnais flex-update (5 cas, rouge sans le changement),
+251 tests, steps 240/240, 18 harnais.
+

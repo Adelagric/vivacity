@@ -28,12 +28,14 @@ stage_project() {
 # http except with `secure-http: false`, which seed_flex sets on the
 # staged copies. Sets FLEX_INDEX_URL and FLEX_INDEX_PID (no command
 # substitution: the pid must survive); `flex_index_stop` ends it.
+# `flex_index_serve [nom]` : `index.json` par défaut, `index-recipes.json`
+# (les mêmes `versions` plus de vraies entrées `recipes`) sur demande.
 flex_index_serve() {
-  local port
+  local file="${1:-index.json}" port
   port=$(php -r '$s = stream_socket_server("tcp://127.0.0.1:0", $e, $m); $n = stream_socket_get_name($s, false); fclose($s); echo substr($n, strrpos($n, ":") + 1);')
   php -S "127.0.0.1:$port" -t "$ROOT/fixtures/flex" >/dev/null 2>&1 &
   FLEX_INDEX_PID=$!
-  FLEX_INDEX_URL="http://127.0.0.1:$port/index.json"
+  FLEX_INDEX_URL="http://127.0.0.1:$port/$file"
   for _ in $(seq 1 50); do
     curl -fs -o /dev/null "$FLEX_INDEX_URL" 2>/dev/null && break
     sleep 0.1
@@ -50,7 +52,13 @@ flex_index_stop() { [ -n "${FLEX_INDEX_PID:-}" ] && kill "$FLEX_INDEX_PID" 2>/de
 seed_flex() {
   local dest="$1" fx="$2" url="$3"
   mkdir -p "$dest/vendor/composer" "$dest/vendor/symfony/flex"
-  jq '{packages: [(.packages[] | select(.name == "symfony/flex") | . + {"install-path": "../symfony/flex"})], dev: true, "dev-package-names": []}' "$dest/composer.lock" > "$dest/vendor/composer/installed.json"
+  # L'entrée est celle que Composer écrirait : `version_normalized` et
+  # `installation-source` compris (sans eux, un paquet inchangé garde
+  # l'entrée telle quelle chez Composer et la comparaison verrait un écart
+  # qui vient de l'amorçage, pas du produit). `--indent 4` pour la même
+  # raison : `JsonFile::write` reprend l'indentation du fichier existant,
+  # et Composer écrit installed.json en 4 espaces.
+  jq --indent 4 '{packages: [(.packages[] | select(.name == "symfony/flex") | . + {"version_normalized": (.version | ltrimstr("v") + ".0"), "installation-source": "dist", "install-path": "../symfony/flex"})], dev: true, "dev-package-names": []}' "$dest/composer.lock" > "$dest/vendor/composer/installed.json"
   [ "$(jq '.packages | length' "$dest/vendor/composer/installed.json")" = 1 ] || { echo "seed_flex: symfony/flex not in $fx's lock" >&2; return 1; }
   [ -d "$ROOT/fixtures/work/$fx/vendor/symfony/flex" ] || { echo "seed_flex: fixtures/work/$fx/vendor/symfony/flex missing (fixtures/make.sh)" >&2; return 1; }
   (cd "$ROOT/fixtures/work/$fx/vendor/symfony/flex" && tar -cf - .) | (cd "$dest/vendor/symfony/flex" && tar -xf -)

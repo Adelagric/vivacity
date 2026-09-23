@@ -143,14 +143,9 @@ pub fn installed_json(lock: &Lock, with_dev: bool, layout: &Layout) -> Result<St
             "version_normalized".to_owned(),
             Value::String(normalize_pretty(p.version()).unwrap_or_else(|_| p.version().to_owned())),
         );
-        // ArrayDumper: the key only exists if an installation source was
-        // chosen, never for a metapackage (nothing is installed).
-        if !p.is_metapackage() {
-            src.insert(
-                "installation-source".to_owned(),
-                Value::String("dist".to_owned()),
-            );
-        }
+        // `installation-source` is carried by the entry itself: the
+        // installer decides it (the download phase's doing), this only
+        // places it in ArrayDumper's key order.
         for key in ENTRY_KEY_ORDER {
             if let Some(v) = src.remove(key) {
                 entry.insert(key.to_owned(), v);
@@ -559,7 +554,17 @@ mod tests {
 
     #[test]
     fn installed_json_shape() {
-        let lock = sample_lock();
+        // `installation-source` is decided by the installer (the download
+        // phase's doing) and carried by the entry; this only places it.
+        let mut lock = sample_lock();
+        for p in lock.packages.iter_mut() {
+            if p.name() == "a/lib" {
+                p.raw.insert(
+                    "installation-source".to_owned(),
+                    Value::String("dist".to_owned()),
+                );
+            }
+        }
         let layout = Layout::vendor_only(std::path::Path::new("/proj"), &lock, true);
         let text = installed_json(&lock, true, &layout).expect("json");
         let v: Value = serde_json::from_str(&text).expect("parse");
@@ -576,6 +581,11 @@ mod tests {
         );
         assert_eq!(v["packages"][0]["version_normalized"], "1.2.0.0");
         assert_eq!(v["packages"][0]["installation-source"], "dist");
+        assert_eq!(
+            v["packages"][1]["installation-source"],
+            Value::Null,
+            "an entry that does not carry it does not grow one"
+        );
         assert_eq!(v["packages"][0]["install-path"], "../a/lib");
         assert_eq!(v["packages"][1]["install-path"], Value::Null, "metapackage");
         assert_eq!(v["dev"], true);

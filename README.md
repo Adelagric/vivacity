@@ -263,7 +263,10 @@ root and then runs the plugin's implicit update (refused with the
 reason).
 
 `symfony/flex`'s pool filter is emulated for `update` and `remove` with
-`--no-install`: the index of its endpoints (`extra.symfony.endpoint`,
+`--no-install`, and `update` **with** install is emulated too when Flex
+would apply no recipe — no package the install adds to `symfony.lock` has
+one in the recipe index or ships a bundle class, and the install lays out
+nothing new; anything else hands over before the lock is written: the index of its endpoints (`extra.symfony.endpoint`,
 `SYMFONY_ENDPOINT`, the two recipe indexes by default; cached in Flex's
 own format under Composer's cache) prunes the pool against
 `extra.symfony.require` / `SYMFONY_REQUIRE` exactly as

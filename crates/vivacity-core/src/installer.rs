@@ -20,6 +20,9 @@ pub struct InstallOptions {
     pub offline: bool,
     /// Download/extraction parallelism.
     pub jobs: usize,
+    /// No `--no-plugins`: Flex, when installed and allowed, lays out
+    /// `symfony-pack` packages as metapackages.
+    pub plugins_enabled: bool,
 }
 
 impl Default for InstallOptions {
@@ -28,6 +31,7 @@ impl Default for InstallOptions {
             with_dev: true,
             offline: false,
             jobs: 16,
+            plugins_enabled: true,
         }
     }
 }
@@ -101,6 +105,7 @@ fn local_repository(
     lock: &Lock,
     previous: &BTreeMap<String, Installed>,
     unchanged_names: &std::collections::BTreeSet<&str>,
+    flex_ready: bool,
 ) -> Lock {
     let mut local = lock.clone();
     for p in local
@@ -108,15 +113,31 @@ fn local_repository(
         .iter_mut()
         .chain(local.packages_dev.iter_mut())
     {
-        if !unchanged_names.contains(p.name()) {
+        if unchanged_names.contains(p.name()) {
+            // Untouched by this run: Composer dumps the package object it
+            // loaded from installed.json, so the entry keeps what it had —
+            // `installation-source` included, whether or not it is there.
+            if let Some(prev) = previous.get(p.name()) {
+                let mut raw = prev.raw.clone();
+                for key in ["version_normalized", "install-path"] {
+                    raw.remove(key);
+                }
+                p.raw = raw;
+            }
             continue;
         }
-        if let Some(prev) = previous.get(p.name()) {
-            let mut raw = prev.raw.clone();
-            for key in ["version_normalized", "installation-source", "install-path"] {
-                raw.remove(key);
-            }
-            p.raw = raw;
+        // Laid out by this run: the DOWNLOAD phase sets the source, and it
+        // runs for the whole batch before any operation executes. A
+        // metapackage is never downloaded; a `symfony-pack` escapes it only
+        // when Flex was already registered by then (`flex_ready`) —
+        // installed in the same run, the pack is downloaded first and laid
+        // out afterwards by Flex's metapackage installer.
+        p.raw.remove("installation-source");
+        if !p.is_virtual(flex_ready) {
+            p.raw.insert(
+                "installation-source".to_owned(),
+                serde_json::Value::String("dist".to_owned()),
+            );
         }
     }
     local
@@ -142,7 +163,8 @@ pub fn local_repository_if_unchanged(lock: &Lock, layout: &Layout, with_dev: boo
         }
         unchanged.insert(p.name());
     }
-    Some(local_repository(lock, &previous, &unchanged))
+    // Every package is unchanged here, so the flag is not consulted.
+    Some(local_repository(lock, &previous, &unchanged, false))
 }
 
 pub async fn install(
@@ -168,7 +190,20 @@ pub async fn install(
     // path is gone is not installed at all (a fresh install, not an
     // update — no `removeBinaries`, no removal of the old path).
     let mut previous = installed_packages(&layout.composer_dir());
-    previous.retain(|name, _| {
+    previous.retain(|name, installed| {
+        // `purgePackages` asks the installer: `MetapackageInstaller::
+        // isInstalled` answers from the repository alone, so a package
+        // nothing is laid out for (a metapackage, a Flex pack) is never
+        // purged — there is no path to look at.
+        if installed
+            .raw
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("metapackage")
+            || layout.install_path(name).is_none()
+        {
+            return true;
+        }
         layout
             .abs(name)
             .or_else(|| layout.removals().find(|(n, _)| n == name).map(|(_, d)| d))
@@ -459,7 +494,13 @@ pub async fn install(
     // changing its identity — routine with `path` packages whose reference
     // is a git HEAD or none — leaves installed.json and the autoloader as
     // Composer leaves them.
-    let local = local_repository(lock, &previous, &unchanged_names);
+    let flex_ready = opts.plugins_enabled
+        && previous.contains_key("symfony/flex")
+        && matches!(
+            crate::layout::plugin_allowed(root_manifest, "symfony/flex"),
+            crate::layout::PluginVerdict::Allowed
+        );
+    let local = local_repository(lock, &previous, &unchanged_names, flex_ready);
     let root = RootPackage::detect(root_manifest, project_dir, opts.with_dev);
     crate::state::write_state_files(
         &layout.composer_dir(),

@@ -46,7 +46,31 @@ byte-identical-output promise are the public API.
   Doppar skeleton 38 → 35 ms (74 packages), Laravel 57 → 53 ms (109),
   Sylius 76 → 63 ms (276) — the gain grows with the lock.
 
+### Added
+- **`update` with install is native on a Flex project when no recipe
+  applies**, instead of always going to Composer. Flex's operations are
+  not the update transaction's: `recordOperations` rebuilds them from
+  `symfony.lock`, one install per resolved package the file does not
+  hold. vivacity now computes that set, looks each one up in the recipe
+  index (`Downloader::getRecipes`' version selection, ported) and, failing
+  that, for a bundle class under vendor/ (`SymfonyBundle::getClassNames`,
+  ported) — and proceeds only when none applies and the install lays out
+  nothing new, which is the one case where both questions are answerable
+  before anything is written. Anything else hands over, with the reason,
+  before the lock is touched.
+
 ### Fixed
+- **`installation-source` follows the download phase, not the layout.** A
+  `symfony-pack` carries it when Flex is installed in the same run (the
+  pack is downloaded before Flex registers its metapackage installer) and
+  not when Flex was already installed; an unchanged package keeps whatever
+  its entry had. vivacity regenerated the key for every package on every
+  run.
+- **A package nothing is laid out for is no longer purged from
+  installed.json** (`purgePackages` asks the installer, and
+  `MetapackageInstaller::isInstalled` answers from the repository): a
+  metapackage or a Flex pack was treated as absent on every no-op, which
+  rewrote its entry.
 - **`vivacity install` on a Symfony project left the app without its
   `.env`.** `symfony/flex` listens to `POST_INSTALL_CMD` and copies
   `.env.dist` to `.env` when neither `.env` nor `.env.local` exists and

@@ -101,6 +101,8 @@ jobs:
         run: harness/package-versions.sh
       - name: symfony/flex at install (.env from .env.dist, its lines, symfony-pack)
         run: harness/flex-install.sh
+      - name: symfony/flex on update with install (recipes decided before writing)
+        run: harness/flex-update.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh
