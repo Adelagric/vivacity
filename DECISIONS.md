@@ -1442,3 +1442,44 @@ demanderait une lecture de vendor/ — laissé en repli inutile, jamais en
 écriture manquée. Vérifié : harnais flex-update passé de 5 à 11 cas (les 6
 nouveaux rouges avant le changement, dont 2 natifs), flex-install 7/7,
 update 12/12, 253 tests.
+
+## 2026-09-24 — Flex, tranche C : l'ordre de la revue corrigé par deux faits
+
+Fait : l'ordre recoupé par la revue mettait le rappel `symfony/thanks` en
+deuxième et la lecture d'archive en dernier (« le tiers le moins utile »).
+Deux faits l'inversent partiellement.
+
+Le rappel `symfony/thanks` n'est pas observable avant les réponses par
+paquet : il exige un `POST_PACKAGE_UPDATE`, donc une opération d'update
+exécutée, alors que la précondition de la tranche B
+(`unchanged_local_repository`) exclut toute opération. L'écrire maintenant
+serait du code qu'aucun cas différentiel ne peut exercer — il part avec
+l'item 3, et il doit en faire partie, puisque le premier update natif qui
+met un paquet à jour perdrait sinon trois lignes de stderr.
+
+La lecture d'archive est un prérequis des réponses par paquet, pas l'étape
+optionnelle finale. `recordOperations` enregistre un paquet dès que
+`symfony.lock` n'a pas son nom, que l'opération soit un install ou un
+update ; pour chacun, la question du bundle porte sur le **nouveau**
+contenu (`getClassNames` dérive les candidats de l'autoload du nouveau
+paquet, `isBundleClass` lit le fichier que l'install vient d'extraire).
+Avant l'install, vendor/ contient l'ancienne version : le lire est faux
+précisément pour les paquets qu'un update touche. La seule source saine
+avant écriture est le dist. Le seul négatif sain sans archive — une entrée
+de lock sans espace de noms PSR-4/PSR-0 n'a aucun nom de classe candidat —
+ne couvre que peu de paquets.
+
+Décision d'ordre de téléchargement, que la revue demandait d'écrire : les
+dists des paquets enregistrés sont récupérés avant l'écriture du lock, en
+silence. Le coût en stderr est nul — vivacity n'imprime jamais les lignes
+`  - Downloading …` de Composer (divergence connue sur cache froid, filtrée
+par trois harnais), donc déplacer le transfert plus tôt ne change aucune
+sortie ; et en cas de repli le transfert n'est pas perdu, Composer lit le
+même cache.
+
+Livré ici : `read_zip_entry` / `read_tar_entry`, adressés comme l'arbre
+extrait (même règle de racine unique), avec un test d'invariant qui extrait
+chaque archive puis relit chaque fichier par le lecteur — les extracteurs
+étant déjà comparés à `ZipArchive` et `PharData`, l'oracle est transitif.
+Un lien symbolique répond `None` et non le fichier vide que PharData écrit :
+c'est le sens d'erreur sûr pour « ce fichier déclare-t-il un bundle ».

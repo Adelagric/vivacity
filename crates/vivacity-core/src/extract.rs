@@ -612,3 +612,113 @@ mod tests {
         assert_eq!(out, body);
     }
 }
+
+/// The bytes of one file of a zip dist, addressed as the extracted tree
+/// addresses it: the same single-root strip, then a `/`-separated relative
+/// path. `None` when the archive holds no such file — a directory entry,
+/// a symlink or a missing name all answer `None`, since the question this
+/// serves is "what would this file contain once extracted".
+pub fn read_zip_entry(zip_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
+    let dest = Path::new("<archive>");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(Error::zip(dest))?;
+    let strip = root_strip(&mut archive, dest)?;
+    let wanted = Path::new(rel);
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(Error::zip(dest))?;
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.unix_mode().unwrap_or(0) & S_IFMT == S_IFLNK {
+            continue;
+        }
+        let path = entry_path(&entry, dest)?;
+        if !same_stripped(&path, strip, wanted) {
+            continue;
+        }
+        if entry.size() > MAX_UNCOMPRESSED {
+            return Err(Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: format!("entry {rel} is absurdly large"),
+            });
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
+        return Ok(Some(buf));
+    }
+    Ok(None)
+}
+
+/// The same for a tar dist. The stream is not seekable and the strip needs
+/// every path, so the archive is read once, keeping only the candidate.
+pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
+    let dest = Path::new("<archive>");
+    let wanted = Path::new(rel);
+    let mut paths: Vec<(PathBuf, bool)> = Vec::new();
+    let mut found: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    let decoder = flate2::read::GzDecoder::new(tgz_bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let mut total: u64 = 0;
+    for entry in archive.entries().map_err(Error::io(dest))? {
+        let mut entry = entry.map_err(Error::io(dest))?;
+        let kind = entry.header().entry_type();
+        let path = {
+            let raw = entry.path_bytes();
+            let text = std::str::from_utf8(&raw).map_err(|_| Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: "entry path is not UTF-8".to_owned(),
+            })?;
+            let p = Path::new(text);
+            if p.is_absolute()
+                || !p
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            {
+                return Err(Error::HostileArchive {
+                    dest: dest.to_path_buf(),
+                    reason: format!("invalid entry path: {text:?}"),
+                });
+            }
+            p.to_path_buf()
+        };
+        paths.push((path.clone(), kind.is_dir()));
+        if !kind.is_file() {
+            continue;
+        }
+        total = total.saturating_add(entry.size());
+        if total > MAX_UNCOMPRESSED {
+            return Err(Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: "decompressed size beyond the limit".to_owned(),
+            });
+        }
+        // The strip is only known at the end, so every name that could be
+        // the one — stripped or not — is kept.
+        if same_stripped(&path, 0, wanted) || same_stripped(&path, 1, wanted) {
+            let mut buf = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
+            found.push((path, buf));
+        }
+    }
+    let strip = root_strip_of(paths.iter().map(|(p, d)| (p.as_path(), *d)));
+    Ok(found
+        .into_iter()
+        .find(|(p, _)| same_stripped(p, strip, wanted))
+        .map(|(_, b)| b))
+}
+
+/// An entry path, its first `strip` components dropped, compared to a
+/// wanted relative path. `./` components are ignored on both sides, as the
+/// extraction ignores them.
+fn same_stripped(path: &Path, strip: usize, wanted: &Path) -> bool {
+    let normal = |p: &Path| -> Vec<std::ffi::OsString> {
+        p.components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(n.to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    let got = normal(path);
+    got.len() > strip && got[strip..] == normal(wanted)[..]
+}
