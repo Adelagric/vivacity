@@ -2555,6 +2555,40 @@ fn flex_install_reason(
     let lock = vivacity_core::lock::Lock::from_value(lock_value);
     let installed = installed_packages(project, manifest);
     let locked = flex::lock_names(project);
+    // `Flex::record` on `POST_PACKAGE_UNINSTALL` records every uninstall
+    // (`shouldRecordOperation` returns true for them outright), and
+    // `fetchRecipes` then drops the name from `symfony.lock` and
+    // unconfigures it: with `$uninstall` true, `getClassNames()` returns
+    // every candidate class without reading a single file, so a removal
+    // almost always yields an auto-generated recipe. A removal of a name
+    // `symfony.lock` does not hold is skipped before any write, and with
+    // `--no-dev` a package the new lock has under `packages-dev` is not
+    // recorded at all.
+    let wanted: std::collections::BTreeSet<&str> =
+        lock.wanted_packages(with_dev).map(|p| p.name()).collect();
+    let dev_names: std::collections::BTreeSet<&str> = lock_value
+        .get("packages-dev")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    for entry in &installed {
+        let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if wanted.contains(name) || !locked.contains(name) {
+            continue;
+        }
+        if !with_dev && dev_names.contains(name) {
+            continue;
+        }
+        return Ok(Some(format!(
+            "would unconfigure {name} and drop it from symfony.lock (not emulated)"
+        )));
+    }
     let recorded: Vec<&vivacity_core::lock::LockPackage> = lock
         .wanted_packages(with_dev)
         .filter(|p| !locked.contains(p.name()))

@@ -20,6 +20,14 @@ byte-identical-output promise are the public API.
   for one an installer puts outside `<vendor-dir>/<name>`, where Flex's own
   read finds nothing. Anything that cannot be answered before writing hands
   over.
+- **`update` hands over when the install would remove a package
+  `symfony.lock` holds.** `Flex::record` records every uninstall and
+  `fetchRecipes` then drops the name from `symfony.lock` and unconfigures
+  it — with `$uninstall` true, `getClassNames()` returns every candidate
+  class without reading a file, so a removal almost always yields an
+  auto-generated recipe. A removal of a name `symfony.lock` does not hold
+  is skipped before any write, and with `--no-dev` a package the new lock
+  has under `packages-dev` is not recorded at all.
 - **The `symfony/thanks` reminder**, which Flex prints on any update whose
   transaction updates a package, unless the plugin is already active
   locally or in `COMPOSER_HOME` (`class_exists(Thanks::class, false)`

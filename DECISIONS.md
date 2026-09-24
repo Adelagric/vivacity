@@ -1533,5 +1533,15 @@ l'autoritaire. Leçon : le hook pre-push ne fait tourner que fmt/clippy/tests
 harnais qui le nomment (`grep -l` sur harness/), ici transitions.sh et
 vendor-dir.sh.
 
-Vérifié : flex-update 15/15 (les 10 nouveaux cas rouges avant), transitions,
+Trou refermé dans le même mouvement, ouvert par la suppression de la
+précondition globale : les **suppressions**. `Flex::record` (POST_PACKAGE_
+UNINSTALL) enregistre tout uninstall, et `fetchRecipes` retire alors le nom
+de `symfony.lock` puis désinstalle le bundle — avec `$uninstall` vrai,
+`getClassNames()` rend tous les noms candidats sans lire un seul fichier.
+Sans le garde, le cas `remove-package` ne rendait pas la main et **écrivait**
+le lock. Une suppression d'un nom absent de `symfony.lock` est sautée avant
+toute écriture, et en `--no-dev` un paquet que le nouveau lock porte sous
+`packages-dev` n'est pas enregistré du tout.
+
+Vérifié : flex-update 16/16 (les 11 nouveaux cas rouges avant), transitions,
 vendor-dir, flex-install 7/7, update 19/19, steps 240/240, 256 tests.

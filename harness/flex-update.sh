@@ -125,7 +125,19 @@ downgrade_package() { # projet, paquet
   jq --indent 4 --arg n "$2" '.packages |= map(if .name == $n then .version = "v0.0.1" | .version_normalized = "0.0.1.0" | .dist.reference = "0000000000000000000000000000000000000000" else . end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
+# Une exigence racine retirée APRÈS la convergence : l'update mesuré est
+# celui qui supprime le paquet, et `symfony.lock` le détient encore.
+drop_require() { # projet, paquet
+  php -r '
+    $f = $argv[1] . "/composer.json";
+    $j = json_decode(file_get_contents($f), true);
+    unset($j["require"][$argv[2]], $j["require-dev"][$argv[2]]);
+    file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+  ' "$1" "$2"
+}
+
 shape_forget_log()    { case "$1" in post) forget_package "$2" psr/log;; esac; }
+shape_remove_expr()   { case "$1" in post) drop_require "$2" symfony/expression-language;; esac; }
 shape_forget_twig()   { case "$1" in post) forget_package "$2" symfony/twig-bundle;; esac; }
 shape_forget_flex()   { case "$1" in post) forget_package "$2" symfony/flex;; esac; }
 shape_downgrade_log() { case "$1" in post) downgrade_package "$2" psr/log;; esac; }
@@ -207,6 +219,9 @@ prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bun
 prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    fallback "would register symfony/twig-bundle's bundle"
 # Une opération d'update arme le rappel `symfony/thanks`.
 prepare thanks         shape_downgrade_log - && run thanks    native
+# Une suppression : `record` l'enregistre, `fetchRecipes` retire le nom de
+# `symfony.lock` et désinstalle le bundle.
+prepare remove-package shape_remove_expr - && run remove-package fallback "would unconfigure symfony/expression-language"
 # symfony/flex installé par ce run : `install()` arrête la propagation et
 # relance un Installer complet.
 prepare flex-installed shape_forget_flex - && run flex-installed fallback "would install itself"
