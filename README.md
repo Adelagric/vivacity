@@ -41,7 +41,7 @@ Also `cargo install vivacity` (crates.io), `cargo binstall vivacity`, or
 GitHub Actions:
 
 ```yaml
-- uses: Adelagric/vivacity@v0.17.0
+- uses: Adelagric/vivacity@v0.18.0
 - run: vivacity install
 ```
 
@@ -325,7 +325,7 @@ runtime. Such a host selects the provider-agnostic backend instead and
 installs its own process-wide default provider before the first request:
 
 ```toml
-vivacity = { version = "0.17", default-features = false, features = ["rustls-tls-no-provider"] }
+vivacity = { version = "0.18", default-features = false, features = ["rustls-tls-no-provider"] }
 ```
 
 vivacity's regular expressions run on PCRE2 (Composer's patterns need it:
