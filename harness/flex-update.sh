@@ -138,6 +138,20 @@ drop_require() { # projet, paquet
 
 shape_forget_log()    { case "$1" in post) forget_package "$2" psr/log;; esac; }
 shape_remove_expr()   { case "$1" in post) drop_require "$2" symfony/expression-language;; esac; }
+# Le vrai `symfony.lock` de la fixture (30 entrées) au lieu du fabriqué :
+# 123 des 153 paquets sont alors enregistrés, chacun interrogé sur sa
+# recette et sur sa classe de bundle. C'est la forme d'un projet réel.
+shape_real_lock()     { case "$1" in post) cp "$ROOT/fixtures/projects/$FX/symfony.lock" "$2/symfony.lock";; esac; }
+# Le même, moins une entrée qui porte un bundle : le repli qui s'ensuit
+# prouve que c'est bien ce fichier-là qui décide de l'ensemble enregistré
+# (avec un fichier ignoré ou complet, les deux cas seraient natifs).
+shape_real_lock_gap() { case "$1" in post)
+                          php -r '
+                            $f = $argv[1] . "/symfony.lock";
+                            $j = json_decode(file_get_contents($argv[2]), true);
+                            unset($j["symfony/twig-bundle"]);
+                            file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+                          ' "$2" "$ROOT/fixtures/projects/$FX/symfony.lock";; esac; }
 shape_forget_twig()   { case "$1" in post) forget_package "$2" symfony/twig-bundle;; esac; }
 shape_forget_flex()   { case "$1" in post) forget_package "$2" symfony/flex;; esac; }
 shape_downgrade_log() { case "$1" in post) downgrade_package "$2" psr/log;; esac; }
@@ -219,6 +233,8 @@ prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bun
 prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    fallback "would register symfony/twig-bundle's bundle"
 # Une opération d'update arme le rappel `symfony/thanks`.
 prepare thanks         shape_downgrade_log - && run thanks    native
+prepare real-symfony-lock shape_real_lock     - && run real-symfony-lock native
+prepare real-lock-gap     shape_real_lock_gap - && run real-lock-gap     fallback "would register symfony/twig-bundle's bundle"
 # Une suppression : `record` l'enregistre, `fetchRecipes` retire le nom de
 # `symfony.lock` et désinstalle le bundle.
 prepare remove-package shape_remove_expr - && run remove-package fallback "would unconfigure symfony/expression-language"

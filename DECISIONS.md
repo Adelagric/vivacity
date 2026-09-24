@@ -1543,5 +1543,14 @@ le lock. Une suppression d'un nom absent de `symfony.lock` est sautée avant
 toute écriture, et en `--no-dev` un paquet que le nouveau lock porte sous
 `packages-dev` n'est pas enregistré du tout.
 
-Vérifié : flex-update 16/16 (les 11 nouveaux cas rouges avant), transitions,
+Mesure de ce que la tranche achète sur un projet réel : avec le **vrai**
+`symfony.lock` de la fixture symfony (30 entrées, donc 123 des 153 paquets
+enregistrés), `update` avec install est natif — projet, composer.lock,
+symfony.lock et stderr identiques. C'est cohérent : les paquets qui portent
+un bundle sont exactement ceux dont la recette a été appliquée, donc ceux
+que `symfony.lock` détient. Le cas jumeau `real-lock-gap` (le même fichier
+moins `symfony/twig-bundle`) rend la main sur ce bundle : sans lui, la paire
+serait vide de sens, un fichier ignoré ou complet donnant aussi « natif ».
+
+Vérifié : flex-update 18/18 (les 13 nouveaux cas rouges avant), transitions,
 vendor-dir, flex-install 7/7, update 19/19, steps 240/240, 256 tests.
