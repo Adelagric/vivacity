@@ -1398,3 +1398,47 @@ Composer reprend celle du fichier — visible seulement sur un fichier édité
 à la main. Vérifié : harnais flex-update (5 cas, rouge sans le changement),
 251 tests, steps 240/240, 18 harnais.
 
+
+## 2026-09-24 — Flex, tranche C item 1 : le garde de synchronisation ramené à ce qui s'écrit
+
+Fait : la revue adversariale de la tranche C a désigné notre propre garde
+comme le vrai blocage — `package.json` ou `importmap.php` présent faisait
+rendre la main sur *toute* application Symfony réelle, quelle que soit la
+transaction, alors que c'était recopier le déclencheur de Flex
+(`shouldSynchronize()`) et non ce qu'il écrit. Décision : répondre à la
+question « qu'est-ce qui serait écrit », lue dans la source de Flex 2.9 et
+de Composer 2.10.3, pas dans un souvenir.
+
+Branche `importmap.php` (elle gagne quand les deux fichiers existent) :
+`updateImportMap` rend la main avant de lire le fichier sur une liste
+d'entrées vide, `updateControllersJsonFile` sur un `assets/controllers.json`
+absent, et `synchronizeForAssetMapper` renvoie toujours false — donc même
+les trois lignes de stderr ne sortent pas. Les entrées ne viennent que de
+paquets portant le mot-clé `symfony-ux`, et **les mots-clés voyagent dans
+le lock** : 4 tels paquets dans la fixture symfony, 5 dans sylius.
+
+Branche `package.json` : un fichier illisible par le parseur fait sortir
+Flex avant toute écriture ; sinon `removeObsoletePackageJsonLinks` écrit
+**sans condition**, et comme `JsonManipulator::__construct` garde
+`trim($contents)` et que `getContents()` rajoute `$this->newline` (un
+`\r\n` dès que le fichier en contient un), cette écriture ne préserve les
+octets que sur un fichier déjà de cette forme. D'où le prédicat retenu :
+pas de mot-clé `symfony-ux`, pas de `assets/controllers.json`, aucun lien
+`@… : file:<vendor-dir>/…/assets` dont le paquet a disparu, et
+`trim(octets) + newline == octets`.
+
+Corollaire de placement : ces questions portent sur le **nouveau** lock,
+donc le garde ne pouvait pas rester avant la résolution. Il passe à côté de
+`flex_install_reason`, entre la résolution et l'écriture du lock — le point
+que la tranche B a déjà prouvé sans écriture. Et il ne dépend pas de
+l'install : mesuré sur Composer 2.10.3, `update --no-install` dispatche
+quand même `POST_UPDATE_CMD` (Flex synchronise, `--no-scripts` ne coupe que
+les scripts de composer.json, pas les abonnés du plugin), tandis que
+`--dry-run` ne le dispatche pas du tout.
+
+Sens d'erreur assumé : un paquet `symfony-ux` dont le propre
+`assets/package.json` manque ne produit aucune entrée, mais le vérifier
+demanderait une lecture de vendor/ — laissé en repli inutile, jamais en
+écriture manquée. Vérifié : harnais flex-update passé de 5 à 11 cas (les 6
+nouveaux rouges avant le changement, dont 2 natifs), flex-install 7/7,
+update 12/12, 253 tests.

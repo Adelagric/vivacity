@@ -2380,19 +2380,24 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
     }
 }
 
-/// `Flex::install` on `POST_UPDATE_CMD` after a resolution that installed
-/// nothing (no operations, hence no recipes): an empty line, then
-/// `finish()` — `synchronizePackageJson`'s notices (the synchronisation
-/// itself, with a package.json or importmap.php, is a fallback guard
-/// upstream), `symfony.lock` unchanged — then the recipes hint when the
-/// downloader is enabled (symfony/flex required by the root).
-fn print_flex_post_update(manifest: &serde_json::Value) {
-    let sync = manifest
+/// `extra.symfony/flex.synchronize_package_json`, default true.
+fn flex_synchronize_enabled(manifest: &serde_json::Value) -> bool {
+    manifest
         .get("extra")
         .and_then(|e| e.get("symfony/flex"))
         .and_then(|f| f.get("synchronize_package_json"))
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+        .unwrap_or(true)
+}
+
+/// `Flex::install` on `POST_UPDATE_CMD` after a resolution that installed
+/// nothing (no operations, hence no recipes): an empty line, then
+/// `finish()` — `synchronizePackageJson`'s notices, the synchronisation
+/// itself decided by `flex_sync_reason` on the solved lock, `symfony.lock`
+/// unchanged — then the recipes hint when the downloader is enabled
+/// (symfony/flex required by the root).
+fn print_flex_post_update(manifest: &serde_json::Value) {
+    let sync = flex_synchronize_enabled(manifest);
     let enabled = flex_downloader_enabled(manifest);
     // `fetchRecipes` writes this one before `install`'s blank line.
     if !enabled {
@@ -2522,6 +2527,150 @@ fn flex_install_reason(
     Ok(None)
 }
 
+/// `Flex::finish` → `synchronizePackageJson`: why it has to run, or
+/// `None` when it would write nothing and print nothing.
+///
+/// `shouldSynchronize()` is `package.json || importmap.php`, which is far
+/// wider than what actually gets written. With `importmap.php` — which
+/// wins when both exist — `synchronizeForAssetMapper` calls
+/// `updateImportMap`, which returns before reading the file when no entry
+/// was resolved, and `updateControllersJsonFile`, which returns when
+/// `assets/controllers.json` is absent; it returns false, so the three
+/// stderr lines are not printed either. Entries only come from packages
+/// carrying the `symfony-ux` keyword, and keywords travel in the lock.
+///
+/// With `package.json`: an unparsable file returns false before any write;
+/// otherwise `removeObsoletePackageJsonLinks` writes **unconditionally**,
+/// and since `JsonManipulator` holds `trim($contents)` and its
+/// `getContents()` appends the newline, that write is only byte-preserving
+/// on a file that already has that shape.
+fn flex_sync_reason(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock_value: &serde_json::Value,
+) -> Option<String> {
+    // Both cases print a notice instead of synchronising, and
+    // `print_flex_post_update` prints it.
+    if !flex_synchronize_enabled(manifest) || !flex_downloader_enabled(manifest) {
+        return None;
+    }
+    let root_dir = flex_root_dir(project, manifest);
+    let importmap = root_dir.join("importmap.php");
+    let package_json = root_dir.join("package.json");
+    if !importmap.exists() && !package_json.exists() {
+        return None;
+    }
+    let ux = flex_ux_package(lock_value);
+    let controllers = root_dir.join("assets").join("controllers.json").exists();
+    if importmap.exists() {
+        if let Some(name) = ux {
+            return Some(format!(
+                "would add the symfony-ux assets of {name} to importmap.php (not emulated)"
+            ));
+        }
+        if controllers {
+            return Some("would update assets/controllers.json (not emulated)".to_owned());
+        }
+        return None;
+    }
+    let text = match std::fs::read_to_string(&package_json) {
+        Ok(t) => t,
+        Err(e) => {
+            return Some(format!(
+                "would rewrite {}, which is unreadable here ({e})",
+                package_json.display()
+            ))
+        }
+    };
+    // `JsonFile::parseJson` failing is Flex's own way out, before any write.
+    let json: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    // `JsonManipulator` demands an object and throws on anything else:
+    // Composer would abort, which is not something to reproduce.
+    let Some(object) = json.as_object() else {
+        return Some("would fail on a package.json that is not an object".to_owned());
+    };
+    if let Some(name) = ux {
+        return Some(format!(
+            "would add the JavaScript dependencies of {name} to package.json (not emulated)"
+        ));
+    }
+    if controllers {
+        return Some("would update assets/controllers.json (not emulated)".to_owned());
+    }
+    // `removeObsoletePackageJsonLinks`: an `@…` link to
+    // `file:<vendor-dir>/…/assets` whose package.json is gone is dropped.
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .unwrap_or_default()
+        .vendor_dir(project);
+    let Ok(vendor_rel) = vendor.strip_prefix(&root_dir) else {
+        return Some(
+            "would look for obsolete package.json links under a vendor directory outside the root"
+                .to_owned(),
+        );
+    };
+    let prefix = format!("file:{}/", vendor_rel.to_string_lossy().replace('\\', "/"));
+    for key in ["dependencies", "devDependencies"] {
+        for (name, value) in object
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            let Some(target) = value.as_str() else {
+                continue;
+            };
+            if !name.starts_with('@') || !target.starts_with(&prefix) || !target.contains("/assets")
+            {
+                continue;
+            }
+            if !root_dir.join(&target[5..]).join("package.json").exists() {
+                return Some(format!(
+                    "would remove the obsolete package.json link {name} (not emulated)"
+                ));
+            }
+        }
+    }
+    // That unconditional write, byte for byte.
+    if php_json_manipulator_contents(&text) != text {
+        return Some(
+            "would rewrite package.json, whose leading or trailing whitespace Composer normalises"
+                .to_owned(),
+        );
+    }
+    None
+}
+
+/// The first locked package carrying the `symfony-ux` keyword, the one
+/// thing `resolvePackageJson` looks at (`in_array('symfony-ux',
+/// $phpPackage['keywords'] ?? [], true)`). Flex merges `packages` and
+/// `packages-dev` whatever the install's dev mode.
+fn flex_ux_package(lock_value: &serde_json::Value) -> Option<&str> {
+    ["packages", "packages-dev"]
+        .iter()
+        .filter_map(|k| lock_value.get(k))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .find(|p| {
+            p.get("keywords")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|k| k.iter().any(|w| w.as_str() == Some("symfony-ux")))
+        })
+        .and_then(|p| p.get("name"))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// What `JsonManipulator::getContents()` returns for an untouched file:
+/// the constructor's `trim($contents)` — PHP trims those six bytes — then
+/// `$this->newline`, which is `\r\n` as soon as the file holds one.
+fn php_json_manipulator_contents(text: &str) -> String {
+    let trimmed = text.trim_matches(|c| matches!(c, ' ' | '\n' | '\r' | '\t' | '\u{0B}' | '\0'));
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    format!("{trimmed}{newline}")
+}
+
 /// `Flex::install` on `POST_INSTALL_CMD` (an `install`, not an update):
 /// `fetchRecipes` is not called — the event is not POST_UPDATE_CMD — so
 /// the listener only copies `.env` and prints. Returns the `.env` it
@@ -2595,27 +2744,9 @@ fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> 
             ));
         }
     }
-    let sync = manifest
-        .get("extra")
-        .and_then(|e| e.get("symfony/flex"))
-        .and_then(|f| f.get("synchronize_package_json"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let enabled = ["require", "require-dev"].iter().any(|k| {
-        manifest
-            .get(k)
-            .and_then(|m| m.get("symfony/flex"))
-            .is_some()
-    });
-    if sync
-        && enabled
-        && (root_dir.join("package.json").exists() || root_dir.join("importmap.php").exists())
-    {
-        return Some(
-            "would synchronize package.json / importmap.php with the lock (not emulated)"
-                .to_owned(),
-        );
-    }
+    // The package.json / importmap.php synchronisation is decided by
+    // `flex_sync_reason` instead: what it writes depends on the keywords
+    // of the packages the update locks, so it cannot be answered here.
     // `Flex::update` → `unpack()`: every root requirement is looked up
     // (installed.json, else the repositories) and a `symfony-pack` with
     // requirements is unpacked into composer.json. Decided here from
@@ -2976,11 +3107,19 @@ fn resolve_and_lock(
     // what the install lays out. vivacity emulates that only where Flex
     // would apply none — and the question is answerable exactly here, on
     // the solved lock, before anything is written.
-    if flex_active && !args.no_install && !args.dry_run {
+    // The package.json / importmap.php synchronisation comes with it, and
+    // it does not need the install: measured on Composer 2.10.3, `update
+    // --no-install` still dispatches `POST_UPDATE_CMD` — so Flex still
+    // synchronises — while `--dry-run` does not dispatch it at all.
+    if flex_active && !args.dry_run {
         if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
-            if let Some(reason) =
+            let reason = if args.no_install {
+                None
+            } else {
                 flex_install_reason(&project, &m, &lock, installer_dev_mode, args.offline)?
-            {
+            }
+            .or_else(|| flex_sync_reason(&project, &m, &lock));
+            if let Some(reason) = reason {
                 let code = delegate_resolution(
                     &project,
                     vivacity_core::scope::ResolutionCommand::Update,
@@ -3942,5 +4081,45 @@ mod local_repository_tests {
         assert!(
             unchanged_local_repository(&installed, &json!({"packages": same()}), true).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod flex_sync_tests {
+    use super::{flex_ux_package, php_json_manipulator_contents};
+
+    #[test]
+    fn json_manipulator_round_trip_is_not_the_identity() {
+        // Untouched, Composer still rewrites the file as `trim` + newline.
+        assert_eq!(php_json_manipulator_contents("{}\n"), "{}\n");
+        assert_eq!(php_json_manipulator_contents("{}"), "{}\n");
+        assert_eq!(php_json_manipulator_contents("{}\n\n\n"), "{}\n");
+        assert_eq!(php_json_manipulator_contents("\n  {}  \t"), "{}\n");
+        // One CRLF anywhere and the appended newline is a CRLF.
+        assert_eq!(
+            php_json_manipulator_contents("{\r\n  \"a\": 1\r\n}"),
+            "{\r\n  \"a\": 1\r\n}\r\n"
+        );
+        // PHP's trim covers the vertical tab and the NUL byte too.
+        assert_eq!(php_json_manipulator_contents("{}\u{0B}\0"), "{}\n");
+    }
+
+    #[test]
+    fn ux_package_found_in_either_lock_section() {
+        let lock = serde_json::json!({
+            "packages": [
+                {"name": "psr/log", "keywords": ["log"]},
+                {"name": "symfony/ux-icons", "keywords": ["icons", "symfony-ux"]},
+            ],
+            "packages-dev": [{"name": "symfony/stimulus-bundle", "keywords": ["symfony-ux"]}],
+        });
+        assert_eq!(flex_ux_package(&lock), Some("symfony/ux-icons"));
+        // `packages-dev` is read whatever the install's dev mode.
+        let dev_only = serde_json::json!({
+            "packages": [{"name": "psr/log"}],
+            "packages-dev": [{"name": "symfony/stimulus-bundle", "keywords": ["symfony-ux"]}],
+        });
+        assert_eq!(flex_ux_package(&dev_only), Some("symfony/stimulus-bundle"));
+        assert_eq!(flex_ux_package(&serde_json::json!({})), None);
     }
 }

@@ -4,6 +4,24 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Changed
+- **`update` on a Symfony project no longer hands over just because it has
+  a `package.json` or an `importmap.php`.** That was
+  `PackageJsonSynchronizer::shouldSynchronize()`'s own trigger, and it is
+  much wider than what the synchronisation writes: with `importmap.php`
+  nothing is written unless a locked package carries the `symfony-ux`
+  keyword or `assets/controllers.json` exists, and with `package.json`
+  nothing unless one of those holds, a `file:` link to a gone package has
+  to be dropped, or the file is not already in the shape Composer's
+  `JsonManipulator` hands back (`trim` plus one newline, which it rewrites
+  unconditionally). Those questions need the *new* lock — keywords travel
+  in it — so they are answered between the resolution and the lock write,
+  where nothing has been written yet. Measured on Composer 2.10.3: `update
+  --no-install` still dispatches `POST_UPDATE_CMD`, so it is covered too;
+  `--dry-run` does not dispatch it at all.
+
 ## [0.18.0] — 2026-09-24
 
 ### Added

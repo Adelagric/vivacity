@@ -275,8 +275,19 @@ in "symfony/symfony" to …`), with `COMPOSER_PREFER_DEV_OVER_PRERELEASE`
 as Flex sets it; the lock is Composer's with Flex active (checked by
 `harness/update.sh` on the Symfony demo and Sylius). What Flex writes
 besides the lock stays Composer's: with install (recipes, `symfony.lock`),
-on `require` (aliases), a `.env.dist` to copy, a `package.json` or
-`importmap.php` to synchronise, a `symfony-pack` to unpack.
+on `require` (aliases), a `.env.dist` to copy, a `symfony-pack` to unpack.
+
+The `package.json` / `importmap.php` synchronisation is emulated by
+answering what it would write rather than by its trigger. Flex runs it on
+`update` (never on `install`: `finish()` is only reached at
+`POST_UPDATE_CMD`) as soon as either file exists, but with `importmap.php`
+it writes nothing when no locked package carries the `symfony-ux` keyword
+and `assets/controllers.json` is absent, and with `package.json` nothing
+when, on top of that, no `@…: file:<vendor-dir>/…/assets` link has lost
+its package and the file already has the shape Composer's
+`JsonManipulator` gives it back (`trim` plus one newline — that rewrite is
+unconditional). Those are the cases vivacity runs natively; anything else
+hands the command over before the lock is written.
 
 Scripts stay Composer's business: `vivacity install --run-scripts` hands
 each event the project declares to `composer run-script`, at the points

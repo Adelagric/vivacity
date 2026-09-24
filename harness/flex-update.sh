@@ -14,6 +14,12 @@
 # index, mais une classe de bundle → repli) ; un paquet retiré de vendor/
 # (l'install poserait quelque chose → repli).
 #
+# Tranche C, item 1 — `synchronizePackageJson` : `shouldSynchronize()` est
+# `package.json || importmap.php`, mais ce qui s'écrit est bien plus étroit.
+# Les cas `sync-*` posent la forme du projet que `stage_project` ne copie
+# pas, et retirent au besoin les paquets `symfony-ux` des exigences racine
+# — ce sont eux qui alimentent `importmap.php`.
+#
 # Usage : harness/flex-update.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -60,15 +66,59 @@ write_symfony_lock() { # projet, paquets à omettre...
   ' "$d" "$omit"
 }
 
+# Les paquets `symfony-ux` retirés des exigences racine : sans eux
+# `resolveImportMapPackages` et `resolvePackageJsonDependencies` ne rendent
+# rien, et Flex n'a plus de dépendance JS à inscrire.
+drop_ux() { # projet
+  php -r '
+    $f = $argv[1] . "/composer.json";
+    $j = json_decode(file_get_contents($f), true);
+    foreach (["symfony/stimulus-bundle", "symfony/ux-icons", "symfony/ux-live-component"] as $n) {
+      unset($j["require"][$n]);
+    }
+    file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+  ' "$1"
+}
+write_importmap() { printf '<?php\n\nreturn [];\n' > "$1/importmap.php"; }
+# Chaque forme est appelée en `pre` (avant la convergence : composer.json,
+# donc la résolution) puis en `post` (après : les fichiers que Flex lirait).
+# Les fichiers ne peuvent pas être posés avant, sinon c'est l'update de
+# préparation qui les synchronise — `--no-scripts` ne coupe que les scripts
+# de composer.json, pas les abonnés du plugin.
+shape_importmap()     { case "$1" in pre) drop_ux "$2";; post) write_importmap "$2";; esac; }
+shape_ux()            { case "$1" in post) write_importmap "$2";; esac; }
+shape_controllers()   { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) write_importmap "$2"; mkdir -p "$2/assets"
+                                printf '{\n    "controllers": [],\n    "entrypoints": []\n}\n' > "$2/assets/controllers.json";;
+                        esac; }
+shape_package()       { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) printf '{\n    "devDependencies": {}\n}\n' > "$2/package.json";;
+                        esac; }
+# Sans saut de ligne final : `JsonManipulator` rend `trim($contenu) .
+# $newline`, et `removeObsoletePackageJsonLinks` réécrit sans condition —
+# les octets changeraient.
+shape_package_dirty() { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) printf '{\n    "devDependencies": {}\n}' > "$2/package.json";;
+                        esac; }
+# Un lien `file:` vers un paquet absent : il serait retiré, donc écrit.
+shape_package_link()  { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) printf '{\n    "devDependencies": {\n        "@symfony/gone": "file:vendor/symfony/gone/assets"\n    }\n}\n' > "$2/package.json";;
+                        esac; }
+
 # Les deux côtés partent du même état convergé : un `composer update` de
 # préparation (l'instantané est figé, donc le lock qui en sort est stable),
 # puis le `symfony.lock` fabriqué ici. Le `update` mesuré ensuite ne change
 # donc rien — c'est le cas que la tranche B couvre.
-prepare() { # nom, paquets à omettre de symfony.lock
-  local name="$1"; shift
+prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony.lock
+  local name="$1" shape="$2"; shift 2
   for side in ref viv; do
     local d="$WORK/$side-$name"
     stage_project "$FX" "$d"
+    [ "$shape" = - ] || "$shape" pre "$d"
     seed_flex "$d" "$FX" "$FLEX_INDEX_URL" || return 1
     # Un symfony.lock complet AVANT la convergence : aucune opération
     # n'est enregistrée, donc Flex ne télécharge aucune recette.
@@ -78,6 +128,7 @@ prepare() { # nom, paquets à omettre de symfony.lock
       composer update --no-scripts --no-interaction --no-audit --no-ansi --no-blocking --quiet >"$WORK/$name.$side.prepare.log" 2>&1) || {
         echo "FAIL $name : la préparation a échoué ($side)"; tail -3 "$WORK/$name.$side.prepare.log"; status=1; return 1; }
     write_symfony_lock "$d" "$@"
+    [ "$shape" = - ] || "$shape" post "$d"
   done
 }
 
@@ -122,9 +173,18 @@ run() { # nom, attendu (native|fallback), motif attendu
   fi
 }
 
-prepare all-locked        && run all-locked native
-prepare no-recipe         symfony/polyfill-ctype && run no-recipe native
-prepare recipe-in-index   symfony/console        && run recipe-in-index   fallback "would apply the recipe of symfony/console"
-prepare bundle-class      symfony/twig-bundle    && run bundle-class      fallback "would register symfony/twig-bundle's bundle"
-prepare missing-package   && rm -rf "$WORK/viv-missing-package/vendor/psr/log" && run missing-package fallback "lays out nothing new"
+prepare all-locked      - && run all-locked native
+prepare no-recipe       - symfony/polyfill-ctype && run no-recipe native
+prepare recipe-in-index - symfony/console        && run recipe-in-index   fallback "would apply the recipe of symfony/console"
+prepare bundle-class    - symfony/twig-bundle    && run bundle-class      fallback "would register symfony/twig-bundle's bundle"
+prepare missing-package - && rm -rf "$WORK/viv-missing-package/vendor/psr/log" && run missing-package fallback "lays out nothing new"
+# `importmap.php` sans paquet `symfony-ux` ni `assets/controllers.json` :
+# `updateImportMap` rend la main sur une liste vide, `updateControllersJsonFile`
+# sur un fichier absent — rien n'est écrit, rien n'est affiché.
+prepare sync-importmap    shape_importmap     && run sync-importmap    native
+prepare sync-package-json shape_package       && run sync-package-json native
+prepare sync-ux           shape_ux            && run sync-ux           fallback "symfony-ux"
+prepare sync-controllers  shape_controllers   && run sync-controllers  fallback "assets/controllers.json"
+prepare sync-dirty        shape_package_dirty && run sync-dirty        fallback "would rewrite package.json"
+prepare sync-stale-link   shape_package_link  && run sync-stale-link   fallback "obsolete"
 exit $status
