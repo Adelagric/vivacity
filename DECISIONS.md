@@ -1552,5 +1552,12 @@ que `symfony.lock` détient. Le cas jumeau `real-lock-gap` (le même fichier
 moins `symfony/twig-bundle`) rend la main sur ce bundle : sans lui, la paire
 serait vide de sens, un fichier ignoré ou complet donnant aussi « natif ».
 
-Vérifié : flex-update 18/18 (les 13 nouveaux cas rouges avant), transitions,
+Bug de parité préexistant trouvé en passant, en se demandant ce que
+`--dry-run` fait du bloc de Flex : Composer ne dispatche pas du tout
+`POST_UPDATE_CMD` sur un dry run (mesuré), donc Flex n'affiche rien, pas
+même la ligne des recettes — nous en imprimions trois. Corrigé et couvert
+par un cas (`dry-run`), le harnais acceptant désormais des arguments en
+plus pour les deux côtés.
+
+Vérifié : flex-update 19/19 (les 14 nouveaux cas rouges avant), transitions,
 vendor-dir, flex-install 7/7, update 19/19, steps 240/240, 256 tests.

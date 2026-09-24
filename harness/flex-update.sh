@@ -179,18 +179,18 @@ prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony
   done
 }
 
-run() { # nom, attendu (native|fallback), motif attendu
-  local name="$1" expect="$2" reason="${3:-}"
+run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
+  local name="$1" expect="$2" reason="${3:-}" extra="${4:-}"
   local ref="$WORK/ref-$name" viv="$WORK/viv-$name" c=0 v=0
   cp "$viv/composer.lock" "$WORK/$name.lock.before"; cp "$viv/symfony.lock" "$WORK/$name.symfony.before"
   # Sur un cas de repli, Composer appliquerait la recette (réseau) : seule
   # la décision de vivacity est mesurée, et elle doit ne rien écrire.
   if [ "$expect" = native ]; then
     (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
-      composer update --no-scripts --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
+      composer update --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
   fi
   (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
-    "$VIVACITY" update --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
+    "$VIVACITY" update $extra --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
   if [ "$expect" = fallback ]; then
     # Rien ne doit avoir bougé : ni le lock, ni symfony.lock.
     if ! cmp -s "$viv/composer.lock" "$WORK/$name.lock.before" || ! cmp -s "$viv/symfony.lock" "$WORK/$name.symfony.before"; then
@@ -221,6 +221,9 @@ run() { # nom, attendu (native|fallback), motif attendu
 }
 
 prepare all-locked      - && run all-locked native
+# `--dry-run` : Composer ne dispatche pas POST_UPDATE_CMD du tout (mesuré),
+# donc Flex n'écrit rien ET n'affiche rien — pas même la ligne des recettes.
+prepare dry-run         - && run dry-run   native "" --dry-run
 prepare no-recipe       - symfony/polyfill-ctype && run no-recipe native
 prepare recipe-in-index - symfony/console        && run recipe-in-index   fallback "would apply the recipe of symfony/console"
 prepare bundle-class    - symfony/twig-bundle    && run bundle-class      fallback "would register symfony/twig-bundle's bundle"

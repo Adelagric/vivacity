@@ -39,6 +39,13 @@ byte-identical-output promise are the public API.
   the resolution that ran without it. This was reachable before and went
   unnoticed because the plugin is, by definition, not active yet.
 
+### Fixed
+- **`update --dry-run` on a Flex project printed three lines Composer does
+  not.** Composer does not dispatch `POST_UPDATE_CMD` on a dry run at all,
+  so Flex prints nothing — not even the recipes hint. `--no-install` does
+  dispatch it, and still prints. Found by comparing the two on a dry run,
+  now a harness case.
+
 ### Changed
 - **`update` on a Symfony project no longer hands over just because it has
   a `package.json` or an `importmap.php`.** That was

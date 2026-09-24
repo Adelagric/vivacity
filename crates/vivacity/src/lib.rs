@@ -3460,7 +3460,10 @@ fn resolve_and_lock(
         lock: Some(lock),
         post,
         manifest,
-        flex_active,
+        // Measured on Composer 2.10.3: `--dry-run` does not dispatch
+        // `POST_UPDATE_CMD` at all, so Flex prints nothing — not even the
+        // recipes hint. `--no-install` does dispatch it.
+        flex_active: flex_active && !args.dry_run,
         thanks_reminder,
     })
 }
