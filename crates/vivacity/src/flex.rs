@@ -341,11 +341,28 @@ fn compare_dotted(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(std::cmp::Ordering::Equal)
 }
 
+/// Where the candidate class file is read. `isBundleClass` always reads
+/// `<vendor-dir>/<package name>/…`, whatever installer laid the package out
+/// somewhere else, and it reads it at `POST_UPDATE_CMD` — i.e. the version
+/// the install has just extracted, not the one vendor/ holds now.
+pub enum ClassSource<'a> {
+    /// vendor/ already holds the package at the version the lock names.
+    LaidOut(&'a Path),
+    /// The dist that would lay it out, read without extracting it.
+    Dist {
+        bytes: &'a [u8],
+        kind: vivacity_core::store::DistKind,
+    },
+    /// Nothing will stand at `<vendor-dir>/<name>` — an installer puts the
+    /// package elsewhere — so Flex's read finds no file and no candidate.
+    Elsewhere,
+}
+
 /// `SymfonyBundle::getClassNames` for an install (`$uninstall` false, so
-/// each candidate class must exist under vendor/ and mention one of the
-/// two Bundle base classes): does this package register a bundle, i.e.
-/// would Flex build an auto-generated recipe for it?
-pub fn has_bundle_class(vendor: &Path, pretty_name: &str, package: &Value) -> bool {
+/// each candidate class must exist and mention one of the two Bundle base
+/// classes): does this package register a bundle, i.e. would Flex build an
+/// auto-generated recipe for it? Reading from wherever the file stands.
+pub fn has_bundle_class_from(package: &Value, source: &ClassSource<'_>) -> anyhow::Result<bool> {
     let autoload = package.get("autoload");
     let is_sylius_plugin = package.get("type").and_then(Value::as_str) == Some("sylius-plugin");
     for (key, is_psr4) in [("psr-4", true), ("psr-0", false)] {
@@ -360,14 +377,62 @@ pub fn has_bundle_class(vendor: &Path, pretty_name: &str, package: &Value) -> bo
             };
             for path in paths {
                 for class in extract_class_names(namespace, is_sylius_plugin) {
-                    if is_bundle_class(vendor, pretty_name, &class, path, is_psr4) {
-                        return true;
+                    let rel = class_file_path(&class, path, is_psr4);
+                    if read_class_file(source, &rel)?.is_some_and(|c| declares_bundle(&c)) {
+                        return Ok(true);
                     }
                 }
             }
         }
     }
-    false
+    Ok(false)
+}
+
+/// The file `isBundleClass` opens, relative to the package root.
+fn class_file_path(class: &str, path: &str, is_psr4: bool) -> String {
+    let parts: Vec<&str> = class.split('\\').collect();
+    let last = parts.last().copied().unwrap_or("");
+    let mut rel = path.trim_end_matches('/').to_owned();
+    if !is_psr4 {
+        let joined: String = parts[..parts.len() - 1].join("/").replace('\\', "");
+        if !joined.is_empty() {
+            if !rel.is_empty() {
+                rel.push('/');
+            }
+            rel.push_str(&joined);
+        }
+    }
+    if !rel.is_empty() {
+        rel.push('/');
+    }
+    rel.push_str(&format!("{}.php", last.replace('\\', "/")));
+    rel
+}
+
+fn read_class_file(source: &ClassSource<'_>, rel: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    Ok(match source {
+        ClassSource::Elsewhere => None,
+        ClassSource::LaidOut(root) => std::fs::read(root.join(rel)).ok(),
+        ClassSource::Dist { bytes, kind } => match kind {
+            vivacity_core::store::DistKind::Zip => {
+                vivacity_core::extract::read_zip_entry(bytes, rel)?
+            }
+            vivacity_core::store::DistKind::Tar => {
+                vivacity_core::extract::read_tar_entry(bytes, rel)?
+            }
+        },
+    })
+}
+
+/// `isBundleClass`'s two literal needles, on bytes: `file_get_contents` and
+/// `str_contains` do not care whether the file is valid UTF-8.
+fn declares_bundle(contents: &[u8]) -> bool {
+    [
+        b"Symfony\\Component\\HttpKernel\\Bundle\\Bundle".as_slice(),
+        b"Symfony\\Component\\HttpKernel\\Bundle\\AbstractBundle".as_slice(),
+    ]
+    .iter()
+    .any(|needle| contents.windows(needle.len()).any(|w| w == *needle))
 }
 
 /// `SymfonyBundle::extractClassNames`.
@@ -405,29 +470,57 @@ fn extract_class_names(namespace: &str, is_sylius_plugin: bool) -> Vec<String> {
     classes
 }
 
-/// `SymfonyBundle::isBundleClass`.
-fn is_bundle_class(
-    vendor: &Path,
-    pretty_name: &str,
-    class: &str,
-    path: &str,
-    is_psr4: bool,
-) -> bool {
-    let parts: Vec<&str> = class.split('\\').collect();
-    let last = parts.last().copied().unwrap_or("");
-    let mut class_path = vendor.join(pretty_name).join(path);
-    if !is_psr4 {
-        let joined: String = parts[..parts.len() - 1].join("/").replace('\\', "");
-        if !joined.is_empty() {
-            class_path = class_path.join(joined);
-        }
+/// A runtime and a fetcher for the reads the bundle question needs, built
+/// once per command.
+pub struct DistReader {
+    runtime: tokio::runtime::Runtime,
+    fetcher: vivacity_core::fetch::Fetcher,
+}
+
+impl DistReader {
+    pub fn new(project: &Path) -> anyhow::Result<DistReader> {
+        Ok(DistReader {
+            runtime: tokio::runtime::Runtime::new().context("cannot start the async runtime")?,
+            fetcher: vivacity_core::fetch::Fetcher::new(
+                vivacity_core::fetch::composer_cache_dir(),
+                vivacity_core::fetch::Auth::load(project),
+            )?,
+        })
     }
-    let class_path = class_path.join(format!("{}.php", last.replace('\\', "/")));
-    let Ok(contents) = std::fs::read_to_string(&class_path) else {
-        return false;
-    };
-    contents.contains("Symfony\\Component\\HttpKernel\\Bundle\\Bundle")
-        || contents.contains("Symfony\\Component\\HttpKernel\\Bundle\\AbstractBundle")
+
+    /// The dist bytes of a package: Composer's own files cache when it
+    /// holds them, the network otherwise — the very fetch the install would
+    /// do, into the very cache it would fill, so nothing is transferred
+    /// twice whatever this command decides.
+    pub fn dist_bytes(
+        &self,
+        package: &vivacity_core::lock::LockPackage,
+        offline: bool,
+    ) -> anyhow::Result<(Vec<u8>, vivacity_core::store::DistKind)> {
+        let kind = if package.dist_kind() == vivacity_core::lock::DistKind::Tar {
+            vivacity_core::store::DistKind::Tar
+        } else {
+            vivacity_core::store::DistKind::Zip
+        };
+        let dist_type = match kind {
+            vivacity_core::store::DistKind::Zip => "zip",
+            vivacity_core::store::DistKind::Tar => "tar",
+        };
+        let url = package
+            .dist_url_expanded()
+            .context("package without a dist url")?;
+        let (bytes, _) = self
+            .runtime
+            .block_on(self.fetcher.dist_bytes_of(
+                package.name(),
+                &url,
+                dist_type,
+                package.dist_shasum(),
+                offline,
+            ))
+            .with_context(|| format!("cannot read the dist of {}", package.name()))?;
+        Ok((bytes, kind))
+    }
 }
 
 /// The names `symfony.lock` holds (`Lock::all`). Its path:
@@ -529,18 +622,81 @@ mod tests {
         let src = vendor.join("acme/foo-bundle/src");
         std::fs::create_dir_all(&src).expect("dirs");
         let package = serde_json::json!({"autoload": {"psr-4": {"Acme\\FooBundle\\": "src"}}});
+        let root = vendor.join("acme/foo-bundle");
+        let found = |p: &Value| {
+            has_bundle_class_from(p, &ClassSource::LaidOut(&root)).expect("no error on a disk read")
+        };
         // No file at all.
-        assert!(!has_bundle_class(vendor, "acme/foo-bundle", &package));
+        assert!(!found(&package));
         // A file that is not a bundle.
         std::fs::write(src.join("FooBundle.php"), "<?php class FooBundle {}").expect("w");
-        assert!(!has_bundle_class(vendor, "acme/foo-bundle", &package));
+        assert!(!found(&package));
         // The heuristic: either base class mentioned anywhere in the file.
         std::fs::write(
             src.join("FooBundle.php"),
             "<?php use Symfony\\Component\\HttpKernel\\Bundle\\AbstractBundle;",
         )
         .expect("w");
-        assert!(has_bundle_class(vendor, "acme/foo-bundle", &package));
+        assert!(found(&package));
+    }
+
+    #[test]
+    fn the_dist_answers_the_same_as_the_laid_out_package() {
+        // The same tree, once on disk and once as the zip that would lay it
+        // out: `isBundleClass` must not care which it reads.
+        let bundle = "<?php use Symfony\\Component\\HttpKernel\\Bundle\\Bundle;";
+        let cases: [(&str, serde_json::Value, &str); 3] = [
+            (
+                "psr-4",
+                serde_json::json!({"autoload": {"psr-4": {"Acme\\FooBundle\\": "src"}}}),
+                "src/FooBundle.php",
+            ),
+            (
+                // psr-0 appends the namespace's own directories under the
+                // path, `implode('/', array_slice($parts, 0, -1))`.
+                "psr-0",
+                serde_json::json!({"autoload": {"psr-0": {"Acme\\Foo": "lib"}}}),
+                "lib/Acme/Foo/FooBundle.php",
+            ),
+            (
+                "root-path",
+                serde_json::json!({"autoload": {"psr-4": {"Acme\\FooBundle\\": ""}}}),
+                "FooBundle.php",
+            ),
+        ];
+        for (tag, package, rel) in cases {
+            let d = tempfile::tempdir().expect("tmp");
+            let root = d.path().join("acme/foo-bundle");
+            let file = root.join(rel);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
+            std::fs::write(&file, bundle).expect("w");
+            assert!(
+                has_bundle_class_from(&package, &ClassSource::LaidOut(&root)).expect("disk"),
+                "{tag}: not found on disk, so the path is wrong"
+            );
+            // One root directory, as a Packagist zipball has.
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            w.add_directory("foo-bundle-abc123", opts).expect("dir");
+            w.start_file(format!("foo-bundle-abc123/{rel}"), opts)
+                .expect("file");
+            std::io::Write::write_all(&mut w, bundle.as_bytes()).expect("write");
+            let zip_bytes = w.finish().expect("finish").into_inner();
+            assert!(
+                has_bundle_class_from(
+                    &package,
+                    &ClassSource::Dist {
+                        bytes: &zip_bytes,
+                        kind: vivacity_core::store::DistKind::Zip,
+                    },
+                )
+                .expect("dist read"),
+                "{tag}: the dist does not answer like the laid-out package"
+            );
+            // Laid out somewhere else: Flex reads vendor/<name> and finds
+            // nothing there.
+            assert!(!has_bundle_class_from(&package, &ClassSource::Elsewhere).expect("elsewhere"));
+        }
     }
 
     #[test]

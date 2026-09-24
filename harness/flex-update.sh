@@ -109,6 +109,27 @@ shape_package_link()  { case "$1" in
                           post) printf '{\n    "devDependencies": {\n        "@symfony/gone": "file:vendor/symfony/gone/assets"\n    }\n}\n' > "$2/package.json";;
                         esac; }
 
+# Un paquet retiré de l'état ET de vendor/ : l'install le posera des deux
+# côtés, donc la question du bundle porte sur le dist et non sur vendor/.
+forget_package() { # projet, paquet
+  local f="$1/vendor/composer/installed.json"
+  jq --indent 4 --arg n "$2" '.packages |= map(select(.name != $n)) | ."dev-package-names" |= map(select(. != $n))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  rm -rf "$1/vendor/$2"
+}
+
+# Une version plus ancienne déclarée dans l'état : l'install fera une
+# opération d'update, ce qui arme le rappel `symfony/thanks`
+# (`enableThanksReminder` sur POST_PACKAGE_UPDATE).
+downgrade_package() { # projet, paquet
+  local f="$1/vendor/composer/installed.json"
+  jq --indent 4 --arg n "$2" '.packages |= map(if .name == $n then .version = "v0.0.1" | .version_normalized = "0.0.1.0" | .dist.reference = "0000000000000000000000000000000000000000" else . end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+shape_forget_log()    { case "$1" in post) forget_package "$2" psr/log;; esac; }
+shape_forget_twig()   { case "$1" in post) forget_package "$2" symfony/twig-bundle;; esac; }
+shape_forget_flex()   { case "$1" in post) forget_package "$2" symfony/flex;; esac; }
+shape_downgrade_log() { case "$1" in post) downgrade_package "$2" psr/log;; esac; }
+
 # Les deux côtés partent du même état convergé : un `composer update` de
 # préparation (l'instantané est figé, donc le lock qui en sort est stable),
 # puis le `symfony.lock` fabriqué ici. Le `update` mesuré ensuite ne change
@@ -177,7 +198,18 @@ prepare all-locked      - && run all-locked native
 prepare no-recipe       - symfony/polyfill-ctype && run no-recipe native
 prepare recipe-in-index - symfony/console        && run recipe-in-index   fallback "would apply the recipe of symfony/console"
 prepare bundle-class    - symfony/twig-bundle    && run bundle-class      fallback "would register symfony/twig-bundle's bundle"
-prepare missing-package - && rm -rf "$WORK/viv-missing-package/vendor/psr/log" && run missing-package fallback "lays out nothing new"
+# L'install pose quelque chose, mais `symfony.lock` couvre le paquet : rien
+# n'est enregistré, donc Flex n'écrit rien — natif depuis la tranche C.
+prepare relays-package shape_forget_log - && run relays-package native
+# Enregistré ET posé par l'install : la classe de bundle ne peut venir que
+# du dist, vendor/ ne l'a pas encore.
+prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bundle native
+prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    fallback "would register symfony/twig-bundle's bundle"
+# Une opération d'update arme le rappel `symfony/thanks`.
+prepare thanks         shape_downgrade_log - && run thanks    native
+# symfony/flex installé par ce run : `install()` arrête la propagation et
+# relance un Installer complet.
+prepare flex-installed shape_forget_flex - && run flex-installed fallback "would install itself"
 # `importmap.php` sans paquet `symfony-ux` ni `assets/controllers.json` :
 # `updateImportMap` rend la main sur une liste vide, `updateControllersJsonFile`
 # sur un fichier absent — rien n'est écrit, rien n'est affiché.

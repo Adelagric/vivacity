@@ -1483,3 +1483,55 @@ chaque archive puis relit chaque fichier par le lecteur — les extracteurs
 étant déjà comparés à `ZipArchive` et `PharData`, l'oracle est transitif.
 Un lien symbolique répond `None` et non le fichier vide que PharData écrit :
 c'est le sens d'erreur sûr pour « ce fichier déclare-t-il un bundle ».
+
+## 2026-09-24 — Flex, tranche C : réponses par paquet, rappel thanks, et un trou trouvé
+
+Fait : la tranche B n'était native que si l'install ne posait rien. En
+relisant `recordOperations` et `shouldRecordOperation` dans la source, le
+domaine s'avère indépendant de la transaction d'install : une `Transaction`
+synthétique est construite entre les paquets de `symfony.lock` et le jeu
+résolu **entier**, et seuls les `InstallOperation` dont `symfony.lock` n'a
+pas le nom sont retenus (un `UpdateOperation` retombe sur `return false`,
+un `UninstallOperation` est écarté par l'appelant). Donc la précondition
+globale n'avait qu'un rôle : garantir que vendor/ contenait déjà la bonne
+version pour lire la classe de bundle. Elle est remplacée par la lecture de
+la bonne source, paquet par paquet : le dist pour un paquet que l'install
+pose ou change, vendor/ pour un paquet qu'elle laisse tel quel, et rien du
+tout pour un paquet qu'un installateur place ailleurs que
+`<vendor-dir>/<nom>` — seul endroit où `isBundleClass` regarde, ce qui rend
+la réponse négative par construction. Tout ce qui n'est pas répondable
+avant écriture rend la main.
+
+Le rappel `symfony/thanks` part avec, comme prévu : dès qu'un update natif
+peut mettre un paquet à jour, `enableThanksReminder` s'arme sur
+`POST_PACKAGE_UPDATE` et trois lignes apparaissent. Prédicat mesuré :
+armé à 1 uniquement si la commande résolue est `update`, promu à 2 au
+premier POST_PACKAGE_UPDATE si `class_exists(Thanks::class, false)` est
+faux — donc si Composer n'a pas activé le plugin symfony/thanks, du projet
+ou de COMPOSER_HOME, ce que `scope::active_plugins` couvre déjà. Décidé
+avant l'install, sur l'état qu'elle va remplacer. Vérifié à l'octet contre
+Composer (mêmes lignes 14 et 15, emoji et doubles espaces compris).
+
+Trou trouvé par le nouveau cas `flex-installed`, préexistant : quand
+symfony/flex est dans le lock mais pas dans installed.json, il n'est pas un
+plugin actif, donc ni le filtre de pool ni rien d'autre ne s'appliquait —
+et Composer, lui, exécute alors `Flex::install` → `$reinstall` → un second
+`Installer` complet, cette fois avec le filtre. Le repli est donc décidé
+hors de la question « le plugin est-il actif », puisque la réponse est
+précisément qu'il ne l'est pas encore.
+
+Régression introduite puis corrigée, trouvée par la CI et non par moi :
+déplacer la décision de synchronisation après la résolution faisait payer
+une résolution à un projet qui allait rendre la main de toute façon, et
+hors ligne l'index de recettes non caché masquait le motif (`transitions.sh`
+attendait 3, recevait 1). Rétabli une passe précoce du même prédicat sur le
+lock **actuel**, qui ne peut que rendre la main : l'ancien lock peut porter
+un paquet `symfony-ux` que l'update va retirer, et un repli inutile est le
+sens d'erreur sûr. La passe tardive sur le nouveau lock reste
+l'autoritaire. Leçon : le hook pre-push ne fait tourner que fmt/clippy/tests
+— une retouche de l'émulation d'un plugin doit faire tourner tous les
+harnais qui le nomment (`grep -l` sur harness/), ici transitions.sh et
+vendor-dir.sh.
+
+Vérifié : flex-update 15/15 (les 10 nouveaux cas rouges avant), transitions,
+vendor-dir, flex-install 7/7, update 19/19, steps 240/240, 256 tests.

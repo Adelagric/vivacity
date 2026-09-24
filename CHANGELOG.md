@@ -6,6 +6,31 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Added
+- **`update` is native on a Flex project that actually installs or updates
+  something.** Until now it needed the install to lay out nothing at all.
+  What Flex records is not the install's transaction: `recordOperations`
+  builds a synthetic one between the packages `symfony.lock` names and the
+  whole resolved set, and `shouldRecordOperation` keeps only the installs
+  of names `symfony.lock` does not hold. So the recorded set is answerable
+  package by package — the recipe from the endpoints' index, the bundle
+  class from the content the install would lay out: out of the dist for a
+  package it changes (`read_zip_entry` / `read_tar_entry`, addressed like
+  the extracted tree), out of vendor/ for one it leaves alone, and nowhere
+  for one an installer puts outside `<vendor-dir>/<name>`, where Flex's own
+  read finds nothing. Anything that cannot be answered before writing hands
+  over.
+- **The `symfony/thanks` reminder**, which Flex prints on any update whose
+  transaction updates a package, unless the plugin is already active
+  locally or in `COMPOSER_HOME` (`class_exists(Thanks::class, false)`
+  autoloads nothing). Three lines, glyphs and their double spaces included,
+  compared byte for byte against Composer's.
+- **`update` hands over when it would install `symfony/flex` itself**: Flex
+  then stops the event's propagation and runs a whole second `Installer`,
+  this time with its pool filter active, which can settle elsewhere than
+  the resolution that ran without it. This was reachable before and went
+  unnoticed because the plugin is, by definition, not active yet.
+
 ### Changed
 - **`update` on a Symfony project no longer hands over just because it has
   a `package.json` or an `importmap.php`.** That was

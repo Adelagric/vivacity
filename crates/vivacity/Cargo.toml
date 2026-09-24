@@ -29,6 +29,8 @@ md-5.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only to build, in a test, the zipball shape a dist has.
+zip.workspace = true
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/vivacity-v{ version }-{ target }{ archive-suffix }"

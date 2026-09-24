@@ -264,9 +264,17 @@ reason).
 
 `symfony/flex`'s pool filter is emulated for `update` and `remove` with
 `--no-install`, and `update` **with** install is emulated too when Flex
-would apply no recipe — no package the install adds to `symfony.lock` has
-one in the recipe index or ships a bundle class, and the install lays out
-nothing new; anything else hands over before the lock is written: the index of its endpoints (`extra.symfony.endpoint`,
+would apply no recipe. What Flex records is not the install's transaction:
+`recordOperations` builds a synthetic one between the packages
+`symfony.lock` names and the whole resolved set, and keeps only the
+installs of names that file does not hold. Each of those is answered on its
+own — a recipe in the endpoints' index, or a bundle class in the content
+the install would lay out (read out of the dist for a package it changes,
+out of vendor/ for one it leaves alone, and nowhere for one an installer
+puts outside `<vendor-dir>/<name>`, which is the only place Flex looks).
+Anything unanswerable before writing, a removal, or `symfony/flex` being
+installed by the run itself — Flex then runs a whole second installer —
+hands over before the lock is written: the index of its endpoints (`extra.symfony.endpoint`,
 `SYMFONY_ENDPOINT`, the two recipe indexes by default; cached in Flex's
 own format under Composer's cache) prunes the pool against
 `extra.symfony.require` / `SYMFONY_REQUIRE` exactly as

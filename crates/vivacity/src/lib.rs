@@ -2364,6 +2364,11 @@ pub(crate) struct Resolved {
     /// symfony/flex was active for this resolution: its `POST_UPDATE_CMD`
     /// output follows the report (`print_post_update`).
     pub(crate) flex_active: bool,
+    /// The install would perform at least one update operation, which arms
+    /// Flex's `symfony/thanks` reminder (`enableThanksReminder` on
+    /// `POST_PACKAGE_UPDATE`); computed before the install, since it needs
+    /// the state the install replaces.
+    pub(crate) thanks_reminder: bool,
 }
 
 /// Prints the post-update report of `Installer::run` once the install
@@ -2376,7 +2381,7 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
     }
     print_funding(project, &resolved.manifest);
     if resolved.flex_active {
-        print_flex_post_update(&resolved.manifest);
+        print_flex_post_update(&resolved.manifest, resolved.thanks_reminder);
     }
 }
 
@@ -2396,13 +2401,30 @@ fn flex_synchronize_enabled(manifest: &serde_json::Value) -> bool {
 /// itself decided by `flex_sync_reason` on the solved lock, `symfony.lock`
 /// unchanged — then the recipes hint when the downloader is enabled
 /// (symfony/flex required by the root).
-fn print_flex_post_update(manifest: &serde_json::Value) {
+fn print_flex_post_update(manifest: &serde_json::Value, thanks_reminder: bool) {
     let sync = flex_synchronize_enabled(manifest);
     let enabled = flex_downloader_enabled(manifest);
     // `fetchRecipes` writes this one before `install`'s blank line.
     if !enabled {
         eprintln!(
             "Symfony recipes are disabled: \"symfony/flex\" not found in the root composer.json"
+        );
+    }
+    // `2 === $this->displayThanksReminder`, between the recipes and the
+    // blank line. The glyphs carry their own trailing space, and the
+    // template adds another one.
+    if thanks_reminder {
+        let (love, star) = if cfg!(windows) {
+            ("love", "star")
+        } else {
+            ("\u{1f496} ", "\u{2605} ")
+        };
+        eprintln!();
+        eprintln!(
+            "What about running composer global require symfony/thanks && composer thanks now?"
+        );
+        eprintln!(
+            "This will spread some {love} by sending a {star} to the GitHub repositories of your fellow package maintainers."
         );
     }
     eprintln!();
@@ -2464,38 +2486,74 @@ fn flex_downloader_enabled(manifest: &serde_json::Value) -> bool {
     })
 }
 
+/// `Flex::recordFlexInstall` → `$reinstall`: when the install installs
+/// symfony/flex itself, `Flex::install` stops the event's propagation and
+/// runs a whole second `Installer` over a freshly created Composer — this
+/// time with Flex active, so with its pool filter. Composer's first
+/// resolution ran without the filter, exactly as vivacity's does, and the
+/// second run can settle somewhere else entirely.
+///
+/// This is decided outside the "is Flex an active plugin" question, since
+/// the answer is precisely that it is not active yet: it is not in
+/// installed.json, which is where Composer loads its plugins from.
+fn flex_reinstall_reason(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock_value: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> Option<String> {
+    if !plugins_enabled
+        || vivacity_core::layout::plugin_allowed(manifest, "symfony/flex")
+            != vivacity_core::layout::PluginVerdict::Allowed
+    {
+        return None;
+    }
+    let installed = installed_packages(project, manifest);
+    if installed
+        .iter()
+        .any(|i| i.get("name").and_then(serde_json::Value::as_str) == Some("symfony/flex"))
+    {
+        return None;
+    }
+    vivacity_core::lock::Lock::from_value(lock_value)
+        .wanted_packages(with_dev)
+        .any(|p| p.name() == "symfony/flex")
+        .then(|| {
+            "would install itself, then run a second install of its own with its pool filter active (not emulated)"
+                .to_owned()
+        })
+}
+
 /// Why `symfony/flex` has to handle this `update` itself, or `None` when
 /// it would write nothing but what vivacity already reproduces.
 ///
 /// Flex's operations are not the update transaction's: `recordOperations`
-/// (`PRE_OPERATIONS_EXEC`) rebuilds them from `symfony.lock` against the
-/// packages the install will lay out, and records an install for each
-/// name `symfony.lock` does not hold (updates and uninstalls are dropped
-/// there). For each of those it looks for a recipe in the endpoints'
-/// index and, failing that, for a bundle class under vendor/ — either one
-/// means files written into the project.
+/// (`PRE_OPERATIONS_EXEC`) builds a synthetic `Transaction` between the
+/// packages `symfony.lock` names and the whole resolved set, then
+/// `shouldRecordOperation` keeps only the `InstallOperation`s whose name
+/// `symfony.lock` does not hold — an `UpdateOperation` falls through and
+/// returns false, an `UninstallOperation` is dropped by the caller. So the
+/// recorded set depends on `symfony.lock` against the new lock, and not on
+/// what the install lays out.
 ///
-/// Only the case where the install lays out nothing new is emulated: then
-/// every recorded package is already extracted at exactly the version the
-/// new lock names, so both questions are answerable without writing
-/// anything. Anything else hands over.
+/// For each recorded package Flex looks for a recipe in the endpoints'
+/// index and, failing that, for a bundle class — either one means files
+/// written into the project. The bundle class is read from
+/// `<vendor-dir>/<name>/…` as it stands at `POST_UPDATE_CMD`, i.e. at the
+/// version the install has just laid out: from the dist for a package the
+/// install changes, from vendor/ for one it leaves alone, and nowhere at
+/// all for one an installer puts outside `<vendor-dir>/<name>`.
 fn flex_install_reason(
     project: &std::path::Path,
     manifest: &serde_json::Value,
     lock_value: &serde_json::Value,
     with_dev: bool,
     offline: bool,
+    plugins_enabled: bool,
 ) -> anyhow::Result<Option<String>> {
     let lock = vivacity_core::lock::Lock::from_value(lock_value);
     let installed = installed_packages(project, manifest);
-    if unchanged_local_repository(&installed, lock_value, with_dev).is_none() {
-        return Ok(Some(
-            "applies recipes to the packages it installs (not emulated; only an update that lays out nothing new is)"
-                .to_owned(),
-        ));
-    }
-    // `recordOperations`: an install operation per resolved package absent
-    // from symfony.lock.
     let locked = flex::lock_names(project);
     let recorded: Vec<&vivacity_core::lock::LockPackage> = lock
         .wanted_packages(with_dev)
@@ -2513,18 +2571,108 @@ fn flex_install_reason(
             )));
         }
     }
-    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
-        .unwrap_or_default()
-        .vendor_dir(project);
-    for p in &recorded {
-        if flex::has_bundle_class(&vendor, p.name(), &serde_json::Value::Object(p.raw.clone())) {
-            return Ok(Some(format!(
-                "would register {}'s bundle in config/bundles.php (not emulated)",
-                p.name()
-            )));
+    let dirs = vivacity_core::dirs::Dirs::resolve(manifest).unwrap_or_default();
+    let vendor = dirs.vendor_dir(project);
+    let vendor_rel = dirs.vendor_rel().to_owned();
+    // `Layout::resolve` places every package: an installer plugin can put
+    // one outside `<vendor-dir>/<name>`, where Flex's read finds nothing.
+    let layout =
+        vivacity_core::layout::Layout::resolve(project, &lock, manifest, with_dev, plugins_enabled)
+            .ok();
+    enum Where {
+        Elsewhere,
+        LaidOut,
+        Dist,
+    }
+    let placed: Vec<(&vivacity_core::lock::LockPackage, Where)> = recorded
+        .iter()
+        .map(|p| {
+            let at_vendor = layout.as_ref().is_none_or(|l| {
+                l.rel(p.name())
+                    .is_none_or(|rel| rel == format!("{vendor_rel}/{}", p.name()))
+            });
+            let w = if !at_vendor {
+                Where::Elsewhere
+            } else if installed_as_locked(&installed, p) {
+                Where::LaidOut
+            } else {
+                Where::Dist
+            };
+            (*p, w)
+        })
+        .collect();
+    let reader = if placed.iter().any(|(_, w)| matches!(w, Where::Dist)) {
+        Some(flex::DistReader::new(project)?)
+    } else {
+        None
+    };
+    for (p, w) in &placed {
+        let raw = serde_json::Value::Object(p.raw.clone());
+        let answer = match w {
+            // Flex reads `<vendor-dir>/<name>`, where nothing will stand.
+            Where::Elsewhere => flex::has_bundle_class_from(&raw, &flex::ClassSource::Elsewhere),
+            Where::LaidOut => {
+                let root = vendor.join(p.name());
+                flex::has_bundle_class_from(&raw, &flex::ClassSource::LaidOut(&root))
+            }
+            Where::Dist => {
+                let Some(reader) = reader.as_ref() else {
+                    return Ok(Some(format!(
+                        "cannot read {}'s dist before writing (no reader)",
+                        p.name()
+                    )));
+                };
+                match reader.dist_bytes(p, offline) {
+                    Ok((bytes, kind)) => flex::has_bundle_class_from(
+                        &raw,
+                        &flex::ClassSource::Dist {
+                            bytes: &bytes,
+                            kind,
+                        },
+                    ),
+                    // Unanswerable before writing — hand over rather than
+                    // guess: guessing wrong loses a bundle registration.
+                    Err(e) => {
+                        return Ok(Some(format!(
+                            "cannot tell whether {} registers a bundle before writing ({e})",
+                            p.name()
+                        )))
+                    }
+                }
+            }
+        };
+        match answer {
+            Ok(true) => {
+                return Ok(Some(format!(
+                    "would register {}'s bundle in config/bundles.php (not emulated)",
+                    p.name()
+                )))
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Ok(Some(format!(
+                    "cannot tell whether {} registers a bundle before writing ({e})",
+                    p.name()
+                )))
+            }
         }
     }
     Ok(None)
+}
+
+/// Does vendor/ already hold this package exactly as the new lock names it?
+/// Then the install lays nothing out for it, and what Flex reads at
+/// `POST_UPDATE_CMD` is what is there now.
+fn installed_as_locked(
+    installed: &[serde_json::Value],
+    p: &vivacity_core::lock::LockPackage,
+) -> bool {
+    let reference = |v: &serde_json::Value| v.get("dist").and_then(|d| d.get("reference")).cloned();
+    installed.iter().any(|i| {
+        i.get("name").and_then(serde_json::Value::as_str) == Some(p.name())
+            && i.get("version").and_then(serde_json::Value::as_str) == Some(p.version())
+            && reference(i) == reference(&serde_json::Value::Object(p.raw.clone()))
+    })
 }
 
 /// `Flex::finish` → `synchronizePackageJson`: why it has to run, or
@@ -2744,9 +2892,21 @@ fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> 
             ));
         }
     }
-    // The package.json / importmap.php synchronisation is decided by
-    // `flex_sync_reason` instead: what it writes depends on the keywords
-    // of the packages the update locks, so it cannot be answered here.
+    // The package.json / importmap.php synchronisation, asked of the lock
+    // that is there now. It is asked again on the new lock just before it
+    // is written, and that is the authoritative answer — the keywords
+    // belong to the packages the update settles on. This early pass can
+    // therefore only hand over: the current lock may hold a `symfony-ux`
+    // package the update is about to drop, and a needless hand-over is the
+    // safe direction. Without it, a project that will hand over anyway
+    // would pay a full resolution first, and a resolution that cannot run
+    // (an uncached recipe index offline) would mask the reason.
+    let current_lock = vivacity_core::jsonfile::read(&project.join("composer.lock"))
+        .map(|v| (*v).clone())
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(reason) = flex_sync_reason(project, manifest, &current_lock) {
+        return Some(reason);
+    }
     // `Flex::update` → `unpack()`: every root requirement is looked up
     // (installed.json, else the repositories) and a `symfony-pack` with
     // requirements is unpacked into composer.json. Decided here from
@@ -3025,6 +3185,7 @@ fn resolve_and_lock(
                 post: Vec::new(),
                 manifest: serde_json::Value::Null,
                 flex_active: false,
+                thanks_reminder: false,
             });
         }
         Err(e) => return Err(anyhow::anyhow!("{e}")),
@@ -3097,6 +3258,7 @@ fn resolve_and_lock(
                 post: Vec::new(),
                 manifest: serde_json::Value::Null,
                 flex_active: false,
+                thanks_reminder: false,
             });
         }
         Err(e) => return Err(anyhow::anyhow!("{e}")),
@@ -3111,12 +3273,44 @@ fn resolve_and_lock(
     // it does not need the install: measured on Composer 2.10.3, `update
     // --no-install` still dispatches `POST_UPDATE_CMD` — so Flex still
     // synchronises — while `--dry-run` does not dispatch it at all.
+    if !args.dry_run && !args.no_install {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            if let Some(reason) =
+                flex_reinstall_reason(&project, &m, &lock, installer_dev_mode, !args.no_plugins)
+            {
+                let code = delegate_resolution(
+                    &project,
+                    vivacity_core::scope::ResolutionCommand::Update,
+                    &[vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                        "symfony/flex".to_owned(),
+                        reason,
+                    )],
+                    args.no_fallback,
+                )?;
+                return Ok(Resolved {
+                    status: code,
+                    lock: None,
+                    post: Vec::new(),
+                    manifest: serde_json::Value::Null,
+                    flex_active: false,
+                    thanks_reminder: false,
+                });
+            }
+        }
+    }
     if flex_active && !args.dry_run {
         if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
             let reason = if args.no_install {
                 None
             } else {
-                flex_install_reason(&project, &m, &lock, installer_dev_mode, args.offline)?
+                flex_install_reason(
+                    &project,
+                    &m,
+                    &lock,
+                    installer_dev_mode,
+                    args.offline,
+                    !args.no_plugins,
+                )?
             }
             .or_else(|| flex_sync_reason(&project, &m, &lock));
             if let Some(reason) = reason {
@@ -3135,10 +3329,33 @@ fn resolve_and_lock(
                     post: Vec::new(),
                     manifest: serde_json::Value::Null,
                     flex_active: false,
+                    thanks_reminder: false,
                 });
             }
         }
     }
+
+    // `Flex::enableThanksReminder` on `POST_PACKAGE_UPDATE`: the reminder
+    // needs one update operation, so it is decided here, on the state the
+    // install is about to replace. `class_exists(Thanks::class, false)` is
+    // true exactly when Composer activated the symfony/thanks plugin — from
+    // the project or from COMPOSER_HOME — since nothing autoloads it.
+    let thanks_reminder = flex_active && !args.dry_run && !args.no_install && {
+        let m: serde_json::Value =
+            serde_json::from_str(&manifest_text).unwrap_or(serde_json::Value::Null);
+        let loaded = vivacity_core::scope::active_plugins(&project, &m, !args.no_plugins)
+            .iter()
+            .any(|p| p == "symfony/thanks");
+        let installed = installed_packages(&project, &m);
+        !loaded
+            && vivacity_core::lock::Lock::from_value(&lock)
+                .wanted_packages(installer_dev_mode)
+                .any(|p| {
+                    installed.iter().any(|i| {
+                        i.get("name").and_then(serde_json::Value::as_str) == Some(p.name())
+                    }) && !installed_as_locked(&installed, p)
+                })
+    };
 
     let lock_path = project.join("composer.lock");
     let mut text = vivacity_core::phpjson::php_json_encode_with(
@@ -3210,6 +3427,7 @@ fn resolve_and_lock(
         post,
         manifest,
         flex_active,
+        thanks_reminder,
     })
 }
 
