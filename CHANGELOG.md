@@ -40,6 +40,21 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **Two models of "unchanged" were weaker than Composer's, and both produced
+  a wrong native verdict.** `JsonManipulator`'s constructor is not `trim`
+  alone: it looks for the CRLF in the *trimmed* string and rewrites `{}` as
+  `{`, a newline, `}`. So a `package.json` of exactly `{}` and a single-line
+  file whose only CRLF is its last two bytes are both rewritten by Composer
+  where vivacity answered "unchanged, nothing to do". The round-trip is now
+  checked against the real class over fifteen inputs, not against a
+  hand-written table — the table had enshrined the wrong value.
+- **A package whose `source.reference` alone moved was treated as
+  unchanged**, by the installer (which then carried its installed.json entry
+  over instead of rewriting it from the lock) and by Flex's thanks reminder
+  (three lines of stderr dropped). `Transaction::calculateOperations`
+  compares the version, *both* references and the abandoned mark; that
+  four-part identity is now shared by every caller instead of being
+  re-derived narrower in two places.
 - **`update --dry-run` on a Flex project printed three lines Composer does
   not.** Composer does not dispatch `POST_UPDATE_CMD` on a dry run at all,
   so Flex prints nothing — not even the recipes hint. `--no-install` does

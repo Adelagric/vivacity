@@ -57,17 +57,46 @@ pub struct InstallReport {
 }
 
 /// Installed identity of a package: version + dist reference.
-fn identity(p: &LockPackage) -> (String, String) {
+/// What `Transaction::calculateOperations` compares to decide that a present
+/// package and a resolved one are the same, and so that there is no
+/// operation: the version, BOTH references, and the abandoned mark. A
+/// narrower identity leaves a package unplaced and its installed.json entry
+/// carried over, where Composer re-installs it and rewrites the entry from
+/// the lock.
+type Identity = (String, String, String, String);
+
+fn identity(p: &LockPackage) -> Identity {
+    let field = |a: &str, b: &str| {
+        p.raw
+            .get(a)
+            .and_then(|v| v.get(b))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
     (
         p.version().to_owned(),
         p.dist_reference().unwrap_or("").to_owned(),
+        field("source", "reference"),
+        abandoned_mark(p.raw.get("abandoned")),
     )
+}
+
+/// `abandoned` is `false`, `true` or a replacement name, and `ArrayDumper`
+/// omits it when false: the three states as one comparable string.
+fn abandoned_mark(v: Option<&Value>) -> String {
+    match v {
+        None | Some(Value::Bool(false)) | Some(Value::Null) => String::new(),
+        Some(Value::Bool(true)) => "true".to_owned(),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+    }
 }
 
 /// What installed.json says of a package: its identity and, for a `path`
 /// package, the source it was laid out from.
 struct Installed {
-    identity: (String, String),
+    identity: Identity,
     path_source: Option<String>,
     /// The entry as written, for a package that stays.
     raw: serde_json::Map<String, Value>,
@@ -83,13 +112,19 @@ fn installed_packages(composer_dir: &Path) -> BTreeMap<String, Installed> {
         let name = p["name"].as_str().unwrap_or_default();
         let version = p["version"].as_str().unwrap_or_default();
         let reference = p["dist"]["reference"].as_str().unwrap_or_default();
+        let source_reference = p["source"]["reference"].as_str().unwrap_or_default();
         let path_source = (p["dist"]["type"].as_str() == Some("path"))
             .then(|| p["dist"]["url"].as_str().map(str::to_owned))
             .flatten();
         out.insert(
             name.to_owned(),
             Installed {
-                identity: (version.to_owned(), reference.to_owned()),
+                identity: (
+                    version.to_owned(),
+                    reference.to_owned(),
+                    source_reference.to_owned(),
+                    abandoned_mark(p.get("abandoned")),
+                ),
                 path_source,
                 raw: p.as_object().cloned().unwrap_or_default(),
             },

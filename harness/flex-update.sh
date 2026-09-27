@@ -96,14 +96,24 @@ shape_package()       { case "$1" in
                           pre) drop_ux "$2";;
                           post) printf '{\n    "devDependencies": {}\n}\n' > "$2/package.json";;
                         esac; }
-# Sans saut de ligne final : `JsonManipulator` rend `trim($contenu) .
-# $newline`, et `removeObsoletePackageJsonLinks` réécrit sans condition —
-# les octets changeraient.
+# Les trois formes que `JsonManipulator` ne rend pas telles quelles, et que
+# `removeObsoletePackageJsonLinks` réécrit sans condition : sans saut final ;
+# exactement `{}`, que le constructeur remplace par `{` + saut + `}` ; et une
+# seule ligne en CRLF, dont le seul CRLF disparaît au trim, si bien que le
+# saut ajouté est un simple `\n`.
 shape_package_dirty() { case "$1" in
                           pre) drop_ux "$2";;
                           post) printf '{\n    "devDependencies": {}\n}' > "$2/package.json";;
                         esac; }
 # Un lien `file:` vers un paquet absent : il serait retiré, donc écrit.
+shape_package_empty() { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) printf '{}\n' > "$2/package.json";;
+                        esac; }
+shape_package_crlf()  { case "$1" in
+                          pre) drop_ux "$2";;
+                          post) printf '{"devDependencies":{}}\r\n' > "$2/package.json";;
+                        esac; }
 shape_package_link()  { case "$1" in
                           pre) drop_ux "$2";;
                           post) printf '{\n    "devDependencies": {\n        "@symfony/gone": "file:vendor/symfony/gone/assets"\n    }\n}\n' > "$2/package.json";;
@@ -155,6 +165,17 @@ shape_real_lock_gap() { case "$1" in post)
 shape_forget_twig()   { case "$1" in post) forget_package "$2" symfony/twig-bundle;; esac; }
 shape_forget_flex()   { case "$1" in post) forget_package "$2" symfony/flex;; esac; }
 shape_downgrade_log() { case "$1" in post) downgrade_package "$2" psr/log;; esac; }
+# Seule la référence de SOURCE bouge : `Transaction::calculateOperations` la
+# compare aussi, donc Composer fait une opération d'update — et le rappel
+# `symfony/thanks` sort — là où une identité réduite à (nom, version,
+# référence de dist) ne verrait rien.
+retouch_source_ref() { # projet, paquet
+  local f="$1/vendor/composer/installed.json"
+  jq --indent 4 --arg n "$2" '.packages |= map(if .name == $n and .source then .source.reference = "0000000000000000000000000000000000000000" else . end)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  jq -e --arg n "$2" '.packages | map(select(.name == $n and .source.reference == "0000000000000000000000000000000000000000")) | length == 1' "$f" >/dev/null \
+    || { echo "retouch_source_ref: $2 n'\''a pas de bloc source dans $f" >&2; return 1; }
+}
+shape_source_ref()    { case "$1" in post) retouch_source_ref "$2" psr/log;; esac; }
 
 # Les deux côtés partent du même état convergé : un `composer update` de
 # préparation (l'instantané est figé, donc le lock qui en sort est stable),
@@ -236,6 +257,7 @@ prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bun
 prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    fallback "would register symfony/twig-bundle's bundle"
 # Une opération d'update arme le rappel `symfony/thanks`.
 prepare thanks         shape_downgrade_log - && run thanks    native
+prepare thanks-src-ref shape_source_ref    - && run thanks-src-ref native
 prepare real-symfony-lock shape_real_lock     - && run real-symfony-lock native
 prepare real-lock-gap     shape_real_lock_gap - && run real-lock-gap     fallback "would register symfony/twig-bundle's bundle"
 # Une suppression : `record` l'enregistre, `fetchRecipes` retire le nom de
@@ -253,4 +275,6 @@ prepare sync-ux           shape_ux            && run sync-ux           fallback 
 prepare sync-controllers  shape_controllers   && run sync-controllers  fallback "assets/controllers.json"
 prepare sync-dirty        shape_package_dirty && run sync-dirty        fallback "would rewrite package.json"
 prepare sync-stale-link   shape_package_link  && run sync-stale-link   fallback "obsolete"
+prepare sync-empty-object shape_package_empty && run sync-empty-object fallback "would rewrite package.json"
+prepare sync-crlf-oneline shape_package_crlf  && run sync-crlf-oneline fallback "would rewrite package.json"
 exit $status

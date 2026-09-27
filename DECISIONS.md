@@ -1610,3 +1610,45 @@ comparaison exacte en `jq`. Reste à faire, hors de portée d'ici : renommer
 l'issue #1 au nouveau titre pour que le prochain run la commente au lieu d'en
 ouvrir une seconde, et coller les deux lignes d'acquittement dès qu'un run
 contre le snapshot aura imprimé leurs empreintes.
+
+## 2026-09-28 — Revue adversariale de la tranche C : deux identités trop faibles
+
+Fait : revue indépendante de `98a04a8..76098f8` par un relecteur frais,
+mandaté pour réfuter. Elle a rapporté neuf défauts de correction, dont deux
+mesurés de bout en bout, plus des trous de couverture. Traités ici, les deux
+qui produisaient un verdict « natif » faux. Les deux ont la même forme : un
+modèle de « inchangé » plus faible que celui de Composer.
+
+`JsonManipulator::__construct` n'est pas `trim` seul. Ses deux dernières
+lignes, que j'avais coupées en lisant le phar :
+
+    $this->newline = false !== strpos($contents, "\r\n") ? "\r\n" : "\n";
+    $this->contents = $contents === '{}' ? '{' . $this->newline . '}' : $contents;
+
+Donc le saut de ligne est cherché dans la chaîne **trimée** — un fichier
+d'une seule ligne dont le seul CRLF est ses deux derniers octets revient en
+`\n` — et un objet vide est étalé sur deux lignes. Deux `package.json`
+réécrits par Composer là où nous répondions « rien à faire ». Le test à
+table qui figeait la mauvaise valeur est remplacé par un test différentiel
+contre la classe elle-même, sur quinze entrées : une table écrite à la main
+est précisément ce qui s'est trompé.
+
+`installed_as_locked` comparait (nom, version, référence de dist), et
+l'identité de l'installateur (`installer.rs`) le couple (version, référence
+de dist). `Transaction::calculateOperations` compare la version, les **deux**
+références et la marque `abandoned`. Conséquences mesurées sur un paquet dont
+seule `source.reference` bouge : Composer fait une opération d'update, réécrit
+l'entrée d'installed.json depuis le lock et Flex sort son rappel
+`symfony/thanks` ; nous ne reposions rien, gardions l'ancienne entrée (donc
+une référence de source périmée sur disque) et perdions trois lignes de
+stderr. L'identité à quatre champs est désormais partagée par tous les
+appelants au lieu d'être redérivée plus étroite à deux endroits.
+
+Le cas `abandoned` mérite sa note : `ArrayDumper` omet le champ quand il vaut
+false, et il peut valoir true ou un nom de remplacement — les trois états
+sont ramenés à une chaîne comparable.
+
+Vérifié : flex-update 22/22 (les 3 nouveaux cas rouges avant, dont
+`thanks-src-ref` qui a d'abord échoué sur installed.json et a révélé le
+second bug), steps 240/240, update 19/19, diff-vendor, removal, path-repos,
+transitions, boot, vendor-dir, flex-install, 257 tests.
