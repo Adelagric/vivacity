@@ -1715,3 +1715,59 @@ que nous découpions la &str — un segment d'espace de noms finissant par un
 caractère multi-octets tombait sur une frontière invalide. Comparé sur les
 octets désormais. C'est le chemin que prennent les 123 paquets enregistrés du
 cas `real-symfony-lock`, donc une panique à portée d'un paquet réel.
+
+## 2026-09-28 — Revue, fin : trois écarts de fidélité, et un constat réfuté
+
+Fait : le reste des points de correction de la revue.
+
+`synchronize_package_json` : Flex nie la valeur, donc la fausseté de PHP
+s'applique — `0`, `""`, `"0"`, `[]` sautent la synchronisation ET impriment
+« Skip synchronizing package.json with PHP packages ». Nous lisions un
+booléen et traitions tout le reste comme vrai. Couvert par `sync-disabled-0`,
+avec un `package.json` qui aurait été réécrit sans ça.
+
+`vendor-dir` hors de la racine : Composer calcule
+`trim(makePathRelative($vendorDir, $rootDir), '/')`, soit `../vendor`, et
+continue ; nous rendions la main. Passé par `find_shortest_path`.
+
+`flex-require` / `flex-require-dev` : seule la vérification d'`unpack` était
+sautée pour ces projets, rien ne couvrait la réécriture. Vérifié dans
+`Flex::update` (lignes 365-398) : la branche alternative repasse composer.json
+par `JsonManipulator` avec un `file_put_contents` inconditionnel, fusionne les
+clés dans `require`, les retire, puis appelle `reinstall()`. Repli.
+
+**Constat réfuté.** La revue signalait que `flex_downloader_enabled` fait une
+recherche sensible à la casse là où `ArrayLoader::parseLinks` met les cibles
+en minuscules : avec `"Symfony/Flex": "^2"` dans `require`, Flex serait actif
+et nous le croirions désactivé. Mesuré : Composer refuse le projet **avant**,
+`RootPackageLoader` (ligne 179) répondant « require.Symfony/Flex is invalid,
+it should not contain uppercase characters », exit 1 ; et une contrainte
+non-chaîne est refusée par le schéma JSON (`Factory` ligne 317). Les deux
+moitiés du constat sont donc inatteignables depuis un manifeste racine. Le
+changement a été retiré : du code inatteignable qui suggère un scénario
+impossible vaut moins que pas de code.
+
+Ce que la tentative a trouvé en revanche, et qui reste ouvert : sur ces deux
+manifestes, **vivacity réussit là où Composer refuse** (exit 0 contre exit 1,
+lock écrit). La validation du manifeste racine — nom d'exigence en majuscules,
+schéma JSON — n'est pas portée. C'est un écart réel, hors de la tranche Flex,
+et de sens inverse à tous les autres : nous acceptons un projet que Composer
+rejette.
+
+Trous de couverture refermés au passage, signalés par la revue : l'appel
+**tardif** de `flex_sync_reason` — celui que ces notes appellent
+l'autoritaire — n'était exercé par aucun cas, tous les cas `sync-*` partant
+en repli dès la passe précoce ; `sync-ux-late` retire les mots-clés
+`symfony-ux` du lock **actuel** seulement, si bien que la passe précoce ne
+voit rien, que la résolution les rétablit et que c'est la passe tardive qui
+rend la main. Et `--no-install` n'était couvert par aucun cas alors que la
+décision d'y appliquer le garde repose sur une mesure : `no-install` l'exerce
+maintenant.
+
+Reste ouvert de la revue, consigné sans être traité : `Where::Elsewhere`
+n'est exercé par aucun cas (aucune fixture n'a de paquet placé par
+composer/installers) ; le lecteur tar est plus permissif que l'extracteur sur
+les types d'entrée inconnus, ce qui reporte l'échec au lieu de rendre la main
+proprement ; et le prédicat `symfony-ux` reste un sur-ensemble assumé de ce
+que `resolvePackageJson` demande vraiment (un `assets/package.json` dans le
+paquet).

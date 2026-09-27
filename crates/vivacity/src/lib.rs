@@ -2387,12 +2387,29 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
 
 /// `extra.symfony/flex.synchronize_package_json`, default true.
 fn flex_synchronize_enabled(manifest: &serde_json::Value) -> bool {
-    manifest
+    // `!($extra[...] ?? true)`: PHP's falsiness, so `0`, `""`, `"0"` and `[]`
+    // all skip the synchronisation and print the notice.
+    match manifest
         .get("extra")
         .and_then(|e| e.get("symfony/flex"))
         .and_then(|f| f.get("synchronize_package_json"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true)
+    {
+        None => true,
+        Some(v) => php_truthy(v),
+    }
+}
+
+/// PHP's truthiness: `false`, `0`, `0.0`, `""`, `"0"`, `[]` and `null` are
+/// false, everything else is true.
+fn php_truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty() && s != "0",
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+    }
 }
 
 /// `Flex::install` on `POST_UPDATE_CMD` after a resolution that installed
@@ -2478,6 +2495,12 @@ fn flex_dotenv_paths(
 /// `Downloader::isEnabled`: recipes apply only when `symfony/flex` is a
 /// root requirement.
 fn flex_downloader_enabled(manifest: &serde_json::Value) -> bool {
+    // An exact-case lookup of an exact-case key. `ArrayLoader::parseLinks`
+    // does lowercase its targets and skip a non-string constraint, but
+    // neither can be reached from a root manifest: `RootPackageLoader`
+    // refuses `require.Symfony/Flex` outright ("it should not contain
+    // uppercase characters") and the JSON schema refuses anything but a
+    // string as a constraint. Both measured against Composer 2.10.3.
     ["require", "require-dev"].iter().any(|k| {
         manifest
             .get(k)
@@ -2816,13 +2839,17 @@ fn flex_sync_reason(
     let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
         .unwrap_or_default()
         .vendor_dir(project);
-    let Ok(vendor_rel) = vendor.strip_prefix(&root_dir) else {
-        return Some(
-            "would look for obsolete package.json links under a vendor directory outside the root"
-                .to_owned(),
-        );
+    // `trim(makePathRelative($vendorDir, $rootDir), '/')`: a vendor
+    // directory outside the root is `../vendor`, not a reason to give up.
+    let vendor_rel = match vendor.strip_prefix(&root_dir) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => vivacity_core::pathutil::find_shortest_path(
+            &root_dir.to_string_lossy(),
+            &vendor.to_string_lossy(),
+            true,
+        ),
     };
-    let prefix = format!("file:{}/", vendor_rel.to_string_lossy().replace('\\', "/"));
+    let prefix = format!("file:{}/", vendor_rel.trim_end_matches('/'));
     for key in ["dependencies", "devDependencies"] {
         for (name, value) in object
             .get(key)
@@ -2994,7 +3021,18 @@ fn flex_write_guard(project: &std::path::Path, manifest: &serde_json::Value) -> 
     // requirements is unpacked into composer.json. Decided here from
     // installed.json and the lock: a requirement found in neither is left
     // to Composer (its type is unknown before loading it).
-    if manifest.get("flex-require").is_none() && manifest.get("flex-require-dev").is_none() {
+    // `Flex::update` with `flex-require`/`flex-require-dev` takes the other
+    // branch of `unpack()`: composer.json goes back through
+    // `JsonManipulator` and `file_put_contents` unconditionally, the
+    // `flex-require` keys are merged into `require` and removed, and then
+    // `reinstall()` runs a whole second `Installer`.
+    if manifest.get("flex-require").is_some() || manifest.get("flex-require-dev").is_some() {
+        return Some(
+            "would merge flex-require into composer.json and run a second install of its own (not emulated)"
+                .to_owned(),
+        );
+    }
+    {
         let installed = installed_packages(project, manifest);
         let lock: Option<serde_json::Value> =
             std::fs::read_to_string(project.join("composer.lock"))

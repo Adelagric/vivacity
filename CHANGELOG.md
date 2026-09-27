@@ -40,6 +40,21 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **`extra.symfony/flex.synchronize_package_json` now follows PHP's
+  falsiness.** Flex negates the value, so `0`, `""`, `"0"` and `[]` all skip
+  the synchronisation and print `Skip synchronizing package.json with PHP
+  packages`; vivacity read a boolean and treated everything else as true, so
+  it printed nothing and asked the question anyway.
+- **A `vendor-dir` outside the root no longer hands the command over.**
+  Composer computes `trim(makePathRelative($vendorDir, $rootDir), '/')`,
+  which is `../vendor`; vivacity gave up instead of looking for obsolete
+  links under it.
+- **`flex-require` / `flex-require-dev` hand over.** Flex then takes the
+  other branch of `unpack()`: composer.json goes back through
+  `JsonManipulator` and `file_put_contents` unconditionally, the keys are
+  merged into `require` and removed, and a whole second `Installer` runs.
+  Only the *unpack* check was skipped for those projects; nothing covered
+  the rewrite.
 - **A package with no candidate class file no longer fetches a dist** to
   answer a question `getClassNames` settles from the lock entry alone. A
   metapackage or a `symfony-pack` has no dist at all, so an `update` that

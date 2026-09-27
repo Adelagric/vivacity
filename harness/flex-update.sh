@@ -152,6 +152,45 @@ shape_remove_expr()   { case "$1" in post) drop_require "$2" symfony/expression-
 # 123 des 153 paquets sont alors enregistrés, chacun interrogé sur sa
 # recette et sur sa classe de bundle. C'est la forme d'un projet réel.
 shape_real_lock()     { case "$1" in post) cp "$ROOT/fixtures/projects/$FX/symfony.lock" "$2/symfony.lock";; esac; }
+# `synchronize_package_json: 0` : faux au sens de PHP, donc l'avis « Skip
+# synchronizing… » sort et rien n'est écrit, même sur un package.json qui
+# aurait été réécrit.
+shape_sync_zero()     { case "$1" in
+                          pre) drop_ux "$2"
+                               php -r '
+                                 $f = $argv[1] . "/composer.json";
+                                 $j = json_decode(file_get_contents($f), true);
+                                 $j["extra"]["symfony/flex"]["synchronize_package_json"] = 0;
+                                 file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+                               ' "$2";;
+                          post) printf '{"devDependencies":{}}' > "$2/package.json";;
+                        esac; }
+# `flex-require` : Flex prend l'autre branche d'`unpack()`, réécrit
+# composer.json et relance un Installer complet.
+shape_flex_require()  { case "$1" in post)
+                          php -r '
+                            $f = $argv[1] . "/composer.json";
+                            $j = json_decode(file_get_contents($f), true);
+                            $j["flex-require"] = ["psr/log" => "^3"];
+                            file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+                          ' "$2";; esac; }
+# Les mots-clés `symfony-ux` retirés du lock ACTUEL seulement : la passe
+# précoce ne voit rien, la résolution les rétablit, et c'est la passe tardive
+# — celle qui décide vraiment — qui rend la main.
+shape_ux_late()       { case "$1" in post)
+                          write_importmap "$2"
+                          php -r '
+                            $f = $argv[1] . "/composer.lock";
+                            $j = json_decode(file_get_contents($f), true);
+                            foreach (["packages", "packages-dev"] as $k) {
+                              foreach ($j[$k] ?? [] as $i => $p) {
+                                if (in_array("symfony-ux", $p["keywords"] ?? [], true)) {
+                                  $j[$k][$i]["keywords"] = array_values(array_diff($p["keywords"], ["symfony-ux"]));
+                                }
+                              }
+                            }
+                            file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+                          ' "$2";; esac; }
 # Le même, moins une entrée qui porte un bundle : le repli qui s'ensuit
 # prouve que c'est bien ce fichier-là qui décide de l'ensemble enregistré
 # (avec un fichier ignoré ou complet, les deux cas seraient natifs).
@@ -277,4 +316,8 @@ prepare sync-dirty        shape_package_dirty && run sync-dirty        fallback 
 prepare sync-stale-link   shape_package_link  && run sync-stale-link   fallback "obsolete"
 prepare sync-empty-object shape_package_empty && run sync-empty-object fallback "would rewrite package.json"
 prepare sync-crlf-oneline shape_package_crlf  && run sync-crlf-oneline fallback "would rewrite package.json"
+prepare sync-disabled-0   shape_sync_zero     && run sync-disabled-0   native
+prepare no-install        -                   && run no-install        native "" --no-install
+prepare flex-require      shape_flex_require  && run flex-require      fallback "would merge flex-require"
+prepare sync-ux-late      shape_ux_late       && run sync-ux-late      fallback "symfony-ux"
 exit $status
