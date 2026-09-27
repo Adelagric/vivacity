@@ -615,45 +615,132 @@ mod tests {
 
 /// The bytes of one file of a zip dist, addressed as the extracted tree
 /// addresses it: the same single-root strip, then a `/`-separated relative
-/// path. `None` when the archive holds no such file — a directory entry,
-/// a symlink or a missing name all answer `None`, since the question this
-/// serves is "what would this file contain once extracted".
+/// path, and then the same semantics a read of the laid-out file has.
+///
+/// That last part is the whole difficulty, and three things follow from it:
+/// the extraction writes every entry in order, so a name appearing twice
+/// ends up holding the LAST one's bytes; `extract_zip` turns a symlink entry
+/// into a real symlink, so reading it yields its target's bytes; and on a
+/// case-insensitive filesystem — macOS and Windows — a read of
+/// `src/AcmeBundle.php` finds an entry named `src/acmebundle.php`. A match
+/// that only differs in case is accepted after an exact one fails: on a
+/// case-sensitive host that can only over-answer, and the caller's
+/// over-answer is a needless hand-over.
+///
+/// `None` when the archive holds no such file: a directory entry, a missing
+/// name, or a symlink whose target is absent or escapes the package (an
+/// archive `extract_zip` would refuse outright).
 pub fn read_zip_entry(zip_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
     let dest = Path::new("<archive>");
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(Error::zip(dest))?;
-    let strip = root_strip(&mut archive, dest)?;
-    let wanted = Path::new(rel);
+    let mut entries: Vec<(PathBuf, bool, u32)> = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(Error::zip(dest))?;
-        if entry.is_dir() {
+        let entry = archive.by_index(i).map_err(Error::zip(dest))?;
+        entries.push((
+            entry_path(&entry, dest)?,
+            entry.is_dir(),
+            entry.unix_mode().unwrap_or(0),
+        ));
+    }
+    let strip = root_strip_of(entries.iter().map(|(p, d, _)| (p.as_path(), *d)));
+    // Later entries win, as the extraction's writes do.
+    let mut by_path: Vec<(Vec<std::ffi::OsString>, usize, bool)> = Vec::new();
+    for (i, (path, dir, mode)) in entries.iter().enumerate() {
+        if *dir {
             continue;
         }
-        if entry.unix_mode().unwrap_or(0) & S_IFMT == S_IFLNK {
+        let Some(comps) = stripped(path, strip) else {
             continue;
+        };
+        let link = mode & S_IFMT == S_IFLNK;
+        if let Some(slot) = by_path.iter_mut().find(|(c, _, _)| *c == comps) {
+            *slot = (comps, i, link);
+        } else {
+            by_path.push((comps, i, link));
         }
-        let path = entry_path(&entry, dest)?;
-        if !same_stripped(&path, strip, wanted) {
-            continue;
+    }
+    let find = |wanted: &[std::ffi::OsString]| -> Option<(usize, bool)> {
+        by_path
+            .iter()
+            .find(|(c, _, _)| c == wanted)
+            .or_else(|| {
+                by_path
+                    .iter()
+                    .find(|(c, _, _)| same_ignoring_case(c, wanted))
+            })
+            .map(|(_, i, link)| (*i, *link))
+    };
+    let mut wanted = components(Path::new(rel));
+    // `ELOOP`: a symlink chain the filesystem would refuse to follow.
+    for _ in 0..8 {
+        let Some((index, link)) = find(&wanted) else {
+            return Ok(None);
+        };
+        let bytes = read_zip_index(&mut archive, index, dest, rel)?;
+        if !link {
+            return Ok(Some(bytes));
         }
-        if entry.size() > MAX_UNCOMPRESSED {
-            return Err(Error::HostileArchive {
-                dest: dest.to_path_buf(),
-                reason: format!("entry {rel} is absurdly large"),
-            });
-        }
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
-        return Ok(Some(buf));
+        let Ok(target) = String::from_utf8(bytes) else {
+            return Ok(None);
+        };
+        let Some(next) = resolve_link(&wanted, &target) else {
+            return Ok(None);
+        };
+        wanted = next;
     }
     Ok(None)
 }
 
+fn read_zip_index(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    index: usize,
+    dest: &Path,
+    rel: &str,
+) -> Result<Vec<u8>> {
+    let mut entry = archive.by_index(index).map_err(Error::zip(dest))?;
+    if entry.size() > MAX_UNCOMPRESSED {
+        return Err(Error::HostileArchive {
+            dest: dest.to_path_buf(),
+            reason: format!("entry {rel} is absurdly large"),
+        });
+    }
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
+    Ok(buf)
+}
+
+/// A symlink's target, resolved lexically against the link's own path, as
+/// the filesystem resolves it. `None` when it leaves the package root, which
+/// `check_symlink_target` refuses at extraction time, or when it is absolute.
+fn resolve_link(link: &[std::ffi::OsString], target: &str) -> Option<Vec<std::ffi::OsString>> {
+    let target = Path::new(target);
+    if target.is_absolute() {
+        return None;
+    }
+    let mut out: Vec<std::ffi::OsString> = link[..link.len().saturating_sub(1)].to_vec();
+    for c in target.components() {
+        match c {
+            Component::Normal(n) => out.push(n.to_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop()?;
+            }
+            _ => return None,
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The same for a tar dist. The stream is not seekable and the strip needs
-/// every path, so the archive is read once, keeping only the candidate.
+/// every path, so the archive is read once, keeping every candidate — the
+/// last one wins, as the extraction's writes do. A symlink is NOT followed
+/// here: `PharData::extractTo`, which `TarDownloader` uses, writes a symlink
+/// entry as an empty file, and an empty file answers like `None` to the one
+/// question this serves.
 pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
     let dest = Path::new("<archive>");
-    let wanted = Path::new(rel);
+    let wanted = components(Path::new(rel));
     let mut paths: Vec<(PathBuf, bool)> = Vec::new();
     let mut found: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let decoder = flate2::read::GzDecoder::new(tgz_bytes);
@@ -693,32 +780,57 @@ pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
             });
         }
         // The strip is only known at the end, so every name that could be
-        // the one — stripped or not — is kept.
-        if same_stripped(&path, 0, wanted) || same_stripped(&path, 1, wanted) {
+        // the one — stripped or not, whatever its case — is kept.
+        if matches_stripped(&path, 0, &wanted) || matches_stripped(&path, 1, &wanted) {
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
             found.push((path, buf));
         }
     }
     let strip = root_strip_of(paths.iter().map(|(p, d)| (p.as_path(), *d)));
-    Ok(found
-        .into_iter()
-        .find(|(p, _)| same_stripped(p, strip, wanted))
-        .map(|(_, b)| b))
+    // Last match wins; an exact one wins over one that only differs in case.
+    let pick = |exact: bool| {
+        found.iter().rev().find(|(p, _)| {
+            stripped(p, strip).is_some_and(|c| {
+                if exact {
+                    c == wanted
+                } else {
+                    same_ignoring_case(&c, &wanted)
+                }
+            })
+        })
+    };
+    Ok(pick(true).or_else(|| pick(false)).map(|(_, b)| b.clone()))
 }
 
-/// An entry path, its first `strip` components dropped, compared to a
-/// wanted relative path. `./` components are ignored on both sides, as the
-/// extraction ignores them.
-fn same_stripped(path: &Path, strip: usize, wanted: &Path) -> bool {
-    let normal = |p: &Path| -> Vec<std::ffi::OsString> {
-        p.components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => Some(n.to_owned()),
-                _ => None,
+/// An entry path's components, its first `strip` of them dropped; `None`
+/// when it has no more than that (the stripped root itself).
+fn stripped(path: &Path, strip: usize) -> Option<Vec<std::ffi::OsString>> {
+    let got = components(path);
+    (got.len() > strip).then(|| got[strip..].to_vec())
+}
+
+fn components(p: &Path) -> Vec<std::ffi::OsString> {
+    p.components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The same path but for ASCII case, which is what a case-insensitive
+/// filesystem folds in every name a PHP class file can have.
+fn same_ignoring_case(a: &[std::ffi::OsString], b: &[std::ffi::OsString]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| match (x.to_str(), y.to_str()) {
+                (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+                _ => x == y,
             })
-            .collect()
-    };
-    let got = normal(path);
-    got.len() > strip && got[strip..] == normal(wanted)[..]
+}
+
+fn matches_stripped(path: &Path, strip: usize, wanted: &[std::ffi::OsString]) -> bool {
+    stripped(path, strip).is_some_and(|c| c == wanted || same_ignoring_case(&c, wanted))
 }

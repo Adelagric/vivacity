@@ -1652,3 +1652,40 @@ Vérifié : flex-update 22/22 (les 3 nouveaux cas rouges avant, dont
 `thanks-src-ref` qui a d'abord échoué sur installed.json et a révélé le
 second bug), steps 240/240, update 19/19, diff-vendor, removal, path-repos,
 transitions, boot, vendor-dir, flex-install, 257 tests.
+
+## 2026-09-28 — Le lecteur de dist contre l'arbre extrait : trois désaccords
+
+Fait : la même revue a mesuré trois cas où `read_zip_entry` /
+`read_tar_entry` répondent autrement que la lecture du fichier posé. Tous
+trois vont dans le sens dangereux — « ce paquet ne porte pas de bundle »
+alors qu'il en porte, donc l'enregistrement du bundle et l'entrée de
+`symfony.lock` sautent en silence.
+
+1. `extract_zip` pose un vrai lien symbolique pour une entrée de mode
+   0o120777 (vérifié : l'entrée sort en `120777`, le fichier sur disque est
+   un lien, sa lecture rend le contenu de la cible) ; le lecteur sautait les
+   liens. Il les suit maintenant, résolus lexicalement dans l'archive, avec
+   un plafond de huit sauts pour l'équivalent d'`ELOOP`. En tar la réponse
+   `None` reste juste : `PharData` écrit un lien comme un fichier vide.
+2. L'extraction écrit toutes les entrées dans l'ordre, donc un nom répété
+   finit avec les octets de la **dernière** ; le lecteur rendait la première.
+3. Sur un système de fichiers insensible à la casse — celui de macOS et de
+   Windows par défaut — lire `src/AcmeBundle.php` trouve une entrée nommée
+   `src/acmebundle.php` ; le lecteur comparait les octets. Une différence de
+   seule casse est désormais acceptée **après** l'échec d'une correspondance
+   exacte : sur un système sensible à la casse cela ne peut que sur-répondre,
+   et une sur-réponse du bundle est un repli inutile, jamais un bundle
+   manqué. Casse ASCII seulement, ce qui couvre tout nom de fichier de classe
+   PHP.
+
+Le test d'invariant excluait explicitement les liens symboliques de son
+inventaire : c'est ce qui laissait passer le premier. Il les parcourt
+maintenant, et deux tests s'ajoutent pour le nom répété et la casse. Les
+trois vérifiés rouges avant le correctif.
+
+Leçon de méthode, la troisième de la journée : un `str.replace` sans
+vérification est un correctif qui peut ne pas s'appliquer. Deux de mes
+éditions ont été silencieusement perdues — l'une parce que `cargo fmt` avait
+replié un `vec!` sur une ligne entre-temps — et un cas de test n'a pas
+existé pendant deux exécutions qui le déclaraient vert. Toute substitution
+porte désormais son assertion.

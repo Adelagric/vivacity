@@ -15,9 +15,10 @@ fn work(tag: &str) -> PathBuf {
     d
 }
 
-/// Every file of a tree, as `/`-separated relative paths, symlinks excluded
-/// (the reader deliberately answers `None` for them, as does a PHP `require`
-/// of a path a symlink would have pointed outside the package).
+/// Every readable path of a tree, as `/`-separated relative paths, symlinks
+/// INCLUDED: a read of the laid-out file follows them, so they belong to the
+/// invariant. Excluding them is what let the reader disagree with the
+/// extraction on a symlinked class file.
 fn files(root: &Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).expect("read_dir") {
@@ -25,7 +26,7 @@ fn files(root: &Path) -> Vec<String> {
             let meta = std::fs::symlink_metadata(&p).expect("meta");
             if meta.is_dir() {
                 walk(root, &p, out);
-            } else if !meta.file_type().is_symlink() {
+            } else {
                 out.push(
                     p.strip_prefix(root)
                         .expect("rel")
@@ -39,6 +40,17 @@ fn files(root: &Path) -> Vec<String> {
     walk(root, root, &mut out);
     out.sort();
     out
+}
+
+/// Is this filesystem case-insensitive, as macOS's and Windows' default ones
+/// are? The reader's case fallback only has to agree with the extracted tree
+/// where the tree itself folds case.
+fn case_insensitive(dir: &Path) -> bool {
+    let probe = dir.join("CaseProbe");
+    std::fs::write(&probe, b"x").expect("probe");
+    let folded = dir.join("caseprobe").exists();
+    std::fs::remove_file(&probe).expect("clean probe");
+    folded
 }
 
 fn build_tgz(entries: &[TarSpec<'_>]) -> Vec<u8> {
@@ -63,6 +75,8 @@ fn build_tgz(entries: &[TarSpec<'_>]) -> Vec<u8> {
     enc.finish().expect("gzip")
 }
 
+/// `path -> data`; a `path` ending in `/` is a directory entry, and a `data`
+/// prefixed with `link:` makes a symlink to the rest.
 fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
@@ -70,6 +84,8 @@ fn build_zip(entries: &[(&str, &str)]) -> Vec<u8> {
         if path.ends_with('/') {
             w.add_directory(path.trim_end_matches('/'), opts)
                 .expect("dir");
+        } else if let Some(target) = data.strip_prefix("link:") {
+            w.add_symlink(*path, target, opts).expect("symlink");
         } else {
             w.start_file(*path, opts).expect("file");
             std::io::Write::write_all(&mut w, data.as_bytes()).expect("write");
@@ -107,6 +123,18 @@ fn zip_entry_reads_what_the_extraction_lays_out() {
             // keep their first component.
             "two-roots",
             vec![("a/composer.json", "{}"), ("b/src/AcmeBundle.php", BUNDLE)],
+        ),
+        (
+            // `extract_zip` writes a real symlink (mode 0o120777), and a read
+            // of it yields the target's bytes — so the reader must follow it.
+            "symlink",
+            vec![
+                ("acme-9f8/", ""),
+                ("acme-9f8/src/RealBundle.php", BUNDLE),
+                ("acme-9f8/src/AcmeBundle.php", "link:RealBundle.php"),
+                // Through a directory and back up with `..`.
+                ("acme-9f8/lib/Deep.php", "link:../src/RealBundle.php"),
+            ],
         ),
     ];
     for (tag, entries) in cases {
@@ -185,4 +213,85 @@ fn tar_entry_reads_what_the_extraction_lays_out() {
         );
         std::fs::remove_dir_all(&dest).expect("clean");
     }
+}
+
+#[test]
+fn tar_entry_takes_the_last_of_a_repeated_name() {
+    use tar::EntryType::{Directory, Regular};
+    // A tar stream may carry the same name twice; `extractTo` writes both in
+    // order, so the file left on disk holds the LAST one's bytes.
+    let bytes = build_tgz(&[
+        ("package/", Directory, ""),
+        (
+            "package/src/AcmeBundle.php",
+            Regular,
+            "<?php // nothing here",
+        ),
+        ("package/src/AcmeBundle.php", Regular, BUNDLE),
+    ]);
+    let dest = work("tar-dup");
+    extract_tar(&bytes, &dest).expect("extract");
+    let laid_out = std::fs::read(dest.join("src/AcmeBundle.php")).expect("read");
+    assert_eq!(
+        String::from_utf8_lossy(&laid_out),
+        BUNDLE,
+        "the extraction keeps the last entry"
+    );
+    assert_eq!(
+        read_tar_entry(&bytes, "src/AcmeBundle.php").expect("read entry"),
+        Some(laid_out),
+        "the reader must keep the last one too"
+    );
+    std::fs::remove_dir_all(&dest).expect("clean");
+}
+
+#[test]
+fn entries_fold_case_like_the_filesystem() {
+    // An entry whose case does not match the class name is only readable as
+    // the class expects it on a case-insensitive filesystem — macOS's and
+    // Windows' default. The reader accepts a case-only difference after an
+    // exact match fails: it then agrees with such a tree, and over-answers
+    // on a case-sensitive one, which is the safe direction for the caller
+    // (a needless hand-over, never a missed bundle).
+    let zip_bytes = build_zip(&[("acme-9f8/", ""), ("acme-9f8/src/acmebundle.php", BUNDLE)]);
+    let dest = work("zip-case");
+    extract_zip(&zip_bytes, &dest).expect("extract");
+    let asked = read_zip_entry(&zip_bytes, "src/AcmeBundle.php").expect("case");
+    if case_insensitive(&dest) {
+        assert_eq!(
+            asked,
+            Some(std::fs::read(dest.join("src/AcmeBundle.php")).expect("read")),
+            "the tree folds case here, so the reader must too"
+        );
+    } else {
+        assert!(asked.is_some(), "over-answering is the safe direction");
+    }
+    // An exact match still wins over one that only differs in case.
+    let both = build_zip(&[
+        ("acme-9f8/", ""),
+        ("acme-9f8/src/acmebundle.php", "<?php // wrong case"),
+        ("acme-9f8/src/AcmeBundle.php", BUNDLE),
+    ]);
+    assert_eq!(
+        read_zip_entry(&both, "src/AcmeBundle.php")
+            .expect("exact")
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
+        Some(BUNDLE.to_owned())
+    );
+    std::fs::remove_dir_all(&dest).expect("clean");
+
+    let tgz = build_tgz(&[
+        ("package/", tar::EntryType::Directory, ""),
+        (
+            "package/src/acmebundle.php",
+            tar::EntryType::Regular,
+            BUNDLE,
+        ),
+    ]);
+    assert!(
+        read_tar_entry(&tgz, "src/AcmeBundle.php")
+            .expect("case")
+            .is_some(),
+        "the tar reader folds case the same way"
+    );
 }

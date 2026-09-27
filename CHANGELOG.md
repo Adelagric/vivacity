@@ -40,6 +40,17 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **The dist reader disagreed with the extraction in three ways**, each one
+  able to answer "this package ships no bundle" about a package that does —
+  so Flex's bundle registration and its `symfony.lock` entry were silently
+  skipped. `extract_zip` turns a symlink entry into a real symlink and a read
+  of it yields the target's bytes, where the reader skipped it; the
+  extraction writes every entry in order so a repeated name ends up holding
+  the LAST one's bytes, where the reader returned the first; and on a
+  case-insensitive filesystem a read of `src/AcmeBundle.php` finds an entry
+  named `src/acmebundle.php`, where the reader compared bytes. The invariant
+  test now walks symlinks too — excluding them is what let the first one
+  through — and covers a repeated name and a case-only difference.
 - **Two models of "unchanged" were weaker than Composer's, and both produced
   a wrong native verdict.** `JsonManipulator`'s constructor is not `trim`
   alone: it looks for the CRLF in the *trimmed* string and rewrites `{}` as
