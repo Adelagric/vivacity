@@ -1689,3 +1689,29 @@ vérification est un correctif qui peut ne pas s'appliquer. Deux de mes
 replié un `vec!` sur une ligne entre-temps — et un cas de test n'a pas
 existé pendant deux exécutions qui le déclaraient vert. Toute substitution
 porte désormais son assertion.
+
+## 2026-09-28 — Revue, suite : un repli inutile qui allait mordre, et une panique
+
+Fait : trois autres points de la même revue, dans `flex.rs`.
+
+Le dist était récupéré avant qu'on demande s'il y avait quoi que ce soit à
+lire. `getClassNames` répond « aucun candidat » depuis la seule entrée de
+lock quand le paquet ne déclare pas de `psr-4`/`psr-0` — ce qui est le cas
+d'un métapaquet et d'un `symfony-pack`, qui n'ont pas de dist du tout. Un
+`update` qui en installait un rendait donc la main sur « impossible de lire
+le dist », pour une lecture que Flex n'aurait jamais faite. La liste des
+fichiers candidats est maintenant calculée d'abord (`bundle_candidate_paths`),
+et seul un paquet qui en a un est lu. Aucune fixture ne porte de paquet sans
+dist, donc le garde est couvert par des tests unitaires plutôt que par le
+banc — déclaré ici faute de mieux.
+
+Un chemin d'autoload non-chaîne faisait sauter tout l'espace de noms, là où
+PHP enveloppe le scalaire (`if (!is_array($paths))`) et l'utilise comme
+chemin : `{"psr-4": {"Acme\\": 5}}` cherche son candidat sous `5/`.
+
+`extract_class_names` pouvait **paniquer** au lieu de répondre :
+`substr($suffix, -6)` compte des octets et la comparaison est binaire, alors
+que nous découpions la &str — un segment d'espace de noms finissant par un
+caractère multi-octets tombait sur une frontière invalide. Comparé sur les
+octets désormais. C'est le chemin que prennent les 123 paquets enregistrés du
+cas `real-symfony-lock`, donc une panique à portée d'un paquet réel.

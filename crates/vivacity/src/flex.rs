@@ -363,29 +363,54 @@ pub enum ClassSource<'a> {
 /// classes): does this package register a bundle, i.e. would Flex build an
 /// auto-generated recipe for it? Reading from wherever the file stands.
 pub fn has_bundle_class_from(package: &Value, source: &ClassSource<'_>) -> anyhow::Result<bool> {
+    for rel in bundle_candidate_paths(package) {
+        if read_class_file(source, &rel)?.is_some_and(|c| declares_bundle(&c)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The files `isBundleClass` would open for this package, relative to the
+/// package root, in the order it opens them. Computed from the lock entry
+/// alone: an EMPTY list means the answer is no with nothing to read — and
+/// that has to be settled before a dist is fetched, or a package with no
+/// dist at all (a metapackage) would hand the command over for nothing.
+pub fn bundle_candidate_paths(package: &Value) -> Vec<String> {
     let autoload = package.get("autoload");
     let is_sylius_plugin = package.get("type").and_then(Value::as_str) == Some("sylius-plugin");
+    let mut out = Vec::new();
     for (key, is_psr4) in [("psr-4", true), ("psr-0", false)] {
         let Some(map) = autoload.and_then(|a| a.get(key)).and_then(Value::as_object) else {
             continue;
         };
         for (namespace, paths) in map {
-            let paths: Vec<&str> = match paths {
-                Value::String(s) => vec![s.as_str()],
-                Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
-                _ => continue,
+            // `if (!is_array($paths)) { $paths = [$paths]; }`, and each is
+            // then used as a string: a scalar is a path, not a skipped
+            // namespace.
+            let paths: Vec<String> = match paths {
+                Value::Array(a) => a.iter().map(php_string).collect(),
+                other => vec![php_string(other)],
             };
             for path in paths {
                 for class in extract_class_names(namespace, is_sylius_plugin) {
-                    let rel = class_file_path(&class, path, is_psr4);
-                    if read_class_file(source, &rel)?.is_some_and(|c| declares_bundle(&c)) {
-                        return Ok(true);
-                    }
+                    out.push(class_file_path(&class, &path, is_psr4));
                 }
             }
         }
     }
-    Ok(false)
+    out
+}
+
+/// A JSON value where PHP would use a string.
+fn php_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Bool(true) => "1".to_owned(),
+        Value::Bool(false) => String::new(),
+        other => other.to_string(),
+    }
 }
 
 /// The file `isBundleClass` opens, relative to the package root.
@@ -441,17 +466,16 @@ fn extract_class_names(namespace: &str, is_sylius_plugin: bool) -> Vec<String> {
     let class = format!("{namespace}\\");
     let parts: Vec<&str> = namespace.split('\\').collect();
     let last = parts.last().copied().unwrap_or("");
-    let end_of_word = if last.len() >= 6 {
-        &last[last.len() - 6..]
-    } else {
-        last
-    };
+    // `substr($suffix, -6)` counts BYTES and the comparison is byte-wise:
+    // slicing the &str would panic on a multi-byte boundary.
+    let bytes = last.as_bytes();
+    let end_of_word = &bytes[bytes.len().saturating_sub(6)..];
     let mut suffix = last.to_owned();
     if is_sylius_plugin {
-        if end_of_word != "Bundle" && end_of_word != "Plugin" {
+        if end_of_word != b"Bundle" && end_of_word != b"Plugin" {
             suffix.push_str("Bundle");
         }
-    } else if end_of_word != "Bundle" {
+    } else if end_of_word != b"Bundle" {
         suffix.push_str("Bundle");
     }
     let mut classes = vec![format!("{class}{suffix}")];
@@ -696,6 +720,67 @@ mod tests {
             // Laid out somewhere else: Flex reads vendor/<name> and finds
             // nothing there.
             assert!(!has_bundle_class_from(&package, &ClassSource::Elsewhere).expect("elsewhere"));
+        }
+    }
+
+    #[test]
+    fn no_candidate_file_means_no_read_at_all() {
+        // The guard that keeps a package with no dist to fetch — a
+        // metapackage, a symfony-pack — from handing the command over for a
+        // read `getClassNames` would never do.
+        for empty in [
+            serde_json::json!({}),
+            serde_json::json!({"type": "metapackage"}),
+            serde_json::json!({"autoload": {"files": ["src/fn.php"]}}),
+            serde_json::json!({"autoload": {"classmap": ["src/"]}}),
+            serde_json::json!({"autoload": {"psr-4": []}}),
+        ] {
+            assert!(
+                bundle_candidate_paths(&empty).is_empty(),
+                "{empty} should need no read"
+            );
+        }
+        // `extractClassNames` yields several names per namespace, so several
+        // files: the first is the one PHP opens first.
+        let one = serde_json::json!({"autoload": {"psr-4": {"Acme\\FooBundle\\": "src"}}});
+        assert_eq!(
+            bundle_candidate_paths(&one),
+            vec!["src/FooBundle.php", "src/AcmeFooBundle.php"]
+        );
+    }
+
+    #[test]
+    fn autoload_paths_follow_php_coercion() {
+        // `if (!is_array($paths)) { $paths = [$paths]; }`, then used as a
+        // string: a scalar is a path, not a reason to skip the namespace.
+        let cases: [(serde_json::Value, &str); 3] = [
+            (
+                serde_json::json!({"autoload": {"psr-4": {"Acme\\": 5}}}),
+                "5/AcmeBundle.php",
+            ),
+            (
+                serde_json::json!({"autoload": {"psr-4": {"Acme\\": null}}}),
+                "AcmeBundle.php",
+            ),
+            (
+                serde_json::json!({"autoload": {"psr-4": {"Acme\\": ["lib", 7]}}}),
+                "lib/AcmeBundle.php",
+            ),
+        ];
+        for (package, first) in cases {
+            let paths = bundle_candidate_paths(&package);
+            assert_eq!(paths.first().map(String::as_str), Some(first), "{package}");
+        }
+    }
+
+    #[test]
+    fn a_multibyte_namespace_does_not_panic() {
+        // `substr($suffix, -6)` counts bytes: on `ééééa` the sixth byte from
+        // the end is a continuation byte, and slicing the &str panicked.
+        for ns in ["Ééééa\\", "Bundle\\", "Ébundle\\", "é\\"] {
+            let package = serde_json::json!({"autoload": {"psr-4": {ns: "src"}}});
+            let paths = bundle_candidate_paths(&package);
+            assert!(!paths.is_empty(), "{ns} yields a candidate");
         }
     }
 

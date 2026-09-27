@@ -2625,7 +2625,13 @@ fn flex_install_reason(
                 l.rel(p.name())
                     .is_none_or(|rel| rel == format!("{vendor_rel}/{}", p.name()))
             });
-            let w = if !at_vendor {
+            // No candidate class file at all — the commonest case, and the
+            // one `getClassNames` answers without opening anything. Asked
+            // first, so a package with no dist to fetch (a metapackage) is
+            // not handed over for a read it would never do.
+            let has_candidate =
+                !flex::bundle_candidate_paths(&serde_json::Value::Object(p.raw.clone())).is_empty();
+            let w = if !at_vendor || !has_candidate {
                 Where::Elsewhere
             } else if installed_as_locked(&installed, p) {
                 Where::LaidOut

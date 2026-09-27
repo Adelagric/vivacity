@@ -40,6 +40,20 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **A package with no candidate class file no longer fetches a dist** to
+  answer a question `getClassNames` settles from the lock entry alone. A
+  metapackage or a `symfony-pack` has no dist at all, so an `update` that
+  installed one handed the whole command over for a read Flex would never
+  do. The autoload question is now asked first, and only a package that has
+  a candidate file is read — from vendor/ or from its dist.
+- **An autoload path that is not a string no longer skips its namespace.**
+  PHP wraps a scalar (`if (!is_array($paths))`) and uses it as a path; a
+  package declaring `{"psr-4": {"Acme\\": 5}}` has its candidate under
+  `5/`, where vivacity ignored the namespace entirely.
+- **`extract_class_names` could panic** instead of answering: it sliced the
+  last six *characters* where `substr($suffix, -6)` counts bytes, so a
+  namespace segment ending in a multi-byte character crashed the command.
+  Compared on bytes now, as PHP compares.
 - **The dist reader disagreed with the extraction in three ways**, each one
   able to answer "this package ships no bundle" about a package that does —
   so Flex's bundle registration and its `symfony.lock` entry were silently
