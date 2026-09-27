@@ -7,6 +7,9 @@ name: drift
 #
 # Stage 1 diffs the reference twins (docs/reference/*.php) against the same
 # files inside the newer phar: it names the exact port that moved, in seconds.
+# A drift that has been read and settled is acknowledged in
+# docs/reference/DRIFT-ACK, keyed by the fingerprint of the diff itself, so it
+# stops alerting until upstream moves again.
 # Stage 2 runs the tests and the whole harness against that Composer.
 
 on:
@@ -87,11 +90,19 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gh label create drift --color B60205 --description "Output drifted from a newer Composer" --force
-          title="Drift against Composer $COMPOSER_VERSION ($CHANNEL)"
-          body="Reference twins: **$TWINS** · tests + harness: **$HARNESS** · run: $RUN_URL
+          # One open issue per channel, the version in the body: the snapshot
+          # channel's version string carries a build ref and changes every
+          # week, so putting it in the title opened a new issue each run.
+          # A drift that comes back after being fixed does open a fresh issue,
+          # since only OPEN ones are looked up.
+          title="Drift against Composer ($CHANNEL)"
+          body="Composer **$COMPOSER_VERSION** · reference twins: **$TWINS** · tests + harness: **$HARNESS** · run: $RUN_URL
 
           The vendored reference is Composer 2.10.3. A failing stage 1 names the file whose port must be re-read; a failing stage 2 with a passing stage 1 means behaviour changed outside the vendored files."
-          existing=$(gh issue list --label drift --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          # Matched exactly rather than through the search index: the title
+          # holds parentheses, and `in:title` is a substring match.
+          existing=$(gh issue list --label drift --state open --limit 50 --json number,title \
+            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else

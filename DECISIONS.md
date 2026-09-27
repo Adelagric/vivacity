@@ -1561,3 +1561,52 @@ plus pour les deux côtés.
 
 Vérifié : flex-update 19/19 (les 14 nouveaux cas rouges avant), transitions,
 vendor-dir, flex-install 7/7, update 19/19, steps 240/240, 256 tests.
+
+## 2026-09-27 — Drift : les deux jumeaux qui bougent, et un acquittement daté
+
+Fait : l'issue #1 (canal `snapshot`) répète depuis le 2026-09-20 « reference
+twins: failure · tests + harness: success ». Le log nomme les deux fichiers :
+`ComposerRepository.php` (44 lignes) et `PlatformRepository.php` (5 lignes).
+Lus en amont par l'API GitHub, sans télécharger de phar.
+
+`ComposerRepository.php` : commits `53e6ddca8` (batching des requêtes à l'API
+des avis de sécurité, `ADVISORY_API_BATCH_SIZE = 500`, parce que PHP tronque
+`$_POST` au-delà de `max_input_vars` sans erreur) et `24e396b52` (options de
+transport passées à `FilterListApiClient`). Le premier est ce que vivacity
+avait déjà porté par avance (`crates/vivacity-resolver/src/repository.rs`) :
+le jumeau diffère parce qu'amont a rattrapé, pas parce que nous sommes en
+retard. Nuance relevée et non portée : amont lance désormais les lots **en
+parallèle** (`httpDownloader->add` + `loop->wait`), trie les réponses par
+index de lot, et n'affiche les avertissements du dépôt qu'une fois pour
+l'ensemble — notre boucle est séquentielle. Sans effet contre la référence
+épinglée 2.10.3, qui n'a pas le batching du tout.
+
+`PlatformRepository.php` : `MB_ONIGURUMA_VERSION` est déprécié en PHP 8.6, le
+garde passe de `PHP_VERSION_ID < 90000` à `< 80600` et `Silencer::call`
+disparaît. Rien à porter : sur PHP 8.6 amont retombe sur la branche qui lit la
+version dans la sortie de `phpinfo` — celle que notre sonde a déjà en
+`elseif` — donc `lib-mbstring-oniguruma` existe des deux côtés, seule la
+source de la chaîne de version change, et notre `@constant(...)` supprime déjà
+la notice.
+
+Décision : deux dérives lues, aucune à porter, donc acquittables. Mécanisme
+ajouté dans `harness/drift-reference.sh` : `docs/reference/DRIFT-ACK` liste
+`<fichier> <sha256 du diff> <raison>`. La clé est l'empreinte du **diff**, si
+bien qu'un nouveau mouvement amont périme l'acquittement et réalerte — un
+acquittement tait un écart dont la décision est écrite, il n'endort jamais la
+surveillance. Le script imprime sous chaque dérive la ligne exacte à coller.
+Vérifié sur les trois branches dans un arbre jetable : non acquittée (code 1 +
+ligne à coller), acquittée (code 0, `ACK` avec la raison), amont qui rebouge
+(code 1 à nouveau). Piège rencontré en route : sortir le `diff` de l'intérieur
+d'un `echo` le soumet à `set -e -o pipefail`, qui tuait le script sur le statut
+1 de `diff` — le diff est maintenant écrit une fois dans un fichier, puis lu.
+
+Titre de l'issue de drift rendu stable par canal (`Drift against Composer
+($CHANNEL)`), la version passant dans le corps : la chaîne de version du canal
+`snapshot` porte un ref de build, donc la mettre dans le titre ouvrait une
+issue neuve dès qu'amont recompilait. La recherche d'issue existante passe de
+`--search "… in:title"` (substring, et le titre contient des parenthèses) à une
+comparaison exacte en `jq`. Reste à faire, hors de portée d'ici : renommer
+l'issue #1 au nouveau titre pour que le prochain run la commente au lieu d'en
+ouvrir une seconde, et coller les deux lignes d'acquittement dès qu'un run
+contre le snapshot aura imprimé leurs empreintes.

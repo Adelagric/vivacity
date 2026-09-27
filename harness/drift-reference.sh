@@ -83,9 +83,23 @@ resolver_twin() {
   echo ""
 }
 
+# Dérives déjà lues et tranchées : une ligne `<fichier> <empreinte> <raison>`
+# dans docs/reference/DRIFT-ACK. L'empreinte est celle du diff lui-même, donc
+# un NOUVEAU mouvement amont réalerte — un acquittement ne peut pas endormir
+# la surveillance, seulement taire un écart dont la décision est écrite.
+ACK="$ROOT/docs/reference/DRIFT-ACK"
+ack_reason() { # fichier, empreinte
+  [ -f "$ACK" ] || return 1
+  awk -v f="$1" -v h="$2" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 == f && $2 == h { $1 = ""; $2 = ""; sub(/^[[:space:]]+/, ""); print; found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$ACK"
+}
+
 version=$(php "$TMP/composer.phar" --version --no-ansi 2>/dev/null | sed -n 's/^Composer version \([^ ]*\).*/\1/p')
 echo "Composer $version vs docs/reference (2.10.3)"
-status=0; checked=0
+status=0; checked=0; acked=0
 for f in "$ROOT"/docs/reference/*.php "$ROOT"/docs/reference/resolver/*.php "$ROOT"/docs/reference/resolver/Operation/*.php "$ROOT"/docs/reference/policy/*.php; do
   name=$(basename "$f")
   [ -s "$f" ] || continue
@@ -102,9 +116,25 @@ for f in "$ROOT"/docs/reference/*.php "$ROOT"/docs/reference/resolver/*.php "$RO
   if diff -q "$f" "$TMP/twin.php" >/dev/null; then
     checked=$((checked + 1))
   else
-    echo "DRIFT $name ($inner) : $(diff "$f" "$TMP/twin.php" | grep -c '^[<>]') lignes"
-    status=1
+    # `diff` sort 1 quand les fichiers diffèrent, et `set -e -o pipefail`
+    # tuerait l'affectation : le diff est écrit une fois, puis lu.
+    diff "$f" "$TMP/twin.php" > "$TMP/drift.diff" || true
+    lines=$(grep -c '^[<>]' "$TMP/drift.diff" || true)
+    fingerprint=$(shasum -a 256 < "$TMP/drift.diff" | cut -d' ' -f1)
+    if reason=$(ack_reason "$name" "$fingerprint"); then
+      echo "ACK   $name ($inner) : $lines lignes, acquittées — $reason"
+      acked=$((acked + 1))
+    else
+      echo "DRIFT $name ($inner) : $lines lignes"
+      echo "      pour acquitter, après avoir lu le diff et écrit la décision :"
+      echo "      $name $fingerprint <raison en une ligne>"
+      status=1
+    fi
   fi
 done
-echo "$checked fichiers identiques"
+if [ "$acked" -gt 0 ]; then
+  echo "$checked fichiers identiques, $acked dérives acquittées (docs/reference/DRIFT-ACK)"
+else
+  echo "$checked fichiers identiques"
+fi
 exit $status

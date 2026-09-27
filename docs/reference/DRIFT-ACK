@@ -1,0 +1,11 @@
+# Dérives de l'étage 1 déjà lues et tranchées.
+#
+# Format : <fichier de docs/reference> <sha256 du diff> <raison en une ligne>
+# L'empreinte est celle du diff entre le jumeau épinglé (Composer 2.10.3) et
+# le même fichier du Composer sous test. Elle change dès qu'amont rebouge :
+# un acquittement tait un écart dont la décision est écrite, il n'endort
+# jamais la surveillance.
+#
+# On n'acquitte qu'après avoir lu le diff ET consigné la décision dans
+# DECISIONS.md. La ligne à coller est imprimée par harness/drift-reference.sh
+# sous la dérive.

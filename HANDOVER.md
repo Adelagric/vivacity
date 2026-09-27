@@ -30,7 +30,7 @@ harness/vendor-dir.sh [variante...]      # config.vendor-dir / bin-dir : 6 varia
 harness/path-repos.sh                    # dépôts `path` (14 étapes, dont 4 sur la ligne « Generating [optimized] autoload files ») : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)
 tools/snapshot-packagist.sh <fixture>    # (re)capture un instantané Packagist + lock de référence
 harness/boot.sh                          # les 6 fixtures démarrent sur un vendor 100 % vivacity
-harness/drift-reference.sh [phar]        # docs/reference/ == fichiers du phar (2.10.3 ou autre)
+harness/drift-reference.sh [phar]        # docs/reference/ == fichiers du phar (2.10.3 ou autre) ; une dérive lue et tranchée s'acquitte dans docs/reference/DRIFT-ACK (clé = empreinte du diff, donc un nouveau mouvement amont réalerte), le script imprimant la ligne à coller
 php tools/gen-installers-table.php /tmp/composer.phar [src] [tag]   # régénère assets/installers/<tag>.json
 harness/linux.sh                         # toute la chaîne dans un conteneur Linux (Docker)
 bench/profile.sh ; bench/spike-vs-composer.sh   # M0, longs
