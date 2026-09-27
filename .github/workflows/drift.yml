@@ -100,9 +100,15 @@ jobs:
 
           The vendored reference is Composer 2.10.3. A failing stage 1 names the file whose port must be re-read; a failing stage 2 with a passing stage 1 means behaviour changed outside the vendored files."
           # Matched exactly rather than through the search index: the title
-          # holds parentheses, and `in:title` is a substring match.
+          # holds parentheses, and `in:title` is a substring match. The second
+          # branch catches an issue opened under the old title, which carried
+          # the version — so this change migrates itself instead of opening a
+          # duplicate beside it.
           existing=$(gh issue list --label drift --state open --limit 50 --json number,title \
-            | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')
+            | jq -r --arg t "$title" --arg c "($CHANNEL)" '
+                (map(select(.title == $t)) | .[0].number)
+                // (map(select(.title | startswith("Drift against Composer") and endswith($c))) | .[0].number)
+                // empty')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else
