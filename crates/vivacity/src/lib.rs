@@ -2871,8 +2871,15 @@ fn flex_sync_reason(
             }
         }
     }
-    // That unconditional write, byte for byte.
-    if php_json_manipulator_contents(&text) != text {
+    // That unconditional write, byte for byte. The port of the manipulator
+    // answers it: its constructor holds the whole subtlety (`trim`, an empty
+    // object spread over two lines, the newline taken from the TRIMMED
+    // text), and `oracle_json_manipulator` already holds that port to the
+    // real class — including with no operation at all, which is this case.
+    let Ok(manipulator) = vivacity_resolver::json_manipulator::JsonManipulator::new(&text) else {
+        return Some("would fail on a package.json that is not an object".to_owned());
+    };
+    if manipulator.contents() != text {
         return Some(
             "would rewrite package.json, which Composer's JsonManipulator does not hand back byte for byte"
                 .to_owned(),
@@ -2898,34 +2905,6 @@ fn flex_ux_package(lock_value: &serde_json::Value) -> Option<&str> {
         })
         .and_then(|p| p.get("name"))
         .and_then(serde_json::Value::as_str)
-}
-
-/// What `JsonManipulator::getContents()` returns for an untouched file.
-/// The constructor is not `trim` alone:
-///
-/// ```php
-/// $contents = trim($contents);
-/// if ($contents === '') { $contents = '{}'; }
-/// $this->newline = false !== strpos($contents, "\r\n") ? "\r\n" : "\n";
-/// $this->contents = $contents === '{}' ? '{' . $this->newline . '}' : $contents;
-/// ```
-///
-/// So the newline is looked for in the **trimmed** string — a file whose
-/// only CRLF is its last two bytes comes back with a plain `\n` — and an
-/// empty object is spread over two lines. `getContents()` then appends the
-/// newline.
-fn php_json_manipulator_contents(text: &str) -> String {
-    let trimmed = text.trim_matches(|c| matches!(c, ' ' | '\n' | '\r' | '\t' | '\u{0B}' | '\0'));
-    let trimmed = if trimmed.is_empty() { "{}" } else { trimmed };
-    let newline = if trimmed.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    if trimmed == "{}" {
-        return format!("{{{newline}}}{newline}");
-    }
-    format!("{trimmed}{newline}")
 }
 
 /// `Flex::install` on `POST_INSTALL_CMD` (an `install`, not an update):
@@ -4419,119 +4398,7 @@ mod local_repository_tests {
 
 #[cfg(test)]
 mod flex_sync_tests {
-    use super::{flex_ux_package, php_json_manipulator_contents};
-
-    #[test]
-    fn json_manipulator_round_trip_is_not_the_identity() {
-        // An empty object is spread over two lines, whatever it looked like.
-        assert_eq!(php_json_manipulator_contents("{}\n"), "{\n}\n");
-        assert_eq!(php_json_manipulator_contents("{}"), "{\n}\n");
-        assert_eq!(php_json_manipulator_contents("{}\n\n\n"), "{\n}\n");
-        assert_eq!(php_json_manipulator_contents("\n  {}  \t"), "{\n}\n");
-        // PHP's trim covers the vertical tab and the NUL byte too.
-        assert_eq!(php_json_manipulator_contents("{}\u{0B}\0"), "{\n}\n");
-        // Anything else comes back trimmed, with one newline appended.
-        assert_eq!(
-            php_json_manipulator_contents("  {\"a\": 1}\n\n"),
-            "{\"a\": 1}\n"
-        );
-        // The newline is looked for in the TRIMMED string: a single-line
-        // file whose only CRLF is its last two bytes gets a plain `\n`.
-        assert_eq!(
-            php_json_manipulator_contents("{\"a\": 1}\r\n"),
-            "{\"a\": 1}\n"
-        );
-        // An inner CRLF survives the trim, and then it is the newline.
-        assert_eq!(
-            php_json_manipulator_contents("{\r\n  \"a\": 1\r\n}"),
-            "{\r\n  \"a\": 1\r\n}\r\n"
-        );
-        // Both at once: `{}` in CRLF comes back as three CRLF-separated lines.
-        assert_eq!(php_json_manipulator_contents("{}\r\n"), "{\n}\n");
-    }
-
-    /// The same inputs through the real `JsonManipulator`: the table above
-    /// says what we believe, this says what Composer does. A hand-written
-    /// table is exactly what got this wrong once — it asserted that `{}\n`
-    /// came back unchanged, and the constructor's last line turns it into
-    /// `{` + newline + `}`.
-    ///
-    /// Prerequisite: `composer` on the PATH (dev/CI). Missing it FAILS.
-    #[test]
-    fn json_manipulator_round_trip_matches_composer() {
-        let inputs: Vec<String> = vec![
-            "{}\n",
-            "{}",
-            "{}\n\n\n",
-            "\n  {}  \t",
-            "{}\u{0B}\0",
-            "{}\r\n",
-            "{}\r\n\r\n",
-            "  {\"a\": 1}\n\n",
-            "{\"a\": 1}\r\n",
-            "{\r\n  \"a\": 1\r\n}",
-            "{\n  \"devDependencies\": {}\n}\n",
-            "{\"a\":1}",
-            "{ }",
-            "{\t}\n",
-            "{\"a\": \"b\\r\\n\"}\n",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-        if !phar.exists() {
-            let src = String::from_utf8(
-                std::process::Command::new("which")
-                    .arg("composer")
-                    .output()
-                    .expect("which")
-                    .stdout,
-            )
-            .expect("utf8");
-            assert!(!src.trim().is_empty(), "composer required");
-            std::fs::copy(src.trim(), &phar).expect("copy");
-        }
-        let script = format!(
-            r#"require "phar://{}/vendor/autoload.php";
-               $out = [];
-               foreach (json_decode(stream_get_contents(STDIN), true) as $c) {{
-                   try {{ $out[] = (new \Composer\Json\JsonManipulator($c))->getContents(); }}
-                   catch (\Throwable $e) {{ $out[] = null; }}
-               }}
-               echo json_encode($out);"#,
-            phar.display()
-        );
-        let mut child = std::process::Command::new("php")
-            .arg("-r")
-            .arg(&script)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("php runs");
-        {
-            use std::io::Write as _;
-            let stdin = child.stdin.as_mut().expect("stdin");
-            stdin
-                .write_all(serde_json::to_string(&inputs).expect("json").as_bytes())
-                .expect("write");
-        }
-        let out = child.wait_with_output().expect("php output");
-        assert!(out.status.success(), "php failed");
-        let expected: Vec<Option<String>> =
-            serde_json::from_slice(&out.stdout).expect("oracle json");
-        assert_eq!(expected.len(), inputs.len());
-        for (input, want) in inputs.iter().zip(expected) {
-            // `null` means the constructor threw: not a shape we model here
-            // (the caller hands the command over instead).
-            let Some(want) = want else { continue };
-            assert_eq!(
-                php_json_manipulator_contents(input),
-                want,
-                "input {input:?} round-trips differently"
-            );
-        }
-    }
+    use super::flex_ux_package;
 
     #[test]
     fn ux_package_found_in_either_lock_section() {

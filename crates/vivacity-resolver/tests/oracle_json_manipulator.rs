@@ -184,6 +184,11 @@ fn scenarios(contents: &str) -> Vec<Vec<Op>> {
         .as_object()
         .and_then(|m| m.keys().next().cloned());
     let mut out = vec![
+        // No operation at all: the constructor's own round-trip, which is
+        // what decides whether Flex's unconditional rewrite of a
+        // package.json changes its bytes (`trim`, `{}` spread over two
+        // lines, the newline taken from the TRIMMED text).
+        vec![],
         vec![Op::AddLink(
             "require",
             "vivacity/new-link".into(),

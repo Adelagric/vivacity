@@ -85,9 +85,10 @@ byte-identical-output promise are the public API.
   alone: it looks for the CRLF in the *trimmed* string and rewrites `{}` as
   `{`, a newline, `}`. So a `package.json` of exactly `{}` and a single-line
   file whose only CRLF is its last two bytes are both rewritten by Composer
-  where vivacity answered "unchanged, nothing to do". The round-trip is now
-  checked against the real class over fifteen inputs, not against a
-  hand-written table — the table had enshrined the wrong value.
+  where vivacity answered "unchanged, nothing to do". The answer now comes
+  from the port of `JsonManipulator` that the repository already held —
+  faithful all along, and held to the real class by its own oracle, which
+  now replays the no-operation scenario too.
 - **A package whose `source.reference` alone moved was treated as
   unchanged**, by the installer (which then carried its installed.json entry
   over instead of rewriting it from the lock) and by Flex's thanks reminder

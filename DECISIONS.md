@@ -1771,3 +1771,36 @@ les types d'entrée inconnus, ce qui reporte l'échec au lieu de rendre la main
 proprement ; et le prédicat `symfony-ux` reste un sur-ensemble assumé de ce
 que `resolvePackageJson` demande vraiment (un `assets/package.json` dans le
 paquet).
+
+## 2026-09-28 — Le port existait déjà : ne pas remodéliser ce qui est porté
+
+Fait : Windows a refusé le lot précédent, et la cause remonte à une faute
+plus profonde que le symptôme.
+
+Le symptôme : le test différentiel que j'avais écrit pour `JsonManipulator`
+vivait dans les tests unitaires de bibliothèque, seuls exécutés par le
+workflow `windows` (`cargo test --workspace --lib`). Il cherche le phar par
+`which composer`, ce qui sur Windows ne rend pas un phar. Tous les autres
+oracles à phar du dépôt sont des tests d'**intégration**, jamais lancés là :
+mon test était au mauvais endroit.
+
+La faute : `crates/vivacity-resolver/src/json_manipulator.rs` contient depuis
+longtemps un port complet de la classe, dont le constructeur fait exactement
+ce que j'ai passé la soirée à redécouvrir — `trim`, vide → `{}`, la
+vérification `^\{(.*)\}$`, le saut de ligne cherché dans la chaîne **trimée**,
+et `{}` étalé sur deux lignes. Il est tenu à la classe réelle par
+`oracle_json_manipulator`. J'ai écrit un second modèle du même objet, à la
+main, faux, avec son propre test qui figeait l'erreur — alors que la réponse
+juste était à un appel de fonction.
+
+Correctif : `flex_sync_reason` appelle `JsonManipulator::new(&text)` et
+compare `contents()` aux octets du fichier ; le `Err` du constructeur est
+exactement le cas « pas un objet », qui fait avorter Composer et doit donc
+rendre la main. Mon helper et ses deux tests sont supprimés. L'oracle du
+manipulateur gagne un scénario **sans aucune opération** : le constructeur et
+`getContents()` seuls, rejoués sur tout le corpus de manifestes réels — c'est
+précisément la propriété dont dépend le garde de synchronisation, et elle
+n'était couverte par personne.
+
+Règle retenue : avant de modéliser un comportement de Composer, chercher s'il
+est déjà porté. `grep` sur le nom de la classe aurait suffi.
