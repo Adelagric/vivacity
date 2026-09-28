@@ -34,6 +34,7 @@ WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/flex-update"
 FX=symfony
 [ -x "$VIVACITY" ] || { echo "binaire absent : cargo build --release"; exit 1; }
 command -v composer >/dev/null || { echo "composer requis"; exit 1; }
+composer --version --no-ansi | head -1
 command -v php >/dev/null || { echo "php requis"; exit 1; }
 rm -rf "$WORK"; mkdir -p "$WORK"; harness_git_env "$WORK"
 # L'instantané Packagist figé : sans lui les deux outils résoudraient en
@@ -233,7 +234,11 @@ prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony
     write_symfony_lock "$d"
     (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
       composer update --no-scripts --no-interaction --no-audit --no-ansi --no-blocking --quiet >"$WORK/$name.$side.prepare.log" 2>&1) || {
-        echo "FAIL $name : la préparation a échoué ($side)"; tail -3 "$WORK/$name.$side.prepare.log"; status=1; return 1; }
+        echo "FAIL $name : la préparation a échoué ($side)"
+        # Les premières lignes, pas les dernières : Composer met son message
+        # AVANT le synopsis de la commande, et un `tail` ne montre que le
+        # synopsis — ce qui a coûté une enquête entière.
+        sed -n '1,8p' "$WORK/$name.$side.prepare.log"; status=1; return 1; }
     write_symfony_lock "$d" "$@"
     [ "$shape" = - ] || "$shape" post "$d"
   done
