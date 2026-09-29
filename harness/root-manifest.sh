@@ -32,8 +32,8 @@ status=0
 # Le contenu de l'encadré d'erreur de Symfony Console, sans son en-tête
 # (`In X.php line N:`) ni le synopsis, marges rognées.
 box_text() {
-  sed -n '/^In [A-Za-z]*\.php line [0-9]*:$/,/^$/p' "$1" \
-    | sed 's/^ *//; s/ *$//' | grep -v '^$' | grep -vE '^In [A-Za-z]*\.php line [0-9]*:$'
+  sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/,/^$/p' "$1" \
+    | sed 's/^ *//; s/ *$//' | grep -v '^$' | grep -vE '^In [A-Za-z0-9_]*\.php line [0-9]*:$'
 }
 
 run() { # nom, expression jq, commande...
@@ -63,7 +63,7 @@ run() { # nom, expression jq, commande...
   fi
   local written
   for side in ref viv; do
-    written=$(cd "$d-$side" && find . -newer "$WORK/$name.marker" -type f | head -5)
+    written=$(cd "$d-$side" && find . -newer "$WORK/$name.marker" ! -name . | head -5)
     if [ -n "$written" ]; then
       echo "FAIL $name : $side a écrit malgré le refus : $(echo "$written" | tr '\n' ' ')"; status=1; return
     fi
@@ -71,7 +71,8 @@ run() { # nom, expression jq, commande...
   echo "OK   $name : code $rc, message identique, rien d'écrit des deux côtés"
 }
 
-for cmd_label in "dump-autoload:dump-autoload" "install:install" "update:update --no-install"; do
+for cmd_label in "dump-autoload:dump-autoload" "install:install" "update:update --no-install" \
+                 "remove:remove psr/log" "require:require psr/log"; do
   label="${cmd_label%%:*}"; cmdline="${cmd_label#*:}"
   # shellcheck disable=SC2086
   # Un nom racine en majuscules ou de forme invalide est refusé par le SCHÉMA,

@@ -325,17 +325,28 @@ without Symfony Console's box and without the command synopsis — the same
 deviation already taken for path repositories, and measured: the box is
 wrapped to the terminal's width and is sometimes chained.
 
-What stays accepted, measured on eight realistic invalid manifests: the five
-that Composer refuses through its **JSON schema** — a root name with an
-uppercase letter or a malformed shape (the schema's `name` pattern is
-case-sensitive, so those never reach the loader), a constraint that is not a
-string, an unknown `minimum-stability`, a `version` that is not a version, a
-repository without a `type` or with an unknown one. Porting them means
-validating `res/composer-schema.json`, which vivacity does not do. And on
-`install` and `dump-autoload` the refusals that need a parsed manifest — a
-malformed alias, an unparsable constraint — are not enforced either, since
-reaching them means guessing the root version, i.e. running git, on the
-install path.
+Three of these rules are ported; the rest of what Composer refuses in a root
+manifest is not, and the shape of each gap is different.
+
+*Refused, with different words.* Composer validates its JSON schema before the
+loader, and the schema catches an uppercase or malformed `name` (its pattern is
+case-sensitive) and a constraint that is not a string; `parent::load` catches an
+unparsable constraint before the link-name loop. On such a manifest vivacity
+refuses too — same exit code, nothing written — but names the rule it can see
+rather than the one Composer names. Words are the cheaper divergence, and the
+project already takes one for the box; staying silent would let `dump-autoload`
+write an autoloader where Composer writes nothing.
+
+*Accepted on `install` and `dump-autoload`.* An unknown `minimum-stability`, a
+`version` that is not a version, a repository with no `type` or an unknown one:
+Composer refuses all three through the schema, and `update` refuses the first
+two through its own ports. Reaching them on the other commands means loading
+the root package, i.e. guessing its version, i.e. running git on the install
+path — so they are left. Porting the schema itself means validating
+`res/composer-schema.json`, which vivacity does not do.
+
+*Not refused at all.* `COMPOSER=<file>` is refused as unsupported rather than
+honoured, so a manifest named there is never validated — nor installed from.
 
 Not supported: `gitlab-token` auth, root version detection from
 hg/svn/fossil.

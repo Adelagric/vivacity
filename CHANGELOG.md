@@ -15,7 +15,15 @@ byte-identical-output promise are the public API.
   wrote an autoloader where Composer writes nothing and exits 1. Now refused
   at all five commands, before anything is written, with Composer's own
   message and exit code: an invalid root package name, a package that requires
-  itself, an invalid link name in any of the five link types. The message is
+  itself, an invalid link name in any of the five link types. On a manifest
+  Composer's JSON schema refuses too, vivacity refuses with the rule it can see
+  rather than the schema's words: the exit code and the absence of writes are
+  what matter, and staying silent would mean writing.
+- **`COMPOSER=<file>` is refused by `install`, `dump-autoload` and `update`**
+  as it already was by `require` and `remove`. They read `composer.json`
+  whatever the variable said, so they worked on a manifest Composer never looks
+  at — `update` wrote `composer.lock` where Composer would have written
+  `alt.lock`, and neither was validated. The message is
   printed without Symfony Console's box or the command synopsis, the deviation
   already taken for path repositories. What stays accepted is stated in the
   README, measured: the five refusals that come from the JSON schema, which

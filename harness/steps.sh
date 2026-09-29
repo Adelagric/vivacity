@@ -81,11 +81,15 @@ STEPS=(
   "laravel|update @jq:.require[\"con/x\"]=\"*\" @nostderr"
   "laravel|update @jq:.require[\"acme/x.json\"]=\"*\" @nostderr"
   "laravel|update @jq:.provide[\"BAR/Foo\"]=\"1.0\" @nostderr"
-  # Un nom racine en majuscules ou de forme invalide est refusé par le SCHÉMA
-  # (son motif `name` est sensible à la casse), famille non portée : vivacity
-  # l'accepte encore. Le nom réservé, lui, franchit le schéma et atteint le
-  # chargeur.
+  # Un nom racine en majuscules est refusé par le SCHÉMA chez Composer et par
+  # le chargeur chez nous : même code, même absence d'écriture, mots
+  # différents — d'où `@nostderr` ici et l'absence de ce cas dans
+  # root-manifest.sh, qui compare les mots.
+  "laravel|update @jq:.name=\"acme/ThingBaz\" @nostderr"
   "laravel|update @jq:.name=\"con/thing\" @nostderr"
+  # Deux fautes à la fois : Composer nomme la contrainte illisible, nous le nom
+  # de lien. Même code, rien d'écrit.
+  "laravel|update @jq:.require[\"x/y\"]=\"not_a_constraint\"|.require[\"Bad/Name\"]=\"^1\" @nostderr"
   "laravel|update @jq:.name=\"laravel/framework\" @nostderr"
   "laravel|install @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"
   "laravel|remove psr/log @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"

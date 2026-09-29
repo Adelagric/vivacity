@@ -64,9 +64,6 @@ impl RootPackage {
     /// Loads composer.json (already parsed) with the root version guessed by
     /// vivacity-core (same rules as RootPackageLoader + VersionGuesser).
     pub fn load(manifest: &Value, project_dir: &Path) -> Result<RootPackage, RootError> {
-        if let Some(err) = manifest_error(manifest) {
-            return Err(RootError(err));
-        }
         let mut config = manifest
             .as_object()
             .cloned()
@@ -246,6 +243,14 @@ impl RootPackage {
 /// prints it without Symfony Console's box, as it already does for path
 /// repositories: the box is wrapped to the terminal width, followed by the
 /// command synopsis, and sometimes chained.
+///
+/// These rules are reported even when Composer would have answered with
+/// ANOTHER message — its JSON schema runs first and catches an uppercase or
+/// malformed `name`, and `parent::load` catches an unparsable constraint before
+/// the link-name loop. Reporting ours then differs in words; staying silent
+/// would differ in OUTCOME, letting `dump-autoload` write an autoloader where
+/// Composer writes nothing. Words are the cheaper divergence, and the project
+/// already takes one for the box.
 pub fn manifest_error(manifest: &Value) -> Option<String> {
     use crate::lockfile::package_naming_error;
     let config = manifest.as_object()?;
@@ -258,7 +263,7 @@ pub fn manifest_error(manifest: &Value) -> Option<String> {
     // reproduce — only what the schema lets through is ours to report, i.e. the
     // `.json` suffix and the reserved names.
     let name = config.get("name").and_then(Value::as_str);
-    if let Some(name) = name.filter(|n| schema_name_shape(n)) {
+    if let Some(name) = name {
         if let Some(err) = package_naming_error(name, false) {
             return Some(format!("Your package name {err}"));
         }
@@ -280,8 +285,8 @@ pub fn manifest_error(manifest: &Value) -> Option<String> {
     }
     // `foreach (array_keys(BasePackage::$supportedLinkTypes) as $linkType)`,
     // in that order, first error wins.
-    for link_type in ["require", "conflict", "provide", "replace", "require-dev"] {
-        let Some(links) = config.get(link_type).and_then(Value::as_object) else {
+    for link_type in LINK_TYPES {
+        let Some(links) = config.get(*link_type).and_then(Value::as_object) else {
             continue;
         };
         for target in links.keys() {
@@ -293,18 +298,8 @@ pub fn manifest_error(manifest: &Value) -> Option<String> {
     None
 }
 
-/// `res/composer-schema.json`'s pattern for `name`: the loader's shape rule
-/// without its `i` flag. A name that fails it never reaches the loader, since
-/// `Factory::createComposer` validates the schema first.
-fn schema_name_shape(name: &str) -> bool {
-    static SHAPE: OnceLock<pcre2::bytes::Regex> = OnceLock::new();
-    let re = crate::version::regex(
-        &SHAPE,
-        r"^[a-z0-9](?:[_.-]?[a-z0-9]++)*+/[a-z0-9](?:(?:[_.]|-{1,2})?[a-z0-9]++)*+\z",
-        false,
-    );
-    re.is_match(name.as_bytes()).unwrap_or(false)
-}
+/// `array_keys(BasePackage::$supportedLinkTypes)`, in its order.
+const LINK_TYPES: &[&str] = &["require", "conflict", "provide", "replace", "require-dev"];
 
 pub fn normalize_stability(s: &str) -> Result<String, RootError> {
     let lower = s.to_lowercase();
@@ -618,11 +613,20 @@ mod tests {
             Some("Your package name acme/thing.json is invalid, package names can not end in .json, consider renaming it or perhaps using a -json suffix instead.")
         );
         assert!(manifest_error(&json!({"name": "con/thing"})).is_some());
-        // An uppercase or malformed root name is refused by the schema first,
-        // with a message vivacity does not reproduce: silence here is
-        // deliberate, not an oversight.
-        assert_eq!(manifest_error(&json!({"name": "acme/ThingBaz"})), None);
-        assert_eq!(manifest_error(&json!({"name": "acme"})), None);
+        // An uppercase or malformed root name is refused by Composer's JSON
+        // schema first, so its message is the schema's and ours is the
+        // loader's. Both refuse and both write nothing, which is the part that
+        // matters; staying silent here would let `dump-autoload` write.
+        assert_eq!(
+            manifest_error(&json!({"name": "acme/ThingBaz"})).as_deref(),
+            Some("Your package name acme/ThingBaz is invalid, it should not contain uppercase characters. We suggest using acme/thing-baz instead.")
+        );
+        assert!(manifest_error(&json!({"name": "acme"}))
+            .is_some_and(|e| e
+                .starts_with("Your package name acme is invalid, it should have a vendor name")));
+        // A trailing newline: the schema's `$` tolerates it, the loader's `D`
+        // does not — so the loader is what answers, and so do we.
+        assert!(manifest_error(&json!({"name": "acme/app\n"})).is_some());
         // No name at all is `__root__`, never an error.
         assert_eq!(manifest_error(&json!({"require": {"a/b": "*"}})), None);
         // A package that requires itself, from either section.

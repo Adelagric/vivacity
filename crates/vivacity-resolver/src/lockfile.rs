@@ -711,7 +711,10 @@ pub fn validate_package(p: &Package) -> Result<(), String> {
     Ok(())
 }
 
-/// `ValidatingArrayLoader::hasPackageNamingError($name)` (excluding links).
+/// `ValidatingArrayLoader::hasPackageNamingError($name, $isLink)`. With
+/// `is_link`, the uppercase rule names the lowercase form to use; without it,
+/// it suggests the camelCase split (`root::manifest_error` for the root
+/// package's own name, `validate_package` for a package of a repository).
 pub fn package_naming_error(name: &str, is_link: bool) -> Option<String> {
     static NAME: OnceLock<pcre2::bytes::Regex> = OnceLock::new();
     if crate::platform::is_platform_package(name) {

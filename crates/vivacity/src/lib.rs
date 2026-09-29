@@ -590,6 +590,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let project = project_dir(args.working_dir.as_deref())?;
     let manifest_path = project.join("composer.json");
     let lock_path = project.join("composer.lock");
+    refuse_alternate_manifest()?;
 
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
@@ -1850,6 +1851,7 @@ fn composer_dir_of(project: &std::path::Path, manifest: &serde_json::Value) -> s
 fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     let t0 = std::time::Instant::now();
     let project = project_dir(args.working_dir.as_deref())?;
+    refuse_alternate_manifest()?;
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join("composer.json"))
             .context("cannot read composer.json")?,
@@ -2391,6 +2393,20 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
     if resolved.flex_active {
         print_flex_post_update(&resolved.manifest, resolved.thanks_reminder);
     }
+}
+
+/// `COMPOSER=<file>` points Composer at another manifest, and at the lock
+/// beside it. `remove` and `require` already refuse it; `install`,
+/// `dump-autoload` and `update` read `composer.json` regardless — so they
+/// worked on a file Composer never looks at, and the root-manifest refusals
+/// below were decided on the wrong one.
+fn refuse_alternate_manifest() -> anyhow::Result<()> {
+    if let Some(f) = std::env::var("COMPOSER").ok().map(|f| f.trim().to_owned()) {
+        if !f.is_empty() && f != "composer.json" && f != "./composer.json" {
+            anyhow::bail!("COMPOSER={f}: an alternate manifest is not supported yet");
+        }
+    }
+    Ok(())
 }
 
 /// `RootPackageLoader::load`'s own refusals, which Composer raises for EVERY
@@ -3240,6 +3256,7 @@ fn resolve_and_lock(
     use vivacity_resolver::session::UpdateSession;
     let t0 = std::time::Instant::now();
     let project = project_dir(args.working_dir.as_deref())?;
+    refuse_alternate_manifest()?;
     let manifest_path = project.join("composer.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;

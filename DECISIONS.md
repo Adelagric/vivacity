@@ -1869,3 +1869,53 @@ avec un autre message ; 9 lignes de plus dans steps.sh (249/249) ; update 19/19,
 flex-update 26/26, diff-vendor, removal, path-repos, transitions, boot,
 vendor-dir, flex-install ; 263 tests dont un oracle de nommage contre le phar
 sur un corpus fabriqué **et** tous les noms de liens des fixtures.
+
+## 2026-09-29 — Revue indépendante : mon garde était à l'envers
+
+Fait : la revue indépendante (niveau 2) a rapporté cinq défauts réels dont une
+régression, et surtout elle m'a fait voir que j'avais optimisé le mauvais
+critère.
+
+**Le garde du schéma était à l'envers.** J'avais conditionné la règle du nom
+racine au franchissement du motif `name` du schéma, pour ne pas imprimer un
+message que Composer n'imprime pas. La revue montre le prix de ce choix :
+sur un manifeste que le schéma refuse **aussi**, se taire nous fait retomber
+sur « accepter », donc `dump-authoload` écrit un autoloader là où Composer sort
+en 1 sans rien écrire. C'est exactement le péché que ce changement corrige. Le
+mot juste est moins important que l'issue juste, et le projet assume déjà une
+déviation de mots (l'encadré). Le garde est donc **retiré** : la règle parle
+toujours. Trois effets : la régression signalée disparaît (elle ne portait que
+sur les mots d'un manifeste à deux fautes), le cas du saut de ligne final
+devient **exact** sans rien coder (le motif du chargeur le refuse, comme
+Composer), et deux fonctions auxiliaires disparaissent.
+
+**`COMPOSER=<fichier>` contournait le garde** sur `install`, `dump-autoload` et
+`update`, qui lisaient `composer.json` sans regarder la variable — donc
+validaient un fichier que Composer ne regarde pas, et écrivaient. Trou
+préexistant (`remove` et `require` refusaient déjà la variable) : mesuré,
+`update` écrivait même `composer.lock` au lieu d'`alt.lock`. Les trois refusent
+maintenant comme les deux autres.
+
+**`RootPackage::load` n'appelle plus `manifest_error`.** Le plugin merge charge
+un manifeste **fusionné** par `RootPackage::load`, alors que Composer applique
+`setRequires` à un paquet racine déjà chargé — il ne revalide jamais les noms
+injectés. Sans ce retrait, un fichier inclus déclarant `core` ou
+`fluid_styled_content` (25 noms de ce type dans le cache packagist local, que
+Composer accepte via le plugin) aurait fait refuser un projet que Composer
+résout. Les cinq gardes de commande suffisent.
+
+Écarts résiduels, écrits plutôt que corrigés : un nom de paquet invalide passé
+en **argument** de `require` (`require Psr/Log:^3`) est attrapé après la
+réécriture de composer.json, donc une ligne de plus et l'ordre de la note de
+retour inversé — mais l'issue est juste (avant ce changement, cette commande
+sortait 0 en laissant la mauvaise exigence dans le manifeste) ; et
+`{"require": {"0": "^1"}}` sort 1 chez nous contre 255 chez Composer, dont le
+`declare(strict_types=1)` lève une TypeError sur la clé devenue entière.
+
+Vérifié après révision : root-manifest 35/35 (cinq commandes × sept règles),
+steps 251/251, update 19/19, flex-update 26/26, diff-vendor, removal,
+path-repos, transitions, boot, vendor-dir, flex-install, 263 tests. La revue a
+par ailleurs poussé la preuve d'absence de faux positif bien au-delà de mes
+fixtures : 1 122 manifestes du dépôt et 211 497 versions de paquets réelles du
+cache packagist local, zéro refus indu, et un fuzz de 187 384 comparaisons de
+`suggest_name` contre le phar sans divergence.
