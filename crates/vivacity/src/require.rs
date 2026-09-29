@@ -345,6 +345,13 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             .map_err(anyhow::Error::from)
             .and_then(|t| serde_json::from_str::<Value>(&t).map_err(Into::into))
         {
+            // Before this command edits composer.json: Composer refuses the
+            // manifest while loading the root package, so it never reaches
+            // the edit — nor the `reverting ./composer.json` notice that a
+            // later failure would print.
+            if let Some(code) = crate::refuse_invalid_root(&manifest) {
+                return Ok(code);
+            }
             if let Some(code) = crate::resolution_fallback(
                 &project,
                 &manifest,

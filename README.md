@@ -309,6 +309,34 @@ work, since Composer runs them. Not carried: the per-package events
 Without the flag, no script ever runs (`composer run-script post-install-cmd`
 is one command away).
 
+Root manifest refusals are Composer's. `Factory::createComposer` loads the
+root package for every command, so Composer refuses an invalid manifest
+whatever you asked it to do; vivacity only built a root package for a
+resolution, and so used to accept manifests the reference rejects — writing a
+lock, or dumping an autoloader, where Composer writes nothing and exits 1.
+Now refused at all five commands, before anything is written, with Composer's
+own message and its exit code: an invalid **root package name** (the rules the
+schema lets through — a `.json` suffix, a reserved Windows device name), a
+package that **requires itself**, and an invalid **link name** in any of
+`require`, `conflict`, `provide`, `replace`, `require-dev`
+(`ValidatingArrayLoader::hasPackageNamingError`, ported with PCRE2 so the
+case-insensitive class stays ASCII as PHP's does). The message is printed
+without Symfony Console's box and without the command synopsis — the same
+deviation already taken for path repositories, and measured: the box is
+wrapped to the terminal's width and is sometimes chained.
+
+What stays accepted, measured on eight realistic invalid manifests: the five
+that Composer refuses through its **JSON schema** — a root name with an
+uppercase letter or a malformed shape (the schema's `name` pattern is
+case-sensitive, so those never reach the loader), a constraint that is not a
+string, an unknown `minimum-stability`, a `version` that is not a version, a
+repository without a `type` or with an unknown one. Porting them means
+validating `res/composer-schema.json`, which vivacity does not do. And on
+`install` and `dump-autoload` the refusals that need a parsed manifest — a
+malformed alias, an unparsable constraint — are not enforced either, since
+reaching them means guessing the root version, i.e. running git, on the
+install path.
+
 Not supported: `gitlab-token` auth, root version detection from
 hg/svn/fossil.
 

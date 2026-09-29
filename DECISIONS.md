@@ -1804,3 +1804,68 @@ n'était couverte par personne.
 
 Règle retenue : avant de modéliser un comportement de Composer, chercher s'il
 est déjà porté. `grep` sur le nom de la classe aurait suffi.
+
+## 2026-09-29 — Validation du manifeste racine : refus natif aux cinq commandes
+
+Fait : vivacity réussissait là où Composer refuse — le premier écart de ce sens
+du projet. `Factory::createComposer` charge le paquet racine pour **toute**
+commande, donc Composer refuse un manifeste invalide quoi qu'on lui demande ;
+nous ne construisions un paquet racine que pour une résolution, si bien que
+`install`, `dump-autoload`, `require` et `remove` acceptaient ces manifestes.
+`dump-autoload` allait jusqu'à **écrire** l'autoloader là où Composer sort en 1
+sans rien écrire.
+
+Décision : refus **natif**, texte du message seul, code de sortie identique,
+rien d'écrit. Ni reproduction à l'octet, ni délégation. La maison avait déjà
+tranché ce cas et l'avait écrit (HANDOVER, dépôts `path` : « la forme encadrée
+des erreurs … vivacity imprime le texte seul, code identique »). Mesuré contre
+la reproduction : l'encadré de Symfony Console est replié à la largeur du
+terminal (COLUMNS=40 → 39 colonnes, COLUMNS=200 → 113, coupant les mots), suivi
+du synopsis de la commande, et parfois **chaîné** (deux encadrés pour une
+contrainte invalide). Mesuré contre la délégation : `run_dump` n'a aucun chemin
+de délégation (il rendrait 3, Composer rend 1), `fallback_or_fail` exigerait une
+variante de `ScopeIssue` dont l'en-tête décrirait mal un manifeste que la
+référence refuse aussi, et sans Composer sur le `PATH` la délégation rend 3 —
+le cas de l'utilisateur du binaire autonome.
+
+Ce que la méta adversariale a réfuté du premier plan est consigné dans
+`docs/plans/v0.19-root-manifest-validation.md` §6. Le plus coûteux : la
+fonction que le plan voulait écrire **existait déjà**
+(`lockfile.rs::package_naming_error`), et le plan aurait produit une seconde
+copie de la même fonction de Composer dans le même crate. Elle portait un bug,
+trouvé en pointant un oracle dessus : la suggestion de nom de la branche
+`$isLink = false` éclate le camelCase avant de minusculer (`Foo/BarBaz` →
+`foo/bar-baz`), nous rendions `foo/barbaz`. Ce message est celui de « Invalid
+package found during dependency resolution », donc le bug était livré.
+
+Découverte en cours d'exécution, par le banc que j'écrivais : le motif `name`
+du schéma JSON est **sensible à la casse** (`^[a-z0-9]([_.-]?[a-z0-9]+)*/…$`,
+lu dans `res/composer-schema.json`), et le schéma passe avant le chargeur. Un
+nom racine en majuscules ou de forme invalide est donc refusé par le schéma,
+avec un message que nous ne portons pas — nous en imprimions un autre. Le
+contrôle du nom racine est désormais **conditionné** au franchissement du motif
+du schéma : seuls le suffixe `.json` et les noms réservés l'atteignent, et ce
+sont les seuls cas où nous parlons. Sans cette découverte, ce changement aurait
+remplacé « accepter à tort » par « refuser avec le mauvais message ».
+
+Périmètre assumé, mesuré sur huit manifestes invalides réalistes : trois refus
+sont portés, cinq restent ouverts — tous ceux qui viennent du schéma JSON, dont
+le portage demanderait de valider `res/composer-schema.json` (90 886 octets,
+draft-04). La contrainte invalide (`ArrayLoader` + `VersionParser`, deux
+encadrés chaînés) est reportée parce qu'elle exige en plus que le texte d'erreur
+de notre parseur de versions corresponde. Et sur `install`/`dump-autoload`, les
+refus qui exigent un manifeste analysé (alias malformé, contrainte illisible)
+ne sont pas appliqués : y arriver demande de devin(er) la version de la racine,
+donc de lancer git, sur le chemin chaud de l'install.
+
+Trou de surveillance refermé au passage : `docs/reference/` n'avait pas
+`ValidatingArrayLoader.php`, donc les règles de nommage déjà livrées n'étaient
+surveillées par aucun job de drift. Le jumeau est ajouté (128 fichiers suivis).
+
+Vérifié : les 21 cas de `harness/root-manifest.sh` rouges avant (21/21), le bon
+rouge par commande étant différent à chaque fois — `install` sortait 4 (lock
+périmé), `dump-autoload` 0 **en écrivant**, `update` 2, `remove` 2, `require` 1
+avec un autre message ; 9 lignes de plus dans steps.sh (249/249) ; update 19/19,
+flex-update 26/26, diff-vendor, removal, path-repos, transitions, boot,
+vendor-dir, flex-install ; 263 tests dont un oracle de nommage contre le phar
+sur un corpus fabriqué **et** tous les noms de liens des fixtures.

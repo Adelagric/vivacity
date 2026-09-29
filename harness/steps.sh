@@ -72,6 +72,24 @@ STEPS=(
   "symfony|remove symfony/uid @plugin:symfony/flex"
   "symfony|require psr/log @plugin:symfony/flex @fallback"
   "laravel|remove laravel/tinker"
+  # `RootPackageLoader::load` refuse le manifeste pour TOUTE commande, avant
+  # toute écriture : nom racine, auto-exigence, nom de lien. `@nostderr` parce
+  # que Composer répond par un encadré de Symfony Console, qu'aucune ancre de
+  # ce banc ne décrit — le texte du message est comparé par
+  # `harness/root-manifest.sh`, qui vérifie aussi qu'il n'y a pas d'écriture.
+  "laravel|update @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"
+  "laravel|update @jq:.require[\"con/x\"]=\"*\" @nostderr"
+  "laravel|update @jq:.require[\"acme/x.json\"]=\"*\" @nostderr"
+  "laravel|update @jq:.provide[\"BAR/Foo\"]=\"1.0\" @nostderr"
+  # Un nom racine en majuscules ou de forme invalide est refusé par le SCHÉMA
+  # (son motif `name` est sensible à la casse), famille non portée : vivacity
+  # l'accepte encore. Le nom réservé, lui, franchit le schéma et atteint le
+  # chargeur.
+  "laravel|update @jq:.name=\"con/thing\" @nostderr"
+  "laravel|update @jq:.name=\"laravel/framework\" @nostderr"
+  "laravel|install @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"
+  "laravel|remove psr/log @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"
+  "laravel|require psr/log @jq:.require[\"Acme/Thing\"]=\"^1\" @nostderr"
   "laravel|remove laravel/tinker @nolock"
   "laravel|remove laravel/tinker @badlock"
   # Contraintes temporaires sur une résolution qui aboutit : la version

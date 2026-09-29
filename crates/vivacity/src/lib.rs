@@ -597,6 +597,11 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         Some(v) => v.clone(),
         None => serde_json::from_str(&manifest_text).context("invalid composer.json")?,
     };
+    // Before the lock is even looked at: Composer refuses the manifest before
+    // it reads the lock, so a stale lock is not the error to report.
+    if let Some(code) = refuse_invalid_root(&manifest) {
+        return Ok(code);
+    }
     if args.virtual_lock.is_none() && !lock_path.is_file() {
         anyhow::bail!(
             "no composer.lock in {} — `install` needs one; run `vivacity update` \
@@ -1850,6 +1855,9 @@ fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             .context("cannot read composer.json")?,
     )
     .context("invalid composer.json")?;
+    if let Some(code) = refuse_invalid_root(&manifest) {
+        return Ok(code);
+    }
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
     // bamarni/composer-bin-plugin's `COMMAND` listener.
     if vivacity_core::scope::active_plugins(&project, &manifest, !args.no_plugins)
@@ -2383,6 +2391,22 @@ pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) 
     if resolved.flex_active {
         print_flex_post_update(&resolved.manifest, resolved.thanks_reminder);
     }
+}
+
+/// `RootPackageLoader::load`'s own refusals, which Composer raises for EVERY
+/// command because `Factory::createComposer` loads the root package: an invalid
+/// root name, a package that requires itself, an invalid link name. vivacity
+/// only built a root package for a resolution, so `install` and
+/// `dump-autoload` accepted manifests the reference refuses.
+///
+/// The message is Composer's, printed without Symfony Console's box — the
+/// deviation already taken for path repositories, and measured: the box is
+/// wrapped to the terminal width, followed by the command synopsis, and
+/// sometimes chained. Exit 1, as Composer, and nothing written.
+fn refuse_invalid_root(manifest: &serde_json::Value) -> Option<i32> {
+    let err = vivacity_resolver::root::manifest_error(manifest)?;
+    eprintln!("{err}");
+    Some(1)
 }
 
 /// `extra.symfony/flex.synchronize_package_json`, default true.
@@ -3223,6 +3247,18 @@ fn resolve_and_lock(
         !(args.no_dev || std::env::var("COMPOSER_NO_DEV").is_ok_and(|v| !v.is_empty() && v != "0"));
     let mut options = options;
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+        // `RootPackage::load` refuses these too, but through the error path,
+        // which prefixes the message; here it is worded as Composer words it.
+        if let Some(code) = refuse_invalid_root(&m) {
+            return Ok(Resolved {
+                status: code,
+                lock: None,
+                post: Vec::new(),
+                manifest: serde_json::Value::Null,
+                flex_active: false,
+                thanks_reminder: false,
+            });
+        }
         refuse_merge_plugin_resolution(&project, &m, !args.no_plugins)?;
         // composer-merge-plugin installed and allowed: the root Composer
         // resolves is the merged one (INIT, then `PRE_UPDATE_CMD` with the
@@ -3765,6 +3801,11 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .with_context(|| format!("cannot read {}", file.display()))?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
         .with_context(|| format!("{} does not contain valid JSON", file.display()))?;
+    // Before the manifest is edited: Composer refuses it while loading the
+    // root package, so nothing is written and no revert notice is printed.
+    if let Some(code) = refuse_invalid_root(&manifest) {
+        return Ok(code);
+    }
     refuse_merge_plugin_resolution(&project, &manifest, !args.no_plugins)?;
     if serde_json::from_str::<serde_json::Value>(&manifest_text)
         .ok()

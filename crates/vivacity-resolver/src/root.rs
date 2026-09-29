@@ -64,6 +64,9 @@ impl RootPackage {
     /// Loads composer.json (already parsed) with the root version guessed by
     /// vivacity-core (same rules as RootPackageLoader + VersionGuesser).
     pub fn load(manifest: &Value, project_dir: &Path) -> Result<RootPackage, RootError> {
+        if let Some(err) = manifest_error(manifest) {
+            return Err(RootError(err));
+        }
         let mut config = manifest
             .as_object()
             .cloned()
@@ -226,6 +229,83 @@ impl RootPackage {
 }
 
 /// `VersionParser::normalizeStability`.
+/// The refusals `RootPackageLoader::load` raises from the manifest alone, in
+/// its order: the root package's own name, then — after the links are parsed,
+/// which changes nothing for a raw manifest — a package that requires itself,
+/// then the name of every link of the five `BasePackage::$supportedLinkTypes`.
+///
+/// Composer refuses these for EVERY command, because `Factory::createComposer`
+/// loads the root package; vivacity only built a `RootPackage` for a
+/// resolution, so `install` and `dump-autoload` used to accept them. They call
+/// this directly — the checks that need a parsed manifest (a malformed alias,
+/// an unknown `minimum-stability`, an unparsable constraint) stay inside
+/// `load`, since reaching them means guessing the root version, i.e. running
+/// git, on the install hot path.
+///
+/// The message is returned as Composer words it, prefixes included. vivacity
+/// prints it without Symfony Console's box, as it already does for path
+/// repositories: the box is wrapped to the terminal width, followed by the
+/// command synopsis, and sometimes chained.
+pub fn manifest_error(manifest: &Value) -> Option<String> {
+    use crate::lockfile::package_naming_error;
+    let config = manifest.as_object()?;
+    // `if (!isset($config['name'])) { '__root__' } elseif ($err = …)`.
+    //
+    // The schema runs first, and it holds the same shape pattern for `name`
+    // but CASE SENSITIVELY (`^[a-z0-9]([_.-]?[a-z0-9]+)*/…$`, measured in
+    // `res/composer-schema.json`). So a root name with an uppercase letter or a
+    // bad shape is refused with the schema's message, which vivacity does not
+    // reproduce — only what the schema lets through is ours to report, i.e. the
+    // `.json` suffix and the reserved names.
+    let name = config.get("name").and_then(Value::as_str);
+    if let Some(name) = name.filter(|n| schema_name_shape(n)) {
+        if let Some(err) = package_naming_error(name, false) {
+            return Some(format!("Your package name {err}"));
+        }
+    }
+    // `if (isset($links[$config['name']]))`, for require then require-dev. The
+    // targets are lowercased by `parseLinks`; the name passed the check above,
+    // so it is already lowercase ASCII here.
+    if let Some(name) = name {
+        for link_type in ["require", "require-dev"] {
+            let Some(links) = config.get(link_type).and_then(Value::as_object) else {
+                continue;
+            };
+            if links.keys().any(|k| k.to_ascii_lowercase() == name) {
+                return Some(format!(
+                    "Root package '{name}' cannot require itself in its composer.json\nDid you accidentally name your root package after an external package?"
+                ));
+            }
+        }
+    }
+    // `foreach (array_keys(BasePackage::$supportedLinkTypes) as $linkType)`,
+    // in that order, first error wins.
+    for link_type in ["require", "conflict", "provide", "replace", "require-dev"] {
+        let Some(links) = config.get(link_type).and_then(Value::as_object) else {
+            continue;
+        };
+        for target in links.keys() {
+            if let Some(err) = package_naming_error(target, true) {
+                return Some(format!("{link_type}.{err}"));
+            }
+        }
+    }
+    None
+}
+
+/// `res/composer-schema.json`'s pattern for `name`: the loader's shape rule
+/// without its `i` flag. A name that fails it never reaches the loader, since
+/// `Factory::createComposer` validates the schema first.
+fn schema_name_shape(name: &str) -> bool {
+    static SHAPE: OnceLock<pcre2::bytes::Regex> = OnceLock::new();
+    let re = crate::version::regex(
+        &SHAPE,
+        r"^[a-z0-9](?:[_.-]?[a-z0-9]++)*+/[a-z0-9](?:(?:[_.]|-{1,2})?[a-z0-9]++)*+\z",
+        false,
+    );
+    re.is_match(name.as_bytes()).unwrap_or(false)
+}
+
 pub fn normalize_stability(s: &str) -> Result<String, RootError> {
     let lower = s.to_lowercase();
     match lower.as_str() {
@@ -518,5 +598,61 @@ mod tests {
         assert_eq!(r.minimum_stability, "RC");
         assert!(r.prefer_stable);
         assert_eq!(r.package.requires.len(), 2);
+    }
+
+    #[test]
+    fn manifest_error_follows_the_loader() {
+        use serde_json::json;
+        // A real manifest is accepted, platform packages included.
+        assert_eq!(
+            manifest_error(&json!({
+                "name": "acme/app",
+                "require": {"php": ">=8.1", "ext-json": "*", "psr/log": "^3", "a-b/c--d": "*"},
+                "require-dev": {"phpunit/phpunit": "^11"},
+            })),
+            None
+        );
+        // The root name: only what the schema lets through is ours to report.
+        assert_eq!(
+            manifest_error(&json!({"name": "acme/thing.json"})).as_deref(),
+            Some("Your package name acme/thing.json is invalid, package names can not end in .json, consider renaming it or perhaps using a -json suffix instead.")
+        );
+        assert!(manifest_error(&json!({"name": "con/thing"})).is_some());
+        // An uppercase or malformed root name is refused by the schema first,
+        // with a message vivacity does not reproduce: silence here is
+        // deliberate, not an oversight.
+        assert_eq!(manifest_error(&json!({"name": "acme/ThingBaz"})), None);
+        assert_eq!(manifest_error(&json!({"name": "acme"})), None);
+        // No name at all is `__root__`, never an error.
+        assert_eq!(manifest_error(&json!({"require": {"a/b": "*"}})), None);
+        // A package that requires itself, from either section.
+        for section in ["require", "require-dev"] {
+            let m = json!({"name": "acme/app", section: {"acme/app": "*"}});
+            assert!(
+                manifest_error(&m).is_some_and(|e| e
+                    .starts_with("Root package 'acme/app' cannot require itself")
+                    && e.contains("\nDid you accidentally")),
+                "{section}"
+            );
+        }
+        // The five link types, each prefixed with its own name.
+        for section in ["require", "conflict", "provide", "replace", "require-dev"] {
+            let m = json!({"name": "acme/app", section: {"Acme/Thing": "^1"}});
+            assert_eq!(
+                manifest_error(&m).as_deref(),
+                Some(&*format!("{section}.Acme/Thing is invalid, it should not contain uppercase characters. Please use acme/thing instead.")),
+                "{section}"
+            );
+        }
+        // Composer's order: the root name first, then self-require, then the
+        // link names in the order of `BasePackage::$supportedLinkTypes`.
+        let all = json!({
+            "name": "acme/thing.json",
+            "require": {"acme/thing.json": "*", "Bad/Name": "*"},
+            "conflict": {"Other/Name": "*"},
+        });
+        assert!(manifest_error(&all).is_some_and(|e| e.starts_with("Your package name")));
+        let links = json!({"require": {"Bad/Name": "*"}, "conflict": {"Other/Name": "*"}});
+        assert!(manifest_error(&links).is_some_and(|e| e.starts_with("require.Bad/Name")));
     }
 }

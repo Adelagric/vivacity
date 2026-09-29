@@ -651,7 +651,7 @@ pub fn validate_package(p: &Package) -> Result<(), String> {
     if matches!(p.origin, crate::package::Origin::Root) {
         return Ok(());
     }
-    if let Some(err) = package_naming_error(&p.name) {
+    if let Some(err) = package_naming_error(&p.name, false) {
         return Err(format!(
             "Invalid package found during dependency resolution, aborting: {err}"
         ));
@@ -712,7 +712,7 @@ pub fn validate_package(p: &Package) -> Result<(), String> {
 }
 
 /// `ValidatingArrayLoader::hasPackageNamingError($name)` (excluding links).
-fn package_naming_error(name: &str) -> Option<String> {
+pub fn package_naming_error(name: &str, is_link: bool) -> Option<String> {
     static NAME: OnceLock<pcre2::bytes::Regex> = OnceLock::new();
     if crate::platform::is_platform_package(name) {
         return None;
@@ -747,12 +747,51 @@ fn package_naming_error(name: &str) -> Option<String> {
         ));
     }
     if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        // The shape pattern above is ASCII-only, so the name is ASCII here and
+        // `to_ascii_lowercase` is PHP's `strtolower`. A link says which name to
+        // use, a package name gets the camelCase split first.
+        if is_link {
+            return Some(format!(
+                "{name} is invalid, it should not contain uppercase characters. Please use {} instead.",
+                name.to_ascii_lowercase()
+            ));
+        }
         return Some(format!(
             "{name} is invalid, it should not contain uppercase characters. We suggest using {} instead.",
-            name.to_lowercase()
+            suggest_name(name)
         ));
     }
     None
+}
+
+/// `hasPackageNamingError`'s suggestion for a package name (not a link):
+/// `Preg::replace('{(?:([a-z])([A-Z])|([A-Z])([A-Z][a-z]))}', '\1\3-\2\4', $name)`
+/// then `strtolower` — a dash before an upper that follows a lower, and before
+/// the last upper of a run that starts a word. Scanned left to right without
+/// overlapping, as `preg_replace` scans.
+fn suggest_name(name: &str) -> String {
+    let b = name.as_bytes();
+    let mut out = Vec::with_capacity(b.len() + 4);
+    let mut i = 0;
+    while i < b.len() {
+        let lower_upper =
+            i + 1 < b.len() && b[i].is_ascii_lowercase() && b[i + 1].is_ascii_uppercase();
+        let upper_upper_lower = i + 2 < b.len()
+            && b[i].is_ascii_uppercase()
+            && b[i + 1].is_ascii_uppercase()
+            && b[i + 2].is_ascii_lowercase();
+        if lower_upper {
+            out.extend_from_slice(&[b[i], b'-', b[i + 1]]);
+            i += 2;
+        } else if upper_upper_lower {
+            out.extend_from_slice(&[b[i], b'-', b[i + 1], b[i + 2]]);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -813,11 +852,11 @@ mod tests {
         p.dist = None;
         p.raw = serde_json::json!({"bin": ["../x"]});
         assert!(validate_package(&p).unwrap_err().contains("bin"));
-        assert!(package_naming_error("Acme/Lib").is_some());
-        assert!(package_naming_error("acme/lib.json").is_some());
-        assert!(package_naming_error("con/lib").is_some());
-        assert!(package_naming_error("acme/lib--x").is_none());
-        assert!(package_naming_error("php").is_none());
+        assert!(package_naming_error("Acme/Lib", false).is_some());
+        assert!(package_naming_error("acme/lib.json", false).is_some());
+        assert!(package_naming_error("con/lib", false).is_some());
+        assert!(package_naming_error("acme/lib--x", false).is_none());
+        assert!(package_naming_error("php", false).is_none());
     }
 
     #[test]

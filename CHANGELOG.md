@@ -7,6 +7,19 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **The root manifest's own refusals, at every command.**
+  `Factory::createComposer` loads the root package whatever the command, so
+  Composer refuses an invalid manifest everywhere; vivacity only built a root
+  package for a resolution, so `install`, `dump-autoload`, `require` and
+  `remove` accepted manifests the reference rejects — `dump-autoload` even
+  wrote an autoloader where Composer writes nothing and exits 1. Now refused
+  at all five commands, before anything is written, with Composer's own
+  message and exit code: an invalid root package name, a package that requires
+  itself, an invalid link name in any of the five link types. The message is
+  printed without Symfony Console's box or the command synopsis, the deviation
+  already taken for path repositories. What stays accepted is stated in the
+  README, measured: the five refusals that come from the JSON schema, which
+  vivacity does not validate.
 - **`update` is native on a Flex project that actually installs or updates
   something.** Until now it needed the install to lay out nothing at all.
   What Flex records is not the install's transaction: `recordOperations`
@@ -40,6 +53,10 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **The suggestion in `Invalid package found during dependency resolution`
+  was wrong.** `hasPackageNamingError` splits camelCase before lowercasing —
+  `Foo/BarBaz` suggests `foo/bar-baz` — where vivacity suggested `foo/barbaz`.
+  Found by pointing a new oracle at the function that was already there.
 - **`extra.symfony/flex.synchronize_package_json` now follows PHP's
   falsiness.** Flex negates the value, so `0`, `""`, `"0"` and `[]` all skip
   the synchronisation and print `Skip synchronizing package.json with PHP
