@@ -1919,3 +1919,40 @@ par ailleurs poussé la preuve d'absence de faux positif bien au-delà de mes
 fixtures : 1 122 manifestes du dépôt et 211 497 versions de paquets réelles du
 cache packagist local, zéro refus indu, et un fuzz de 187 384 comparaisons de
 `suggest_name` contre le phar sans divergence.
+
+## 2026-09-30 — Drift : ce que l'acquittement a fait remonter
+
+Fait : le cron du 2026-09-28 a tourné avec le mécanisme d'acquittement en
+place, et il a imprimé ce pour quoi il a été fait — une ligne prête à coller
+par dérive. Mais le snapshot avait bougé (`2.11-dev+cc854808`, contre
+`85ae0251` la fois d'avant), donc ce ne sont plus les deux mêmes fichiers : dix
+jumeaux ont dérivé, et surtout **l'étage 2 a échoué aussi**, ce qui n'était
+jamais arrivé — un écart de *comportement*, pas un déplacement de code.
+
+L'écart est dans `oracle_semver` : 3 paires divergentes sur 518 dans
+`intervals_match_composer`, 4 contraintes sur 7 494 dans le corpus. Toutes de
+la même forme, une borne avec suffixe de pré-version :
+
+    >=2.5.0-RC1   2.10.3 → ">= 2.5.0.0-RC1-dev"   2.11-dev → ">= 2.5.0.0-RC1"
+    <3.3-rc2      2.10.3 → "< 3.3.0.0-RC2-dev"    2.11-dev → "< 3.3.0.0-RC2"
+
+Cause amont nommée : composer/semver `9ee1a95ec`, « Fix RC stability suffix
+getting an extra `-dev` in `<` and `>=` constraints » (#187, 2026-09-24). Amont
+qualifie cela de **correctif** : notre port reproduit donc fidèlement un bug de
+la version épinglée. Conséquence de résolution non nulle — `>= 2.5.0.0-RC1-dev`
+admet une build de dev de la RC, `>= 2.5.0.0-RC1` non — et ces contraintes
+existent dans de vrais manifestes (4 occurrences dans notre corpus de 7 494).
+
+Deux autres dérives s'expliquent par le même lot amont : `346ebc8ca` (clés de
+cache concaténées dans `CompilingMatcher`, sans effet observable) et
+`b60bbabdb` (#189, ne plus compacter une contrainte sans dev en `!=` nus qui
+matchent dev) — ce dernier est probablement la cause des divergences
+d'`intervals` au-delà du suffixe.
+
+Décision : rien à porter tant que la référence est 2.10.3 — notre sortie est
+juste **par définition du contrat**. À porter le jour où l'on re-épingle, et
+c'est désormais écrit noir sur blanc avec le commit amont, ce qui était tout
+l'objet du job. Les dix jumeaux ne sont pas acquittés : l'acquittement exige
+d'avoir lu chaque diff, et deux sont gros (`ClassMap.php` 167 lignes,
+`Platform.php` 72). L'alarme hebdomadaire reste donc rouge, ce qui est le bon
+état : elle signale un écart réel et daté, pas du bruit.
