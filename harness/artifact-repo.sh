@@ -113,11 +113,21 @@ else
   echo "FAIL : vendor/ différent"; head -12 "$WORK/vendor.diff"; status=1
 fi
 
+# Le mode d'un fichier, quelle que soit la variante de `stat`. L'ordre compte :
+# `stat -f` existe des deux côtés — sous GNU il affiche les infos du SYSTÈME DE
+# FICHIERS et sort 0 — donc un repli « BSD d'abord, GNU ensuite » ne se
+# déclenche jamais sous Linux et compare un pavé de statistiques à un mode.
+if stat -c '%a' . >/dev/null 2>&1; then
+  mode_of() { stat -c '%a' "$1"; }
+else
+  mode_of() { stat -f '%Lp' "$1"; }
+fi
+
 # Les modes stockés doivent survivre à l'install, des deux côtés.
 for f in src/Widget.php:600 bin/run.sh:700 LICENSE:666 docs/readme.md:640 composer.json:644; do
   path="${f%%:*}"; want="${f##*:}"
-  a=$(stat -f '%Lp' "$WORK/ref/vendor/acme/widget/$path" 2>/dev/null || stat -c '%a' "$WORK/ref/vendor/acme/widget/$path")
-  b=$(stat -f '%Lp' "$WORK/viv/vendor/acme/widget/$path" 2>/dev/null || stat -c '%a' "$WORK/viv/vendor/acme/widget/$path")
+  a=$(mode_of "$WORK/ref/vendor/acme/widget/$path")
+  b=$(mode_of "$WORK/viv/vendor/acme/widget/$path")
   if [ "$a" != "$want" ]; then
     echo "FAIL : Composer pose $a sur $path, le zip stocke $want — la fixture ou la référence a changé"; status=1
   elif [ "$b" != "$want" ]; then

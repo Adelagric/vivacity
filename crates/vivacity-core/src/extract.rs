@@ -179,6 +179,9 @@ const HOST_UNIX: u8 = 3;
 ///   default (`0400` under umask 077, measured), then with that default
 ///   alone — `0666` for a file, `0777` for a directory, both masked by the
 ///   umask, which is exactly what `fs::write` and `create_dir_all` do.
+// The two payloads are read by `apply_mode`, which only does anything on unix:
+// the modes of a zip are a unix notion, and Windows has no `chmod` to match.
+#[cfg_attr(not(unix), allow(dead_code))]
 enum ModeRule {
     Exact(u32),
     NarrowDefault(u32),
@@ -898,13 +901,18 @@ mod tests {
         let zip = w.finish().expect("finish").into_inner();
         let d = tmpdir();
         extract_zip(&zip, d.path()).expect("laid out");
-        assert!(d
-            .path()
-            .join("alias.txt")
-            .symlink_metadata()
-            .expect("meta")
-            .file_type()
-            .is_symlink());
+        let alias = d.path().join("alias.txt");
+        let meta = alias.symlink_metadata().expect("meta");
+        #[cfg(unix)]
+        assert!(meta.file_type().is_symlink());
+        // Windows: a link when a tool is found AND the process may create one,
+        // the target's bytes in a plain file otherwise — the rule the branch
+        // above documents, so the test accepts exactly those two outcomes.
+        #[cfg(windows)]
+        assert!(
+            meta.file_type().is_symlink() || std::fs::read(&alias).expect("read") == b"real.txt",
+            "neither a link nor the target's bytes"
+        );
     }
 
     fn tmpdir() -> tempfile::TempDir {

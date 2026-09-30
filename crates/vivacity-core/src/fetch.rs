@@ -506,20 +506,16 @@ impl Fetcher {
     /// percent-decoded, as PHP's file wrapper decodes nothing either.
     fn local_dist_path(url: &str) -> Option<PathBuf> {
         if let Some(rest) = url.strip_prefix("file://") {
-            // `file:///abs`, and on Windows `file:///C:/x`; a host part
-            // (`file://host/share`) is left to the caller's error.
-            let rest = rest.strip_prefix('/').map_or(rest, |r| {
-                if cfg!(windows) && r.chars().nth(1) == Some(':') {
-                    r
-                } else {
-                    &rest[1..]
-                }
-            });
-            let mut p = String::from(rest);
-            if !cfg!(windows) && !p.starts_with('/') {
-                p.insert(0, '/');
-            }
-            return Some(PathBuf::from(p));
+            // The third slash belongs to the path (`file:///srv/x` is
+            // `/srv/x`) except when a drive letter follows it, the Windows
+            // form (`file:///C:/x` is `C:/x`). A host part
+            // (`file://host/share`) is left to the caller's error, as PHP
+            // leaves it to the stream wrapper.
+            let path = match rest.strip_prefix('/') {
+                Some(after) if after.chars().nth(1) == Some(':') => after,
+                _ => rest,
+            };
+            return Some(PathBuf::from(path));
         }
         if url.contains("://") {
             return None;
@@ -576,6 +572,9 @@ mod tests {
             // Nothing is decoded, as PHP's file wrapper decodes nothing.
             Some("/srv/a%20b/x.zip".to_owned())
         );
+        // The Windows form of the same thing: the third slash is the
+        // separator before the drive letter, not part of the path.
+        assert_eq!(p("file:///C:/srv/x.zip"), Some("C:/srv/x.zip".to_owned()));
         // Everything else stays a download.
         assert_eq!(p("https://repo.example/x.zip"), None);
         assert_eq!(p("http://repo.example/x.zip"), None);
