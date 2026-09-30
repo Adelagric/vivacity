@@ -7,6 +7,16 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **The `  - Downloading <name> (<version>)` lines.** Composer prints one per
+  package whose archive its files cache does not serve, as a block before the
+  operation lines, in transaction order — and vivacity printed none, so a
+  cold-cache install was missing 109 lines of stderr on a 109-package project.
+  The lines now come from the same transaction walk that produces the operation
+  lines, with the decision taken *before* the fetch, since our own fetch fills
+  that cache. Measured on a cold cache on both sides: 109 lines each and stderr
+  identical byte for byte. `harness/download-lines.sh` proves it with a fresh
+  files cache per side and no filter at all, and checks that a warm cache prints
+  none on either side.
 - **`install` accepts `--prefer-source`, `--prefer-dist` and
   `--prefer-install`, and `--no-progress` is accepted everywhere Composer has
   it.** They used to fail with clap's usage error and exit 2 where Composer

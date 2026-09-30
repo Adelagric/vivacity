@@ -103,6 +103,8 @@ jobs:
         run: harness/flex-install.sh
       - name: symfony/flex on update with install (recipes decided before writing)
         run: harness/flex-update.sh
+      - name: FileDownloader's Downloading lines (cold files cache on both sides)
+        run: harness/download-lines.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

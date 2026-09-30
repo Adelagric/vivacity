@@ -2108,3 +2108,44 @@ qu'aucun banc ne pourrait comparer à la référence.
 Structure observée au passage, sans `--no-ansi` et à cache chaud : une barre
 indéterminée à la phase de téléchargement, les 109 lignes `- Installing`, puis
 huit cadres numérotés après elles.
+
+## 2026-09-30 — Les lignes `- Downloading` : livrées, et un critère faux deux fois
+
+Fait : Composer imprime une ligne par paquet dont son cache de fichiers ne sert
+pas l'archive, en bloc avant les lignes d'opérations, dans l'ordre de la
+transaction. vivacity n'en imprimait aucune : sur un projet de 109 paquets, une
+install à cache froid perdait 109 lignes de stderr.
+
+Design retenu après la méta (qui avait tué le premier) : le même parcours de la
+transaction que celui qui produit les lignes d'opérations, en sautant ce qui ne
+reçoit pas de `FileDownloader` (pas de dist, dist `path`), et en décidant sur la
+présence de l'archive dans le cache de Composer. La divergence restante est une
+archive en cache dont le sha1 ne correspond plus : Composer imprime, nous non —
+et notre récupération jette l'entrée et retélécharge de toute façon.
+
+Piège trouvé en mesurant, pas en relisant : calculées au moment de l'impression,
+les lignes étaient **zéro**, parce que notre propre récupération avait déjà
+rempli ce cache entre-temps. Composer décide avant de récupérer ; le calcul est
+donc fait au même endroit que `operation_lines`, avant la transaction. C'est
+exactement la raison pour laquelle ce dernier était déjà calculé là.
+
+Le critère de succès du plan a été **faux deux fois**, et la seconde erreur n'est
+apparue qu'en implémentant. Révision 1 : « `diff-vendor.sh` à cache vide » — or
+ce banc lance Composer en `--quiet` (zéro octet de stderr) et ne compare jamais
+la stderr. Révision 2 : « retirer les trois filtres » — or les harnais qui
+comparent la stderr **partagent** un cache et Composer passe en premier : il
+imprime ses lignes *et réchauffe le cache*, si bien que vivacity n'a plus rien à
+imprimer. Ces filtres ne compensaient donc pas un manque de notre part mais
+l'asymétrie du cache partagé ; les retirer casserait ces cas quoi que fasse
+vivacity. Ils restent, documentés pour ce qu'ils sont.
+
+Le critère juste est un banc à part, `harness/download-lines.sh` : un cache de
+fichiers **vierge par côté**, stderr comparée **sans aucun filtre**, plus un
+second cas à cache chaud des deux côtés où personne n'imprime. Vu rouge avant
+(2 lignes chez Composer, 0 chez nous). Mesuré aussi sur laravel : 109 lignes de
+part et d'autre, stderr identique à l'octet.
+
+Écart voisin repéré en route et laissé ouvert : sur un projet sans git ni
+`version`, Composer avertit `Composer could not detect the root package (X)
+version, defaulting to '1.0.0'` et nous n'imprimons rien. Déterministe, donc
+portable — contrairement à la barre de progression.

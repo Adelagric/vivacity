@@ -1078,6 +1078,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         lock.flex_packs(&manifest, with_dev, !args.no_plugins),
         !args.no_plugins,
     )?;
+    // Composer decides these before it fetches anything; computed here for the
+    // same reason `operation_lines` is — our own fetch fills that cache.
+    let downloading = download_lines(&lock, &arena, &transaction.operations, with_dev);
 
     // Transaction.
     let store = Arc::new(vivacity_core::store::Store::default_location());
@@ -1113,6 +1116,9 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         Err(e) => return Err(e.into()),
     };
     trace("install transaction", t0);
+    for line in &downloading {
+        eprintln!("{line}");
+    }
     for line in &operation_lines {
         eprintln!("{line}");
     }
@@ -1529,6 +1535,72 @@ fn emulate_package_versions(
 }
 
 /// `  - <operation><appendix>` for every operation of a real install.
+/// `FileDownloader::download`'s line, for the packages this install will fetch.
+///
+/// Composer writes it synchronously in `downloadAndExecuteBatch`'s registration
+/// loop — `return $download()` runs its `writeError` before `addCopy`, and
+/// `addJob` does not tick the curl loop — so the order is the transaction's,
+/// not the completion order, and the lines form one block before the operation
+/// lines. A package with no dist (a metapackage) or a `path` dist gets no
+/// `FileDownloader` and no line. A dry run downloads nothing and prints none
+/// (measured).
+///
+/// The decision is Composer's: the line appears when its files cache does not
+/// serve the archive. Checked by presence alone — a cached archive whose sha1 no
+/// longer matches makes Composer print where we do not, which is the one corner
+/// left (our own fetch throws that entry away and re-downloads either way).
+fn download_lines(
+    lock: &vivacity_core::lock::Lock,
+    arena: &[vivacity_resolver::package::Package],
+    operations: &[vivacity_resolver::transaction::Operation],
+    with_dev: bool,
+) -> Vec<String> {
+    use vivacity_resolver::transaction::{DisplayRef, Operation};
+    let by_name: std::collections::BTreeMap<&str, &vivacity_core::lock::LockPackage> = lock
+        .wanted_packages(with_dev)
+        .map(|p| (p.name(), p))
+        .collect();
+    let cache_root = vivacity_core::fetch::composer_cache_dir();
+    let mut lines = Vec::new();
+    for op in operations {
+        let target = match *op {
+            Operation::Install(p) | Operation::Update(_, p) => p,
+            _ => continue,
+        };
+        let package = &arena[target];
+        let Some(locked) = by_name.get(package.name.as_str()) else {
+            continue;
+        };
+        let kind = match locked
+            .raw
+            .get("dist")
+            .and_then(|d| d.get("type"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(kind) if kind != "path" => kind.to_owned(),
+            _ => continue,
+        };
+        let Some(url) = locked.dist_url_expanded() else {
+            continue;
+        };
+        let cached =
+            vivacity_core::fetch::dist_cache_path_of(&cache_root, locked.name(), &url, &kind);
+        if cached.exists() {
+            continue;
+        }
+        lines.push(format!(
+            "  - Downloading {} ({})",
+            package.name,
+            vivacity_resolver::transaction::full_pretty_version(
+                package,
+                true,
+                DisplayRef::SourceRefIfDev
+            )
+        ));
+    }
+    lines
+}
+
 fn operation_lines(
     project: &std::path::Path,
     arena: &[vivacity_resolver::package::Package],
