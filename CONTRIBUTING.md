@@ -71,6 +71,11 @@ the roadmap below.
   name, self-require, invalid link name) but does not validate the schema,
   so five of eight realistic invalid manifests are still accepted. What is
   accepted is stated in the README, measured.
+- **Modification times of zip dists** — `unzip` restores the archive's DOS
+  timestamp, vivacity leaves the install's time (measured, README says so).
+  Doing it exactly means converting a DOS timestamp as `unzip` does, local
+  wall-clock with the DST rules of that date, hence a timezone database; the
+  cheap approximations (current offset, UTC) are wrong for half the year.
 - **The root-version warning** — `Composer could not detect the root package
   (<name>) version, defaulting to '1.0.0'`, printed once as the first line
   when the manifest has no `version`, has a name, and its `type` is not

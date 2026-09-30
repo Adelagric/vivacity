@@ -2428,3 +2428,29 @@ wp-core 5, package-versions 7, yii2-composer 8.
 
 Au passage, l'oracle zip modélise maintenant le `rename` de Composer plutôt
 qu'un « remonter le contenu » : sans ça il ne pouvait pas voir le point 2.
+
+## 2026-09-30 — Les horodatages d'un dist zip : écart assumé, avec ce qu'il coûterait
+
+Mesuré, archive datée du 2020-01-02 03:04:06 :
+
+| | fichier | répertoire |
+|---|---|---|
+| `unzip` (référence zip) | 2020-01-02 03:04:06 | 2020-01-02 03:04:06 |
+| install Composer réel | 2020-01-02 03:04:06 | — |
+| vivacity | l'heure de l'install | l'heure de l'install |
+| `PharData` (référence tar) | l'heure de l'extraction | — |
+
+Donc l'écart est propre au zip : côté tar, ne rien poser **est** la parité.
+
+Écart assumé, et la raison est écrite plutôt que sous-entendue : un horodatage
+DOS est une heure locale *murale*, qu'`unzip` convertit avec les règles de
+changement d'heure en vigueur **à cette date**. Reproduire ça exactement demande
+une base de données de fuseaux (les approximations bon marché — décalage courant,
+UTC — se trompent une moitié de l'année), pour une propriété dont aucun contenu
+de fichier, aucun mode et aucune cible de lien ne dépend, et que le contrat ne
+revendique pas (`compare_vendor` ne compare pas les mtimes, le README promet
+« modes et cibles de liens »). Les dépendances `filetime` et `time` sont déjà
+dans le graphe (via `tar` et `zip`) mais aucune ne donne le décalage historique.
+
+Consigné dans le README à côté des autres écarts et dans CONTRIBUTING comme
+chantier ouvert, avec ce qu'il exige.

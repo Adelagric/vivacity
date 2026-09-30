@@ -376,6 +376,17 @@ leaves nothing). Re-running either command converges to the same tree, and
 vivacity's store makes its retry cheap — but the intermediate state is not the
 same, so it is written here rather than implied.
 
+Modification times are not reproduced for zip dists, and that is a deliberate
+gap. `unzip` restores the archive's DOS timestamp on files and directories, so
+Composer's `vendor/` carries the dates the packager stored (measured: a dist
+stamped 2020-01-02 03:04:06 installs with that date on both sides of Composer's
+own path); vivacity leaves the time of the install. Reproducing it means
+interpreting a DOS timestamp the way `unzip` does — local wall-clock, converted
+with the DST rules in force at that date — which needs a timezone database, for
+a property no file content, mode or link target depends on and which the
+contract does not claim. `PharData` does not restore them either, so `tar` dists
+match the reference as they are.
+
 Not supported: `gitlab-token` auth, root version detection from
 hg/svn/fossil.
 
