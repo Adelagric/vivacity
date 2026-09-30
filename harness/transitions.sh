@@ -106,6 +106,62 @@ for spec in "dev-main:auto:refuse" "dev-main:source:refuse" "1.0.0:auto:natif"; 
   fi
 done
 
+# Les drapeaux de stratégie d'installation, que `getPreferredInstallOptions`
+# traduit en une préférence effective : `--prefer-source` et
+# `--prefer-install source` rendent la main (tout viendrait de la source),
+# `--prefer-install auto` suit la règle par paquet, et `--prefer-dist` remplace
+# ce que disait la config — c'est le cas de précision qui compte, puisqu'un
+# drapeau qui ne remplacerait pas la config rendrait la main pour rien.
+for spec in "1.0.0:dist:--prefer-source:refuse" \
+            "1.0.0:dist:--prefer-install=source:refuse" \
+            "1.0.0:auto:--prefer-install=auto:natif" \
+            "dev-main:auto:--prefer-dist:natif" \
+            "dev-main:dist:--prefer-install=auto:refuse"; do
+  version="${spec%%:*}"; r1="${spec#*:}"; pref="${r1%%:*}"; r2="${r1#*:}"; flag="${r2%%:*}"; expect="${r2#*:}"
+  dir="$WORK/flag-$version-$pref-${flag//[^a-z]/}"
+  prefer_project "$dir" "$version" "$pref"
+  cd "$dir"
+  before=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+  code=0
+  # shellcheck disable=SC2086
+  "$VIVACITY" install $flag --no-fallback --offline >"$WORK/flag.log" 2>&1 || code=$?
+  named=0; grep -q "preferred-install" "$WORK/flag.log" && named=1
+  if [ "$expect" = refuse ]; then
+    if [ "$code" != 3 ] || [ "$named" != 1 ]; then
+      echo "FAIL $flag sur $version (config $pref) : attendu 3 en nommant l'option, code $code (nommée=$named)"; tail -3 "$WORK/flag.log"; exit 1
+    fi
+    after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+    [ "$before" = "$after" ] || { echo "FAIL $flag sur $version : arbre modifié avant le refus"; exit 1; }
+    echo "OK   $flag sur $version (config $pref) : rendu à Composer sans toucher au disque"
+  else
+    [ "$named" = 0 ] || { echo "FAIL $flag sur $version (config $pref) : refusé alors que Composer poserait le dist"; tail -3 "$WORK/flag.log"; exit 1; }
+    echo "OK   $flag sur $version (config $pref) : pas de refus"
+  fi
+done
+
+# Les erreurs d'usage de ces drapeaux : même code et même texte que Composer
+# (sans l'encadré de Symfony Console, déviation déjà assumée). Composer échoue
+# sur la validation des arguments avant tout réseau, donc le cas est hors ligne.
+if command -v composer >/dev/null; then
+  dir="$WORK/flag-usage"; prefer_project "$dir" "1.0.0" "dist"; cd "$dir"
+  usage_case() { # étiquette, arguments…
+    local label="$1"; shift
+    local vout cout vc=0 cc=0
+    vout=$("$VIVACITY" install "$@" --no-fallback --offline 2>&1) || vc=$?
+    cout=$(COMPOSER_NO_INTERACTION=1 COLUMNS=400 composer install "$@" --no-ansi 2>&1) || cc=$?
+    local vmsg cmsg
+    vmsg=$(printf '%s\n' "$vout" | grep -E '^(--prefer)' | head -1)
+    cmsg=$(printf '%s\n' "$cout" | sed 's/^ *//;s/ *$//' | grep -E '^(--prefer)' | head -1)
+    if [ "$vc" != "$cc" ] || [ -z "$cmsg" ] || [ "$vmsg" != "$cmsg" ]; then
+      echo "FAIL usage $label : codes $vc/$cc"; echo "  vivacity : $vmsg"; echo "  composer : $cmsg"; exit 1
+    fi
+    echo "OK   usage $label : code $vc et texte identiques à Composer"
+  }
+  usage_case "--prefer-source avec --prefer-install" --prefer-source --prefer-install dist
+  usage_case "--prefer-dist avec --prefer-install" --prefer-dist --prefer-install source
+  usage_case "--prefer-install inconnu" --prefer-install bogus
+fi
+
 # The resolution commands (plan v0.16): an installed, allowed plugin whose
 # effect vivacity does not emulate hands the whole command to Composer
 # BEFORE any write; `--no-fallback` refuses with exit 3, naming the plugin,

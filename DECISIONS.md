@@ -2040,3 +2040,42 @@ les drapeaux eux-mêmes. `vivacity install --prefer-source`, `-vv`,
 devraient être acceptés ; `--prefer-source` et `--prefer-install=source|auto`
 devraient router vers le refus qu'on vient de rendre exact ; `-v`/`-vv`
 demandent leur propre décision, puisque Composer y imprime davantage.
+
+## 2026-09-30 — Les drapeaux de stratégie d'installation
+
+Fait : `vivacity install --prefer-source` sortait en 2 (erreur d'usage de clap)
+là où Composer sort en 0. Même famille que la validation du manifeste racine,
+en sens inverse : un mur là où la référence travaille.
+
+Décision : porter `BaseCommand::getPreferredInstallOptions` et **traduire les
+drapeaux en la préférence effective** écrite dans la vue du manifeste que
+vivacity analyse. Le détecteur juge alors cette préférence par paquet — ce que
+je venais de rendre exact — sans aucun câblage nouveau. Conséquences utiles et
+non devinées, chacune couverte par un cas :
+- `--prefer-dist` **remplace** un `auto` venu de la config : un paquet dev reste
+  natif, là où une règle qui ignorerait le drapeau rendrait la main pour rien ;
+- `--prefer-install auto` **efface** un `dist` venu de la config, donc un paquet
+  dev bascule vers la source et la commande est rendue ;
+- `--prefer-install` ne se combine ni avec `--prefer-source` ni avec
+  `--prefer-dist` (`InvalidArgumentException`), et une valeur inconnue a son
+  propre message.
+
+Les trois messages d'usage sont comparés à Composer dans le banc, code de sortie
+compris. Le troisième était **faux dans ma première version** : j'avais
+reconstitué son préfixe depuis une lecture tronquée du phar (`Invalid
+--prefer-install option, expected …` au lieu de `--prefer-install accepts one of
+…`). Quatrième fois de la journée qu'une sortie coupée me coûte un aller-retour ;
+c'est le banc qui l'a rattrapé, pas moi.
+
+`--no-progress` est accepté partout où Composer l'a, et c'est une vraie
+non-opération : nous n'imprimons pas de barre. À noter — et c'est la méta des
+lignes `- Downloading` qui l'a trouvé — `--no-ansi` implique silencieusement
+`--no-progress` chez Composer, ce qui est la seule raison pour laquelle aucun
+harnais n'a jamais vu cette barre. `--prefer-*` reste refusé sur `update`,
+`require` et `remove` : leur chemin relit composer.json après que la vue en
+mémoire a disparu, donc porter la préférence effective jusque-là demande du
+câblage — et accepter un drapeau qu'on ignorerait serait pire que le refuser.
+
+Vérifié : transitions 13/13 (huit nouveaux cas, dont les deux de précision et
+les trois d'usage), steps 251/251, update 19/19, root-manifest 35/35,
+flex-update 26/26, le reste du balayage vert, 265 tests.

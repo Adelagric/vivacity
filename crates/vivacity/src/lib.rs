@@ -218,6 +218,9 @@ struct RemoveArgs {
 
 #[derive(clap::Args, Debug)]
 struct UpdateArgs {
+    /// Accepted for compatibility: vivacity prints no progress bar.
+    #[arg(long)]
+    no_progress: bool,
     /// Packages to update (the others stay locked); `vendor/*` patterns accepted.
     #[arg(value_name = "PACKAGES")]
     packages: Vec<String>,
@@ -320,6 +323,18 @@ struct InstallArgs {
     /// Do not install require-dev packages.
     #[arg(long)]
     no_dev: bool,
+    /// Install from source: refused, vivacity only lays out dists.
+    #[arg(long)]
+    prefer_source: bool,
+    /// Install from dist: accepted for compatibility, vivacity's only way.
+    #[arg(long)]
+    prefer_dist: bool,
+    /// `dist`, `source` or `auto`, as Composer's option.
+    #[arg(long, value_name = "PREFER-INSTALL")]
+    prefer_install: Option<String>,
+    /// Accepted for compatibility: vivacity prints no progress bar.
+    #[arg(long)]
+    no_progress: bool,
     /// Do not generate the autoloader.
     #[arg(long)]
     no_autoloader: bool,
@@ -603,6 +618,35 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }
+    // `--prefer-source` / `--prefer-dist` / `--prefer-install` are what
+    // `getPreferredInstallOptions` makes of them: the effective
+    // `preferred-install` this run uses. Written into the manifest vivacity
+    // analyses, so the scope detector judges it per package exactly as it
+    // judges the config — a source install then hands the command over.
+    let mut manifest = manifest;
+    match vivacity_core::scope::effective_preferred_install(
+        &manifest,
+        args.prefer_source,
+        args.prefer_dist,
+        args.prefer_install.as_deref(),
+    ) {
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(1);
+        }
+        Ok(Some(value)) => {
+            if let Some(config) = manifest.get_mut("config").and_then(|c| c.as_object_mut()) {
+                config.insert("preferred-install".to_owned(), value);
+            } else if let Some(root) = manifest.as_object_mut() {
+                root.insert(
+                    "config".to_owned(),
+                    serde_json::json!({"preferred-install": value}),
+                );
+            }
+        }
+        Ok(None) => {}
+    }
+    let manifest = manifest;
     if args.virtual_lock.is_none() && !lock_path.is_file() {
         anyhow::bail!(
             "no composer.lock in {} — `install` needs one; run `vivacity update` \
@@ -2332,6 +2376,10 @@ fn install_after_update(
     virtual_manifest: Option<serde_json::Value>,
 ) -> anyhow::Result<i32> {
     run_install(&InstallArgs {
+        prefer_source: false,
+        prefer_dist: false,
+        prefer_install: None,
+        no_progress: args.no_progress,
         no_dev: args.no_dev,
         no_autoloader: args.no_autoloader,
         optimize_autoloader: args.optimize_autoloader,
@@ -4011,6 +4059,7 @@ fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        no_progress: args.no_progress,
         with: Vec::new(),
         packages: Vec::new(),
         with_dependencies: false,

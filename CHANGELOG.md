@@ -7,6 +7,23 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`install` accepts `--prefer-source`, `--prefer-dist` and
+  `--prefer-install`, and `--no-progress` is accepted everywhere Composer has
+  it.** They used to fail with clap's usage error and exit 2 where Composer
+  exits 0. `getPreferredInstallOptions` is ported, so the flags become the
+  effective `preferred-install` this run uses — including `--prefer-install
+  auto`, which *clears* a `dist` coming from the config, and `--prefer-dist`,
+  which overrides an `auto` there. The refusal then follows the per-package rule
+  rather than the flag's name, so `--prefer-dist` over a dev package stays
+  native and `--prefer-install auto` over one hands over. The two forbidden
+  combinations and an unknown value reproduce Composer's message and its exit
+  code, compared against it in the harness. `--no-progress` is a true no-op:
+  vivacity prints no progress bar (and `--no-ansi` silently implies
+  `--no-progress` in Composer, which is why no harness ever saw the bar).
+  `update`, `require` and `remove` still reject the `--prefer-*` flags: their
+  path re-reads composer.json after the in-memory manifest is gone, so carrying
+  the effective preference there needs plumbing rather than a patch, and
+  accepting a flag we then ignore would be worse than rejecting it.
 - **The root manifest's own refusals, at every command.**
   `Factory::createComposer` loads the root package whatever the command, so
   Composer refuses an invalid manifest everywhere; vivacity only built a root

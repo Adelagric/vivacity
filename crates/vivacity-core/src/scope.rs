@@ -471,7 +471,76 @@ pub fn plugin_issues(lock: &Lock, with_dev: bool) -> Vec<ScopeIssue> {
 /// `dist` AND a `*` pattern makes it total; anything else hands over.
 /// (`vendor-dir` / `bin-dir` are resolved by `dirs::Dirs`; the forms it
 /// refuses come back as layout issues.)
-/// `DownloadManager::resolvePackageInstallPreference` plus `Factory`'s switch,
+/// `BaseCommand::getPreferredInstallOptions`: the `preferred-install` this
+/// command really runs with, once `--prefer-source`, `--prefer-dist` and
+/// `--prefer-install` have had their say — `None` when they say nothing and the
+/// config stands.
+///
+/// The cascade, ported: the config's string sets one of the two flags (`auto`, a
+/// map, or anything else sets neither); `--prefer-install` may not be combined
+/// with either flag (`InvalidArgumentException`) and its value stands in for the
+/// matching flag, `auto` clearing both; finally, if either flag is set, the two
+/// flags replace whatever the config said.
+///
+/// Reported as the effective `preferred-install`, which is what the refusal is
+/// about: `config_issues` then judges it per package, exactly as
+/// `resolvePackageInstallPreference` does. `Err` is Composer's own usage
+/// message, printed as text with exit 1.
+pub fn effective_preferred_install(
+    root_manifest: &Value,
+    prefer_source: bool,
+    prefer_dist: bool,
+    prefer_install: Option<&str>,
+) -> Result<Option<Value>, String> {
+    if prefer_install.is_none() && !prefer_source && !prefer_dist {
+        return Ok(None);
+    }
+    let config = root_manifest
+        .get("config")
+        .and_then(|c| c.get("preferred-install"))
+        .cloned()
+        .or_else(|| crate::layout::global_config_value("preferred-install"));
+    let mut flag_source = prefer_source;
+    let mut flag_dist = prefer_dist;
+    let mut cleared = false;
+    if let Some(value) = prefer_install {
+        if prefer_source {
+            return Err(
+                "--prefer-source can not be used together with --prefer-install".to_owned(),
+            );
+        }
+        if prefer_dist {
+            return Err("--prefer-dist can not be used together with --prefer-install".to_owned());
+        }
+        match value {
+            "dist" => flag_dist = true,
+            "source" => flag_source = true,
+            "auto" => cleared = true,
+            other => {
+                return Err(format!(
+                    "--prefer-install accepts one of \"dist\", \"source\" or \"auto\", got {other}"
+                ))
+            }
+        }
+    }
+    if flag_source {
+        return Ok(Some(Value::String("source".to_owned())));
+    }
+    if flag_dist {
+        return Ok(Some(Value::String("dist".to_owned())));
+    }
+    if cleared {
+        // Both flags off: the config's string no longer applies, but its map
+        // still reaches `setPreferences`, so only a string is replaced.
+        return Ok(Some(match config {
+            Some(Value::Object(m)) => Value::Object(m),
+            _ => Value::String("auto".to_owned()),
+        }));
+    }
+    Ok(None)
+}
+
+/// `DownloadManager::resolvePackageInstallPreference` plus `Factory`'s switch,/// `DownloadManager::resolvePackageInstallPreference` plus `Factory`'s switch,
 /// for one package: would Composer install it from source?
 ///
 /// A string is handled by the switch — `dist` forces dist, `source` forces

@@ -635,6 +635,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        no_progress: args.no_progress,
         with: Vec::new(),
         packages: Vec::new(),
         with_dependencies: false,
