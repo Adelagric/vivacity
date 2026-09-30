@@ -31,6 +31,27 @@ byte-identical-output promise are the public API.
   covered seven ordinary modes and no special bit, which is why it was
   silent.
 
+### Changed
+- **A hostile archive is the one family where vivacity fails instead of handing
+  over, and that is now written down** (README, next to the other deviations).
+  Everything else it cannot reproduce is caught before the first write; an
+  archive's content is only known while it is being read, halfway through an
+  install. Measured, the outcomes coincide — `unzip` refuses the traversal,
+  Composer retries with `ZipArchive` over the partial tree, that fails too, both
+  sides exit 1. What differs is what a *failed* install leaves: Composer keeps
+  the packages already installed and records them, vivacity writes `vendor/`
+  only once every archive is in its store, so a failure leaves `vendor/`
+  untouched. Written rather than implied.
+- **A refusal names the package**, not the store's `.tmp-XXXXXX` directory:
+  `hostile archive refused for acme/evil (1.0.0): entry a/b would be written
+  through the symlink a`.
+- **The store carries a layout segment.** A store entry is a tree, not an
+  archive, so it holds whatever extraction rule the build that wrote it
+  applied — and an entry written before the mode fix kept serving the old modes,
+  indefinitely and in silence (observed: 0644 served where the reference poses
+  0600). Bumping the segment is what makes a semantic change take effect; older
+  trees stay on disk, unused.
+
 ### Added
 - **A dist that lives on this filesystem is read, not downloaded.**
   `HttpDownloader::addJob` hands anything that is not `http(s)://` to

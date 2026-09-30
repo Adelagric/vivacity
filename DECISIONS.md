@@ -2334,3 +2334,51 @@ stderr, `vendor/` entier et le mode de chaque fichier. Les zips portent exprès
 donc aussi la règle de modes de l'extraction, et Composer y pose bien ces modes
 (mesuré dans le banc lui-même, pas supposé). Lancé contre le binaire 0.19.0
 publié, il échoue sur le premier dist.
+
+## 2026-09-30 — Une archive hostile échoue, elle ne rend pas la main (et ce qu'un échec laisse)
+
+Question posée par la méta : `Error::HostileArchive` n'est référencé nulle part
+ailleurs dans `crates/` — donc aucune délégation, une erreur sèche, après le
+début des écritures — alors que le contrat dit « ce qui n'est pas reproductible
+est détecté avant toute écriture et la main est rendue ». Les deux ne peuvent
+pas être vrais.
+
+Tranché : l'archive hostile est **la** famille où vivacity échoue au lieu de
+rendre la main, et c'est écrit dans le README à côté des autres écarts. La
+raison est structurelle et non un choix de confort : tout le reste se décide sur
+des métadonnées (lock, manifeste, plugins installés) disponibles avant le
+premier octet écrit ; le contenu d'une archive ne se connaît qu'en la lisant, au
+milieu d'un install. Rendre la main à ce moment supposerait de défaire ce qui
+est déjà posé.
+
+Mesuré, et ça tombe bien : sur l'archive de l'évasion, les deux côtés
+échouent. `unzip` refuse la traversée (sortie 2), Composer réessaie avec
+`ZipArchive` **par-dessus l'arbre partiel**, ça échoue aussi
+(`extractTo(…/pkg/a): Failed to open stream: Is a directory`), et l'install
+s'arrête. Codes de sortie 1 des deux côtés.
+
+Ce qui diverge, mesuré sur un projet à deux paquets dont le second est hostile :
+
+| | Composer | vivacity |
+|---|---|---|
+| code de sortie | 1 | 1 |
+| paquet sain | installé dans `vendor/`, inscrit dans `installed.json` | **rien d'écrit** |
+| évasion | aucune | aucune |
+
+vivacity n'écrit `vendor/` qu'une fois toutes les archives dans son store, donc
+un échec n'importe où laisse `vendor/` intact. Re-lancer converge des deux
+côtés, et notre store rend le second essai gratuit — mais l'état intermédiaire
+n'est pas le même, donc il est écrit plutôt que sous-entendu.
+
+Deux corrections au passage :
+- le message nommait `.tmp-EX4VNV` sous le store, ce qui ne dit rien au lecteur.
+  Nouvelle variante `HostileDist { name, version, reason }` : « hostile archive
+  refused for acme/evil (1.0.0): entry a/b would be written through the symlink
+  a » ;
+- le store gagne un **segment de disposition** (`v2`). Une entrée de store est
+  un *arbre*, pas une archive : elle porte la règle d'extraction de la version
+  qui l'a écrite, donc une entrée écrite avant le changement de modes
+  continuait de servir l'ancien arbre, indéfiniment et en silence (observé sur
+  une sonde : 0644 servi alors que la référence pose 0600). Le segment est ce
+  qui fait prendre effet un changement de sémantique. Les arbres précédents
+  restent sur disque, inutilisés.

@@ -33,6 +33,16 @@ pub enum Error {
     #[error("hostile archive refused for {dest}: {reason}")]
     HostileArchive { dest: PathBuf, reason: String },
 
+    /// The same refusal, once the caller knows which package the archive
+    /// belongs to: the path the extractor can name is the store's own
+    /// temporary directory, which tells a reader nothing.
+    #[error("hostile archive refused for {name} ({version}): {reason}")]
+    HostileDist {
+        name: String,
+        version: String,
+        reason: String,
+    },
+
     #[error("HTTP failure for {url}: {message}")]
     Http { url: String, message: String },
 

@@ -20,6 +20,15 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// Segment naming the extraction semantics an entry was written with. A store
+/// entry is a *tree*, not an archive, so it carries whatever rule the build
+/// that wrote it applied — and when that rule changes (`v2`: the modes come
+/// from the archive instead of "executable → 0755, default otherwise"), an old
+/// entry keeps serving the old tree forever, silently. Bumping this segment is
+/// what makes the change take effect; the previous trees stay on disk, unused,
+/// until the cache is cleared.
+const LAYOUT: &str = "v2";
+
 impl Store {
     pub fn at(root: PathBuf) -> Store {
         Store { root }
@@ -46,6 +55,7 @@ impl Store {
         let short_ref = dist_ref.unwrap_or("noref");
         let short_ref = &short_ref[..short_ref.len().min(12)];
         self.root
+            .join(LAYOUT)
             .join(name) // vendor/pkg: two safe segments (validated by the lock)
             .join(format!("{}-{}", sane(version), sane(short_ref)))
     }
@@ -70,10 +80,19 @@ impl Store {
             .prefix(".tmp-")
             .tempdir_in(&parent)
             .map_err(Error::io(&parent))?;
-        match kind {
-            DistKind::Zip => extract_zip(dist_bytes, tmp.path())?,
-            DistKind::Tar => extract_tar(dist_bytes, tmp.path())?,
-        }
+        let extracted = match kind {
+            DistKind::Zip => extract_zip(dist_bytes, tmp.path()),
+            DistKind::Tar => extract_tar(dist_bytes, tmp.path()),
+        };
+        // A refusal names the package, not `.tmp-EX4VNV` under the store.
+        extracted.map_err(|e| match e {
+            Error::HostileArchive { reason, .. } => Error::HostileDist {
+                name: name.to_owned(),
+                version: version.to_owned(),
+                reason,
+            },
+            other => other,
+        })?;
         let tmp_path = tmp.keep();
         match std::fs::rename(&tmp_path, &final_path) {
             Ok(()) => Ok(final_path),
@@ -146,6 +165,12 @@ mod tests {
         let p3 = store
             .ensure("a/b", "../../evil", None, &zip, DistKind::Zip)
             .expect("sane");
-        assert!(p3.starts_with(dir.path().join("store").join("a/b")));
+        assert!(p3.starts_with(dir.path().join("store").join(LAYOUT).join("a/b")));
+        // The layout segment is part of the key: a tree written by another
+        // extraction rule is never served under this one.
+        assert!(store
+            .entry_path("a/b", "1.0.0", Some("deadbeefcafe1234"))
+            .components()
+            .any(|c| c.as_os_str() == LAYOUT));
     }
 }

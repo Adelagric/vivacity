@@ -355,6 +355,27 @@ path — so they are left. Porting the schema itself means validating
 *Not refused at all.* `COMPOSER=<file>` is refused as unsupported rather than
 honoured, so a manifest named there is never validated — nor installed from.
 
+A hostile archive is the one family where vivacity **fails instead of handing
+over**. Everything else it cannot reproduce is detected before the first write,
+so the command goes to Composer; an archive, by definition, is only known once
+it is being read, halfway through an install. So a dist that would write
+outside its own directory — a symlink whose target leaves it, an entry written
+through a symlink the archive just created, a path with `..` or an absolute one,
+more decompressed bytes than the 512 MB budget — stops the command with a
+non-zero exit. Measured on the reference, the outcomes coincide: `unzip` also
+refuses the traversal, Composer then retries with `ZipArchive` on top of the
+partial tree, that fails too, and the install fails with nothing installed for
+that package.
+
+What differs is what a *failed* install leaves behind. Composer keeps the
+packages it had already installed and records them in `installed.json`;
+vivacity writes `vendor/` only once every archive is in its store, so a failure
+anywhere leaves `vendor/` untouched (measured on a two-package project whose
+second dist is hostile: Composer leaves the first one installed, vivacity
+leaves nothing). Re-running either command converges to the same tree, and
+vivacity's store makes its retry cheap — but the intermediate state is not the
+same, so it is written here rather than implied.
+
 Not supported: `gitlab-token` auth, root version detection from
 hg/svn/fossil.
 
