@@ -36,25 +36,75 @@ fn entry_path(entry: &zip::read::ZipFile<'_>, dest: &Path) -> Result<PathBuf> {
         })
 }
 
-/// Number of leading components to strip from each entry: 1 if the archive
-/// has exactly one top-level entry and it is a directory
-/// (`ArchiveDownloader::install`, `$singleDirAtTopLevel`; a top-level
-/// `.DS_Store` is not counted, and then disappears along with the root
-/// directory), 0 otherwise, in which case everything is moved, `.DS_Store`
-/// included (`rename($temporaryDir, $path)` onto an empty target).
-fn root_strip(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, dest: &Path) -> Result<usize> {
-    let mut entries: Vec<(PathBuf, bool)> = Vec::with_capacity(archive.len());
+/// The single top-level directory whose content becomes the package, or `None`
+/// when everything is taken as is. `ArchiveDownloader::install` lists the
+/// extracted tree with a Finder that excludes `.DS_Store` **by name** — file or
+/// directory, `notName('.DS_Store')` — and keeps the strip when exactly one
+/// entry is left and `is_dir()` says it is a directory. It then does
+/// `rename($extractedDir, $path)`: that directory MOVES onto the destination,
+/// so a `.DS_Store` beside it stays in the temporary directory and is thrown
+/// away with it — which is why the name is returned rather than a count of
+/// components to drop.
+/// Every entry's path, whether it is a directory entry, and whether it is a
+/// symlink — read before the first write, because both the single-root rule and
+/// the refusal below need the whole picture.
+fn zip_listing(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    attrs: &std::collections::HashMap<Vec<u8>, (u8, u32)>,
+    dest: &Path,
+) -> Result<Vec<(PathBuf, bool, bool)>> {
+    let mut out = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(Error::zip(dest))?;
-        entries.push((entry_path(&entry, dest)?, entry.is_dir()));
+        let (host, ext) = attrs.get(entry.name_raw()).copied().unwrap_or_else(|| {
+            (
+                HOST_UNIX,
+                entry.unix_mode().map_or(0, |m| (m & 0o177777) << 16),
+            )
+        });
+        let is_symlink = host == HOST_UNIX && (ext >> 16) & S_IFMT == S_IFLNK;
+        out.push((entry_path(&entry, dest)?, entry.is_dir(), is_symlink));
     }
-    Ok(root_strip_of(
-        entries.iter().map(|(p, d)| (p.as_path(), *d)),
-    ))
+    Ok(out)
+}
+
+/// The archive's whole top level is one symlink. `is_dir()` follows links, so
+/// Composer keeps the single-root rule and `rename($extractedDir, $path)` moves
+/// THE LINK onto `vendor/<name>`: measured, the installed package *is* a
+/// symlink (`vendor/hostile/rootlink -> ..`). A store entry here is a directory
+/// tree — there is nothing that could become a link — so such an archive is
+/// refused rather than laid out as something else.
+fn lone_top_level_symlink(listing: &[(PathBuf, bool, bool)]) -> Option<PathBuf> {
+    let mut only: Option<&(PathBuf, bool, bool)> = None;
+    for e in listing {
+        let mut comps =
+            e.0.components()
+                .filter(|c| matches!(c, Component::Normal(_)));
+        let Some(Component::Normal(first)) = comps.next() else {
+            continue;
+        };
+        if first == ".DS_Store" {
+            continue;
+        }
+        match only {
+            None => only = Some(e),
+            Some(seen) if std::ptr::eq(seen, e) => {}
+            Some(_) => return None,
+        }
+    }
+    let (path, _, is_symlink) = only?;
+    // One entry in all, and it is the top-level name itself.
+    let depth = path
+        .components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .count();
+    (*is_symlink && depth == 1).then(|| path.clone())
 }
 
 /// The rule itself, over `(entry path, is a directory entry)`.
-fn root_strip_of<'a>(entries: impl Iterator<Item = (&'a Path, bool)>) -> usize {
+fn root_strip_of<'a>(
+    entries: impl Iterator<Item = (&'a Path, bool)>,
+) -> Option<std::ffi::OsString> {
     let mut top: std::collections::BTreeMap<std::ffi::OsString, bool> =
         std::collections::BTreeMap::new();
     for (raw, dir_entry) in entries {
@@ -64,13 +114,16 @@ fn root_strip_of<'a>(entries: impl Iterator<Item = (&'a Path, bool)>) -> usize {
         let Some(Component::Normal(first)) = comps.next() else {
             continue;
         };
-        let is_dir = dir_entry || comps.next().is_some();
-        if !is_dir && first == ".DS_Store" {
+        // Excluded by NAME, whatever it is: the Finder's `notName` does not
+        // care whether `.DS_Store` is a file or a directory.
+        if first == ".DS_Store" {
             continue;
         }
+        let is_dir = dir_entry || comps.next().is_some();
         *top.entry(first.to_owned()).or_insert(false) |= is_dir;
     }
-    usize::from(top.len() == 1 && top.values().all(|d| *d))
+    let (name, is_dir) = top.iter().next()?;
+    (top.len() == 1 && *is_dir).then(|| name.clone())
 }
 
 /// Host byte and external attributes of every entry, keyed by raw name, read
@@ -165,6 +218,24 @@ fn apply_mode(_path: &Path, _rule: &ModeRule) -> Result<()> {
     Ok(())
 }
 
+/// The path an entry lands at, or `None` when the entry is thrown away: with a
+/// single root, everything beside it goes (it stays in the temporary directory
+/// Composer renames away), and the root's own entry becomes nothing.
+fn strip_root(raw: &Path, root: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let mut comps = raw
+        .components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .peekable();
+    if let Some(root) = root {
+        match comps.next() {
+            Some(Component::Normal(first)) if first == root => {}
+            _ => return None,
+        }
+    }
+    let rest: PathBuf = comps.collect();
+    (!rest.as_os_str().is_empty()).then_some(rest)
+}
+
 /// Memoized `create_dir_all`: avoids one `create_dir_all` (hence one stat +
 /// N syscalls) per zip entry when hundreds of files share the same parent
 /// directory. Inserts the path and its newly created ancestors.
@@ -220,8 +291,18 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
         zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(Error::zip(dest))?;
     let mut made: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     ensure_dir(dest, &mut made)?;
-    let strip = root_strip(&mut archive, dest)?;
     let attrs = central_attrs(zip_bytes);
+    let listing = zip_listing(&mut archive, &attrs, dest)?;
+    if let Some(link) = lone_top_level_symlink(&listing) {
+        return Err(Error::HostileArchive {
+            dest: dest.to_path_buf(),
+            reason: format!(
+                "the archive's whole content is the symlink {}, which Composer would install as a link in place of the package directory",
+                link.display()
+            ),
+        });
+    }
+    let strip = root_strip_of(listing.iter().map(|(p, d, _)| (p.as_path(), *d)));
     // Directory modes are applied at the END: an entry can give its directory
     // a mode that forbids writing into it (`0500`), and the files that follow
     // still have to land. `unzip` restores them at the end for the same
@@ -246,14 +327,9 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(Error::zip(dest))?;
         let raw = entry_path(&entry, dest)?;
-        let stripped: PathBuf = raw
-            .components()
-            .filter(|c| matches!(c, Component::Normal(_)))
-            .skip(strip)
-            .collect();
-        if stripped.as_os_str().is_empty() {
+        let Some(stripped) = strip_root(&raw, strip.as_deref()) else {
             continue;
-        }
+        };
         if let Some(link) = symlinked
             .iter()
             .find(|s| stripped.starts_with(s) && stripped.as_path() != s.as_path())
@@ -439,15 +515,9 @@ fn extract_tar_with_limit(tgz_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
     let mut made: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     ensure_dir(dest, &mut made)?;
     for e in &entries {
-        let stripped: PathBuf = e
-            .path
-            .components()
-            .filter(|c| matches!(c, Component::Normal(_)))
-            .skip(strip)
-            .collect();
-        if stripped.as_os_str().is_empty() {
+        let Some(stripped) = strip_root(&e.path, strip.as_deref()) else {
             continue;
-        }
+        };
         let out = dest.join(&stripped);
         if e.kind == tar::EntryType::Directory {
             ensure_dir(&out, &mut made)?;
@@ -771,6 +841,52 @@ mod tests {
         assert!(format!("{err}").contains("uncompressed size"), "{err}");
     }
 
+    #[test]
+    fn an_archive_that_is_only_a_symlink_is_refused() {
+        // Measured on Composer: `is_dir()` follows the link, so the strip
+        // applies and the rename moves the LINK onto the package directory —
+        // `vendor/hostile/rootlink -> ..`. A store entry is a tree, so this is
+        // refused instead of laid out as a directory holding a link.
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.add_symlink("pkg", "..", SimpleFileOptions::default())
+            .expect("symlink");
+        let zip = w.finish().expect("finish").into_inner();
+        let d = tmpdir();
+        let err = extract_zip(&zip, d.path()).expect_err("refused");
+        assert!(
+            format!("{err}").contains("whole content is the symlink"),
+            "{err}"
+        );
+        // A .DS_Store beside it changes nothing: the Finder excludes it by name.
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file(".DS_Store", SimpleFileOptions::default())
+            .expect("start");
+        w.write_all(b"junk").expect("write");
+        w.add_symlink("pkg", ".", SimpleFileOptions::default())
+            .expect("symlink");
+        let zip = w.finish().expect("finish").into_inner();
+        let d = tmpdir();
+        assert!(extract_zip(&zip, d.path()).is_err());
+        // Two top-level entries: not that case at all, and the link stays a
+        // link inside the package.
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file("pkg/real.txt", SimpleFileOptions::default())
+            .expect("start");
+        w.write_all(b"x").expect("write");
+        w.add_symlink("pkg/alias.txt", "real.txt", SimpleFileOptions::default())
+            .expect("symlink");
+        let zip = w.finish().expect("finish").into_inner();
+        let d = tmpdir();
+        extract_zip(&zip, d.path()).expect("laid out");
+        assert!(d
+            .path()
+            .join("alias.txt")
+            .symlink_metadata()
+            .expect("meta")
+            .file_type()
+            .is_symlink());
+    }
+
     fn tmpdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tmpdir")
     }
@@ -1060,7 +1176,7 @@ pub fn read_zip_entry(zip_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
         if *dir {
             continue;
         }
-        let Some(comps) = stripped(path, strip) else {
+        let Some(comps) = stripped(path, strip.as_deref()) else {
             continue;
         };
         let link = mode & S_IFMT == S_IFLNK;
@@ -1198,7 +1314,7 @@ pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
     // Last match wins; an exact one wins over one that only differs in case.
     let pick = |exact: bool| {
         found.iter().rev().find(|(p, _)| {
-            stripped(p, strip).is_some_and(|c| {
+            stripped(p, strip.as_deref()).is_some_and(|c| {
                 if exact {
                     c == wanted
                 } else {
@@ -1210,11 +1326,15 @@ pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
     Ok(pick(true).or_else(|| pick(false)).map(|(_, b)| b.clone()))
 }
 
-/// An entry path's components, its first `strip` of them dropped; `None`
-/// when it has no more than that (the stripped root itself).
-fn stripped(path: &Path, strip: usize) -> Option<Vec<std::ffi::OsString>> {
+/// An entry path's components once the single root is taken off; `None` when
+/// the entry is thrown away (beside the root, or the root itself). Mirrors
+/// `strip_root`, on components rather than on a `Path`.
+fn stripped(path: &Path, root: Option<&std::ffi::OsStr>) -> Option<Vec<std::ffi::OsString>> {
     let got = components(path);
-    (got.len() > strip).then(|| got[strip..].to_vec())
+    match root {
+        None => (!got.is_empty()).then(|| got.clone()),
+        Some(root) => (got.len() > 1 && got[0] == root).then(|| got[1..].to_vec()),
+    }
 }
 
 fn components(p: &Path) -> Vec<std::ffi::OsString> {
@@ -1238,6 +1358,13 @@ fn same_ignoring_case(a: &[std::ffi::OsString], b: &[std::ffi::OsString]) -> boo
             })
 }
 
-fn matches_stripped(path: &Path, strip: usize, wanted: &[std::ffi::OsString]) -> bool {
-    stripped(path, strip).is_some_and(|c| c == wanted || same_ignoring_case(&c, wanted))
+/// Whether a path, with its first `drop` components taken off, is the wanted
+/// one. Used before the single root is known, with both 0 and 1, to keep every
+/// candidate; the root's real name settles it afterwards.
+fn matches_stripped(path: &Path, drop: usize, wanted: &[std::ffi::OsString]) -> bool {
+    let got = components(path);
+    got.len() > drop && {
+        let c = &got[drop..];
+        c == wanted || same_ignoring_case(c, wanted)
+    }
 }

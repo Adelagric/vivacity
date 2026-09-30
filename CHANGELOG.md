@@ -31,6 +31,27 @@ byte-identical-output promise are the public API.
   covered seven ordinary modes and no special bit, which is why it was
   silent.
 
+### Fixed
+- **The single-root rule is decided the way Composer decides it.**
+  `ArchiveDownloader::install` lists the extracted tree with a Finder that
+  excludes `.DS_Store` **by name** — file or directory — then keeps the strip
+  when one entry is left and `is_dir()` says it is a directory, and finally does
+  `rename($extractedDir, $path)`, which moves that directory *onto* the
+  destination. Two consequences vivacity got wrong: a `.DS_Store` **directory**
+  (what a macOS-made zip carries) counted as a second top-level entry and
+  defeated the strip entirely, and an entry beside the root was carried up
+  instead of being thrown away with the temporary directory (`.DS_Store/junk`
+  landed as `junk` at the package root). The rule now returns the root's name
+  rather than a count of components to drop, which is what makes "beside the
+  root" expressible.
+- **An archive whose whole content is a symlink is refused.** `is_dir()` follows
+  the link, so Composer keeps the strip and the rename moves *the link* onto the
+  package directory — measured, the installed package *is* a symlink
+  (`vendor/hostile/rootlink -> ..`). A store entry is a directory tree, so there
+  is nothing here that could become a link; vivacity used to lay out a directory
+  containing the link, which is a silently different `vendor/`. Refused now,
+  with the reason, and unaffected by a `.DS_Store` beside it.
+
 ### Changed
 - **A hostile archive is the one family where vivacity fails instead of handing
   over, and that is now written down** (README, next to the other deviations).

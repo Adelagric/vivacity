@@ -2382,3 +2382,49 @@ Deux corrections au passage :
   une sonde : 0644 servi alors que la référence pose 0600). Le segment est ce
   qui fait prendre effet un changement de sémantique. Les arbres précédents
   restent sur disque, inutilisés.
+
+## 2026-09-30 — La règle de racine unique se décide sur le nom de la racine, pas sur un compteur
+
+Lu dans `ArchiveDownloader.php:118-176` (vendu dans `docs/reference/`) :
+
+    $getFolderContent = Finder::create()->ignoreVCS(false)->ignoreDotFiles(false)
+        ->notName('.DS_Store')->depth(0)->in($dir);
+    $singleDirAtTopLevel = 1 === count($contentDir) && is_dir((string) reset($contentDir));
+    …
+    $filesystem->rename($extractedDir, $path);
+
+Trois faits que vivacity ignorait :
+
+1. `.DS_Store` est exclu **par nom**, fichier ou répertoire. Notre règle ne le
+   sautait que s'il n'était pas un répertoire — donc un zip fabriqué sur macOS
+   avec un `.DS_Store/` comptait comme seconde entrée de premier niveau et
+   annulait le retrait de racine, pour tout le paquet.
+2. Composer **renomme le répertoire racine sur la destination** : ce qui est à
+   côté de lui reste dans le répertoire temporaire et disparaît avec. Nous
+   retirions un composant à *chaque* entrée, donc `.DS_Store/junk` atterrissait
+   en `junk` à la racine du paquet. La règle rend maintenant le **nom** de la
+   racine, ce qui rend « à côté de la racine » exprimable ; `strip_root` jette
+   ce qui n'en vient pas.
+3. `is_dir()` **suit les liens**. Une archive dont tout le premier niveau est un
+   lien symbolique garde donc le retrait, et le `rename` déplace **le lien** sur
+   `vendor/<nom>` : mesuré, le paquet installé *est* un lien
+   (`vendor/hostile/rootlink -> ..`). Une entrée de store est un arbre de
+   répertoires : rien là-dedans ne peut devenir un lien. Nous posions un
+   répertoire contenant le lien — un `vendor/` silencieusement différent, la
+   pire catégorie. Refusé désormais, avec la raison, et insensible à un
+   `.DS_Store` posé à côté.
+
+Le cas `tar` n'est pas concerné : une entrée de lien y devient un fichier vide
+(PharData), donc `is_dir()` répond faux des deux côtés et le retrait ne
+s'applique ni ici ni là.
+
+Vérifié : `oracle_zip.rs` gagne le cas `.DS_Store/` (vu rouge : l'oracle rendait
+`composer.json` + `src/A.php`, nous `pkg/…` intact), le test unitaire du lien
+racine couvre les trois formes (lien seul, lien plus `.DS_Store`, deux entrées
+où le lien reste un lien dans le paquet), 282 tests, et les harnais les plus
+exposés au retrait de racine restent verts : diff-vendor 12, tar-dist 7,
+path-repos 14, artifact-repo 9, steps 251, flex-install 7, custom-dirs 4,
+wp-core 5, package-versions 7, yii2-composer 8.
+
+Au passage, l'oracle zip modélise maintenant le `rename` de Composer plutôt
+qu'un « remonter le contenu » : sans ça il ne pouvait pas voir le point 2.

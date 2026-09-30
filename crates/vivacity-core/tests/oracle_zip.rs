@@ -201,30 +201,32 @@ fn oracle_extract(zip: &[u8], work: &Path) -> PathBuf {
     out
 }
 
-/// `ArchiveDownloader::install` after the extraction: the content of the
-/// single top-level directory moved up. `is_dir()` follows links, as PHP's
-/// does. Applied to the oracle tree so both sides compare after the same
-/// rule (vivacity applies it inside `extract_zip`).
-fn move_single_root_up(out: &Path) {
-    let mut top: Vec<PathBuf> = std::fs::read_dir(out)
+/// `ArchiveDownloader::install` after the extraction, modelled on the real
+/// thing: the Finder excludes `.DS_Store` **by name**, `is_dir()` follows
+/// links, and when exactly one entry is left Composer does
+/// `rename($extractedDir, $path)` — it moves THAT directory onto the
+/// destination, so anything beside it (a `.DS_Store`, file or directory) is
+/// left in the temporary directory and thrown away with it.
+fn install_like_composer(out: &Path) {
+    let top: Vec<PathBuf> = std::fs::read_dir(out)
         .expect("read_dir")
         .map(|e| e.expect("entry").path())
         .filter(|p| p.file_name().is_some_and(|n| n != ".DS_Store"))
         .collect();
-    if top.len() == 1 && top[0].is_dir() {
-        let root = top.remove(0);
-        for e in std::fs::read_dir(&root).expect("read_dir") {
-            let e = e.expect("entry").path();
-            std::fs::rename(&e, out.join(e.file_name().expect("name"))).expect("rename");
-        }
-        std::fs::remove_dir(&root).expect("rmdir");
+    if top.len() != 1 || !top[0].is_dir() {
+        return;
     }
+    let root = &top[0];
+    let aside = out.parent().expect("parent").join("single-root-aside");
+    std::fs::rename(root, &aside).expect("rename aside");
+    std::fs::remove_dir_all(out).expect("drop the temporary directory");
+    std::fs::rename(&aside, out).expect("rename onto the destination");
 }
 
 fn compare(zip: &[u8]) {
     let work = tempfile::tempdir().expect("tmp");
     let oracle = oracle_extract(zip, work.path());
-    move_single_root_up(&oracle);
+    install_like_composer(&oracle);
     let ours = work.path().join("ours");
     vivacity_core::extract::extract_zip(zip, &ours).expect("extract_zip");
     let (a, b) = (inventory(&oracle), inventory(&ours));
@@ -312,4 +314,19 @@ fn a_dos_host_entry_follows_unzips_own_rule() {
         set_central_attrs(&mut zip, name, attrs);
     }
     compare(&zip);
+}
+
+/// Composer decides the single-root rule on the *extracted tree*, with a
+/// Finder that excludes `.DS_Store` **by name** — file or directory — and an
+/// `is_dir()` that follows links. A macOS-made zip carrying a `.DS_Store`
+/// DIRECTORY next to the package root is therefore still stripped.
+#[test]
+fn a_ds_store_directory_does_not_defeat_the_single_root_rule() {
+    compare(&build_zip(&[
+        dir(".DS_Store/", 0o755),
+        file(".DS_Store/junk", b"junk", 0o644),
+        dir("pkg/", 0o755),
+        file("pkg/composer.json", b"{}", 0o644),
+        file("pkg/src/A.php", b"<?php", 0o644),
+    ]));
 }
