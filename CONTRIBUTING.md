@@ -71,6 +71,13 @@ the roadmap below.
   name, self-require, invalid link name) but does not validate the schema,
   so five of eight realistic invalid manifests are still accepted. What is
   accepted is stated in the README, measured.
+- **Does `7z x -y` recreate a symlink entry as a link?** On Windows Composer
+  prefers `7z` (found in `C:\Program Files\7-Zip` as well as on the `PATH`)
+  over `unzip`, and vivacity mirrors that discovery — but whether 7-Zip makes a
+  link without `-snl` is unmeasured, and the answer decides what a symlink entry
+  becomes on a box that has 7-Zip and no `unzip`. It needs a measurement on
+  Windows, not a guess; `extract.rs`'s `windows_unzip_tool_present` says so at
+  the point where it matters.
 - **Modification times of zip dists** — `unzip` restores the archive's DOS
   timestamp, vivacity leaves the install's time (measured, README says so).
   Doing it exactly means converting a DOS timestamp as `unzip` does, local

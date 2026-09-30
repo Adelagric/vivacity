@@ -37,6 +37,8 @@ twin() {
     Filesystem.php)           echo "src/Composer/Util/Filesystem.php" ;;
     PluginManager.php)        echo "src/Composer/Plugin/PluginManager.php" ;;
     ArchiveDownloader.php)    echo "src/Composer/Downloader/ArchiveDownloader.php" ;;
+    ZipDownloader.php)        echo "src/Composer/Downloader/ZipDownloader.php" ;;
+    TarDownloader.php)        echo "src/Composer/Downloader/TarDownloader.php" ;;
     LibraryInstaller.php)     echo "src/Composer/Installer/LibraryInstaller.php" ;;
     cmg-ClassMap.php)         echo "vendor/composer/class-map-generator/src/ClassMap.php" ;;
     cmg-ClassMapGenerator.php) echo "vendor/composer/class-map-generator/src/ClassMapGenerator.php" ;;

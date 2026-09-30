@@ -53,6 +53,14 @@ byte-identical-output promise are the public API.
   with the reason, and unaffected by a `.DS_Store` beside it.
 
 ### Changed
+- **Windows: Composer's search for an external unzip tool is mirrored.** It uses
+  Symfony's `ExecutableFinder` and looks for `7z` **first**, with `C:\Program
+  Files\7-Zip` added to the search path — outside `PATH` — then for `unzip`.
+  vivacity probed `PATH` alone, so on a box with 7-Zip installed normally it
+  answered "no tool" where Composer finds one, and turned a symlink entry into a
+  plain file where the reference makes a link. Whether `7z x -y` makes a link
+  without `-snl` is still unmeasured, and that is written at the point where it
+  decides the branch rather than guessed.
 - **A hostile archive is the one family where vivacity fails instead of handing
   over, and that is now written down** (README, next to the other deviations).
   Everything else it cannot reproduce is caught before the first write; an

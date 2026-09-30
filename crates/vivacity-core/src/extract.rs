@@ -254,6 +254,29 @@ fn ensure_dir(p: &Path, made: &mut std::collections::HashSet<PathBuf>) -> Result
     Ok(())
 }
 
+/// Whether Composer would find an external unzip tool on this Windows box.
+/// `ZipDownloader::__construct` builds its command list with Symfony's
+/// `ExecutableFinder`, and on Windows it looks for **`7z` first**, with
+/// `C:\Program Files\7-Zip` added to the search path — outside `PATH`
+/// entirely — then for `unzip`. Probing `PATH` alone therefore answered "no
+/// tool" on a machine where Composer finds one, and turned a symlink entry
+/// into a plain file where the reference makes a link.
+///
+/// What is NOT settled here, and is written down rather than guessed: whether
+/// `7z x -y` recreates a symlink entry as a link at all (it may need `-snl`).
+/// The answer decides this branch on a box that has 7-Zip but no `unzip`, and
+/// it needs a measurement on Windows — see CONTRIBUTING.
+#[cfg(windows)]
+fn windows_unzip_tool_present() -> bool {
+    let in_path = |exe: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(exe).exists()))
+    };
+    in_path("7z.exe")
+        || std::path::Path::new("C:\\Program Files\\7-Zip\\7z.exe").exists()
+        || in_path("unzip.exe")
+}
+
 /// Reads one entry against the budget the archive has left, counting the bytes
 /// **really** read. A declared size is the archive's word, and both formats
 /// let it lie: a zip's two size fields are `u32`s an attacker edits (measured
@@ -376,20 +399,17 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
             symlinked.insert(stripped.clone());
             #[cfg(unix)]
             crate::clone::symlink_like_unzip(std::path::Path::new(&target), &out)?;
-            // Windows: Composer extracts with `unzip` or `7z` when one is on
-            // the PATH (`ZipDownloader::$unzipCommands`), which recreate the
-            // link when the process may create links (the GitHub runner);
+            // Windows: Composer extracts with an external tool when it finds
+            // one (`ZipDownloader::$unzipCommands`), and such a tool recreates
+            // the link when the process may create links (the GitHub runner);
             // with PHP's ZipArchive the entry becomes an ordinary file whose
-            // content is the target. Same rule here: a link when such a tool
-            // is present and the link can be made, the file otherwise.
+            // content is the target. Same rule here — see
+            // `windows_unzip_tool_present` for what "finds one" means, which is
+            // not just the PATH.
             #[cfg(windows)]
             {
-                let tool_present = std::env::var_os("PATH").is_some_and(|path| {
-                    std::env::split_paths(&path)
-                        .any(|dir| dir.join("unzip.exe").exists() || dir.join("7z.exe").exists())
-                });
-                let linked =
-                    tool_present && std::os::windows::fs::symlink_file(&target, &out).is_ok();
+                let linked = windows_unzip_tool_present()
+                    && std::os::windows::fs::symlink_file(&target, &out).is_ok();
                 if !linked {
                     std::fs::write(&out, target.as_bytes()).map_err(Error::io(&out))?;
                 }

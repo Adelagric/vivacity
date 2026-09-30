@@ -2454,3 +2454,25 @@ dans le graphe (via `tar` et `zip`) mais aucune ne donne le décalage historique
 
 Consigné dans le README à côté des autres écarts et dans CONTRIBUTING comme
 chantier ouvert, avec ce qu'il exige.
+
+## 2026-09-30 — Windows : Composer cherche `7z` là où nous ne cherchions pas
+
+`ZipDownloader::__construct` construit sa liste de commandes avec
+l'`ExecutableFinder` de Symfony, et sous Windows il cherche **`7z` d'abord**,
+avec `C:\Program Files\7-Zip` ajouté au chemin de recherche — donc hors `PATH` —
+puis `unzip` (`ZipDownloader.php:47-51`, vendu dans `docs/reference/`). Notre
+sonde ne regardait que le `PATH` et ne connaissait pas cette priorité : sur une
+machine qui a 7-Zip installé normalement mais pas dans le `PATH`, nous
+répondions « aucun outil » là où Composer en trouve un, et une entrée de lien
+devenait un fichier ordinaire au lieu d'un lien.
+
+La découverte est alignée. Ce qui **n'est pas** tranché, et qui est écrit au
+point où ça compte plutôt que deviné : est-ce que `7z x -y` recrée une entrée de
+lien *en tant que lien* (il lui faut peut-être `-snl`) ? La réponse décide de
+cette branche sur une machine qui a 7-Zip et pas `unzip`, et elle demande une
+mesure **sous Windows**, pas une supposition. Consigné dans CONTRIBUTING.
+
+Au passage, `ZipDownloader.php` et `TarDownloader.php` entrent dans
+`docs/reference/` avec leur jumeau dans `drift-reference.sh` : tout le travail de
+ce sprint repose sur leur comportement, et le script ne surveille que ce qui est
+versé (129 fichiers désormais, contre 127).
