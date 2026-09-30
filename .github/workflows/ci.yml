@@ -105,6 +105,8 @@ jobs:
         run: harness/flex-update.sh
       - name: FileDownloader's Downloading lines (cold files cache on both sides)
         run: harness/download-lines.sh
+      - name: Artifact repositories (local dists read off the disk, modes kept)
+        run: harness/artifact-repo.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

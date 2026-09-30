@@ -2292,3 +2292,45 @@ perf.
 Borner n'est pas un durcissement : PharData s'arrête sur le `memory_limit` de
 PHP (`Allowed memory size of 134217728 bytes exhausted`, sortie 255) et `unzip`
 écrit en flux. C'est donc de la parité.
+
+## 2026-09-30 — Un dist sur le disque est lu, pas téléchargé (dépôts `artifact`)
+
+Fait : `FileDownloader::download` appelle `httpDownloader->addCopy($url)`, et
+`HttpDownloader::addJob` confie tout ce qui n'est pas `http(s)://` à
+`RemoteFilesystem`, qui l'ouvre avec les flux de PHP. Composer installe donc
+sans broncher un `dist.url` qui est un `file://…` **ou un chemin nu** — et un
+chemin nu est exactement ce qu'un dépôt `artifact` écrit dans le lock.
+
+vivacity donnait l'URL à reqwest et échouait, store et cache vides :
+
+    Error: HTTP failure for /…/artifacts/acme-widget-1.0.0.zip:
+      failed after 3 attempts: builder error
+
+Toute la famille `artifact` partait donc en erreur : installs hors réseau,
+paquets privés, miroirs locaux. Et pas en délégation — en erreur sèche. Le
+défaut était invisible parce que les deux sondes qui l'ont approché tournaient
+sur un cache de Composer déjà chaud (l'archive y était, vivacity la lisait) ou
+sur un store déjà rempli.
+
+Décision : lire le fichier. `local_dist_path` reconnaît `file://…` et l'absence
+de schéma, rien n'est pourcent-décodé (le wrapper `file` de PHP ne décode rien
+non plus), la lecture est **unique** (Composer réessaie trois fois, nous une
+seule : un `ENOENT` local ne guérit pas en 250 ms — écart assumé, visible
+seulement sur le nombre de lignes `- Downloading` d'un échec, jamais sur un
+succès), puis le shasum et l'écriture dans le cache de fichiers de Composer
+suivent le même chemin que pour un téléchargement.
+
+Écart qui reste, mesuré : sur un dist local **absent**, Composer imprime
+`The "<chemin>" file could not be downloaded: Failed to open stream: No such
+file or directory` dans une boîte Symfony et sort **100** ; vivacity imprime
+`Error: …` à plat et sort 1. C'est la famille d'écart déjà assumée pour les
+erreurs rendues en boîte (décision `COMPOSER=<fichier>`), et le code 100 vaut
+pour tout échec de transport, y compris HTTP : à traiter comme un sujet propre.
+
+Vérifié : `harness/artifact-repo.sh`, sans réseau — deux paquets fabriqués avec
+`ZipArchive`, caches de fichiers et store vierges par côté, codes de sortie,
+stderr, `vendor/` entier et le mode de chaque fichier. Les zips portent exprès
+0600, 0640, 0666 et 0700, que les zipballs réelles n'ont jamais : le banc tient
+donc aussi la règle de modes de l'extraction, et Composer y pose bien ces modes
+(mesuré dans le banc lui-même, pas supposé). Lancé contre le binaire 0.19.0
+publié, il échoue sur le premier dist.

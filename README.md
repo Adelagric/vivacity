@@ -61,7 +61,11 @@ repositories and compares stderr, the lock and `vendor/` down to file modes
 and link targets; `harness/tar-dist.sh` installs `tar` dists (asset-packagist's
 npm tarballs) on both sides and compares the tree, modes included — the
 modes come from the tar headers, as `PharData` writes them, and the
-tarballs are read from Composer's own cache. All must report no
+tarballs are read from Composer's own cache. `harness/artifact-repo.sh`
+needs no network at all: it builds an `artifact` repository of zips carrying
+modes real zipballs never have (0600, 0640, 0666, 0700) and installs it on
+both sides with a cold files cache and a cold store, comparing exit codes,
+stderr, `vendor/` and every mode. All must report no
 difference; CI runs them on Linux and macOS on every push.
 
 Underneath, each generated file and each step of the resolver is a port of

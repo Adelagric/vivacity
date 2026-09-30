@@ -315,6 +315,28 @@ impl Fetcher {
             });
         }
 
+        // A dist that lives on this filesystem is read, not downloaded: that
+        // is what Composer does with it, and refusing it lost the whole
+        // `artifact` repository family (offline installs, private builds).
+        if let Some(path) = Self::local_dist_path(url) {
+            let bytes = std::fs::read(&path).map_err(|e| Error::Http {
+                url: url.to_owned(),
+                message: format!("{} could not be read: {e}", path.display()),
+            })?;
+            if let Some(exp) = expected_sha1 {
+                let actual = sha1_hex(&bytes);
+                if actual != exp {
+                    return Err(Error::ShasumMismatch {
+                        name: name.to_owned(),
+                        expected: exp.to_owned(),
+                        actual,
+                    });
+                }
+            }
+            self.cache_dist(&cache_path, &bytes);
+            return Ok((bytes, Provenance::Network));
+        }
+
         let mut last_err = String::new();
         for attempt in 0..3u32 {
             if attempt > 0 {
@@ -332,14 +354,7 @@ impl Fetcher {
                             });
                         }
                     }
-                    if let Some(parent) = cache_path.parent() {
-                        if std::fs::create_dir_all(parent).is_ok() {
-                            let tmp = cache_path.with_extension("zip.vivacity-tmp");
-                            if std::fs::write(&tmp, &bytes).is_ok() {
-                                let _ = std::fs::rename(&tmp, &cache_path);
-                            }
-                        }
-                    }
+                    self.cache_dist(&cache_path, &bytes);
                     return Ok((bytes, Provenance::Network));
                 }
                 Err(e) => last_err = e,
@@ -470,6 +485,48 @@ impl Fetcher {
         })
     }
 
+    /// Writes a dist into Composer's own files cache, through a temporary
+    /// name so a killed process never leaves a half-written entry behind.
+    fn cache_dist(&self, cache_path: &Path, bytes: &[u8]) {
+        if let Some(parent) = cache_path.parent() {
+            if std::fs::create_dir_all(parent).is_ok() {
+                let tmp = cache_path.with_extension("zip.vivacity-tmp");
+                if std::fs::write(&tmp, bytes).is_ok() {
+                    let _ = std::fs::rename(&tmp, cache_path);
+                }
+            }
+        }
+    }
+
+    /// The filesystem path a dist URL names, when it names one. Composer's
+    /// `HttpDownloader::addJob` hands anything that is not `http(s)://` to
+    /// `RemoteFilesystem`, which opens it with PHP's stream layer — so a
+    /// `file://` URL and a plain path both work there, and a plain path is
+    /// exactly what an `artifact` repository writes into the lock. Nothing is
+    /// percent-decoded, as PHP's file wrapper decodes nothing either.
+    fn local_dist_path(url: &str) -> Option<PathBuf> {
+        if let Some(rest) = url.strip_prefix("file://") {
+            // `file:///abs`, and on Windows `file:///C:/x`; a host part
+            // (`file://host/share`) is left to the caller's error.
+            let rest = rest.strip_prefix('/').map_or(rest, |r| {
+                if cfg!(windows) && r.chars().nth(1) == Some(':') {
+                    r
+                } else {
+                    &rest[1..]
+                }
+            });
+            let mut p = String::from(rest);
+            if !cfg!(windows) && !p.starts_with('/') {
+                p.insert(0, '/');
+            }
+            return Some(PathBuf::from(p));
+        }
+        if url.contains("://") {
+            return None;
+        }
+        Some(PathBuf::from(url))
+    }
+
     async fn try_download(&self, url: &str) -> std::result::Result<Vec<u8>, String> {
         let mut req = self.client.get(url);
         if let Ok(parsed) = reqwest::Url::parse(url) {
@@ -503,6 +560,26 @@ mod tests {
         assert!(s.starts_with("/c/files/monolog/monolog/"));
         assert!(s.ends_with(".zip"));
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn a_dist_url_that_names_a_local_file_is_recognised() {
+        let p = |u: &str| Fetcher::local_dist_path(u).map(|p| p.to_string_lossy().into_owned());
+        // What an `artifact` repository writes into the lock: a plain path.
+        assert_eq!(
+            p("/srv/artifacts/acme-widget-1.0.0.zip"),
+            Some("/srv/artifacts/acme-widget-1.0.0.zip".to_owned())
+        );
+        // A `file://` URL, the other form Composer opens.
+        assert_eq!(
+            p("file:///srv/a%20b/x.zip"),
+            // Nothing is decoded, as PHP's file wrapper decodes nothing.
+            Some("/srv/a%20b/x.zip".to_owned())
+        );
+        // Everything else stays a download.
+        assert_eq!(p("https://repo.example/x.zip"), None);
+        assert_eq!(p("http://repo.example/x.zip"), None);
+        assert_eq!(p("ssh://git@example/x.git"), None);
     }
 
     #[test]

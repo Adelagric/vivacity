@@ -31,6 +31,20 @@ byte-identical-output promise are the public API.
   covered seven ordinary modes and no special bit, which is why it was
   silent.
 
+### Added
+- **A dist that lives on this filesystem is read, not downloaded.**
+  `HttpDownloader::addJob` hands anything that is not `http(s)://` to
+  `RemoteFilesystem`, which opens it with PHP's streams — so Composer installs
+  a `dist.url` that is a plain path or a `file://` URL, and an `artifact`
+  repository writes exactly such a path into the lock. vivacity handed every
+  one of them to reqwest and failed after three attempts (`HTTP failure …
+  builder error`), so offline installs and private artifact builds errored out
+  where Composer succeeds — and it did not hand the command over either.
+  `harness/artifact-repo.sh` holds it: two packages built into an artifact
+  directory, no network at all, fresh files cache and store per side, exit
+  codes, stderr, `vendor/` and every file's mode compared. Run against the
+  0.19.0 binary it fails on the first dist, which is how it was checked.
+
 ### Security
 - **The limit on a dist's decompressed size counted what the archive
   claimed.** `extract_zip` added up the *declared* sizes, which are two
