@@ -2196,3 +2196,99 @@ fichier sortait.
 Écart assumé, écrit plutôt que tu : nous refusons l'archive entière là où `unzip`
 saute l'entrée fautive et continue — plus strict, et cohérent avec ce que nous
 faisons déjà des chemins absolus et des `..`, qu'`unzip` saute aussi.
+
+## 2026-09-30 — Les modes d'un zip viennent de l'archive (et le zip n'avait pas d'oracle)
+
+Fait, mesuré sur des archives fabriquées, `unzip 6.00` d'Apple, umask 022 puis
+077 et 002 :
+
+| mode stocké | `unzip` | vivacity (022) | vivacity (077) |
+|---|---|---|---|
+| 0600 | 0600 | 0644 | 0600 |
+| 0640 | 0640 | 0644 | 0600 |
+| 0664 | 0664 | 0644 | 0600 |
+| 0666 | 0666 | 0644 | 0600 |
+| 0700 | 0700 | 0755 | 0755 |
+| 04755 | 0755 | 0755 | 0755 |
+
+`unzip` pose le mode stocké **sans appliquer l'umask** et retire les bits
+spéciaux. La règle de vivacité — « un bit d'exécution quelque part → 0755,
+sinon le défaut du système » (décision du 2026-09-17) — n'était juste que pour
+0644 et 0755, les deux seuls modes que portent les zipballs réelles : d'où le
+silence de 3 768 paquets de corpus. Et sous un umask autre que 022, **chaque
+fichier de chaque paquet** divergeait, y compris pour un dist parfaitement
+ordinaire, puisque `fs::write` pose `0666 & ~umask` là où Composer ne bouge pas.
+
+Les deux autres branches, mesurées aussi :
+- hôte DOS/FAT sans mode, bit lecture seule : `unzip` pose `0444` **réduit par
+  le défaut** (0400 sous umask 077, 0444 sous 002) ;
+- hôte DOS/FAT sans mode ni bit : le défaut seul (`0666`/`0777` & ~umask), ce
+  que `fs::write` et `create_dir_all` font déjà ;
+- hôte unix avec des attributs nuls : `unzip` pose **0000**, fichier illisible.
+  C'est la référence, donc c'est ce que nous posons.
+
+Le `unix_mode()` du crate `zip` ne permet pas de suivre ça : il **synthétise**
+`0664`/`0775` pour un hôte DOS (`types.rs:562-573`) et rend `None` dès que les
+attributs sont nuls, sans exposer l'octet d'hôte. L'octet d'hôte et les
+attributs externes sont donc lus dans l'annuaire central (`central_attrs`, 30
+lignes), qui devient la seule source de vérité pour les modes. Les modes des
+entrées répertoire sont posés **à la fin** : une entrée peut donner à son
+répertoire un mode qui interdit d'y écrire (0500) et les fichiers qui suivent
+doivent quand même atterrir — `unzip` les restaure à la fin pour la même raison.
+
+Cause structurelle, trouvée en méta : `oracle_tar.rs` existait, `oracle_zip.rs`
+non. Le chemin tenu par un oracle était exact, l'autre appliquait une règle
+écrite à la main. `crates/vivacity-core/tests/oracle_zip.rs` comble ça : six
+cas, `unzip -qq` d'un côté, `extract_zip` de l'autre, comparaison des chemins,
+types, contenus, modes et cibles de liens. Vu rouge sur trois des six avant le
+correctif.
+
+Conséquence opérationnelle écrite ici parce qu'elle survivra à la version : le
+store ne porte **aucune marque de version** (`<store>/<vendor>/<pkg>/<version>-<ref12>`),
+donc une entrée extraite par une version antérieure garde les anciens modes et
+continue d'être servie. Observé sur la sonde. À traiter avec l'hygiène du store
+(plan v0.20, R7).
+
+## 2026-09-30 — PharData retire les bits spéciaux, nous les gardions
+
+`extract_tar` posait `mode & 0o7777`, donc écrivait un fichier **setuid** là où
+`PharData::extractTo` n'en écrit pas : mesuré, 04755, 02755 et 01755 sortent
+tous en 0755. `oracle_tar.rs` couvrait sept modes ordinaires et aucun bit
+spécial — d'où le silence. Correctif d'une ligne (`& 0o777`), trois specs
+ajoutés à l'oracle, vus rouges d'abord (2541, 1517 et 1005 contre 493).
+
+## 2026-09-30 — Le plafond de décompression compte les octets réellement lus
+
+Fait : le plafond de 512 Mo additionnait des tailles **déclarées**.
+
+- Zip : les deux champs de taille non compressée sont des `u32` qu'on réécrit
+  (en-tête local +22, annuaire central +24). Sonde : 305 991 octets contenant
+  300 Mo de zéros, déclarés 1 octet — le plafond ne voit rien, l'entrée est
+  mise en mémoire d'un bloc, **pic 607 110 032 o** (`/usr/bin/time -l`), et
+  `jobs: 16` multiplie ça par le nombre d'extractions simultanées.
+- Tar : pire, le plafond était déjà un no-op. `extract_tar` comptait
+  `entry.header().size()` alors que le crate borne ses lectures avec
+  `entry.size()`, **écrasé par l'enregistrement pax `size`**. Un `.tgz` dont
+  l'en-tête ustar dit 0 et dont le pax dit 4096 faisait lire 4096 octets avec
+  un total resté à 0 — le test de non-régression affirme les deux nombres avant
+  d'affirmer le refus. `read_tar_entry` utilisait déjà le bon.
+
+La comptabilité porte désormais sur les octets **réellement lus**, contre un
+budget unique pour toute l'archive, aux quatre sites de lecture : le fichier, le
+lien (`S_IFLNK` plus une taille déclarée à 1 faisait lire une entrée entière
+comme chaîne UTF-8), et les deux lecteurs qui répondent aux questions de
+périmètre **avant** tout install. `take(allowance + 1)` : le `+ 1` a sa raison,
+une lecture qui s'arrête pile sur la limite d'un `Take` rend une lecture courte
+à `Crc32Reader`, qui ne vérifie la somme de contrôle qu'en voyant le flux
+épuisé — le contrôle d'intégrité serait sauté en silence.
+
+Ce qui reste, écrit : le budget borne le total décompressé, pas le pic par
+entrée. La même sonde passe de 607 Mo à **338 Mo** de pic, parce qu'une entrée
+est encore mise en mémoire entière (l'indice de capacité est maintenant plafonné
+par le budget restant, il ne sert plus à réserver 512 Mio sur ordre de
+l'attaquant). L'extraction en flux est un autre chantier, à juger sur mesure de
+perf.
+
+Borner n'est pas un durcissement : PharData s'arrête sur le `memory_limit` de
+PHP (`Allowed memory size of 134217728 bytes exhausted`, sortie 255) et `unzip`
+écrit en flux. C'est donc de la parité.

@@ -4,6 +4,49 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **A zip dist's file modes come from the archive, as `unzip` poses them.**
+  vivacity applied a rule of its own — an executable bit anywhere → `0755`,
+  otherwise the process default — where `ZipDownloader`'s `unzip` poses the
+  stored mode, *without* the umask. Measured entry by entry: `0600`, `0640`,
+  `0664`, `0666` and `0700` were all written as `0644`/`0755`, and under a
+  umask other than `022` **every file of every package** diverged (`0600`
+  everywhere under `077`, where Composer does not move). A DOS/FAT host and an
+  entry carrying no mode at all have rules of their own, also measured
+  (`0444` for the read-only bit, narrowed by the default; the default alone
+  otherwise), and the crate's synthesised `0664`/`0775` is not one of them, so
+  the host byte and the attributes are now read from the central directory
+  rather than taken from `unix_mode()`. Directory entries get their stored
+  mode too, applied at the end so a mode that forbids writing does not stop
+  the files that follow. `crates/vivacity-core/tests/oracle_zip.rs` holds the
+  reference: the same archives extracted by `unzip -qq` and by `extract_zip`,
+  compared down to modes and link targets. The zip path had no oracle — the
+  tar path has had one since 0.17 — and that asymmetry is where every one of
+  these divergences lived.
+- **`extract_tar` no longer writes a setuid file.** `PharData` drops
+  setuid/setgid/sticky (measured: `04755`, `02755` and `01755` all land as
+  `0755`); vivacity kept `mode & 0o7777` and wrote the bit. `oracle_tar.rs`
+  covered seven ordinary modes and no special bit, which is why it was
+  silent.
+
+### Security
+- **The limit on a dist's decompressed size counted what the archive
+  claimed.** `extract_zip` added up the *declared* sizes, which are two
+  `u32`s an attacker edits: a 305 991-byte zip holding 300 MB of zeros,
+  declared as one byte each, walked straight past the 512 MB limit and was
+  buffered whole (peak 607 MB, measured). `extract_tar` was worse — it
+  counted the ustar header's size while the crate bounds its reads with the
+  pax `size` record that overrides it, so the total stayed at zero however
+  much was read. Both now count the bytes **really** read, against one budget
+  for the whole archive, at every read site: the file branch, the symlink
+  branch (`S_IFLNK` plus a declared size of one made it read a whole entry as
+  a UTF-8 string) and the two readers that answer scope questions before any
+  install. The same archive now peaks at 338 MB and, past the budget, is
+  refused. Bounding is not a deviation: PharData stops on PHP's
+  `memory_limit`, and `unzip` streams to disk.
+
 ## [0.19.0] — 2026-09-30
 
 ### Security

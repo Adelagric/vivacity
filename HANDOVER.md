@@ -43,6 +43,18 @@ binaire `composer` du PATH vers `$TMPDIR/vivacity-oracle-composer.phar` et
 appellent ses classes via `php -r`. Sans php/composer ils ÉCHOUENT avec un
 message explicite (jamais de skip silencieux).
 
+`tests/oracle_zip.rs` est l'exception : son oracle n'est pas le phar mais
+`unzip -qq`, la commande que `ZipDownloader::extractWithSystemUnzip` construit
+(sans `-o`). Il couvre les archives qu'`unzip` extrait avec un code 0 ; une
+archive qui le fait sortir non nul envoie Composer dans une SECONDE extraction
+par `ZipArchive` par-dessus l'arbre partiel, comportement à deux étages tranché
+par la mesure dans docs/plans/v0.20-hostile-archives.md.
+
+⚠️ Le store ne porte aucune marque de version : une entrée extraite par une
+version antérieure garde les modes de l'époque et continue d'être servie
+(`<store>/<vendor>/<pkg>/<version>-<ref12>`). Après un changement de sémantique
+d'extraction, vider le store (`VIVACITY_CACHE_DIR`) pour mesurer.
+
 ## Publication sur crates.io (dernière : 0.19.0 le 2026-09-30)
 
 Six crates (`vivacity-pcre2-sys`, `vivacity-pcre2`, `vivacity-core`,

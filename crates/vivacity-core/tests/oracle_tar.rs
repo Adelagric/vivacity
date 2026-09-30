@@ -184,6 +184,17 @@ fn directory_entries_links_and_long_names() {
 }
 
 #[test]
+fn the_special_bits_are_dropped_as_phardata_drops_them() {
+    use tar::EntryType as T;
+    compare(&build_tgz(&[
+        spec("package/setuid.sh", T::Regular, 0o4755, b"#!", ""),
+        spec("package/setgid.sh", T::Regular, 0o2755, b"#!", ""),
+        spec("package/sticky.sh", T::Regular, 0o1755, b"#!", ""),
+        spec("package/plain.txt", T::Regular, 0o644, b"x", ""),
+    ]));
+}
+
+#[test]
 fn two_top_level_entries_are_kept_as_is() {
     use tar::EntryType as T;
     compare(&build_tgz(&[

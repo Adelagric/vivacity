@@ -5,7 +5,7 @@
 //! - paths: `enclosed_name()` (rejects `..` and absolute paths);
 //! - symlinks (unix mode S_IFLNK): relative target only, and the lexically
 //!   resolved path must stay inside the package root;
-//! - executable bits preserved (binaries depend on them);
+//! - modes taken from the archive, as `unzip` poses them (see `unzip_mode`);
 //! - refusal of absurd decompressed sizes (crude zip bomb).
 
 use crate::error::{Error, Result};
@@ -73,6 +73,98 @@ fn root_strip_of<'a>(entries: impl Iterator<Item = (&'a Path, bool)>) -> usize {
     usize::from(top.len() == 1 && top.values().all(|d| *d))
 }
 
+/// Host byte and external attributes of every entry, keyed by raw name, read
+/// from the central directory: the crate keeps the host out of its public API
+/// and `unix_mode()` SYNTHESISES a mode for a DOS host (`0664` / `0775`,
+/// `types.rs:562-573`) where `unzip` poses something else entirely. Record
+/// layout (APPNOTE 4.3.12): signature, `version made by` at +4 (its high byte
+/// is the host), name length at +28, extra length at +30, comment length at
+/// +32, external attributes at +38, name at +46.
+fn central_attrs(zip_bytes: &[u8]) -> std::collections::HashMap<Vec<u8>, (u8, u32)> {
+    let mut out = std::collections::HashMap::new();
+    let mut i = 0usize;
+    while let Some(pos) = zip_bytes
+        .get(i..)
+        .and_then(|s| s.windows(4).position(|w| w == b"PK\x01\x02"))
+        .map(|p| i + p)
+    {
+        let field = |off: usize| -> Option<usize> {
+            let b = zip_bytes.get(pos + off..pos + off + 2)?;
+            Some(u16::from_le_bytes([b[0], b[1]]) as usize)
+        };
+        let (Some(name_len), Some(extra_len), Some(comment_len)) =
+            (field(28), field(30), field(32))
+        else {
+            break;
+        };
+        let Some(attrs) = zip_bytes
+            .get(pos + 38..pos + 42)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        else {
+            break;
+        };
+        let Some(host) = zip_bytes.get(pos + 5).copied() else {
+            break;
+        };
+        if let Some(name) = zip_bytes.get(pos + 46..pos + 46 + name_len) {
+            out.insert(name.to_vec(), (host, attrs));
+        }
+        i = pos + 46 + name_len + extra_len + comment_len;
+    }
+    out
+}
+
+const HOST_UNIX: u8 = 3;
+
+/// What `unzip` poses for one entry, measured case by case
+/// (docs/plans/v0.20-hostile-archives.md):
+/// - a unix host answers with the stored mode, WITHOUT the umask and without
+///   the special bits (`04755` lands as `0755`); a stored mode of zero lands
+///   as `0000`, unreadable, and that is the reference;
+/// - any other host answers with the stored mode when it carries one at all,
+///   then, for the DOS read-only bit, with `0444` narrowed by the process
+///   default (`0400` under umask 077, measured), then with that default
+///   alone — `0666` for a file, `0777` for a directory, both masked by the
+///   umask, which is exactly what `fs::write` and `create_dir_all` do.
+enum ModeRule {
+    Exact(u32),
+    NarrowDefault(u32),
+    Default,
+}
+
+fn unzip_mode(host: u8, attrs: u32) -> ModeRule {
+    let stored = (attrs >> 16) & 0o777;
+    if host == HOST_UNIX || stored != 0 {
+        return ModeRule::Exact(stored);
+    }
+    if attrs & 0x01 != 0 {
+        return ModeRule::NarrowDefault(0o444);
+    }
+    ModeRule::Default
+}
+
+/// Applies the rule to something that exists: the default is what the
+/// creation already produced, so it is read back rather than guessed (no
+/// `umask(2)` call, hence no unsafe and no race).
+#[cfg(unix)]
+fn apply_mode(path: &Path, rule: &ModeRule) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = match rule {
+        ModeRule::Exact(m) => *m,
+        ModeRule::NarrowDefault(m) => {
+            let cur = std::fs::symlink_metadata(path).map_err(Error::io(path))?;
+            cur.permissions().mode() & 0o777 & m
+        }
+        ModeRule::Default => return Ok(()),
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(Error::io(path))
+}
+
+#[cfg(not(unix))]
+fn apply_mode(_path: &Path, _rule: &ModeRule) -> Result<()> {
+    Ok(())
+}
+
 /// Memoized `create_dir_all`: avoids one `create_dir_all` (hence one stat +
 /// N syscalls) per zip entry when hundreds of files share the same parent
 /// directory. Inserts the path and its newly created ancestors.
@@ -91,12 +183,50 @@ fn ensure_dir(p: &Path, made: &mut std::collections::HashSet<PathBuf>) -> Result
     Ok(())
 }
 
+/// Reads one entry against the budget the archive has left, counting the bytes
+/// **really** read. A declared size is the archive's word, and both formats
+/// let it lie: a zip's two size fields are `u32`s an attacker edits (measured
+/// — 300 Mo of zeros declared as 1 octet, extracted in full with a 607 Mo
+/// peak), and a tar's pax `size` record overrides the ustar header the crate
+/// hands back, which is why counting headers bounded nothing at all.
+///
+/// `take(allowance + 1)` is what makes the lie unprofitable, and the `+ 1`
+/// carries its own reason: a read stopping exactly on a `Take`'s limit hands
+/// `Crc32Reader` a short read instead of the end of the stream, and it only
+/// verifies the checksum once the inner reader is drained — so the integrity
+/// check would be skipped in silence.
+fn read_within(
+    reader: &mut impl Read,
+    allowance: &mut u64,
+    hint: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut buf = Vec::with_capacity(hint.min(*allowance) as usize);
+    let read = reader.by_ref().take(*allowance + 1).read_to_end(&mut buf)? as u64;
+    if read > *allowance {
+        return Ok(None);
+    }
+    *allowance -= read;
+    Ok(Some(buf))
+}
+
 pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
+    extract_zip_with_limit(zip_bytes, dest, MAX_UNCOMPRESSED)
+}
+
+/// `extract_zip` with the budget as an argument: the tests prove the
+/// accounting on a handful of bytes instead of half a gigabyte.
+fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<()> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(Error::zip(dest))?;
     let mut made: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     ensure_dir(dest, &mut made)?;
     let strip = root_strip(&mut archive, dest)?;
+    let attrs = central_attrs(zip_bytes);
+    // Directory modes are applied at the END: an entry can give its directory
+    // a mode that forbids writing into it (`0500`), and the files that follow
+    // still have to land. `unzip` restores them at the end for the same
+    // reason.
+    let mut dir_modes: Vec<(PathBuf, ModeRule)> = Vec::new();
     // Symlinks this archive has created, by stripped relative path. Nothing may
     // be written THROUGH one: `check_symlink_target` resolves a target
     // lexically, which assumes every component of the path is a real
@@ -108,16 +238,13 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
     // this: "checkdir error: … exists but is not directory".
     let mut symlinked: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    let mut total: u64 = 0;
+    let mut allowance = limit;
+    let over = || Error::HostileArchive {
+        dest: dest.to_path_buf(),
+        reason: format!("uncompressed size > {limit} bytes"),
+    };
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(Error::zip(dest))?;
-        total = total.saturating_add(entry.size());
-        if total > MAX_UNCOMPRESSED {
-            return Err(Error::HostileArchive {
-                dest: dest.to_path_buf(),
-                reason: format!("uncompressed size > {MAX_UNCOMPRESSED} bytes"),
-            });
-        }
         let raw = entry_path(&entry, dest)?;
         let stripped: PathBuf = raw
             .components()
@@ -142,14 +269,29 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
         }
         let out = dest.join(&stripped);
 
-        let mode = entry.unix_mode();
-        let is_symlink = mode.is_some_and(|m| m & S_IFMT == S_IFLNK);
+        // Host and attributes from the central directory; an entry the scan
+        // did not find falls back to the crate's own answer.
+        let (host, ext) = attrs.get(entry.name_raw()).copied().unwrap_or_else(|| {
+            (
+                HOST_UNIX,
+                entry.unix_mode().map_or(0, |m| (m & 0o177777) << 16),
+            )
+        });
+        let rule = unzip_mode(host, ext);
+        let is_symlink = host == HOST_UNIX && (ext >> 16) & S_IFMT == S_IFLNK;
 
         if entry.is_dir() {
             ensure_dir(&out, &mut made)?;
+            dir_modes.push((out.clone(), rule));
         } else if is_symlink {
-            let mut target = String::new();
-            entry.read_to_string(&mut target).map_err(Error::io(&out))?;
+            let hint = entry.size();
+            let bytes = read_within(&mut entry, &mut allowance, hint)
+                .map_err(Error::io(&out))?
+                .ok_or_else(over)?;
+            let target = String::from_utf8(bytes).map_err(|_| Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: format!("symlink {} has a non-UTF-8 target", stripped.display()),
+            })?;
             check_symlink_target(&stripped, &target, dest, &symlinked)?;
             if let Some(p) = out.parent() {
                 ensure_dir(p, &mut made)?;
@@ -182,18 +324,16 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
             if let Some(p) = out.parent() {
                 ensure_dir(p, &mut made)?;
             }
-            let mut buf = Vec::with_capacity(entry.size().min(MAX_UNCOMPRESSED) as usize);
-            entry.read_to_end(&mut buf).map_err(Error::io(&out))?;
+            let hint = entry.size();
+            let buf = read_within(&mut entry, &mut allowance, hint)
+                .map_err(Error::io(&out))?
+                .ok_or_else(over)?;
             std::fs::write(&out, &buf).map_err(Error::io(&out))?;
-            #[cfg(unix)]
-            if let Some(m) = mode {
-                if m & 0o111 != 0 {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o755))
-                        .map_err(Error::io(&out))?;
-                }
-            }
+            apply_mode(&out, &rule)?;
         }
+    }
+    for (path, rule) in dir_modes.iter().rev() {
+        apply_mode(path, rule)?;
     }
     Ok(())
 }
@@ -201,7 +341,7 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
 /// Extraction of a `tar` dist (asset-packagist: npm's `.tgz`), as
 /// `TarDownloader` does it through `PharData::extractTo` — measured on
 /// PHP 8.5 (docs/plans/v0.17-tar-dist.md):
-/// - a file gets the exact mode of its header (no umask);
+/// - a file gets the exact mode of its header (no umask), special bits dropped;
 /// - a directory entry's mode is ignored (0777 & ~umask, like the
 ///   implicit parents — npm archives have no directory entries at all);
 /// - a symlink or hard-link entry becomes an EMPTY regular file with the
@@ -212,7 +352,12 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
 /// with `..` or absolute are refused (PharData normalises them lexically;
 /// no real archive has one).
 pub fn extract_tar(tgz_bytes: &[u8], dest: &Path) -> Result<()> {
-    use std::io::Read as _;
+    extract_tar_with_limit(tgz_bytes, dest, MAX_UNCOMPRESSED)
+}
+
+/// `extract_tar` with the budget as an argument, for the same reason as
+/// `extract_zip_with_limit`.
+fn extract_tar_with_limit(tgz_bytes: &[u8], dest: &Path, limit: u64) -> Result<()> {
     let hostile = |reason: String| Error::HostileArchive {
         dest: dest.to_path_buf(),
         reason,
@@ -240,7 +385,7 @@ pub fn extract_tar(tgz_bytes: &[u8], dest: &Path) -> Result<()> {
         data: Vec<u8>,
     }
     let mut entries: Vec<Entry> = Vec::new();
-    let mut total: u64 = 0;
+    let mut allowance = limit;
     let decoder = flate2::read::GzDecoder::new(tgz_bytes);
     let mut archive = tar::Archive::new(decoder);
     let iter = archive.entries().map_err(Error::io(dest))?;
@@ -251,19 +396,21 @@ pub fn extract_tar(tgz_bytes: &[u8], dest: &Path) -> Result<()> {
             let raw = entry.path_bytes();
             path_of(&raw)?
         };
-        let mode = entry.header().mode().map_err(Error::io(dest))? & 0o7777;
-        let size = entry.header().size().map_err(Error::io(dest))?;
-        total = total.saturating_add(size);
-        if total > MAX_UNCOMPRESSED {
-            return Err(hostile(format!(
-                "uncompressed size > {MAX_UNCOMPRESSED} bytes"
-            )));
-        }
+        // `& 0o777`, not `& 0o7777`: PharData drops setuid/setgid/sticky
+        // (measured — 04755, 02755 and 01755 all land as 0755), and keeping
+        // them wrote a setuid file where the reference writes none.
+        let mode = entry.header().mode().map_err(Error::io(dest))? & 0o777;
         let data = match kind {
             tar::EntryType::Regular | tar::EntryType::Continuous => {
-                let mut buf = Vec::with_capacity(size.min(MAX_UNCOMPRESSED) as usize);
-                entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
-                buf
+                // `entry.size()`, not `header().size()`: the crate bounds its
+                // own reads with the former, which a pax `size` record
+                // overrides — so counting the latter counted a number nobody
+                // reads (measured: 261 Ko of `.tgz` read 256 Mo with the
+                // total stuck at 0).
+                let hint = entry.size();
+                read_within(&mut entry, &mut allowance, hint)
+                    .map_err(Error::io(dest))?
+                    .ok_or_else(|| hostile(format!("uncompressed size > {limit} bytes")))?
             }
             tar::EntryType::Directory | tar::EntryType::Symlink | tar::EntryType::Link => {
                 Vec::new()
@@ -497,6 +644,131 @@ mod tests {
             }
         }
         w.finish().expect("finish").into_inner()
+    }
+
+    /// Rewrites the declared uncompressed size in the local header (+22) and
+    /// in the central directory record (+24), which is all an attacker has to
+    /// do to make a plafond that counts declared sizes let anything through.
+    fn forge_declared_size(zip: &mut [u8], real: u32, forged: u32) {
+        let mut patched = 0;
+        for (sig, off) in [
+            (b"PK\x03\x04".as_slice(), 22usize),
+            (b"PK\x01\x02".as_slice(), 24),
+        ] {
+            let mut i = 0;
+            while let Some(pos) = zip[i..].windows(4).position(|w| w == sig).map(|p| i + p) {
+                let cur = u32::from_le_bytes(zip[pos + off..pos + off + 4].try_into().expect("4"));
+                if cur == real {
+                    zip[pos + off..pos + off + 4].copy_from_slice(&forged.to_le_bytes());
+                    patched += 1;
+                }
+                i = pos + 4;
+            }
+        }
+        assert_eq!(patched, 2, "the two size fields of the entry");
+    }
+
+    #[test]
+    fn a_zip_that_lies_about_its_size_is_still_bounded() {
+        let payload = vec![b'z'; 4096];
+        let mut zip = build_zip(&[("pkg/big.bin", &payload, Some(0o644))]);
+        forge_declared_size(&mut zip, 4096, 1);
+        let d = tmpdir();
+        // A budget of 1024 bytes: the declared size says 1, the entry holds
+        // 4096, and what counts is what is read.
+        let err = extract_zip_with_limit(&zip, d.path(), 1024).expect_err("refused");
+        assert!(
+            format!("{err}").contains("uncompressed size"),
+            "unexpected error: {err}"
+        );
+        assert!(!d.path().join("big.bin").exists());
+    }
+
+    #[test]
+    fn a_zip_of_many_small_entries_shares_one_budget() {
+        // Each entry is honest and small; the budget is for the archive, not
+        // for one entry, so the fourth one is refused.
+        let payload = vec![b'x'; 400];
+        let zip = build_zip(&[
+            ("pkg/a", &payload, Some(0o644)),
+            ("pkg/b", &payload, Some(0o644)),
+            ("pkg/c", &payload, Some(0o644)),
+            ("pkg/d", &payload, Some(0o644)),
+        ]);
+        let d = tmpdir();
+        let err = extract_zip_with_limit(&zip, d.path(), 1024).expect_err("refused");
+        assert!(format!("{err}").contains("uncompressed size"), "{err}");
+    }
+
+    #[test]
+    fn an_honest_zip_just_under_the_budget_is_extracted() {
+        let payload = vec![b'y'; 1000];
+        let zip = build_zip(&[("pkg/ok.bin", &payload, Some(0o644))]);
+        let d = tmpdir();
+        extract_zip_with_limit(&zip, d.path(), 1024).expect("extracted");
+        assert_eq!(
+            std::fs::read(d.path().join("ok.bin")).expect("read").len(),
+            1000
+        );
+    }
+
+    /// The tar counterpart: a pax `size` record overrides the ustar header,
+    /// so counting the header counted a number nobody reads. The archive is
+    /// built by hand — no writer exposes a pax record — and the test asserts
+    /// the lie itself before asserting the refusal.
+    #[test]
+    fn a_tar_that_lies_in_its_header_is_still_bounded() {
+        const REAL: usize = 4096;
+        let data = vec![b't'; REAL];
+        let mut builder = tar::Builder::new(Vec::new());
+        // The pax extended header that applies to the next entry: one record,
+        // "<total length> size=4096\n", length included in the count.
+        let body = format!("size={REAL}\n");
+        let mut total = body.len() + 3;
+        while total.to_string().len() + 1 + body.len() != total {
+            total += 1;
+        }
+        let record = format!("{total} {body}");
+        assert_eq!(record.len(), total, "a pax record counts its own length");
+        let mut px = tar::Header::new_ustar();
+        px.set_entry_type(tar::EntryType::XHeader);
+        px.set_mode(0o644);
+        px.set_mtime(0);
+        px.set_size(record.len() as u64);
+        px.set_path("PaxHeaders/big.bin").expect("pax path");
+        px.set_cksum();
+        builder.append(&px, record.as_bytes()).expect("pax header");
+        // The entry itself: a ustar header announcing zero, followed by the
+        // 4096 bytes the pax record promises.
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_mode(0o644);
+        h.set_mtime(0);
+        h.set_size(0);
+        h.set_path("pkg/big.bin").expect("path");
+        h.set_cksum();
+        builder.append(&h, data.as_slice()).expect("entry");
+        let tar_bytes = builder.into_inner().expect("tar");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&tar_bytes).expect("gzip");
+        let tgz = enc.finish().expect("gzip");
+
+        // The lie, as the crate sees it.
+        {
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tgz.as_slice()));
+            let entry = archive
+                .entries()
+                .expect("entries")
+                .next()
+                .expect("one entry")
+                .expect("entry");
+            assert_eq!(entry.header().size().expect("header size"), 0);
+            assert_eq!(entry.size(), REAL as u64);
+        }
+
+        let d = tmpdir();
+        let err = extract_tar_with_limit(&tgz, d.path(), 1024).expect_err("refused");
+        assert!(format!("{err}").contains("uncompressed size"), "{err}");
     }
 
     fn tmpdir() -> tempfile::TempDir {
@@ -837,15 +1109,14 @@ fn read_zip_index(
     rel: &str,
 ) -> Result<Vec<u8>> {
     let mut entry = archive.by_index(index).map_err(Error::zip(dest))?;
-    if entry.size() > MAX_UNCOMPRESSED {
-        return Err(Error::HostileArchive {
+    let hint = entry.size();
+    let mut allowance = MAX_UNCOMPRESSED;
+    read_within(&mut entry, &mut allowance, hint)
+        .map_err(Error::io(dest))?
+        .ok_or_else(|| Error::HostileArchive {
             dest: dest.to_path_buf(),
             reason: format!("entry {rel} is absurdly large"),
-        });
-    }
-    let mut buf = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
-    Ok(buf)
+        })
 }
 
 /// A symlink's target, resolved lexically against the link's own path, as
@@ -883,7 +1154,7 @@ pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
     let mut found: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let decoder = flate2::read::GzDecoder::new(tgz_bytes);
     let mut archive = tar::Archive::new(decoder);
-    let mut total: u64 = 0;
+    let mut allowance = MAX_UNCOMPRESSED;
     for entry in archive.entries().map_err(Error::io(dest))? {
         let mut entry = entry.map_err(Error::io(dest))?;
         let kind = entry.header().entry_type();
@@ -910,18 +1181,16 @@ pub fn read_tar_entry(tgz_bytes: &[u8], rel: &str) -> Result<Option<Vec<u8>>> {
         if !kind.is_file() {
             continue;
         }
-        total = total.saturating_add(entry.size());
-        if total > MAX_UNCOMPRESSED {
-            return Err(Error::HostileArchive {
-                dest: dest.to_path_buf(),
-                reason: "decompressed size beyond the limit".to_owned(),
-            });
-        }
         // The strip is only known at the end, so every name that could be
         // the one — stripped or not, whatever its case — is kept.
         if matches_stripped(&path, 0, &wanted) || matches_stripped(&path, 1, &wanted) {
-            let mut buf = Vec::with_capacity(entry.size() as usize);
-            entry.read_to_end(&mut buf).map_err(Error::io(dest))?;
+            let hint = entry.size();
+            let buf = read_within(&mut entry, &mut allowance, hint)
+                .map_err(Error::io(dest))?
+                .ok_or_else(|| Error::HostileArchive {
+                    dest: dest.to_path_buf(),
+                    reason: "decompressed size beyond the limit".to_owned(),
+                })?;
             found.push((path, buf));
         }
     }
