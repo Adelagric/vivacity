@@ -1860,7 +1860,8 @@ donc de lancer git, sur le chemin chaud de l'install.
 
 Trou de surveillance refermé au passage : `docs/reference/` n'avait pas
 `ValidatingArrayLoader.php`, donc les règles de nommage déjà livrées n'étaient
-surveillées par aucun job de drift. Le jumeau est ajouté (128 fichiers suivis).
+surveillées par aucun job de drift. Le jumeau est ajouté (127 fichiers suivis
+après le dédoublonnage du 2026-09-30).
 
 Vérifié : les 21 cas de `harness/root-manifest.sh` rouges avant (21/21), le bon
 rouge par commande étant différent à chaque fois — `install` sortait 4 (lock
@@ -1956,3 +1957,37 @@ l'objet du job. Les dix jumeaux ne sont pas acquittés : l'acquittement exige
 d'avoir lu chaque diff, et deux sont gros (`ClassMap.php` 167 lignes,
 `Platform.php` 72). L'alarme hebdomadaire reste donc rouge, ce qui est le bon
 état : elle signale un écart réel et daté, pas du bruit.
+
+## 2026-09-30 — Les dix dérives instruites et acquittées
+
+Fait : chaque jumeau dérivé a été rattaché à son commit amont, par l'API et sans
+télécharger de phar, et `docs/reference/DRIFT-ACK` porte maintenant dix lignes
+avec une raison chacune. Trois dépôts amont sont en cause et, surprise utile,
+trois des dix fichiers ne forment qu'**une seule** nouveauté : composer #13085
+ajoute un avertissement pour les chemins qui ne diffèrent que par la casse dans
+un dump optimisé, et il consomme `ClassMap::getAmbiguousFolders` ajouté par
+class-map-generator #49/#50 ; #48 du même dépôt corrige au passage le slash
+initial d'un chemin absolu derrière un wrapper de flux.
+
+Répartition des décisions : quatre « rien à porter » (batching des avis déjà
+porté par avance, User-Agent d'agent IA, dépréciation de MB_ONIGURUMA dont amont
+prend la branche `phpinfo` que notre sonde a déjà, clés de cache de
+`CompilingMatcher`) et cinq « à porter au ré-épinglage », dont les trois de la
+nouveauté d'autoload et les deux comportementales de semver (#187 et #189).
+
+La plus intéressante reste #187, dont le message amont explique le mécanisme :
+le contrôle du suffixe de stabilité minusculait la version puis la comparait à
+une regex sensible à la casse contenant « RC », donc il ne matchait jamais —
+`>=1.0-RC1` devenait `>=1.0.0.0-RC1-dev`. Un bug silencieux de la référence, que
+notre port reproduit exactement, et qu'il faudra cesser de reproduire le jour du
+ré-épinglage.
+
+Redondance corrigée : `SemverVersionParser.php` et `semver-VersionParser.php`
+étaient deux jumeaux du **même** fichier du phar (même empreinte de diff, fichiers
+identiques). L'entrée de la table `twin()` et la copie de référence sont
+supprimées ; 127 fichiers suivis au lieu de 128.
+
+Limite écrite : les empreintes sont celles du build `2.11-dev+cc854808` du
+2026-09-28. Le prochain cron tourne contre un build plus récent, et tout fichier
+qui a rebougé depuis réalertera — c'est le comportement voulu. La valeur durable
+de ces lignes est la raison, pas le hachage.

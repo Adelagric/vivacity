@@ -9,3 +9,17 @@
 # On n'acquitte qu'après avoir lu le diff ET consigné la décision dans
 # DECISIONS.md. La ligne à coller est imprimée par harness/drift-reference.sh
 # sous la dérive.
+#
+# Instruit le 2026-09-30 contre Composer 2.11-dev+cc854808 : dix jumeaux, trois
+# dépôts amont, une seule nouveauté à cheval sur trois fichiers. Les empreintes
+# ci-dessous sont celles de CE build ; un nouveau mouvement amont les périme et
+# réalerte, ce qui est voulu — la valeur durable est la raison, pas le hachage.
+AutoloadGenerator.php a6e393e0e96516f9a593fc5d65247df9a526fc62c2e6dea8a8187ad2cb1f1632 amont ajoute l'avertissement de casse ambiguë des dumps optimisés (composer #13085) : une ligne de stderr en plus, à porter au ré-épinglage
+cmg-ClassMap.php 07ce3b5f06a05b0bcb973b2d3f97f00861a878c3a047fdf6d39c4e0c2b5283fd class-map-generator #49 et #50 : getAmbiguousFolders, l'API que consomme #13085 ; à porter avec lui
+cmg-ClassMapGenerator.php 0b2ce35b02108202e8ee4e38224c796165b5461561d647822c6ffc44b6d42135 class-map-generator #48 : garde le slash initial d'un chemin absolu derrière un wrapper de flux ; à porter au ré-épinglage
+ComposerRepository.php bc8eb5f294c104e6d0c582c1d4365603f639bbeb16b6cc6273fc9053c0d0ed9b amont a rattrapé le batching des avis de sécurité que vivacity portait par avance (#13051), plus les options de transport de FilterListApiClient (#13040) : rien à porter
+Platform.php 90fed5f4d59b1ffe12490ddc799375f3ad810fd5223883e5194e646173500069 composer #13073 et #13087 : information d'agent IA dans le User-Agent, hors de notre sortie observable ; rien à porter
+PlatformRepository.php 661c253a6645f4421d36e10aaca5aa31697aa6265da7864e7efd4217bafaefb8 MB_ONIGURUMA_VERSION déprécié en PHP 8.6 (composer 2616959b4) : amont retombe sur la lecture dans phpinfo, branche que notre sonde a déjà en elseif ; rien à porter
+semver-CompilingMatcher.php cbd9e5672b76686c5e36776eaa01c1b714c6fceb33dd01bed0bae9d99fcc9b1a semver #186 : clés de cache non concaténées, sans effet observable ; rien à porter
+semver-Intervals.php dd53e86ca94c15e72c6078f2d3be2424d3ac31fa3f2c84149ac4d76c8f807002 semver #189 : ne plus compacter une contrainte sans dev en != nus qui matchent dev ; comportemental (oracle_semver diverge), à porter au ré-épinglage
+semver-VersionParser.php 398388f378101e8e931db22d294a7d536c66e58d4c2c69a1b3e5c459c234e0a4 semver #187 : le `-dev` en trop sur une borne >= ou < portant un suffixe RC était un bug (regex sensible à la casse après strtolower) ; notre port le reproduit fidèlement, à porter au ré-épinglage
