@@ -6,6 +6,24 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Security
+- **A zip dist could write outside the extraction directory through a chain of
+  symlinks.** `check_symlink_target` resolves a link's target *lexically*, which
+  assumes every component of the path is a real directory — and two entries
+  break that assumption: `a -> .` stays inside, then `a/b -> ..` resolves to the
+  root *lexically* (its parent being `a`), so both passed, yet on disk `a` IS
+  the root, so `a/b` points outside and `a/b/pwned.txt` landed next to the
+  extraction directory. Reported by a third-party review of v0.18.0 and
+  reproduced here before anything was changed.
+
+  Nothing of Composer's behaviour is given up by refusing it: `ZipDownloader`
+  runs the system `unzip`, which creates the link and then refuses every entry
+  whose path traverses it ("checkdir error: … exists but is not directory"),
+  while PHP's own `ZipArchive` never creates links at all. The extractor now
+  records the links an archive creates and refuses both writing through one and
+  a later link whose target *crosses* one. Three regression tests, the first
+  being the reported archive itself.
+
 ### Added
 - **The `  - Downloading <name> (<version>)` lines.** Composer prints one per
   package whose archive its files cache does not serve, as a block before the

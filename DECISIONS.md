@@ -2149,3 +2149,50 @@ part et d'autre, stderr identique à l'octet.
 `version`, Composer avertit `Composer could not detect the root package (X)
 version, defaulting to '1.0.0'` et nous n'imprimons rien. Déterministe, donc
 portable — contrairement à la barre de progression.
+
+## 2026-09-30 — Évasion de l'extraction zip par chaîne de liens (signalée, reproduite, corrigée)
+
+Fait : une revue externe de la v0.18.0 rapporte qu'une archive zip fabriquée
+peut écrire hors du répertoire d'extraction par une chaîne de liens
+symboliques. **Reproduit avant de toucher au code** :
+
+    pkg/a       -> lien vers "."      (reste dedans, accepté)
+    pkg/a/b     -> lien vers ".."     (parent LEXICAL = `a`, donc `a/..` = racine, accepté)
+    pkg/a/b/pwned.txt                 (fichier écrit à travers `b`)
+
+`extract_zip` acceptait l'archive et `pwned.txt` atterrissait **à côté** du
+répertoire d'extraction. La cause : `check_symlink_target` résout la cible
+*lexicalement*, ce qui suppose que chaque composant du chemin est un vrai
+répertoire — supposition que deux entrées suffisent à briser, puisque `a` est en
+réalité la racine.
+
+Ce que fait la référence, mesuré sur la même archive :
+- `ZipDownloader::extract` appelle `extractWithSystemUnzip`, donc `unzip` ;
+- `unzip` **crée** le lien `pkg/a -> .` puis **refuse** chaque entrée dont le
+  chemin le traverse : « checkdir error: … exists but is not directory ». Aucune
+  évasion ;
+- `ZipArchive::extractTo` de PHP, lui, ne crée **aucun** lien : il écrit
+  l'entrée comme un fichier ordinaire contenant la cible (1 octet, `.`), puis
+  échoue sur l'entrée suivante.
+
+Donc créer le lien est le bon comportement pour la parité (c'est `unzip` qui
+fait foi), et le correctif est exactement le refus d'`unzip`, pas un changement
+de sémantique. L'extracteur mémorise désormais les liens que l'archive crée et
+refuse deux choses : écrire **à travers** l'un d'eux, et un lien ultérieur dont
+la cible **traverse** l'un d'eux (`z -> a/../evil`, où la résolution lexicale
+paraît interne mais sort une fois `a` suivi). Ce second cas ne provoquait pas
+d'écriture hors périmètre à l'extraction, mais laissait sur disque un lien qui
+sort dès qu'on le suit.
+
+`extract_tar` n'est pas concerné : une entrée de lien y devient un fichier vide
+(sémantique `PharData`), donc aucun lien n'y est jamais créé et la chaîne est
+impossible.
+
+Trois tests de non-régression, le premier étant l'archive signalée elle-même,
+plus un test qui vérifie que le garde ne coûte pas le cas ordinaire (un lien à
+côté de sa cible, lu à travers). Vérifié rouge avant : l'archive passait et le
+fichier sortait.
+
+Ce qui reste, écrit plutôt que tu : nous refusons l'archive entière là où `unzip`
+saute l'entrée fautive et continue — plus strict, et cohérent avec ce que nous
+faisons déjà des chemins absolus et des `..`, qu'`unzip` saute aussi.

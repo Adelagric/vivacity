@@ -97,6 +97,16 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
     let mut made: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     ensure_dir(dest, &mut made)?;
     let strip = root_strip(&mut archive, dest)?;
+    // Symlinks this archive has created, by stripped relative path. Nothing may
+    // be written THROUGH one: `check_symlink_target` resolves a target
+    // lexically, which assumes every component of the path is a real
+    // directory — and an archive can break that assumption with two entries.
+    // `a -> .` passes (it stays inside), then `a/b -> ..` passes too (its
+    // lexical parent is `a`, so `a/..` is the root), yet on disk `a` is the
+    // root, so `a/b` points OUTSIDE and a file written under it escapes.
+    // `unzip`, which is what `ZipDownloader::extract` runs, refuses exactly
+    // this: "checkdir error: … exists but is not directory".
+    let mut symlinked: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let mut total: u64 = 0;
     for i in 0..archive.len() {
@@ -117,6 +127,19 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
         if stripped.as_os_str().is_empty() {
             continue;
         }
+        if let Some(link) = symlinked
+            .iter()
+            .find(|s| stripped.starts_with(s) && stripped.as_path() != s.as_path())
+        {
+            return Err(Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: format!(
+                    "entry {} would be written through the symlink {}",
+                    stripped.display(),
+                    link.display()
+                ),
+            });
+        }
         let out = dest.join(&stripped);
 
         let mode = entry.unix_mode();
@@ -127,11 +150,12 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<()> {
         } else if is_symlink {
             let mut target = String::new();
             entry.read_to_string(&mut target).map_err(Error::io(&out))?;
-            check_symlink_target(&stripped, &target, dest)?;
+            check_symlink_target(&stripped, &target, dest, &symlinked)?;
             if let Some(p) = out.parent() {
                 ensure_dir(p, &mut made)?;
             }
             let _ = std::fs::remove_file(&out);
+            symlinked.insert(stripped.clone());
             #[cfg(unix)]
             crate::clone::symlink_like_unzip(std::path::Path::new(&target), &out)?;
             // Windows: Composer extracts with `unzip` or `7z` when one is on
@@ -298,7 +322,12 @@ pub fn extract_tar(tgz_bytes: &[u8], dest: &Path) -> Result<()> {
 
 /// A symlink target must be relative and stay lexically inside the extracted
 /// root (the classic attack: `link -> ../../../../etc/passwd`).
-fn check_symlink_target(link_rel: &Path, target: &str, dest: &Path) -> Result<()> {
+fn check_symlink_target(
+    link_rel: &Path,
+    target: &str,
+    dest: &Path,
+    symlinked: &std::collections::HashSet<PathBuf>,
+) -> Result<()> {
     let hostile = |reason: String| Error::HostileArchive {
         dest: dest.to_path_buf(),
         reason,
@@ -309,18 +338,42 @@ fn check_symlink_target(link_rel: &Path, target: &str, dest: &Path) -> Result<()
             "absolute symlink: {link_rel:?} -> {target}"
         )));
     }
-    let mut depth: i64 = link_rel.components().count() as i64 - 1; // depth of the link's directory
-    for c in target_path.components() {
+    // Resolved lexically from the link's own directory, keeping the components
+    // and not just a depth: they are what says whether the target crosses a
+    // symlink this archive created, whose real place on disk is elsewhere.
+    let mut parts: Vec<std::ffi::OsString> = link_rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_owned()),
+            _ => None,
+        })
+        .collect();
+    parts.pop(); // the link's own name: what remains is its directory
+    let comps: Vec<Component<'_>> = target_path.components().collect();
+    for (i, c) in comps.iter().enumerate() {
         match c {
             Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
+                if parts.pop().is_none() {
                     return Err(hostile(format!(
                         "symlink escaping the archive: {link_rel:?} -> {target}"
                     )));
                 }
             }
-            Component::Normal(_) => depth += 1,
+            Component::Normal(n) => {
+                parts.push((*n).to_owned());
+                // Crossing a symlink this archive created is what makes the
+                // lexical resolution a lie; pointing AT one is harmless, so
+                // only a component with something after it counts.
+                if i + 1 < comps.len() {
+                    let crossed: PathBuf = parts.iter().collect();
+                    if symlinked.contains(&crossed) {
+                        return Err(hostile(format!(
+                            "symlink {link_rel:?} -> {target} passes through the symlink {}",
+                            crossed.display()
+                        )));
+                    }
+                }
+            }
             Component::CurDir => {}
             _ => {
                 return Err(hostile(format!(
@@ -448,6 +501,91 @@ mod tests {
 
     fn tmpdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tmpdir")
+    }
+
+    /// Entries in order: a link when `link` is true (`add_symlink`, what a
+    /// zipball carries), an ordinary file otherwise.
+    fn build_mixed(entries: &[(&str, &str, bool)]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, payload, link) in entries {
+            if *link {
+                w.add_symlink(*name, *payload, SimpleFileOptions::default())
+                    .expect("symlink");
+            } else {
+                w.start_file(*name, SimpleFileOptions::default())
+                    .expect("start");
+                w.write_all(payload.as_bytes()).expect("write");
+            }
+        }
+        w.finish().expect("finish").into_inner()
+    }
+
+    #[test]
+    fn a_chain_of_symlinks_cannot_escape() {
+        // Reported by a third-party review of v0.18.0, reproduced: `a -> .`
+        // stays inside, and `a/b -> ..` resolves to the root LEXICALLY (its
+        // parent being `a`), so both passed the target check — yet on disk `a`
+        // IS the root, so `a/b` points outside and a file written under it
+        // escaped the extraction directory. `unzip`, which
+        // `ZipDownloader::extract` runs, refuses the same thing ("exists but is
+        // not directory"), so nothing of Composer's behaviour is given up.
+        let d = tmpdir();
+        let dest = d.path().join("pkg");
+        let zip = build_mixed(&[
+            ("pkg/a", ".", true),
+            ("pkg/a/b", "..", true),
+            ("pkg/a/b/pwned.txt", "ESCAPED", false),
+        ]);
+        let err = extract_zip(&zip, &dest).expect_err("must be refused");
+        assert!(
+            format!("{err}").contains("through the symlink"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !d.path().join("pwned.txt").exists(),
+            "a file was written outside the extraction directory"
+        );
+    }
+
+    #[test]
+    fn a_symlink_target_may_not_cross_a_symlink_of_the_archive() {
+        // The same family, one step earlier: nothing is written through `a`
+        // here, but `z`'s target crosses it, so the link left on disk would
+        // point outside once followed.
+        let d = tmpdir();
+        let dest = d.path().join("pkg");
+        let zip = build_mixed(&[("pkg/a", ".", true), ("pkg/z", "a/../evil", true)]);
+        let err = extract_zip(&zip, &dest).expect_err("must be refused");
+        assert!(
+            format!("{err}").contains("passes through the symlink"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_plain_symlink_inside_the_package_still_works() {
+        // The guard must not cost the ordinary case: a link next to its target.
+        let d = tmpdir();
+        let dest = d.path().join("pkg");
+        let zip = build_mixed(&[
+            ("pkg/src/Real.php", "<?php // real", false),
+            ("pkg/src/Alias.php", "Real.php", true),
+        ]);
+        extract_zip(&zip, &dest).expect("a legitimate link is extracted");
+        let alias = dest.join("src/Alias.php");
+        let meta = std::fs::symlink_metadata(&alias).expect("alias");
+        if meta.file_type().is_symlink() {
+            assert_eq!(
+                std::fs::read_to_string(&alias).expect("read through the link"),
+                "<?php // real"
+            );
+        } else {
+            // Windows without unzip/7z: an ordinary file holding the target.
+            assert_eq!(
+                std::fs::read_to_string(&alias).expect("read the file"),
+                "Real.php"
+            );
+        }
     }
 
     #[test]
