@@ -113,9 +113,12 @@ ways to skip it are Composer's own, with Composer's consequences:
 `--no-blocking` / `--no-security-blocking`, `config.policy.malware.block`
 / `block-scope`, or `--offline` (cache, with a warning). With
 `--no-blocking` a Laravel no-op is ~50 ms on an M4 Max, ~35 ms on Linux.
-CI gates on the vivacity/Composer ratio per scenario (`bench/gate.py`,
-tolerance 15 % past `bench/results/baseline-ratio.json`), so a regression
-shows up as a red `bench` job rather than a slower table.
+CI computes the vivacity/Composer ratio per scenario (`bench/gate.py`,
+tolerance 15 % past `bench/results/baseline-ratio.json`) and writes the
+verdict into the job summary. It **reports**, it does not block: the ratio
+moves 15–50 % between identical runs on shared runners (six false alarms on
+2026-09-19/20), so the `bench` job stays green and a real regression is
+caught by `hyperfine` before the commit.
 
 ## The resolver
 

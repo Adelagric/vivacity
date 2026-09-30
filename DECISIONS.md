@@ -2193,6 +2193,6 @@ plus un test qui vérifie que le garde ne coûte pas le cas ordinaire (un lien �
 côté de sa cible, lu à travers). Vérifié rouge avant : l'archive passait et le
 fichier sortait.
 
-Ce qui reste, écrit plutôt que tu : nous refusons l'archive entière là où `unzip`
+Écart assumé, écrit plutôt que tu : nous refusons l'archive entière là où `unzip`
 saute l'entrée fautive et continue — plus strict, et cohérent avec ce que nous
 faisons déjà des chemins absolus et des `..`, qu'`unzip` saute aussi.
