@@ -61,10 +61,20 @@ the roadmap below.
 - **`path` repositories on Windows** — junctions (`Filesystem::junction`,
   `PathDownloader`'s Windows branch); today such a lock goes through the
   Composer fallback there.
-- **The `  - Downloading …` lines of a real install** — vivacity prints
-  the `Installing … : Extracting archive` lines after the transaction but
-  never announces downloads; with warm caches the two outputs are already
-  identical.
+- **`--prefer-source` / `--prefer-dist` / `--prefer-install` on `update`,
+  `require` and `remove`** — `install` honours them since v0.19 (the ported
+  `getPreferredInstallOptions`); the other three reject them, because their
+  path re-reads composer.json once the in-memory manifest is gone and
+  carrying the effective preference there is plumbing, not a patch.
+- **The refusals that come from Composer's JSON schema** — vivacity refuses
+  the root manifest's own rules at every command since v0.19 (invalid root
+  name, self-require, invalid link name) but does not validate the schema,
+  so five of eight realistic invalid manifests are still accepted. What is
+  accepted is stated in the README, measured.
+- **The root-version warning** — `Composer could not detect the root package
+  (<name>) version, defaulting to '1.0.0'`, printed once as the first line
+  when the manifest has no `version`, has a name, and its `type` is not
+  `project`. Measured, not yet printed.
 - **Plugins to emulate natively** — every install-time plugin proven harmless
   (or reproduced exactly, like `symfony/runtime` and `composer/installers`)
   moves a whole ecosystem off the fallback path. See `scope.rs` for the

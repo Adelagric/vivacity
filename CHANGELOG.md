@@ -4,7 +4,7 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
-## [Unreleased]
+## [0.19.0] — 2026-09-30
 
 ### Security
 - **A zip dist could write outside the extraction directory through a chain of
