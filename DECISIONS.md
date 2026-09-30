@@ -2079,3 +2079,32 @@ câblage — et accepter un drapeau qu'on ignorerait serait pire que le refuser.
 Vérifié : transitions 13/13 (huit nouveaux cas, dont les deux de précision et
 les trois d'usage), steps 251/251, update 19/19, root-manifest 35/35,
 flex-update 26/26, le reste du balayage vert, 265 tests.
+
+## 2026-09-30 — La barre de progression : infermable, et le drapeau du banc justifié
+
+Fait : la méta des lignes `- Downloading` signalait la barre de progression
+comme un écart « inconditionnel et plus gros », invisible au banc parce que
+tous les harnais passent `--no-ansi`, qui l'éteint silencieusement
+(`BaseCommand.php:251`).
+
+Mesuré, la conclusion s'inverse. Deux `composer install` du même projet (109
+paquets, même machine, cache chaud, sans `--no-ansi`) donnent des cadres
+**différents** : `25/109 [======>…] 22 %` contre `26/109 [======>…] 23 %`. Les
+cadres dépendent du moment où chaque opération parallèle finit, donc la sortie
+n'est pas reproductible — ni par nous, ni par Composer lui-même. Il n'y a pas
+de cible à atteindre à l'octet.
+
+Et le contrepoint, mesuré aussi : avec `--no-ansi`, deux runs sont **identiques
+à l'octet**. Le drapeau que les harnais passent n'est donc pas un filtre qui
+cache un écart, c'est ce qui rend la sortie de la référence comparable. Choix
+du banc justifié rétrospectivement.
+
+Décision : rien à porter, et l'item est refermé comme infermable plutôt que
+laissé ouvert dans la feuille de route. Ce qui reste vrai et qui relève du
+produit, non de la parité : un utilisateur en terminal voit une barre chez
+Composer et rien chez nous ; la fournir voudrait dire inventer la nôtre,
+qu'aucun banc ne pourrait comparer à la référence.
+
+Structure observée au passage, sans `--no-ansi` et à cache chaud : une barre
+indéterminée à la phase de téléchargement, les 109 lignes `- Installing`, puis
+huit cadres numérotés après elles.
