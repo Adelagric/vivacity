@@ -61,6 +61,18 @@ byte-identical-output promise are the public API.
   unnoticed because the plugin is, by definition, not active yet.
 
 ### Fixed
+- **`config.preferred-install` is judged per package, and `auto` no longer
+  installs a dev package from the wrong place.**
+  `DownloadManager::resolvePackageInstallPreference` takes the first matching
+  pattern and, with no match at all, answers `$package->isDev() ? 'source' :
+  'dist'` — so `auto`, and any pattern map that leaves a dev-version package
+  unmatched, makes Composer **clone it from source** where vivacity extracted a
+  dist: a git checkout instead of an archive, a different `vendor/` and not a
+  missing line. Measured against Composer 2.10.3, which prints `  - Syncing …
+  into cache` there. vivacity refused only the literal `source`. The rule is
+  now the ported function, so the refusal is exact in both directions: a map
+  whose patterns send every installed package to `dist` stays native, and
+  `auto` over stable packages stays native too.
 - **The suggestion in `Invalid package found during dependency resolution`
   was wrong.** `hasPackageNamingError` splits camelCase before lowercasing —
   `Foo/BarBaz` suggests `foo/bar-baz` — where vivacity suggested `foo/barbaz`.

@@ -35,6 +35,77 @@ after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort
 [ "$before" = "$after" ] || { echo "FAIL drupal: the tree was modified before the refusal"; exit 1; }
 echo "OK   drupal: core-composer-scaffold handed over to Composer without touching the disk"
 
+# `config.preferred-install` other than `dist`:
+# `DownloadManager::resolvePackageInstallPreference` answers
+# `$package->isDev() ? 'source' : 'dist'` when no pattern matches, so `auto`
+# clones a dev-version package from source — a git checkout where vivacity
+# extracts a dist, i.e. a different vendor/ and not a missing line. (Measured
+# against Composer 2.10.3, which prints `  - Syncing <dev package> into cache`
+# there.) A project fabricated here rather than a fixture: every fixture with a
+# dev package is already out of scope for another reason, which would make the
+# case prove only half of it. The scope check runs before any download, so the
+# dist never has to be fetchable.
+prefer_project() { # répertoire, version du paquet, préférence
+  rm -rf "$1"; mkdir -p "$1"
+  cat > "$1/composer.json" <<JSON
+{
+    "name": "vivace/prefer",
+    "require": {
+        "acme/thing": "$2"
+    },
+    "config": {
+        "preferred-install": "$3"
+    }
+}
+JSON
+  cat > "$1/composer.lock" <<JSON
+{
+    "_readme": [],
+    "content-hash": "0000000000000000000000000000000000000000",
+    "packages": [
+        {
+            "name": "acme/thing",
+            "version": "$2",
+            "type": "library",
+            "dist": {"type": "zip", "url": "https://example.invalid/acme.zip", "reference": "abc"}
+        }
+    ],
+    "packages-dev": [],
+    "aliases": [],
+    "minimum-stability": "stable",
+    "stability-flags": {},
+    "prefer-stable": false,
+    "prefer-lowest": false,
+    "platform": {},
+    "platform-dev": {}
+}
+JSON
+}
+
+for spec in "dev-main:auto:refuse" "dev-main:source:refuse" "1.0.0:auto:natif"; do
+  version="${spec%%:*}"; rest="${spec#*:}"; pref="${rest%%:*}"; expect="${rest#*:}"
+  dir="$WORK/prefer-$version-$pref"
+  prefer_project "$dir" "$version" "$pref"
+  cd "$dir"
+  before=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+  code=0
+  "$VIVACITY" install --no-fallback --offline >"$WORK/prefer-$version-$pref.log" 2>&1 || code=$?
+  named=0; grep -q "preferred-install" "$WORK/prefer-$version-$pref.log" && named=1
+  if [ "$expect" = refuse ]; then
+    if [ "$code" != 3 ] || [ "$named" != 1 ]; then
+      echo "FAIL preferred-install $pref sur $version : attendu 3 en nommant l'option, code $code (nommée=$named)"; tail -4 "$WORK/prefer-$version-$pref.log"; exit 1
+    fi
+    after=$( (find . -type d | sort; find . -type f -exec shasum -a 256 {} +) | sort | shasum -a 256)
+    [ "$before" = "$after" ] || { echo "FAIL preferred-install $pref sur $version : arbre modifié avant le refus"; exit 1; }
+    echo "OK   preferred-install $pref sur $version : rendu à Composer sans toucher au disque"
+  else
+    if [ "$named" = 1 ]; then
+      echo "FAIL preferred-install $pref sur $version : refusé alors que Composer poserait le dist"; tail -4 "$WORK/prefer-$version-$pref.log"; exit 1
+    fi
+    echo "OK   preferred-install $pref sur $version : pas de refus (Composer pose le dist pour une version stable)"
+  fi
+done
+
 # The resolution commands (plan v0.16): an installed, allowed plugin whose
 # effect vivacity does not emulate hands the whole command to Composer
 # BEFORE any write; `--no-fallback` refuses with exit 3, naming the plugin,

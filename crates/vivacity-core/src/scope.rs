@@ -434,7 +434,7 @@ pub fn analyze(
         }
     }
     report.issues.extend(
-        config_issues(root_manifest)
+        config_issues(root_manifest, lock, with_dev)
             .into_iter()
             .map(ScopeIssue::Config),
     );
@@ -459,10 +459,90 @@ pub fn plugin_issues(lock: &Lock, with_dev: bool) -> Vec<ScopeIssue> {
 }
 
 /// The `config` keys of the manifest (or the global config) that vivacity
-/// does not honour: a `preferred-install` asking for `source` anywhere.
+/// does not honour: a `preferred-install` that is not exactly `dist`.
+///
+/// `DownloadManager::resolvePackageInstallPreference` takes the FIRST pattern
+/// that matches, and with no match at all it answers
+/// `$package->isDev() ? 'source' : 'dist'`. So `auto` and any partial pattern
+/// map install a dev-version package from **source** — a git clone where
+/// vivacity extracts a dist, i.e. a different vendor/ and not a missing line.
+/// Composer's own default is the string `dist` (`Config`), which is why the
+/// common case needs no refusal. A map is accepted only when every value is
+/// `dist` AND a `*` pattern makes it total; anything else hands over.
 /// (`vendor-dir` / `bin-dir` are resolved by `dirs::Dirs`; the forms it
 /// refuses come back as layout issues.)
-pub fn config_issues(root_manifest: &Value) -> Vec<String> {
+/// `DownloadManager::resolvePackageInstallPreference` plus `Factory`'s switch,
+/// for one package: would Composer install it from source?
+///
+/// A string is handled by the switch — `dist` forces dist, `source` forces
+/// source, anything else (including `auto`) leaves both flags off and falls
+/// through to the per-package rule with no patterns. A map goes to
+/// `setPreferences`, where the FIRST matching pattern decides: `dist` is dist,
+/// `auto` is dist only for a non-dev package, and anything else is source.
+/// With no pattern matching at all: `$package->isDev() ? 'source' : 'dist'`.
+fn prefers_source(preference: &Value, name: &str, is_dev: bool) -> bool {
+    match preference {
+        Value::String(s) => match s.as_str() {
+            "dist" => false,
+            "source" => true,
+            _ => is_dev,
+        },
+        Value::Object(map) => {
+            for (pattern, pref) in map {
+                if pattern_matches(pattern, name) {
+                    return match pref.as_str() {
+                        Some("dist") => false,
+                        Some("auto") => is_dev,
+                        _ => true,
+                    };
+                }
+            }
+            is_dev
+        }
+        _ => is_dev,
+    }
+}
+
+/// `'{^'.str_replace('\*', '.*', preg_quote($pattern)).'$}i'`: a whole-name
+/// The pattern of `resolvePackageInstallPreference`, built as
+/// `preg_quote($pattern)` with `\*` turned into `.*`, anchored, `i`: the whole
+/// name, case-insensitive, `*` the only metacharacter and everything else
+/// literal. Greedy left to right, as `.*` is.
+fn pattern_matches(pattern: &str, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let pieces: Vec<String> = pattern
+        .to_ascii_lowercase()
+        .split('*')
+        .map(str::to_owned)
+        .collect();
+    if pieces.len() == 1 {
+        return name == pieces[0];
+    }
+    let first = &pieces[0];
+    let last = &pieces[pieces.len() - 1];
+    if !name.starts_with(first.as_str()) || !name.ends_with(last.as_str()) {
+        return false;
+    }
+    // The first and last pieces may not overlap in the name.
+    if name.len() < first.len() + last.len() {
+        return false;
+    }
+    let mut rest = &name[first.len()..name.len() - last.len()];
+    for piece in &pieces[1..pieces.len() - 1] {
+        match rest.find(piece.as_str()) {
+            Some(pos) => rest = &rest[pos + piece.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// `Package::isDev()`: the version's stability is `dev`.
+fn is_dev_version(version: &str) -> bool {
+    version.starts_with("dev-") || version.ends_with("-dev")
+}
+
+pub fn config_issues(root_manifest: &Value, lock: &Lock, with_dev: bool) -> Vec<String> {
     let value = |key: &str| -> Option<Value> {
         root_manifest
             .get("config")
@@ -472,12 +552,10 @@ pub fn config_issues(root_manifest: &Value) -> Vec<String> {
     };
     let mut out = Vec::new();
     if let Some(v) = value("preferred-install") {
-        let wants_source = match &v {
-            Value::String(s) => s == "source",
-            Value::Object(m) => m.values().any(|x| x.as_str() == Some("source")),
-            _ => false,
-        };
-        if wants_source {
+        if lock
+            .wanted_packages(with_dev)
+            .any(|p| prefers_source(&v, p.name(), is_dev_version(p.version())))
+        {
             out.push(format!("preferred-install {v}"));
         }
     }
@@ -547,6 +625,69 @@ mod tests {
 
     fn proj() -> std::path::PathBuf {
         std::path::PathBuf::from("/nonexistent-vivacity-scope")
+    }
+
+    #[test]
+    fn preferred_install_auto_hands_over_for_a_dev_package() {
+        // `resolvePackageInstallPreference` with no pattern answers
+        // `$package->isDev() ? 'source' : 'dist'`, so `auto` clones a dev
+        // version from source — a git checkout where vivacity extracts a dist.
+        // Measured against Composer 2.10.3: `  - Syncing … into cache` for the
+        // dev packages, `  - Downloading …` for the stable ones.
+        let dev = json!({"name": "a/b", "version": "dev-main", "type": "library",
+                         "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}});
+        for preference in [
+            json!("auto"),
+            json!("source"),
+            json!({"*": "auto"}),
+            json!({"a/*": "auto"}),
+            // No pattern matches, so the default rule applies to a dev package.
+            json!({"other/*": "dist"}),
+        ] {
+            let lock = lock_with(json!([dev.clone()]));
+            let manifest = json!({"config": {"preferred-install": preference}});
+            assert!(
+                !analyze(&proj(), &lock, &manifest, true, true).is_native_ok(),
+                "{preference} with a dev package must hand over"
+            );
+            // The same preference with a stable package is dist throughout.
+            let stable = lock_with(json!([zip_pkg("a/b", "library")]));
+            let native = analyze(&proj(), &stable, &manifest, true, true).is_native_ok();
+            assert_eq!(
+                native,
+                preference != json!("source"),
+                "{preference} with a stable package"
+            );
+        }
+    }
+
+    #[test]
+    fn install_preference_patterns_match_like_pcre() {
+        // `preg_quote` then `\*` -> `.*`, anchored, case-insensitive.
+        for (pattern, name, want) in [
+            ("a/b", "a/b", true),
+            ("a/b", "a/bc", false),
+            ("A/B", "a/b", true),
+            ("*", "anything/at-all", true),
+            ("acme/*", "acme/thing", true),
+            ("acme/*", "acmex/thing", false),
+            ("*/thing", "acme/thing", true),
+            ("a*b", "a/xb", true),
+            // `.*` matches the empty string.
+            ("a*b", "ab", true),
+            ("a**b", "a/b", true),
+            // A dot is literal, not "any character".
+            ("a.b/c", "axb/c", false),
+            ("a.b/c", "a.b/c", true),
+            ("acme/*-bundle", "acme/my-bundle", true),
+            ("acme/*-bundle", "acme/bundle", false),
+        ] {
+            assert_eq!(
+                pattern_matches(pattern, name),
+                want,
+                "pattern {pattern:?} against {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -758,7 +899,10 @@ mod tests {
 
     #[test]
     fn unread_config_keys_are_scope_issues() {
-        let lock = lock_with(json!([zip_pkg("a/b", "library")]));
+        // `preferred-install` is judged per package, as
+        // `resolvePackageInstallPreference` judges it: only a package that
+        // would come from source is a reason to hand over.
+        let lock = lock_with(json!([zip_pkg("acme/thing", "library")]));
         let manifest = json!({"config": {"vendor-dir": "lib/", "bin-dir": "vendor/bin",
             "preferred-install": {"acme/*": "source", "*": "dist"}}});
         let r = analyze(&proj(), &lock, &manifest, true, true);
@@ -768,6 +912,13 @@ mod tests {
                 "preferred-install {\"acme/*\":\"source\",\"*\":\"dist\"}".into()
             ),]
         );
+        // The same map with a package no source pattern matches: Composer
+        // installs it from dist, so there is nothing to hand over.
+        let lock = lock_with(json!([zip_pkg("a/b", "library")]));
+        let manifest = json!({"config": {"vendor-dir": "vendor",
+            "preferred-install": {"acme/*": "source", "*": "dist"}}});
+        assert!(analyze(&proj(), &lock, &manifest, true, true).is_native_ok());
+        // `auto` with a stable package is dist.
         let manifest = json!({"config": {"vendor-dir": "vendor", "preferred-install": "auto"}});
         assert!(analyze(&proj(), &lock, &manifest, true, true).is_native_ok());
     }

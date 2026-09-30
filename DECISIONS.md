@@ -1991,3 +1991,52 @@ Limite écrite : les empreintes sont celles du build `2.11-dev+cc854808` du
 2026-09-28. Le prochain cron tourne contre un build plus récent, et tout fichier
 qui a rebougé depuis réalertera — c'est le comportement voulu. La valeur durable
 de ces lignes est la raison, pas le hachage.
+
+## 2026-09-30 — `preferred-install` : un vendor/ faux, trouvé en tirant un fil
+
+Fait : en instruisant les drapeaux que vivacity refuse (`--prefer-source` sort
+en 2 là où Composer sort en 0), j'ai lu `resolvePackageInstallPreference` et
+trouvé autre chose — un résultat faux en silence, pas une ligne de stderr.
+
+La fonction prend le **premier** motif qui matche ; sans aucun motif elle
+répond `$package->isDev() ? 'source' : 'dist'`. Donc `auto`, et **toute carte de
+motifs qui laisse un paquet en version dev sans correspondance**, font cloner ce
+paquet **depuis la source** : un checkout git là où vivacity extrait un dist.
+Vérifié contre Composer 2.10.3 sur un projet à paquets dev : il imprime
+`  - Syncing composer/installers (dev-main 634ba02) into cache` pour les dev et
+`  - Downloading …` pour les stables. Notre `config_issues` ne refusait que la
+chaîne littérale `source`.
+
+Le défaut de Composer est `preferred-install: dist` (`Config`), et `Factory`
+transforme la chaîne en `setPreferDist(true)` / `setPreferSource(true)` ; seule
+une valeur `auto` (ou une carte) laisse la résolution par paquet décider. C'est
+pourquoi le cas par défaut n'avait jamais rien révélé.
+
+Décision : porter la fonction au lieu de deviner une règle. `prefers_source`
+reproduit la cascade exacte (chaîne → commutateur de `Factory` ; carte →
+premier motif, `dist` = dist, `auto` = dist seulement si non-dev, tout le reste
+= source ; aucun motif = `isDev ? source : dist`), avec le motif construit comme
+`preg_quote` + `\*` → `.*`, ancré, insensible à la casse. Le refus devient exact
+dans les deux sens : une carte qui envoie tous les paquets installés vers `dist`
+reste native, et `auto` sur des paquets stables aussi — là où une règle
+approximative aurait rendu la main pour rien.
+
+La table du motif est prise **de PHP**, pas devinée : 14 paires passées dans la
+regex de Composer. Une de mes attentes était fausse (`a*b` matche `ab`, `.*`
+acceptant le vide), et c'est la table qui m'a corrigé.
+
+Cas de banc dans `transitions.sh`, sur un projet **fabriqué** et non une
+fixture : toutes nos fixtures à paquets dev sont déjà hors périmètre pour une
+autre raison (plugin de disposition, plugin non autorisé), ce qui ne prouverait
+que la moitié. Trois cas : `auto` + dev et `source` + dev rendent la main sans
+toucher au disque ; `auto` + stable ne rend pas la main — c'est l'affirmation de
+précision. Vus rouges avant : sans le correctif, `auto` + dev partait poser le
+dist (code 1 sur le dist injoignable, option non nommée).
+
+Reste ouvert, mesuré et écrit dans `docs/plans/v0.20-downloading-lines.md` §7 :
+les drapeaux eux-mêmes. `vivacity install --prefer-source`, `-vv`,
+`--no-progress` sortent en 2 (erreur d'usage de clap) là où Composer sort en 0.
+`--prefer-dist` et `--no-progress` sont des non-opérations pour nous et
+devraient être acceptés ; `--prefer-source` et `--prefer-install=source|auto`
+devraient router vers le refus qu'on vient de rendre exact ; `-v`/`-vv`
+demandent leur propre décision, puisque Composer y imprime davantage.
