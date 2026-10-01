@@ -25,7 +25,16 @@ use crate::repository::{AdvisoriesByName, Advisory, ComposerRepository, FilterEn
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct FilterError(pub String);
+pub struct FilterError(pub String, pub crate::repository::RepoErrorKind);
+
+/// The nature travels, as it does out of the pool: a list that could not be
+/// fetched is not a list that could not be read.
+impl From<crate::repository::RepoError> for FilterError {
+    fn from(e: crate::repository::RepoError) -> FilterError {
+        let kind = e.1;
+        FilterError(e.0, kind)
+    }
+}
 
 /// `BasePackage::packageNamesToRegexp` (`{^(?:a|b)$}iD`), `None` without names.
 fn package_names_regexp(names: &[String]) -> Option<Regex> {
@@ -119,7 +128,7 @@ pub(crate) fn security_advisories_for_constraints(
                 }
             }
             Err(e) if e.is_transport() && ignore_unreachable => unreachable.push(e.0),
-            Err(e) => return Err(FilterError(e.0)),
+            Err(e) => return Err(FilterError::from(e)),
         }
     }
     Ok(all)
@@ -334,9 +343,10 @@ pub fn filter_list_filter(
         for repo in composer_repos(repositories) {
             if let Ok(lists) = repo.get_filter_lists() {
                 if let Some(l) = lists.iter().find(|l| policy.custom_lists.contains(l)) {
-                    return Err(FilterError(format!(
-                        "custom policy list \"{l}\" is not supported by vivacity yet"
-                    )));
+                    return Err(FilterError(
+                        format!("custom policy list \"{l}\" is not supported by vivacity yet"),
+                        crate::repository::RepoErrorKind::Data,
+                    ));
                 }
             }
         }
@@ -389,7 +399,7 @@ pub fn filter_list_filter(
                 unreachable.push(e.0);
                 continue;
             }
-            Err(e) => return Err(FilterError(e.0)),
+            Err(e) => return Err(FilterError::from(e)),
         };
         let relevant: Vec<String> = union
             .iter()
@@ -421,7 +431,7 @@ pub fn filter_list_filter(
                 }
             }
             Err(e) if e.is_transport() && ignore_unreachable => unreachable.push(e.0),
-            Err(e) => return Err(FilterError(e.0)),
+            Err(e) => return Err(FilterError::from(e)),
         }
     }
     by_list.sort_by(|(a, _), (b, _)| a.cmp(b));

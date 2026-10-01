@@ -16,11 +16,25 @@ use std::sync::OnceLock;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct PoolError(pub String);
+pub struct PoolError(pub String, pub crate::repository::RepoErrorKind);
 
+impl PoolError {
+    /// A pool failure that is ours, not the network's.
+    pub fn data(message: impl Into<String>) -> PoolError {
+        PoolError(message.into(), crate::repository::RepoErrorKind::Data)
+    }
+    pub fn is_transport(&self) -> bool {
+        self.1 == crate::repository::RepoErrorKind::Transport
+    }
+}
+
+/// The nature travels with the message: a repository that could not be
+/// REACHED is Composer's `TransportException`, whose exit code it rewrites to
+/// 100, and the pool is the layer where that distinction used to be lost.
 impl From<RepoError> for PoolError {
     fn from(e: RepoError) -> PoolError {
-        PoolError(e.0)
+        let kind = e.1;
+        PoolError(e.0, kind)
     }
 }
 
@@ -127,7 +141,7 @@ impl Request {
         let name = name.to_lowercase();
         let constraint = constraint.unwrap_or(Constraint::MatchAll);
         if let Some(existing) = self.requires.get(&name) {
-            return Err(PoolError(format!(
+            return Err(PoolError::data(format!(
                 "Overwriting requires seems like a bug ({name} {existing} => {constraint}, check why it is happening, might be a root alias"
             )));
         }
@@ -670,8 +684,8 @@ impl<'a> PoolBuilder<'a> {
                 .collect();
             self.warn_about_non_matching_update_allow_list(request, arena)?;
             let Some(locked) = request.locked_repository.clone() else {
-                return Err(PoolError(
-                    "No lock repo present and yet a partial update was requested.".into(),
+                return Err(PoolError::data(
+                    "No lock repo present and yet a partial update was requested.",
                 ));
             };
             for locked_idx in locked {
@@ -1137,8 +1151,8 @@ impl<'a> PoolBuilder<'a> {
         arena: &[Package],
     ) -> Result<(), PoolError> {
         let Some(locked) = &request.locked_repository else {
-            return Err(PoolError(
-                "No lock repo present and yet a partial update was requested.".into(),
+            return Err(PoolError::data(
+                "No lock repo present and yet a partial update was requested.",
             ));
         };
         'patterns: for pattern in &self.update_allow_list.clone() {

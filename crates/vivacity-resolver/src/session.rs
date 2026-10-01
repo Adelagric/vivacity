@@ -43,6 +43,9 @@ pub struct SessionError {
 pub enum SessionErrorKind {
     Other,
     Unsolvable,
+    /// Composer would carry this as a `TransportException`, whose code it
+    /// rewrites to 100 (`Application.php:502-506`, `Installer.php:92`).
+    Transport,
     /// The command prints the message itself and returns a code, with no
     /// `Error:` prefix and nothing written: `UpdateCommand`'s temporary
     /// constraint refusal (1), `Installer::run`'s partial update without a
@@ -62,7 +65,69 @@ impl SessionError {
 
 impl From<PoolError> for SessionError {
     fn from(e: PoolError) -> SessionError {
-        SessionError::new(e.0)
+        let transport = e.is_transport();
+        SessionError {
+            message: e.0,
+            kind: if transport {
+                SessionErrorKind::Transport
+            } else {
+                SessionErrorKind::Other
+            },
+            stdout: None,
+        }
+    }
+}
+
+/// The newtype errors of the other layers: a message, and nothing to
+/// distinguish — none of them is a transport failure.
+macro_rules! session_error_from {
+    ($($ty:path),+ $(,)?) => {
+        $(impl From<$ty> for SessionError {
+            fn from(e: $ty) -> SessionError {
+                SessionError::new(e.0)
+            }
+        })+
+    };
+}
+
+session_error_from!(
+    crate::loader::LoadError,
+    crate::platform::PlatformError,
+    crate::policy_config::PolicyError,
+    crate::root::RootError,
+);
+
+/// A filter error, on the other hand, can be either.
+impl From<crate::pool_filters::FilterError> for SessionError {
+    fn from(e: crate::pool_filters::FilterError) -> SessionError {
+        SessionError {
+            kind: if e.1 == crate::repository::RepoErrorKind::Transport {
+                SessionErrorKind::Transport
+            } else {
+                SessionErrorKind::Other
+            },
+            message: e.0,
+            stdout: None,
+        }
+    }
+}
+
+/// A repository error keeps its nature: Composer rewrites a
+/// `TransportException`'s code to `Installer::ERROR_TRANSPORT_EXCEPTION`
+/// (100) before Symfony turns it into an exit code, so a failure to FETCH
+/// something does not exit like a failure to understand it.
+impl From<crate::repository::RepoError> for SessionError {
+    fn from(e: crate::repository::RepoError) -> SessionError {
+        let transport = e.is_transport();
+        SessionError {
+            message: e.0,
+            kind: if transport {
+                SessionErrorKind::Transport
+            } else {
+                SessionErrorKind::Other
+            },
+            stdout: None,
+        }
     }
 }
 
@@ -471,12 +536,11 @@ impl UpdateSession {
             .map_err(|e| SessionError::new(format!("{}: {e}", manifest_path.display())))?;
         let config = MergedConfig::load(&manifest, composer_home)?;
         let mut policy_config = crate::policy_config::PolicyConfig::from_raw(&config.policy)
-            .map_err(|e| SessionError::new(e.0))?;
+            .map_err(SessionError::from)?;
         policy_config
             .apply_no_blocking(options.no_blocking)
-            .map_err(|e| SessionError::new(e.0))?;
-        let mut root =
-            RootPackage::load(&manifest, project_dir).map_err(|e| SessionError::new(e.0))?;
+            .map_err(SessionError::from)?;
+        let mut root = RootPackage::load(&manifest, project_dir).map_err(SessionError::from)?;
         if let Some(merged) = &options.merged {
             // `RootPackageLoader` ran on the file: its stability flags are
             // the starting point. The plugin then merges each file's
@@ -485,8 +549,7 @@ impl UpdateSession {
             // in dev mode), `mergeStabilityFlags` — not from the merged
             // constraint text, which the loader never sees.
             let flags = std::mem::take(&mut root.stability_flags);
-            root = RootPackage::load(&merged.manifest, project_dir)
-                .map_err(|e| SessionError::new(e.0))?;
+            root = RootPackage::load(&merged.manifest, project_dir).map_err(SessionError::from)?;
             root.stability_flags = flags;
             // (`require_dev` is recorded only when the merge ran in dev
             // mode — `mergeDevInto`, a second pass over the files.)
@@ -506,15 +569,14 @@ impl UpdateSession {
             }
         }
         if let Some(patch) = &options.root_patch {
-            root.apply_patch(patch)
-                .map_err(|e| SessionError::new(e.0))?;
+            root.apply_patch(patch).map_err(SessionError::from)?;
         }
         // `UpdateCommand`: the temporary requirements feed the root's
         // references and stability flags before anything else reads them,
         // then become the pool's temporary constraints.
         let temporary_constraints =
             temporary_constraints(&options.temporary_requirements, &mut root)?;
-        let probed = probe().map_err(|e| SessionError::new(e.0))?;
+        let probed = probe().map_err(SessionError::from)?;
         // `PHP_MAJOR_VERSION.PHP_MINOR_VERSION.PHP_RELEASE_VERSION` of the
         // actual PHP (no `config.platform.php` here): the first three
         // numbers of PHP_VERSION.
@@ -531,7 +593,7 @@ impl UpdateSession {
             })
             .unwrap_or_default();
         let platform_pkgs =
-            platform_packages(&probed, &config.platform).map_err(|e| SessionError::new(e.0))?;
+            platform_packages(&probed, &config.platform).map_err(SessionError::from)?;
 
         let mut arena: Vec<Package> = Vec::new();
 
@@ -581,7 +643,7 @@ impl UpdateSession {
             None
         };
         let locked = match &lock {
-            Some(v) => Some(locked_repository(v, &mut arena).map_err(|e| SessionError::new(e.0))?),
+            Some(v) => Some(locked_repository(v, &mut arena).map_err(SessionError::from)?),
             None => None,
         };
 
@@ -770,7 +832,7 @@ impl UpdateSession {
             .collect();
         let result_ids =
             crate::loader::load_packages(&dumps, Origin::Result, &mut self.arena, false)
-                .map_err(|e| SessionError::new(e.0))?;
+                .map_err(SessionError::from)?;
         // createPoolWithAllPackages: root, platform, result, with the root
         // aliases applied along the way.
         let mut members: Vec<usize> = Vec::new();
@@ -1054,7 +1116,7 @@ impl UpdateSession {
                         Origin::Repository(i),
                         &mut self.arena,
                     )
-                    .map_err(|e| SessionError::new(e.0))?;
+                    .map_err(SessionError::from)?;
                 found.extend(ids);
             }
         }
@@ -1089,7 +1151,7 @@ impl UpdateSession {
             &self.policy_config,
             &mut warnings,
         )
-        .map_err(|e| SessionError::new(e.0))?;
+        .map_err(SessionError::from)?;
         pool = crate::pool_filters::filter_list_filter(
             pool,
             &self.arena,
@@ -1099,7 +1161,7 @@ impl UpdateSession {
             "update",
             &mut warnings,
         )
-        .map_err(|e| SessionError::new(e.0))?;
+        .map_err(SessionError::from)?;
         pool.warnings.extend(warnings);
         pool.flex_notice = flex_notice;
         if std::env::var_os("VIVACITY_TRACE").is_some() {
@@ -1156,11 +1218,11 @@ pub fn install_policy_problems(
     let manifest: Value = serde_json::from_str(&manifest_text)
         .map_err(|e| SessionError::new(format!("composer.json: {e}")))?;
     let config = MergedConfig::load(&manifest, composer_home)?;
-    let mut policy = crate::policy_config::PolicyConfig::from_raw(&config.policy)
-        .map_err(|e| SessionError::new(e.0))?;
+    let mut policy =
+        crate::policy_config::PolicyConfig::from_raw(&config.policy).map_err(SessionError::from)?;
     policy
         .apply_no_blocking(no_blocking)
-        .map_err(|e| SessionError::new(e.0))?;
+        .map_err(SessionError::from)?;
     if !policy.malware_blocks("install") {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -1186,7 +1248,7 @@ pub fn install_policy_problems(
     }
     let mut arena: Vec<Package> = Vec::new();
     let locked = crate::repository::locked_repository_with(&lock, &mut arena, with_dev)
-        .map_err(|e| SessionError::new(e.0))?;
+        .map_err(SessionError::from)?;
     let mut request = Request::new(Some(locked.clone()));
     for &idx in &locked {
         request.fix_locked_package(idx);
@@ -1202,7 +1264,7 @@ pub fn install_policy_problems(
         "install",
         &mut warnings,
     )
-    .map_err(|e| SessionError::new(e.0))?;
+    .map_err(SessionError::from)?;
     let problems: Vec<String> = locked
         .iter()
         .map(|&idx| &arena[idx])
@@ -1234,7 +1296,7 @@ fn open_repository(
             )));
         }
         let path_repo = crate::path_repo::open(&repo.definition, project_dir, origin, arena)
-            .map_err(|e| SessionError::new(e.0))?;
+            .map_err(SessionError::from)?;
         return Ok(Repository::Path(path_repo));
     }
     open_repository_with(repo, http, cache_repo_dir, false)
@@ -1295,15 +1357,15 @@ fn open_repository_with(
             "unsupported repository url scheme ({url})"
         )));
     };
-    let mut repo = ComposerRepository::open(url, transport).map_err(|e| SessionError::new(e.0))?;
+    let mut repo = ComposerRepository::open(url, transport).map_err(SessionError::from)?;
     if let Some(options) = def.get("options") {
         repo.options = options.clone();
     }
     repo.set_user_filter(def.get("filter"))
-        .map_err(|e| SessionError::new(e.0))?;
+        .map_err(SessionError::from)?;
     if for_policies {
         repo.set_name_filter(def.get("only"), def.get("exclude"))
-            .map_err(|e| SessionError::new(e.0))?;
+            .map_err(SessionError::from)?;
     }
     if let Some(dir) = cache_repo_dir {
         repo.cache = Some(crate::metacache::MetadataCache::new(dir, &repo.url));

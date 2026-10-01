@@ -260,6 +260,66 @@ pub enum Provenance {
     Network,
 }
 
+/// Composer's retry rule, ported from `CurlDownloader` (2.10.3, lines 384-398
+/// and 465-478):
+/// - a transport error is retried only for curl errno 6 (host not resolved),
+///   7 (cannot connect), 28 (timeout), 16 / 92 (http2), or 56 / 35 with
+///   "connection reset by peer" — in reqwest's terms, no response came back and
+///   the cause is a connect, a timeout, or the body being cut;
+/// - a *status* is retried only when it is one of 423, 425, 500, 502, 503, 504,
+///   507, 510, or a 400 from `codeload.github.com`. A 404, a 401 or a 403 is
+///   therefore final, where vivacity used to try three times — slower, and it
+///   said "after 3 attempts" about a verdict that never moves;
+/// - at most three retries, with Composer's own delays:
+///   `restartJobWithDelay` sleeps not at all, then 100 ms, then 500 ms.
+const MAX_RETRIES: u32 = 3;
+
+fn status_is_retryable(status: u16, url: &str) -> bool {
+    if matches!(status, 423 | 425 | 500 | 502 | 503 | 504 | 507 | 510) {
+        return true;
+    }
+    status == 400
+        && reqwest::Url::parse(url)
+            .ok()
+            .as_ref()
+            .and_then(|u| u.host_str())
+            == Some("codeload.github.com")
+}
+
+/// `true` when the request came back without any response at all and the cause
+/// is one curl would retry.
+fn transport_is_retryable(e: &reqwest::Error) -> bool {
+    e.status().is_none() && (e.is_connect() || e.is_timeout() || e.is_request() || e.is_body())
+}
+
+/// The delay before retry number `retries` (1-based), as
+/// `CurlDownloader::restartJobWithDelay` sleeps it.
+fn retry_delay(retries: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(match retries {
+        0 | 1 => 0,
+        2 => 100,
+        _ => 500,
+    })
+}
+
+/// The message, saying how many attempts there really were — claiming three
+/// when the verdict was final after one is the kind of detail that sends a
+/// reader looking for a network problem that never existed.
+fn attempts_message(retries: u32, last: &str) -> String {
+    if retries == 0 {
+        last.to_owned()
+    } else {
+        format!("failed after {} attempts: {last}", retries + 1)
+    }
+}
+
+/// How a failed attempt is reported: the message, and whether trying again can
+/// change the answer.
+struct Attempt {
+    message: String,
+    retryable: bool,
+}
+
 impl Fetcher {
     pub fn new(cache_root: PathBuf, auth: Auth) -> Result<Fetcher> {
         let client = reqwest::Client::builder()
@@ -337,11 +397,8 @@ impl Fetcher {
             return Ok((bytes, Provenance::Network));
         }
 
-        let mut last_err = String::new();
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(250 * (1 << attempt))).await;
-            }
+        let mut retries = 0u32;
+        let last_err = loop {
             match self.try_download(url).await {
                 Ok(bytes) => {
                     if let Some(exp) = expected_sha1 {
@@ -357,12 +414,18 @@ impl Fetcher {
                     self.cache_dist(&cache_path, &bytes);
                     return Ok((bytes, Provenance::Network));
                 }
-                Err(e) => last_err = e,
+                Err(a) => {
+                    if !a.retryable || retries >= MAX_RETRIES {
+                        break a.message;
+                    }
+                    retries += 1;
+                    tokio::time::sleep(retry_delay(retries)).await;
+                }
             }
-        }
+        };
         Err(Error::Http {
             url: url.to_owned(),
-            message: format!("failed after 3 attempts: {last_err}"),
+            message: attempts_message(retries, &last_err),
         })
     }
 
@@ -425,11 +488,8 @@ impl Fetcher {
         url: &str,
         if_modified_since: Option<&str>,
     ) -> Result<MetadataResponse> {
-        let mut last_err = String::new();
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(250 * (1 << attempt))).await;
-            }
+        let mut retries = 0u32;
+        let last_err = loop {
             let mut req = self.client.get(url);
             if let Ok(parsed) = reqwest::Url::parse(url) {
                 if let Some(host) = parsed.host_str() {
@@ -441,7 +501,7 @@ impl Fetcher {
             if let Some(ims) = if_modified_since {
                 req = req.header(reqwest::header::IF_MODIFIED_SINCE, ims);
             }
-            match req.send().await {
+            let attempt = match req.send().await {
                 Ok(resp) => {
                     if resp.status() == reqwest::StatusCode::NOT_FOUND {
                         return Ok(MetadataResponse::NotFound);
@@ -462,26 +522,33 @@ impl Fetcher {
                                     last_modified,
                                 })
                             }
-                            Err(e) => last_err = e.to_string(),
+                            Err(e) => Attempt {
+                                retryable: transport_is_retryable(&e),
+                                message: e.to_string(),
+                            },
                         },
-                        Err(e) => {
-                            // 4xx other than 404 are not retried.
-                            if e.status().is_some_and(|s| s.is_client_error()) {
-                                return Err(Error::Http {
-                                    url: url.to_owned(),
-                                    message: e.to_string(),
-                                });
-                            }
-                            last_err = e.to_string();
-                        }
+                        Err(e) => Attempt {
+                            retryable: e
+                                .status()
+                                .is_some_and(|s| status_is_retryable(s.as_u16(), url)),
+                            message: e.to_string(),
+                        },
                     }
                 }
-                Err(e) => last_err = e.to_string(),
+                Err(e) => Attempt {
+                    retryable: transport_is_retryable(&e),
+                    message: e.to_string(),
+                },
+            };
+            if !attempt.retryable || retries >= MAX_RETRIES {
+                break attempt.message;
             }
-        }
+            retries += 1;
+            tokio::time::sleep(retry_delay(retries)).await;
+        };
         Err(Error::Http {
             url: url.to_owned(),
-            message: format!("failed after 3 attempts: {last_err}"),
+            message: attempts_message(retries, &last_err),
         })
     }
 
@@ -523,7 +590,14 @@ impl Fetcher {
         Some(PathBuf::from(url))
     }
 
-    async fn try_download(&self, url: &str) -> std::result::Result<Vec<u8>, String> {
+    async fn try_download(&self, url: &str) -> std::result::Result<Vec<u8>, Attempt> {
+        let fail = |e: reqwest::Error, url: &str| Attempt {
+            message: e.to_string(),
+            retryable: match e.status() {
+                Some(s) => status_is_retryable(s.as_u16(), url),
+                None => transport_is_retryable(&e),
+            },
+        };
         let mut req = self.client.get(url);
         if let Ok(parsed) = reqwest::Url::parse(url) {
             if let Some(host) = parsed.host_str() {
@@ -532,9 +606,9 @@ impl Fetcher {
                 }
             }
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        let resp = resp.error_for_status().map_err(|e| e.to_string())?;
-        Ok(resp.bytes().await.map_err(|e| e.to_string())?.to_vec())
+        let resp = req.send().await.map_err(|e| fail(e, url))?;
+        let resp = resp.error_for_status().map_err(|e| fail(e, url))?;
+        Ok(resp.bytes().await.map_err(|e| fail(e, url))?.to_vec())
     }
 }
 
@@ -556,6 +630,39 @@ mod tests {
         assert!(s.starts_with("/c/files/monolog/monolog/"));
         assert!(s.ends_with(".zip"));
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn the_retry_rule_is_composers() {
+        // The list `CurlDownloader` retries on, and nothing else: a 404, a 401
+        // or a 403 is final, which is why a missing dist no longer takes three
+        // tries to say so.
+        for s in [423, 425, 500, 502, 503, 504, 507, 510] {
+            assert!(status_is_retryable(s, "https://repo.example/x"), "{s}");
+        }
+        for s in [400, 401, 403, 404, 405, 409, 410, 418, 451, 501, 505] {
+            assert!(!status_is_retryable(s, "https://repo.example/x"), "{s}");
+        }
+        // The one host-specific exception Composer carries.
+        assert!(status_is_retryable(
+            400,
+            "https://codeload.github.com/acme/widget/zip/abc"
+        ));
+        assert!(!status_is_retryable(400, "https://github.com/acme/widget"));
+    }
+
+    #[test]
+    fn the_retry_delays_are_composers() {
+        // `restartJobWithDelay`: nothing, then 100 ms, then 500 ms.
+        assert_eq!(retry_delay(1).as_millis(), 0);
+        assert_eq!(retry_delay(2).as_millis(), 100);
+        assert_eq!(retry_delay(3).as_millis(), 500);
+        assert_eq!(retry_delay(4).as_millis(), 500);
+        // Three retries at most, so four attempts, and the message says so
+        // rather than claiming three when the verdict was final at once.
+        assert_eq!(MAX_RETRIES, 3);
+        assert_eq!(attempts_message(0, "gone"), "gone");
+        assert_eq!(attempts_message(3, "gone"), "failed after 4 attempts: gone");
     }
 
     #[test]

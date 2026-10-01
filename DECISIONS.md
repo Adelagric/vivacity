@@ -2322,10 +2322,10 @@ suivent le même chemin que pour un téléchargement.
 
 Écart qui reste, mesuré : sur un dist local **absent**, Composer imprime
 `The "<chemin>" file could not be downloaded: Failed to open stream: No such
-file or directory` dans une boîte Symfony et sort **100** ; vivacity imprime
-`Error: …` à plat et sort 1. C'est la famille d'écart déjà assumée pour les
-erreurs rendues en boîte (décision `COMPOSER=<fichier>`), et le code 100 vaut
-pour tout échec de transport, y compris HTTP : à traiter comme un sujet propre.
+file or directory` dans une boîte Symfony ; vivacity imprime `Error: …` à plat.
+C'est la famille d'écart déjà assumée pour les erreurs rendues en boîte
+(décision `COMPOSER=<fichier>`). **Le code de sortie, lui, n'était pas un écart
+assumé mais un défaut** : traité le 2026-10-01, voir l'entrée du jour.
 
 Vérifié : `harness/artifact-repo.sh`, sans réseau — deux paquets fabriqués avec
 `ZipArchive`, caches de fichiers et store vierges par côté, codes de sortie,
@@ -2476,3 +2476,56 @@ Au passage, `ZipDownloader.php` et `TarDownloader.php` entrent dans
 `docs/reference/` avec leur jumeau dans `drift-reference.sh` : tout le travail de
 ce sprint repose sur leur comportement, et le script ne surveille que ce qui est
 versé (129 fichiers désormais, contre 127).
+
+## 2026-10-01 — Un échec de transport sort en 100, et les réessais sont ceux de Composer
+
+Fait, lu dans le phar : `Application::doRun` attrape une `TransportException`,
+**réécrit son code** en `Installer::ERROR_TRANSPORT_EXCEPTION` par réflexion
+(`Application.php:502-506`, `Installer.php:92` = 100) et la relance pour que
+Symfony Console en fasse le code de sortie. Donc tout ce que Composer n'a pas
+réussi à **récupérer** sort en 100 — mesuré sur trois formes du même échec :
+
+| cas | Composer | vivacity avant | maintenant |
+|---|---|---|---|
+| dist qui répond 404 | 100 | 1 | 100 |
+| dépôt `composer` injoignable | 100 | 1 | 100 |
+| dist local absent | 100 | 1 | 100 |
+
+Un script qui branche sur le code voyait donc une erreur générique au lieu d'un
+problème de réseau, pour **tous** les échecs réseau, pas seulement ceux de ce
+sprint.
+
+Ce que ça a demandé : la nature de l'erreur était perdue en route. Le résolveur
+distinguait déjà `RepoErrorKind::Transport` de `Data`, mais chaque couche
+traversée l'aplatissait en texte — `From<RepoError> for PoolError` jetait le
+drapeau, `From<PoolError> for SessionError` aussi, et le CLI faisait
+`anyhow!("{e}")`. Le drapeau voyage maintenant de bout en bout : `PoolError` et
+`FilterError` portent le `RepoErrorKind` (une seule énumération pour les trois
+couches, pas une par couche), `SessionErrorKind` gagne `Transport`, et le CLI
+convertit ça en un `TransportFailure` typé dont le `Display` est le message seul
+— la ligne `Error:` ne bouge pas. `exit_code_of` cherche dans la chaîne soit ce
+type, soit `Error::Http` (le chemin de l'install, qui garde son type).
+
+**La politique de réessai aussi est celle de la référence**, portée depuis
+`CurlDownloader` (2.10.3, lignes 384-398 et 465-478) :
+
+- une erreur de transport n'est réessayée que pour les errno curl 6 (hôte non
+  résolu), 7 (connexion impossible), 28 (délai), 16/92 (http2), 56/35 avec
+  « Connection reset by peer » ;
+- un **statut** n'est réessayé que s'il vaut 423, 425, 500, 502, 503, 504, 507,
+  510, ou 400 depuis `codeload.github.com`. Un 404, un 401, un 403 sont donc
+  définitifs, là où vivacity réessayait trois fois — plus lent, et il annonçait
+  « failed after 3 attempts » à propos d'un verdict qui ne bougeait pas ;
+- trois réessais au plus (donc quatre tentatives), délais de
+  `restartJobWithDelay` : rien, puis 100 ms, puis 500 ms. Les nôtres étaient
+  500 ms puis 1 s, et pour trois tentatives seulement.
+
+Mesuré : le 404 passe de ~2 s à **158 ms**, et son message ne parle plus de
+tentatives.
+
+Vérifié : `harness/transport-exit.sh`, sans réseau (un `php -S` qui répond 404,
+un port fermé, un fichier absent), compare les codes de sortie des deux côtés,
+vérifie l'absence de réessai sur le 404 et que le message ne mentionne pas de
+tentatives. Lancé contre le binaire 0.19.1 publié : quatre des cinq contrôles
+rouges. Plus deux tests unitaires qui épinglent la liste des statuts
+réessayables, l'exception `codeload.github.com` et les trois délais.

@@ -455,8 +455,57 @@ where
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:?}");
-            1
+            exit_code_of(&e)
         }
+    }
+}
+
+/// A session error on its way to the CLI: a transport failure keeps its nature
+/// so the exit code is Composer's 100, everything else reads as before.
+fn session_error(e: vivacity_resolver::session::SessionError) -> anyhow::Error {
+    if e.kind == vivacity_resolver::session::SessionErrorKind::Transport {
+        anyhow::Error::new(TransportFailure(e.message))
+    } else {
+        anyhow::anyhow!("{}", e.message)
+    }
+}
+
+/// A failure to fetch, carried as a typed error so `exit_code_of` finds it in
+/// the chain. It exists because the resolver flattens its own errors to text
+/// at the `HttpFetch` boundary, keeping only a flag: this type is where that
+/// flag lands on the CLI's side. Its `Display` is the message alone, so the
+/// `Error:` line stays what it was.
+#[derive(Debug)]
+struct TransportFailure(String);
+
+impl std::fmt::Display for TransportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransportFailure {}
+
+/// Composer rewrites a `TransportException`'s code to
+/// `Installer::ERROR_TRANSPORT_EXCEPTION` before letting Symfony Console turn it
+/// into an exit code (`Application.php:502-506`, `Installer.php:92`), so
+/// anything it failed to fetch exits **100**, not 1. Measured on three shapes
+/// of the same failure: a dist answering 404, an unreachable `composer`
+/// repository, and a local dist that is not there.
+///
+/// The chain is walked rather than the outermost error inspected, because the
+/// fetch error travels under whatever context the caller added.
+fn exit_code_of(e: &anyhow::Error) -> i32 {
+    let transport = e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<vivacity_core::Error>(),
+            Some(vivacity_core::Error::Http { .. })
+        ) || c.downcast_ref::<TransportFailure>().is_some()
+    });
+    if transport {
+        100
+    } else {
+        1
     }
 }
 
@@ -774,7 +823,7 @@ fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 with_dev,
                 no_blocking,
             )
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(session_error)
         }))
     };
 
@@ -3452,7 +3501,7 @@ fn resolve_and_lock(
                 thanks_reminder: false,
             });
         }
-        Err(e) => return Err(anyhow::anyhow!("{e}")),
+        Err(e) => return Err(session_error(e)),
     };
     trace("prepare", t0);
     // symfony/flex active (installed, allowed, `extra.symfony.require` or
@@ -3525,7 +3574,7 @@ fn resolve_and_lock(
                 thanks_reminder: false,
             });
         }
-        Err(e) => return Err(anyhow::anyhow!("{e}")),
+        Err(e) => return Err(session_error(e)),
     };
     trace("resolve", t0);
 

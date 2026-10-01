@@ -4,6 +4,34 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **A transport failure exits 100, as Composer exits.** `Application::doRun`
+  catches a `TransportException`, rewrites its code to
+  `Installer::ERROR_TRANSPORT_EXCEPTION` (100) by reflection and rethrows it for
+  Symfony Console to turn into the exit code, so anything Composer failed to
+  *fetch* exits 100 — measured on a dist answering 404, on an unreachable
+  `composer` repository and on a missing local dist, where vivacity exited 1 in
+  all three. A script branching on the code saw a generic error instead of a
+  network problem, for every network failure and not just this sprint's.
+  The nature of the error was being flattened to text on the way out: the
+  resolver already told `Transport` from `Data`, but `From<RepoError> for
+  PoolError` dropped the flag, `From<PoolError> for SessionError` dropped it
+  again, and the CLI stringified what was left. It now travels end to end,
+  with one enum shared by the three layers instead of one per layer, and the
+  `Error:` line is unchanged.
+- **The retry policy is Composer's.** Ported from `CurlDownloader`: a transport
+  error is retried only for curl errno 6, 7, 28, 16, 92, or 56/35 with
+  "connection reset by peer"; a *status* only when it is 423, 425, 500, 502,
+  503, 504, 507, 510, or a 400 from `codeload.github.com`. So a 404, a 401 and a
+  403 are final, where vivacity tried three times — slower, and it announced
+  "failed after 3 attempts" about a verdict that never moved (a 404 now takes
+  158 ms instead of ~2 s). Three retries at most, with Composer's own delays:
+  none, then 100 ms, then 500 ms. `harness/transport-exit.sh` holds all of it
+  with no network, and fails four of its five checks against the published
+  0.19.1.
+
 ## [0.19.1] — 2026-09-30
 
 ### Fixed
