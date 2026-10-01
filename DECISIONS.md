@@ -2529,3 +2529,42 @@ vérifie l'absence de réessai sur le 404 et que le message ne mentionne pas de
 tentatives. Lancé contre le binaire 0.19.1 publié : quatre des cinq contrôles
 rouges. Plus deux tests unitaires qui épinglent la liste des statuts
 réessayables, l'exception `codeload.github.com` et les trois délais.
+
+## 2026-10-01 — Le comparateur se compare lui-même (tolérances ancrées)
+
+`harness/lib/compare.sh` est l'oracle de seize harnais et du corpus de 106
+projets : chaque « 0 diff » du projet passe par lui. Trois de ses tolérances
+étaient des `grep -v` en **sous-chaîne**, donc elles effaçaient aussi les
+différences qu'elles n'étaient pas censées couvrir :
+
+| tolérance prévue | ce qu'elle effaçait aussi |
+|---|---|
+| `vendor/autoload_runtime.php` (stub d'émulation) | un paquet livrant `src/autoload_runtime.php`, présent d'un seul côté **ou différent** |
+| les lignes d'erreur de `diff` sur un lien pendant | un fichier nommé `No such file or directory` |
+| `setApcuPrefix` dans `autoload_real.php` (préfixe aléatoire) | la même ligne dans **n'importe quel** fichier d'un paquet |
+
+Chaque tolérance nomme désormais le chemin exact auquel elle s'applique : le
+stub est reconnu à `Only in <vendor>: autoload_runtime.php` et nulle part
+ailleurs, la plainte de `diff` à son préfixe `diff: ` et son suffixe exact, et le
+`-I setApcuPrefix` n'est passé que pour `*/composer/autoload_real.php`.
+L'inventaire `stat` applique la même règle par suffixe exact, de sorte qu'un
+`autoload_runtime.php.bak` n'est plus couvert.
+
+Ajouté aussi : l'inventaire **refuse bruyamment** quand le nombre de fichiers
+trouvés ne correspond pas au nombre de lignes produites — un nom contenant un
+saut de ligne casserait l'hypothèse « une ligne par fichier » des deux côtés à la
+fois, donc sans faire échouer la comparaison.
+
+Vérifié par `harness/compare-selftest.sh` : onze paires d'arbres fabriquées, un
+verdict exigé pour chacune (dont une différence de mode et une différence de
+cible de lien, que `diff -r` ne voit pas). Contre le comparateur précédent,
+**quatre des onze sont rouges** — les quatre trous du tableau. Et le self-test a
+immédiatement attrapé un défaut de ma propre correction : `"${tableau[@]}"` vide
+sous `set -u` fait échouer le bash 3.2 de macOS, ce qui faisait répondre
+« identiques » à trois cas. C'est exactement ce qu'un oracle sans test laisse
+passer.
+
+Les seize harnais qui l'utilisent restent verts : diff-vendor 12, tar-dist 7,
+path-repos 14, artifact-repo 9, flex-install 7, vendor-dir 6, custom-dirs 4,
+wp-core 5, yii2-composer 8, bin-plugin 5, package-versions 7, merge-plugin 16,
+root-manifest 35, root-scan 12, scripts 4.

@@ -68,6 +68,12 @@ both sides with a cold files cache and a cold store, comparing exit codes,
 stderr, `vendor/` and every mode. All must report no
 difference; CI runs them on Linux and macOS on every push.
 
+The comparator those harnesses share has its own test:
+`harness/compare-selftest.sh` builds eleven pairs of trees and demands a verdict
+for each, because a tolerance that is not anchored erases the difference it
+touches — three of them were substring matches until 2026-10-01, and four of the
+eleven cases are red against that version.
+
 Underneath, each generated file and each step of the resolver is a port of
 the corresponding Composer function; the source files ported are vendored
 in `docs/reference/` and a CI step re-diffs them against the phar, so an

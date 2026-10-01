@@ -1,16 +1,23 @@
 # La comparaison de vendor/ (ou du projet) entre la copie de Composer et
 # celle de vivacity, partagée par harness/diff-vendor.sh et harness/corpus.sh.
 #
-# Écarts tolérés (documentés) :
-#   - vendor/autoload_runtime.php : généré par vivacity (émulation
-#     symfony/runtime), absent d'un install Composer sans plugins ;
-#   - « No such file or directory » : `diff -r` ne sait pas suivre un
-#     symlink pendant (identique des deux côtés, vérifié par l'inventaire) ;
+# Écarts tolérés (documentés). Chacun est **ancré** : un paquet qui livre un
+# fichier portant le nom d'une tolérance ne doit pas faire disparaître sa propre
+# différence. Les tolérances étaient des `grep -v` en sous-chaîne jusqu'au
+# 2026-10-01 ; `harness/compare-selftest.sh` tient la nuance.
+#   - <vendor>/autoload_runtime.php, et lui seul : généré par vivacity
+#     (émulation symfony/runtime), absent d'un install Composer sans plugins.
+#     Un `src/autoload_runtime.php` d'un paquet est comparé comme le reste ;
+#   - les lignes d'ERREUR de `diff` (`diff: <chemin>: No such file or
+#     directory`) : `diff -r` ne sait pas suivre un symlink pendant (identique
+#     des deux côtés, vérifié par l'inventaire). Un fichier qui s'appellerait
+#     « No such file or directory » n'est pas toléré pour autant ;
 #   - vendor/composer/include_paths.php (paquets PEAR à `include-path`) :
 #     Composer l'écrit dans l'ordre d'achèvement des extractions asynchrones
 #     (non déterministe, vérifié le 2026-09-11) ; comparé trié ;
-#   - `$loader->setApcuPrefix('…')` dans autoload_real.php : préfixe aléatoire
-#     chez Composer (`bin2hex(random_bytes(10))`) ; la ligne est ignorée ;
+#   - `$loader->setApcuPrefix('…')` **dans vendor/composer/autoload_real.php** :
+#     préfixe aléatoire chez Composer (`bin2hex(random_bytes(10))`) ; la ligne
+#     est ignorée là, et nulle part ailleurs ;
 #   - le chemin absolu du projet dans un fichier généré : remplacé par
 #     `<project>` de chaque côté avant comparaison ;
 #   - vendor/pest-plugins.json : le plugin lit le dépôt local dans l'ordre
@@ -75,13 +82,34 @@ compare_vendor() {
   : > "$out"
   # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
   # diffèrent — celles-ci sont recomparées normalisées.
+  # Les deux répertoires où le stub de vivacity est toléré, en absolu : la
+  # tolérance porte sur CE chemin, pas sur le nom.
+  local runtime_dir_ref runtime_dir_viv
+  if [ -d "$ref/$vrel" ]; then
+    runtime_dir_ref="$ref/$vrel"; runtime_dir_viv="$viv/$vrel"
+  else
+    runtime_dir_ref="$ref"; runtime_dir_viv="$viv"
+  fi
   diff -rq --no-dereference --exclude=.git --exclude=include_paths.php --exclude=pest-plugins.json --exclude=extensions.php "$ref" "$viv" 2>&1 \
-    | grep -v 'autoload_runtime.php' | grep -v 'No such file or directory' \
     | while IFS= read -r line; do
       case "$line" in
+        # Le stub d'émulation, à la racine du vendor et nulle part ailleurs.
+        "Only in $runtime_dir_viv: autoload_runtime.php"|"Only in $runtime_dir_ref: autoload_runtime.php") continue ;;
+        # Une ligne d'erreur de `diff` sur un lien pendant, pas un fichier qui
+        # s'appellerait comme le message.
+        "diff: "*": No such file or directory") continue ;;
         "Files "*" and "*" differ")
           a="${line#Files }"; a="${a% and *}"; b="${line#* and }"; b="${b% differ}"
-          if ! diff -I 'setApcuPrefix' <(norm_ref "$a") <(norm_viv "$b") >/dev/null 2>&1; then
+          # Le préfixe APCu aléatoire n'est ignoré que dans le fichier qui le
+          # porte : partout ailleurs, une ligne contenant `setApcuPrefix` est
+          # une différence comme une autre.
+          local ignore=()
+          case "$a" in
+            */composer/autoload_real.php) ignore=(-I 'setApcuPrefix') ;;
+          esac
+          # `${a[@]+"${a[@]}"}` : sous `set -u`, le bash 3.2 de macOS refuse
+          # `"${a[@]}"` quand le tableau est vide.
+          if ! diff ${ignore[@]+"${ignore[@]}"} <(norm_ref "$a") <(norm_viv "$b") >/dev/null 2>&1; then
             echo "$line"
             diff <(norm_ref "$a") <(norm_viv "$b") | head -6
           fi ;;
@@ -98,9 +126,32 @@ compare_vendor() {
 # autoload_runtime.php toléré comme dans le diff. Un seul `stat`/`find`
 # pour tout l'arbre (un processus par fichier prenait des minutes).
 vendor_inventory() {
-  (cd "$1" && if [ "$(uname -s)" = Darwin ]; then
+  local dir="$1" rel="${VENDOR_REL:-vendor}" tolerated
+  # Le stub est toléré à la racine du vendor seulement : `./vendor/…` quand le
+  # périmètre est le projet, `./…` quand c'est déjà le vendor.
+  if [ -d "$dir/$rel" ]; then tolerated="./$rel/autoload_runtime.php"; else tolerated="./autoload_runtime.php"; fi
+  # Un nom contenant un saut de ligne casserait l'hypothèse « une ligne par
+  # fichier » des deux côtés à la fois, donc sans faire échouer la comparaison :
+  # il est refusé bruyamment plutôt que comparé de travers.
+  local files lines
+  files=$(cd "$dir" && find . -name .git -prune -o -print0 | tr -dc '\0' | wc -c | tr -d ' ')
+  lines=$( (cd "$dir" && if [ "$(uname -s)" = Darwin ]; then
+      find . -name .git -prune -o -print0 | xargs -0 stat -f '%Sp %N -> %Y'
+    else
+      find . -name .git -prune -o -printf '%M %p -> %l\n'
+    fi) | wc -l | tr -d ' ')
+  if [ "$files" != "$lines" ]; then
+    echo "INVENTAIRE INUTILISABLE dans $dir : $files fichiers pour $lines lignes (un nom contient un saut de ligne ?)"
+    return 0
+  fi
+  (cd "$dir" && if [ "$(uname -s)" = Darwin ]; then
     find . -name .git -prune -o -print0 | xargs -0 stat -f '%Sp %N -> %Y' | sed -E 's/ -> $//'
   else
     find . -name .git -prune -o -printf '%M %p -> %l\n' | sed -E 's/ -> $//'
-  fi) | grep -v 'autoload_runtime\.php$' | LC_ALL=C sort
+  fi) | awk -v t=" $tolerated" '
+      # Suffixe EXACT : `…/autoload_runtime.php.bak` ou un paquet qui livre
+      # `src/autoload_runtime.php` ne sont pas la tolérance.
+      substr($0, length($0) - length(t) + 1) == t { next }
+      { print }
+    ' | LC_ALL=C sort
 }

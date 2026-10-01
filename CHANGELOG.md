@@ -7,6 +7,19 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **The comparator's own tolerances are anchored, and it has a test.**
+  `harness/lib/compare.sh` is the oracle of sixteen harnesses and of the
+  106-project corpus, and three of its tolerances were substring `grep -v`s: a
+  package shipping its own `src/autoload_runtime.php` erased its own difference
+  line, so did a file named `No such file or directory`, and a `setApcuPrefix`
+  line differing anywhere — not just in `autoload_real.php` — was ignored. Each
+  tolerance now names the exact path it applies to. `harness/compare-selftest.sh`
+  builds eleven pairs of trees and demands a verdict for each (including a mode
+  difference and a link-target difference, which `diff -r` cannot see); run
+  against the previous comparator, four of the eleven are red. The inventory also
+  refuses loudly, instead of comparing crookedly, when a file name contains a
+  newline.
+
 - **A transport failure exits 100, as Composer exits.** `Application::doRun`
   catches a `TransportException`, rewrites its code to
   `Installer::ERROR_TRANSPORT_EXCEPTION` (100) by reflection and rethrows it for

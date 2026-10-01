@@ -107,6 +107,8 @@ jobs:
         run: harness/download-lines.sh
       - name: Artifact repositories (local dists read off the disk, modes kept)
         run: harness/artifact-repo.sh
+      - name: The comparator's own tolerances (anchored, not substrings)
+        run: harness/compare-selftest.sh
       - name: Transport failures exit 100 (404 dist, dead repository, missing local dist)
         run: harness/transport-exit.sh
 
