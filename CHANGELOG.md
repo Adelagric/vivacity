@@ -7,6 +7,32 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **A file/directory collision inside an archive is refused by name.** An
+  archive can carry `a` as a file and then `a/b` — or the reverse — which makes
+  `unzip` answer "checkdir error: … exists but is not directory" (exit 2), send
+  Composer into its `ZipArchive` fallback, fail there too, and stop the install.
+  vivacity already failed, with the same exit code and the same empty result,
+  but by surfacing an `EEXIST` from `create_dir_all` ("File exists (os error
+  17)") naming the store's temporary directory. The conflict is now detected
+  before the write and named: `entry a/b would be written under a, which the
+  archive wrote as a file`.
+
+### Added
+- **`harness/two-stage.sh`: the family where `unzip` fails and `ZipArchive`
+  resumes.** `ZipDownloader` runs `unzip -qq … -d …` without `-o`, so any
+  non-zero exit triggers a second extraction with `ZipArchive` *on top of the
+  partially written tree* — the reference for such an archive is two stages, not
+  one. Three crafted archives, no network: duplicate entry names (which makes
+  `unzip` prompt, read EOF, skip, and exit 1), and a file/directory collision in
+  both orders. It measures what nobody had: on the duplicate archive both sides
+  install, exit 0, and produce the same tree — the last entry's content with the
+  *stored* mode, because `ZipArchive`'s overwrite does not touch the mode `unzip`
+  had posed. Composer's stderr there carries two random tokens
+  (`vendor/composer/tmp-<32 hex>.zip`, `vendor/composer/<8 hex>`), so it is not
+  reproducible run to run even for Composer; the harness strips the five
+  fallback lines while *requiring* to find them, then compares the rest with no
+  filter.
+
 - **The comparator's own tolerances are anchored, and it has a test.**
   `harness/lib/compare.sh` is the oracle of sixteen harnesses and of the
   106-project corpus, and three of its tolerances were substring `grep -v`s: a

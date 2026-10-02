@@ -2568,3 +2568,50 @@ Les seize harnais qui l'utilisent restent verts : diff-vendor 12, tar-dist 7,
 path-repos 14, artifact-repo 9, flex-install 7, vendor-dir 6, custom-dirs 4,
 wp-core 5, yii2-composer 8, bin-plugin 5, package-versions 7, merge-plugin 16,
 root-manifest 35, root-scan 12, scripts 4.
+
+## 2026-10-03 — La famille à deux étages : mesurée, et elle tombait juste
+
+`ZipDownloader::extractWithSystemUnzip` lance `unzip -qq <fichier> -d <chemin>`
+**sans `-o`**, donc tout code de sortie non nul déclenche `$tryFallback` :
+trois avertissements, puis `extractWithZipArchive` **par-dessus l'arbre déjà
+partiellement écrit** (ZipDownloader.php:51 et 146-179). La référence de ces
+archives est à deux étages — ce que la révision 1 du plan v0.20 avait manqué, et
+que la méta avait relevé.
+
+Mesuré sur trois archives fabriquées, sans réseau :
+
+| archive | `unzip` | Composer | vivacity |
+|---|---|---|---|
+| deux entrées du même nom (mode stocké 0600) | sort 1 (invite `replace …?`, EOF = `[N]one`) | repli ZipArchive, install **réussi** (code 0) : la dernière entrée gagne, le mode 0600 survit | **identique**, code 0, même arbre |
+| fichier `a` puis entrée `a/b` | sort 2 (`checkdir error`) | ZipArchive échoue aussi, install échoué (code 1), rien d'installé | code 1, rien d'installé |
+| entrée `a/b` puis `a` comme fichier | sort 2 | idem | idem |
+
+Le point important du premier cas : `ZipArchive::extractTo` ouvre le fichier en
+écriture, donc il **écrase le contenu sans toucher au mode** qu'`unzip` avait
+posé. L'arbre final est donc « mode du zip + contenu de la dernière entrée », ce
+que vivacity produit déjà en un seul passage. La famille tombait juste ; elle
+n'était simplement pas prouvée.
+
+Deux choses ajoutées :
+
+1. `harness/two-stage.sh` la prouve. La stderr de Composer y porte deux jetons
+   **aléatoires** (`vendor/composer/tmp-<32 hex>.zip` et
+   `vendor/composer/<8 hex>`, `bin2hex(random_bytes(4))`,
+   ArchiveDownloader.php:71) : elle n'est pas reproductible d'une exécution à
+   l'autre, même chez Composer. Le banc retire les cinq lignes du repli **en
+   exigeant de les trouver** — une ligne qui disparaîtrait amont fait échouer le
+   banc au lieu de passer inaperçue — puis compare le reste sans filtre. Écart
+   assumé et écrit : nous n'imprimons aucune des cinq.
+2. La collision fichier/répertoire est refusée **par son nom** plutôt que par un
+   `EEXIST`. Avant : `Error: I/O error at <store>/.tmp-W4bFVb/a: File exists
+   (os error 17)`. Maintenant : `hostile archive refused for acme/collide
+   (1.0.0): entry a/b would be written under a, which the archive wrote as a
+   file`, et dans l'autre ordre `entry a is a file where the archive already
+   made a directory`. Même code de sortie, même absence d'écriture : seul le
+   message change, et il dit lequel des deux cas s'est produit.
+
+Vérifié : banc 12 cas verts ; contre le binaire 0.19.1 publié, les dix premiers
+passent (l'arbre et les codes étaient déjà bons) et les deux contrôles de message
+sont rouges. Trois cas unitaires de plus dans `extract.rs`, dont celui qui
+vérifie qu'une entrée **répertoire** portant le nom d'un répertoire déjà fait
+n'est pas un conflit.

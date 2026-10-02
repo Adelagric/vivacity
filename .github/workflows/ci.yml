@@ -109,6 +109,8 @@ jobs:
         run: harness/artifact-repo.sh
       - name: The comparator's own tolerances (anchored, not substrings)
         run: harness/compare-selftest.sh
+      - name: unzip fails then ZipArchive resumes (duplicates, file/dir collisions)
+        run: harness/two-stage.sh
       - name: Transport failures exit 100 (404 dist, dead repository, missing local dist)
         run: harness/transport-exit.sh
 

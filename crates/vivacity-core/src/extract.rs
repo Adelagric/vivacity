@@ -344,6 +344,13 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
     // `unzip`, which is what `ZipDownloader::extract` runs, refuses exactly
     // this: "checkdir error: … exists but is not directory".
     let mut symlinked: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    // Files this archive has written, for the same reason: an archive can name
+    // `a` as a file and then `a/b`, and `unzip` refuses the second with
+    // "checkdir error: … exists but is not directory" (exit 2), which sends
+    // Composer into its `ZipArchive` fallback — where the entry fails again and
+    // the install stops. Caught here before the write, so the message names the
+    // conflict instead of being an `EEXIST` from `create_dir_all`.
+    let mut written: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     let mut allowance = limit;
     let over = || Error::HostileArchive {
@@ -366,6 +373,28 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                     "entry {} would be written through the symlink {}",
                     stripped.display(),
                     link.display()
+                ),
+            });
+        }
+        if let Some(file) = written
+            .iter()
+            .find(|f| stripped.starts_with(f) && stripped.as_path() != f.as_path())
+        {
+            return Err(Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: format!(
+                    "entry {} would be written under {}, which the archive wrote as a file",
+                    stripped.display(),
+                    file.display()
+                ),
+            });
+        }
+        if made.contains(&dest.join(&stripped)) && !entry.is_dir() {
+            return Err(Error::HostileArchive {
+                dest: dest.to_path_buf(),
+                reason: format!(
+                    "entry {} is a file where the archive already made a directory",
+                    stripped.display()
                 ),
             });
         }
@@ -429,6 +458,7 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 .ok_or_else(over)?;
             std::fs::write(&out, &buf).map_err(Error::io(&out))?;
             apply_mode(&out, &rule)?;
+            written.insert(stripped.clone());
         }
     }
     for (path, rule) in dir_modes.iter().rev() {
@@ -913,6 +943,46 @@ mod tests {
             meta.file_type().is_symlink() || std::fs::read(&alias).expect("read") == b"real.txt",
             "neither a link nor the target's bytes"
         );
+    }
+
+    #[test]
+    fn a_file_and_a_path_under_it_are_refused_both_ways() {
+        // `unzip` answers "checkdir error: … exists but is not directory" and
+        // exits 2, which sends Composer into its ZipArchive fallback, where the
+        // entry fails again and the install stops. Both sides fail; the point
+        // of refusing here is to say WHICH entry conflicts with which, instead
+        // of surfacing an `EEXIST` from `create_dir_all`.
+        let zip = build_zip(&[
+            ("pkg/a", b"i am a file", Some(0o600)),
+            ("pkg/a/b", b"and i am under it", Some(0o644)),
+        ]);
+        let d = tmpdir();
+        let err = extract_zip(&zip, d.path()).expect_err("refused");
+        assert!(
+            format!("{err}").contains("entry a/b would be written under a"),
+            "{err}"
+        );
+
+        // The other order: the directory is made first, then an entry claims
+        // its name as a file.
+        let zip = build_zip(&[
+            ("pkg/a/b", b"under first", Some(0o644)),
+            ("pkg/a", b"then the file", Some(0o600)),
+        ]);
+        let d = tmpdir();
+        let err = extract_zip(&zip, d.path()).expect_err("refused");
+        assert!(
+            format!("{err}")
+                .contains("entry a is a file where the archive already made a directory"),
+            "{err}"
+        );
+
+        // A directory entry named like one already made is not a conflict: an
+        // archive may well carry `pkg/a/` after `pkg/a/b`.
+        let zip = build_zip(&[("pkg/a/b", b"x", Some(0o644)), ("pkg/a/", b"", Some(0o755))]);
+        let d = tmpdir();
+        extract_zip(&zip, d.path()).expect("laid out");
+        assert!(d.path().join("a").is_dir());
     }
 
     fn tmpdir() -> tempfile::TempDir {
