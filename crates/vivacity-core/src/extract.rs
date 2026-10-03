@@ -387,9 +387,15 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
         let Some(stripped) = strip_root(&raw, strip.as_deref()) else {
             continue;
         };
-        if let Some(link) = symlinked
-            .iter()
-            .find(|s| stripped.starts_with(s) && stripped.as_path() != s.as_path())
+        // The two guards below look up the entry's OWN ancestors in the sets
+        // rather than scanning them: scanning was O(entries²) and showed up as
+        // 325 s on a 200 000-entry archive where Composer takes 24 s (measured,
+        // DECISIONS 2026-10-03). `ancestors()` yields the path itself first,
+        // hence the `skip(1)`.
+        if let Some(link) = stripped
+            .ancestors()
+            .skip(1)
+            .find(|a| !a.as_os_str().is_empty() && symlinked.contains(*a))
         {
             return Err(Error::HostileArchive {
                 dest: dest.to_path_buf(),
@@ -400,9 +406,10 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 ),
             });
         }
-        if let Some(file) = written
-            .iter()
-            .find(|f| stripped.starts_with(f) && stripped.as_path() != f.as_path())
+        if let Some(file) = stripped
+            .ancestors()
+            .skip(1)
+            .find(|a| !a.as_os_str().is_empty() && written.contains(*a))
         {
             return Err(Error::HostileArchive {
                 dest: dest.to_path_buf(),

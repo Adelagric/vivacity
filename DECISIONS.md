@@ -2710,3 +2710,35 @@ voie pourquoi.
 
 Vu rouge avant : `café.txt` contre `caf├⌐.txt` dans l'inventaire de l'oracle, et
 « unzip exited Some(50); extract_zip said ok ».
+
+## 2026-10-03 — 200 000 entrées : les gardes balayaient là où il fallait chercher
+
+Mesuré (M4 Max, archive `artifact` de 25,4 Mo, 200 001 entrées, caches et store
+vierges) :
+
+| | durée | pic mémoire |
+|---|---|---|
+| Composer (`unzip`) | 24,4 s | 76 Mo |
+| vivacity, avant | **325 s** (307 s de CPU) | 209 Mo |
+| vivacity, après | **13,8 s** (0,61 s de CPU) | 197 Mo |
+
+Cause : les deux gardes d'extraction — refuser d'écrire **à travers** un lien que
+l'archive vient de créer, et **sous** un chemin qu'elle a écrit comme fichier —
+parcouraient tout leur ensemble à chaque entrée (`set.iter().find(…)`), soit
+O(entrées²). À 200 000 entrées ça fait 2·10¹⁰ comparaisons de chemins.
+
+Correctif : chercher les **ancêtres de l'entrée** dans l'ensemble plutôt que
+parcourir l'ensemble, ce qui est O(profondeur) et strictement équivalent (un
+ancêtre présent ⟺ un élément dont le chemin est un préfixe de composants). La
+durée tombe sous celle de la référence, et le temps CPU s'effondre : tout est
+devenu des appels système.
+
+Portée : la garde des fichiers n'a **jamais été publiée** (elle date du
+2026-10-03, après la 0.19.1). Celle des liens est dans la 0.19.0, où elle ne
+parcourt que les liens créés par l'archive : négligeable sur un dist réel,
+quadratique sur un dist qui en livre beaucoup.
+
+Le pic mémoire reste supérieur à celui de Composer (197 contre 76 Mo) : nous
+tenons l'annuaire central et la liste des entrées, les deux linéaires, là où
+`unzip` écrit en flux. C'est écrit parce que c'est mesuré ; aucun refus n'est
+ajouté, Composer n'en ajoute pas non plus.

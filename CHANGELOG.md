@@ -18,6 +18,18 @@ byte-identical-output promise are the public API.
   archive wrote as a file`.
 
 ### Fixed
+- **The extraction guards no longer scan what they should look up.** The two
+  checks that refuse writing through a symlink the archive created, or under a
+  path it wrote as a file, scanned their whole set for every entry — O(entries²).
+  Measured on a 200 000-entry archive: **325 s** against Composer's 24 s, 307 s
+  of it burning CPU. They now look up the entry's own ancestors instead, which is
+  O(depth): the same archive takes **13.8 s**, faster than the reference, with
+  0.61 s of user time. The second guard was never released; the first shipped in
+  0.19.0, where it scanned only the symlinks an archive creates — cheap on real
+  dists, quadratic on one that ships many. Peak memory is 197 MB against
+  Composer's 76 MB on that archive (the central directory and the entry listing
+  are held, both linear), stated because it is measured.
+
 - **An entry's name is used as bytes, as the reference uses it.** The `zip` crate
   decodes a name as cp437 when the UTF-8 flag is unset, and vivacity laid out
   that reading: an ordinary `café.txt` stored by Windows tooling came out as
