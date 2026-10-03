@@ -140,6 +140,83 @@ fn move_single_root_up(out: &Path) {
     }
 }
 
+/// `compare` for an archive the reference may refuse: what is compared is then
+/// the verdict. A name that is not valid UTF-8 cannot be created on APFS, so
+/// PharData fails there and succeeds on ext4 — the expectation cannot be
+/// hardcoded, but agreeing with the reference can.
+// Used by the non-UTF-8 name test, which is `cfg(unix)`: a tar name is bytes
+// only there.
+#[cfg(unix)]
+fn compare_agreeing(tgz: &[u8]) {
+    let work = tempfile::tempdir().expect("tmp");
+    let file = work.path().join("dist.tgz");
+    std::fs::write(&file, tgz).expect("write tgz");
+    let out = work.path().join("oracle");
+    let status = Command::new(php())
+        .arg("-r")
+        .arg("$a = new PharData($argv[1]); $a->extractTo($argv[2], null, true);")
+        .arg(&file)
+        .arg(&out)
+        .status()
+        .expect("php runs");
+    let ours = work.path().join("ours");
+    let got = vivacity_core::extract::extract_tar(tgz, &ours);
+    eprintln!(
+        "PharData exited {:?}; extract_tar said {}",
+        status.code(),
+        match &got {
+            Ok(()) => "ok".to_owned(),
+            Err(e) => format!("{e}"),
+        }
+    );
+    if status.success() {
+        got.expect("PharData laid it out, so must we");
+        move_single_root_up(&out);
+        assert_eq!(
+            inventory(&out),
+            inventory(&ours),
+            "tree differs from PharData's"
+        );
+    } else {
+        assert!(
+            got.is_err(),
+            "PharData refused this archive ({:?}), so must we",
+            status.code()
+        );
+    }
+}
+
+/// A tar name is bytes. 0xE9 alone is not valid UTF-8, so the archive is built
+/// here rather than through `spec`, whose names are `&str`.
+#[test]
+#[cfg(unix)]
+fn an_entry_name_that_is_not_utf8() {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut builder = tar::Builder::new(Vec::new());
+    let header = |len: usize| {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_mode(0o644);
+        h.set_mtime(0);
+        h.set_size(len as u64);
+        h
+    };
+    let mut h = header(1);
+    builder
+        .append_data(&mut h, "pkg/ok.txt", &b"x"[..])
+        .expect("append");
+    let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"pkg/\xE9.txt"));
+    let mut h = header(1);
+    builder
+        .append_data(&mut h, &odd, &b"y"[..])
+        .expect("append");
+    let tar_bytes = builder.into_inner().expect("tar");
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&tar_bytes).expect("gzip");
+    compare_agreeing(&enc.finish().expect("gzip"));
+}
+
 fn compare(tgz: &[u8]) {
     let work = tempfile::tempdir().expect("tmp");
     let oracle = oracle_extract(tgz, work.path());

@@ -2670,3 +2670,43 @@ une extraction réussie, qu'un orphelin vieilli de sept heures (`filetime`, déj
 dans le graphe via `tar`, déclaré en dev-dependency pour ne pas attendre six
 heures) soit ramassé et qu'un staging frais soit laissé tranquille. Install réel
 de Laravel : `store/v2` et `store/.staging` côte à côte, staging vide.
+
+## 2026-10-03 — Le nom d'une entrée est des octets, comme la référence le traite
+
+Fait, mesuré contre `unzip` par `oracle_zip.rs` :
+
+| nom stocké | `unzip` | vivacity avant | maintenant |
+|---|---|---|---|
+| `café.txt`, **drapeau UTF-8 absent** (zip fabriqué sous Windows) | `café.txt` | **`caf├⌐.txt`** | `café.txt` |
+| nom non valide en UTF-8 (`pkg/<0xE9>ONUTF8A`) | sortie **50** : APFS refuse le nom | **ok**, un nom inventé | échec (`Illegal byte sequence`), comme la référence |
+
+Le crate `zip` lit un nom en **cp437** quand le drapeau UTF-8 n'est pas posé, et
+nous posions cette lecture. La première ligne n'a rien d'hostile : c'est un
+paquet avec un accent dans un nom de fichier, zippé par un outil Windows — et
+nous l'installions sous un autre nom. La seconde est pire dans l'autre sens :
+nous **réussissions** là où l'install de Composer échoue, en inventant un nom
+que le système accepte.
+
+Correctif : sur unix, les octets bruts du nom vont au système de fichiers, et
+les mêmes contrôles de composants s'appliquent (pas de `..`, pas d'absolu ;
+`enclosed_name` reste consulté pour ce qu'il refuse en plus). `extract_tar`
+reçoit le même traitement — il refusait tout nom non UTF-8, donc il refusait des
+archives que `PharData` installe (`PharData` donne les octets au système, comme
+`unzip`).
+
+Sous Windows, le nom décodé est gardé : un nom de fichier doit y être
+convertible en UTF-16, les octets ne sont pas une option. Ce que 7-Zip fait d'un
+tel nom là-bas reste **non mesuré**, consigné dans CONTRIBUTING.
+
+Les deux oracles gagnent une forme de comparaison qui le rend mesurable : quand
+la référence **refuse** l'archive, ce qui est comparé est le verdict (nous devons
+refuser aussi) ; quand elle l'accepte, les arbres sont comparés comme d'habitude.
+Sans ça la bonne attente dépendait du système de fichiers (APFS refuse le nom,
+ext4 l'accepte) et aucun test n'aurait pu l'exprimer. Et `unzip` est désormais
+lancé **sans stdin** dans l'oracle : il pose des questions (écrasement, nom
+illisible) et attendait indéfiniment — Composer lui donne des tuyaux, donc il lit
+EOF et décide seul. Le premier essai de ce test a bloqué dix minutes avant que je
+voie pourquoi.
+
+Vu rouge avant : `café.txt` contre `caf├⌐.txt` dans l'inventaire de l'oracle, et
+« unzip exited Some(50); extract_zip said ok ».

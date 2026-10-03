@@ -24,16 +24,40 @@ const S_IFLNK: u32 = 0o120000;
 /// stripping the first component would turn into an escape, and no
 /// legitimate dist contains one.
 fn entry_path(entry: &zip::read::ZipFile<'_>, dest: &Path) -> Result<PathBuf> {
-    entry
-        .enclosed_name()
-        .filter(|p| {
-            p.components()
-                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-        })
-        .ok_or_else(|| Error::HostileArchive {
+    // On unix the name is used as BYTES, which is what `unzip` does with it: it
+    // transcodes nothing, so a name that is not valid UTF-8 reaches the
+    // filesystem as it stands — and APFS then refuses it, exactly as it refuses
+    // it for `unzip` (measured: exit 50, and vivacity used to succeed there by
+    // laying out the crate's cp437 reading of the name instead). The same
+    // reading was wrong for a perfectly ordinary name too: a UTF-8 name stored
+    // without the UTF-8 flag, which happens with zips built on Windows, came out
+    // as mojibake where `unzip` writes the bytes.
+    //
+    // Elsewhere the crate's decoded name is kept: a Windows filename has to be
+    // convertible to UTF-16, so bytes are not an option, and what 7-Zip does
+    // with such a name there is unmeasured (CONTRIBUTING).
+    #[cfg(unix)]
+    let candidate = {
+        use std::os::unix::ffi::OsStrExt as _;
+        PathBuf::from(std::ffi::OsStr::from_bytes(entry.name_raw()))
+    };
+    #[cfg(not(unix))]
+    let candidate = PathBuf::from(entry.name());
+    let ok = !candidate.as_os_str().is_empty()
+        && !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    // `enclosed_name` is still consulted: it refuses a Windows prefix and a
+    // `..` the component walk could read differently, and it is the rule the
+    // rest of this file was written against.
+    if !ok || entry.enclosed_name().is_none() {
+        return Err(Error::HostileArchive {
             dest: dest.to_path_buf(),
             reason: format!("invalid entry path: {:?}", entry.name()),
-        })
+        });
+    }
+    Ok(candidate)
 }
 
 /// The single top-level directory whose content becomes the package, or `None`
@@ -491,18 +515,31 @@ fn extract_tar_with_limit(tgz_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
         dest: dest.to_path_buf(),
         reason,
     };
+    // A tar name is bytes, and `PharData` hands them to the filesystem as they
+    // are — so on unix so do we, as for a zip entry: refusing a name that is not
+    // UTF-8 meant refusing an archive the reference installs. On a filesystem
+    // that will not have such a name (APFS) both sides fail, which is the
+    // agreement that matters.
     let path_of = |bytes: &[u8]| -> Result<PathBuf> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|_| hostile("entry path is not UTF-8".to_owned()))?;
-        let p = Path::new(text);
-        if p.is_absolute()
+        #[cfg(unix)]
+        let p = {
+            use std::os::unix::ffi::OsStrExt as _;
+            PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        };
+        #[cfg(not(unix))]
+        let p = PathBuf::from(
+            std::str::from_utf8(bytes)
+                .map_err(|_| hostile("entry path is not UTF-8".to_owned()))?,
+        );
+        if p.as_os_str().is_empty()
+            || p.is_absolute()
             || !p
                 .components()
                 .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
         {
-            return Err(hostile(format!("invalid entry path: {text:?}")));
+            return Err(hostile(format!("invalid entry path: {p:?}")));
         }
-        Ok(p.to_path_buf())
+        Ok(p)
     };
     // Whole archive read once: the single-root rule needs every path
     // before the first write, and a tar stream is not seekable.

@@ -17,6 +17,22 @@ byte-identical-output promise are the public API.
   before the write and named: `entry a/b would be written under a, which the
   archive wrote as a file`.
 
+### Fixed
+- **An entry's name is used as bytes, as the reference uses it.** The `zip` crate
+  decodes a name as cp437 when the UTF-8 flag is unset, and vivacity laid out
+  that reading: an ordinary `café.txt` stored by Windows tooling came out as
+  `caf├⌐.txt`, where `unzip` writes the bytes it found. Measured against
+  `unzip`, which is also the shortest description of the fix: on unix the raw
+  name bytes go to the filesystem. A name that is not valid UTF-8 then behaves
+  as it does for the reference — refused by APFS on both sides (`unzip` exits
+  50, we fail with `Illegal byte sequence`), written as-is on a filesystem that
+  accepts it — where vivacity used to *succeed* by inventing a different name
+  for an archive Composer cannot install. `extract_tar` gets the same treatment:
+  it refused a non-UTF-8 name outright, which refused archives `PharData`
+  installs. Windows keeps the decoded name, since a filename there must be
+  convertible to UTF-16, and what 7-Zip does with such a name is listed as
+  unmeasured.
+
 ### Changed
 - **Extractions happen outside the served store, and orphans are collected.**
   The store extracted into a temporary directory *inside* the entry's own

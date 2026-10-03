@@ -185,6 +185,52 @@ fn inventory(root: &Path) -> Vec<(String, String, u32, Vec<u8>)> {
     out
 }
 
+/// `compare` for an archive the reference may REFUSE: the verdict compared is
+/// then the verdict itself. `unzip` can fail for reasons that belong to the
+/// filesystem rather than to Composer — an entry name that is not valid UTF-8
+/// cannot even be created on APFS — so the expectation cannot be hardcoded per
+/// platform. What must hold everywhere is that we agree with the tool.
+fn compare_agreeing(zip: &[u8]) {
+    let work = tempfile::tempdir().expect("tmp");
+    let file = work.path().join("dist.zip");
+    std::fs::write(&file, zip).expect("write zip");
+    let oracle = work.path().join("oracle");
+    std::fs::create_dir_all(&oracle).expect("mkdir");
+    let status = Command::new("unzip")
+        .arg("-qq")
+        .arg(&file)
+        .arg("-d")
+        .arg(&oracle)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .expect("unzip runs");
+    let ours = work.path().join("ours");
+    let got = vivacity_core::extract::extract_zip(zip, &ours);
+    eprintln!(
+        "unzip exited {:?}; extract_zip said {}",
+        status.code(),
+        match &got {
+            Ok(()) => "ok".to_owned(),
+            Err(e) => format!("{e}"),
+        }
+    );
+    if status.success() {
+        got.expect("unzip laid it out, so must we");
+        install_like_composer(&oracle);
+        assert_eq!(
+            inventory(&oracle),
+            inventory(&ours),
+            "tree differs from unzip's"
+        );
+    } else {
+        assert!(
+            got.is_err(),
+            "unzip refused this archive ({:?}), so the install must fail here too",
+            status.code()
+        );
+    }
+}
+
 fn oracle_extract(zip: &[u8], work: &Path) -> PathBuf {
     let file = work.join("dist.zip");
     std::fs::write(&file, zip).expect("write zip");
@@ -195,6 +241,11 @@ fn oracle_extract(zip: &[u8], work: &Path) -> PathBuf {
         .arg(&file)
         .arg("-d")
         .arg(&out)
+        // No stdin: `unzip` asks questions (an overwrite, an unreadable name)
+        // and would wait forever on a terminal. Composer gives it pipes, so it
+        // reads EOF and decides by itself; the oracle must do the same or it
+        // hangs instead of answering.
+        .stdin(std::process::Stdio::null())
         .status()
         .expect("unzip runs (install it: it is what Composer calls)");
     assert!(status.success(), "unzip failed: {status:?}");
@@ -329,4 +380,61 @@ fn a_ds_store_directory_does_not_defeat_the_single_root_rule() {
         file("pkg/composer.json", b"{}", 0o644),
         file("pkg/src/A.php", b"<?php", 0o644),
     ]));
+}
+
+/// An entry name that is not UTF-8. The zip crate decodes a name as cp437 when
+/// the UTF-8 flag is unset, `unzip` writes the bytes it finds — the two do not
+/// have to agree, and what the oracle answers here is the reference.
+#[test]
+fn an_entry_name_that_is_not_utf8() {
+    let mut zip = build_zip(&[
+        file("pkg/ok.txt", b"x", 0o644),
+        // Eight characters, so the name can be rewritten in place below.
+        file("pkg/NONUTF8A", b"y", 0o644),
+    ]);
+    // 0xE9 is `é` in latin-1 and `Θ` in cp437: a name no UTF-8 decoder accepts.
+    let needle = b"pkg/NONUTF8A";
+    let at = zip
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("the name is in the archive");
+    let mut i = at;
+    while let Some(pos) = zip[i..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| i + p)
+    {
+        zip[pos + 4] = 0xE9; // pkg/<0xE9>ONUTF8A
+        i = pos + 1;
+    }
+    compare_agreeing(&zip);
+}
+
+/// Clears the "name is UTF-8" flag (bit 11 of the general purpose flags, at +6
+/// in a local header and +8 in a central record): what a zip built by Windows
+/// tooling looks like, and what makes the `zip` crate read the name as cp437.
+fn clear_utf8_flag(zip: &mut [u8]) {
+    for (sig, off) in [
+        (b"PK\x03\x04".as_slice(), 6usize),
+        (b"PK\x01\x02".as_slice(), 8),
+    ] {
+        let mut i = 0;
+        while let Some(pos) = zip[i..].windows(4).position(|w| w == sig).map(|p| i + p) {
+            zip[pos + off + 1] &= !0x08; // bit 11 = bit 3 of the high byte
+            i = pos + 4;
+        }
+    }
+}
+
+/// An ordinary accented name, stored WITHOUT the UTF-8 flag — a zip built on
+/// Windows. `unzip` writes the bytes it finds; reading them as cp437, as the
+/// crate does by default, would lay out mojibake under a different name.
+#[test]
+fn an_accented_name_stored_without_the_utf8_flag() {
+    let mut zip = build_zip(&[
+        file("pkg/café.txt", b"accent", 0o644),
+        file("pkg/plain.txt", b"x", 0o644),
+    ]);
+    clear_utf8_flag(&mut zip);
+    compare_agreeing(&zip);
 }

@@ -71,6 +71,10 @@ the roadmap below.
   name, self-require, invalid link name) but does not validate the schema,
   so five of eight realistic invalid manifests are still accepted. What is
   accepted is stated in the README, measured.
+- **An entry name that is not UTF-8, on Windows** — on unix the raw bytes are
+  used, as `unzip` and `PharData` use them (measured, oracles). A Windows
+  filename has to be convertible to UTF-16, so the crate's decoded name is kept
+  there, and what 7-Zip does with such a name is unmeasured.
 - **Does `7z x -y` recreate a symlink entry as a link?** On Windows Composer
   prefers `7z` (found in `C:\Program Files\7-Zip` as well as on the `PATH`)
   over `unzip`, and vivacity mirrors that discovery — but whether 7-Zip makes a
