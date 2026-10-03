@@ -118,9 +118,20 @@ JSON
   cp "$WORK/$name/ref/composer.json" "$WORK/$name/ref/composer.lock" "$WORK/$name/viv/"
 }
 
+# `COMPOSER_TESTS_ARE_RUNNING=1` côté référence : sans lui, `$tryFallback`
+# imprime six lignes de débogage SUPPLÉMENTAIRES quand `GITHUB_ACTIONS` est
+# posé (« Additional debug info, please report to …issues/11148 », taille,
+# SHA1, premiers et derniers octets en hexa, `Origin URL`, `Response
+# Headers` — ZipDownloader.php:165), et `GithubActionError` ajoute ses
+# annotations `::error::`. C'est l'interrupteur que Composer fournit pour ça,
+# et il rend la sortie de la référence identique en local et sur le runner —
+# ce qu'un banc différentiel exige. Il ne change rien d'autre ici : les deux
+# autres usages sont une vérification d'interactivité (nous passons
+# `--no-interaction`) et l'enregistrement des en-têtes pour ce même bloc.
 install_both() { # nom
   local name="$1" c=0 v=0
   (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/home" COMPOSER_ROOT_VERSION=dev-main COMPOSER_CACHE_DIR="$WORK/cache-ref-$name" \
+    COMPOSER_TESTS_ARE_RUNNING=1 \
     composer install --no-scripts --no-interaction --no-ansi >/dev/null 2>"$WORK/$name.ref.err") || c=$?
   (cd "$WORK/$name/viv" && COMPOSER_HOME="$WORK/home" COMPOSER_ROOT_VERSION=dev-main COMPOSER_CACHE_DIR="$WORK/cache-viv-$name" \
     VIVACITY_CACHE_DIR="$WORK/store-$name" "$VIVACITY" install --no-scripts --no-fallback >/dev/null 2>"$WORK/$name.viv.err") || v=$?

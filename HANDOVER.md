@@ -50,6 +50,14 @@ archive qui le fait sortir non nul envoie Composer dans une SECONDE extraction
 par `ZipArchive` par-dessus l'arbre partiel, comportement à deux étages tranché
 par la mesure dans docs/plans/v0.20-hostile-archives.md.
 
+Pour reproduire la sortie du runner en local : `GITHUB_ACTIONS=true
+harness/<banc>.sh`. Composer imprime six lignes de débogage en plus dans son
+repli `unzip`→`ZipArchive` quand cette variable est posée, et
+`GithubActionError` ajoute ses annotations — c'est ce qui a fait tomber
+`two-stage.sh` sur les deux runners alors qu'il passait ici. Les bancs qui
+comparent la stderr d'un repli posent `COMPOSER_TESTS_ARE_RUNNING=1` côté
+référence, l'interrupteur que Composer fournit pour ça.
+
 ⚠️ Les runners suivent **stable**, donc une nouvelle version de Rust peut rendre
 `-D warnings` rouge sur du code qui n'a pas bougé : `std::usize::MAX`, déprécié
 en 1.99, a cassé le job `parity` le 2026-10-03 sur un commit qui ne touchait pas

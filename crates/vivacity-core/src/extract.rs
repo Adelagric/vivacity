@@ -304,6 +304,19 @@ fn windows_unzip_tool_present() -> bool {
         || in_path("unzip.exe")
 }
 
+/// An entry's path as the archive spells it: components joined by `/`, whatever
+/// the platform's separator. Our refusal messages are read by people and grepped
+/// by harnesses, so `a/b` must not become `a\b` on Windows.
+fn rel_display(p: &Path) -> String {
+    p.components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Reads one entry against the budget the archive has left, counting the bytes
 /// **really** read. A declared size is the archive's word, and both formats
 /// let it lie: a zip's two size fields are `u32`s an attacker edits (measured
@@ -348,7 +361,7 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
             dest: dest.to_path_buf(),
             reason: format!(
                 "the archive's whole content is the symlink {}, which Composer would install as a link in place of the package directory",
-                link.display()
+                rel_display(&link)
             ),
         });
     }
@@ -401,8 +414,8 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 dest: dest.to_path_buf(),
                 reason: format!(
                     "entry {} would be written through the symlink {}",
-                    stripped.display(),
-                    link.display()
+                    rel_display(&stripped),
+                    rel_display(link)
                 ),
             });
         }
@@ -415,8 +428,8 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 dest: dest.to_path_buf(),
                 reason: format!(
                     "entry {} would be written under {}, which the archive wrote as a file",
-                    stripped.display(),
-                    file.display()
+                    rel_display(&stripped),
+                    rel_display(file)
                 ),
             });
         }
@@ -425,7 +438,7 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 dest: dest.to_path_buf(),
                 reason: format!(
                     "entry {} is a file where the archive already made a directory",
-                    stripped.display()
+                    rel_display(&stripped)
                 ),
             });
         }
@@ -452,7 +465,7 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 .ok_or_else(over)?;
             let target = String::from_utf8(bytes).map_err(|_| Error::HostileArchive {
                 dest: dest.to_path_buf(),
-                reason: format!("symlink {} has a non-UTF-8 target", stripped.display()),
+                reason: format!("symlink {} has a non-UTF-8 target", rel_display(&stripped)),
             })?;
             check_symlink_target(&stripped, &target, dest, &symlinked)?;
             if let Some(p) = out.parent() {
@@ -1201,15 +1214,21 @@ mod tests {
         let ours = work.path().join("ours");
         let got = extract_zip(&zip, &ours);
         eprintln!("tool exited {code:?}; extract_zip said {got:?}");
-        for n in names {
-            let theirs = out.join("pkg").join(n);
-            let mine = ours.join(n);
-            eprintln!(
-                "  {n:?}: tool {} / vivacity {}",
-                theirs.exists(),
-                mine.exists()
-            );
-        }
+        // Both listings, so a tool that RENAMES an entry instead of skipping it
+        // says so in the log rather than looking like a skip.
+        let listing = |d: &Path| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(d)
+                .map(|it| {
+                    it.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort();
+            v
+        };
+        eprintln!("  tool laid out:     {:?}", listing(&out.join("pkg")));
+        eprintln!("  vivacity laid out: {:?}", listing(&ours));
         // The verdict first: a tool that refuses the archive makes Composer's
         // install fail (its ZipArchive fallback cannot create these names
         // either), so we must not report success.
