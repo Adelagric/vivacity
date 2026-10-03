@@ -71,6 +71,12 @@ the roadmap below.
   name, self-require, invalid link name) but does not validate the schema,
   so five of eight realistic invalid manifests are still accepted. What is
   accepted is stated in the README, measured.
+- **Windows reserved names and long paths** — measured on the runner since
+  2026-10-03 (`windows_reserved_names_follow_the_tool`,
+  `a_path_longer_than_max_path_follows_the_tool`): the tests demand agreement
+  with the tool rather than asserting a behaviour. If the runner's answer differs
+  from the Windows box you care about (long-path opt-in, no 7-Zip), say so in the
+  issue with its output.
 - **An entry name that is not UTF-8, on Windows** — on unix the raw bytes are
   used, as `unzip` and `PharData` use them (measured, oracles). A Windows
   filename has to be convertible to UTF-16, so the crate's decoded name is kept

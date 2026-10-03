@@ -58,6 +58,15 @@ byte-identical-output promise are the public API.
   same entry.
 
 ### Added
+- **Windows reserved names and paths past MAX_PATH are measured against the same
+  tool.** `NUL` and its kin are devices, and writing to one *succeeds* while
+  discarding everything — so an extractor can report success for a file that is
+  not there; a path longer than 260 characters needs the long-path opt-in, which
+  7-Zip is said to work around with the `\\?\` prefix. Neither is decidable by
+  reading, so both tests run the tool Composer would run, print what it produced
+  entry by entry (`--nocapture` in CI) and demand that vivacity agree with it —
+  including refusing the archive when the tool refuses it.
+
 - **Windows: what an external tool does with a symlink entry is measured, not
   assumed.** `ZipDownloader` prefers `7z x -bb0 -y` over `unzip -qq` there, and
   whether 7-Zip recreates a symlink entry as a link without `-snl` was the open

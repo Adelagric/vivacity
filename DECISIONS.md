@@ -2742,3 +2742,30 @@ Le pic mémoire reste supérieur à celui de Composer (197 contre 76 Mo) : nous
 tenons l'annuaire central et la liste des entrées, les deux linéaires, là où
 `unzip` écrit en flux. C'est écrit parce que c'est mesuré ; aucun refus n'est
 ajouté, Composer n'en ajoute pas non plus.
+
+## 2026-10-03 — Noms réservés Windows et chemins > MAX_PATH : demander à l'outil
+
+Deux classes qui ne se tranchent pas par le raisonnement :
+
+- **Les noms de périphériques** (`CON`, `NUL`, `COM1`…, et les noms à point ou
+  espace final) : écrire dans `NUL` **réussit** et jette tout. Un extracteur peut
+  donc annoncer un succès pour un fichier qui n'existe pas — c'est le piège, et il
+  ne se voit pas sans regarder.
+- **Un chemin de plus de 260 caractères** : Windows le refuse sans l'option de
+  chemins longs, et 7-Zip serait capable de passer outre avec le préfixe `\\?\`.
+
+Les deux tests (`#[cfg(windows)]`) lancent donc **l'outil que Composer
+lancerait** — découverte et arguments factorisés avec le test des liens —
+impriment ce qu'il a produit entrée par entrée (`--nocapture` dans le job
+`windows`, pour que la réponse du runner soit dans le journal) et exigent
+l'accord : si l'outil refuse l'archive, nous devons refuser aussi ; s'il la pose,
+chaque entrée doit exister des deux côtés ou d'aucun.
+
+Pourquoi « exiger l'accord » plutôt qu'affirmer un comportement : la réponse
+dépend de la machine (7-Zip ou `unzip`, option de chemins longs, droit de créer
+des liens). Un test qui affirme une issue serait vrai sur le runner et faux chez
+un utilisateur ; un test qui exige l'accord est vrai partout — et quand il casse,
+il raconte ce que la machine a répondu.
+
+Vérifié localement par `cargo clippy --target x86_64-pc-windows-gnu
+--all-targets -- -D warnings` (voir HANDOVER) ; l'exécution appartient au runner.

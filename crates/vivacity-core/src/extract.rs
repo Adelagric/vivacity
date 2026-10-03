@@ -1029,6 +1029,48 @@ mod tests {
         assert!(d.path().join("a").is_dir());
     }
 
+    /// The tool Composer would use on this Windows machine, in Composer's own
+    /// order: `7z` from the PATH, then from `C:\Program Files\7-Zip`, then
+    /// `unzip` (`ZipDownloader.php:47-51`). `true` = it is 7-Zip.
+    #[cfg(windows)]
+    fn composers_tool() -> Option<(std::path::PathBuf, bool)> {
+        let in_path = |exe: &str| {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(exe))
+                    .find(|p| p.exists())
+            })
+        };
+        in_path("7z.exe")
+            .or_else(|| {
+                let p = std::path::PathBuf::from("C:\\Program Files\\7-Zip\\7z.exe");
+                p.exists().then_some(p)
+            })
+            .map(|p| (p, true))
+            .or_else(|| in_path("unzip.exe").map(|p| (p, false)))
+    }
+
+    /// Runs it with Composer's own arguments and returns its exit code.
+    #[cfg(windows)]
+    fn run_tool(tool: &(std::path::PathBuf, bool), file: &Path, out: &Path) -> Option<i32> {
+        use std::process::{Command, Stdio};
+        std::fs::create_dir_all(out).expect("mkdir");
+        let (exe, is_7z) = tool;
+        let mut cmd = Command::new(exe);
+        if *is_7z {
+            cmd.args(["x", "-bb0", "-y"])
+                .arg(file)
+                .arg(format!("-o{}", out.display()));
+        } else {
+            cmd.arg("-qq").arg(file).arg("-d").arg(out);
+        }
+        // No stdin: these tools ask questions and would wait forever.
+        cmd.stdin(Stdio::null())
+            .status()
+            .ok()
+            .and_then(|s| s.code())
+    }
+
     /// Windows, measured on the machine that runs the test rather than
     /// assumed: Composer extracts with `7z x -bb0 -y %file% -o%path%` when it
     /// finds 7-Zip (PATH **or** `C:\Program Files\7-Zip`, preferred over
@@ -1043,7 +1085,6 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn a_symlink_entry_follows_whatever_tool_composer_would_use() {
-        use std::process::Command;
         let zip = {
             let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
             w.start_file("pkg/real.txt", SimpleFileOptions::default())
@@ -1061,22 +1102,7 @@ mod tests {
         let work = tmpdir();
         let file = work.path().join("dist.zip");
         std::fs::write(&file, &zip).expect("write zip");
-
-        // The tool Composer would pick, in Composer's order.
-        let in_path = |exe: &str| {
-            std::env::var_os("PATH").and_then(|path| {
-                std::env::split_paths(&path)
-                    .map(|dir| dir.join(exe))
-                    .find(|p| p.exists())
-            })
-        };
-        let seven = in_path("7z.exe").or_else(|| {
-            let p = std::path::PathBuf::from("C:\\Program Files\\7-Zip\\7z.exe");
-            p.exists().then_some(p)
-        });
-        let tool = seven
-            .map(|p| (p, true))
-            .or_else(|| in_path("unzip.exe").map(|p| (p, false)));
+        let tool = composers_tool();
 
         // Can this process create a link at all? Without Developer Mode or the
         // privilege, no — and then the file is the only possible answer.
@@ -1086,23 +1112,10 @@ mod tests {
         };
 
         let tool_made_link = match &tool {
-            Some((exe, is_7z)) => {
+            Some(t) => {
+                let (exe, is_7z) = t;
                 let out = work.path().join("tool");
-                std::fs::create_dir_all(&out).expect("mkdir");
-                let status = if *is_7z {
-                    Command::new(exe)
-                        .args(["x", "-bb0", "-y"])
-                        .arg(&file)
-                        .arg(format!("-o{}", out.display()))
-                        .status()
-                } else {
-                    Command::new(exe)
-                        .arg("-qq")
-                        .arg(&file)
-                        .arg("-d")
-                        .arg(&out)
-                        .status()
-                };
+                let status = run_tool(t, &file, &out);
                 let made = out.join("pkg/link.txt");
                 let meta = std::fs::symlink_metadata(&made);
                 let answer = meta
@@ -1110,10 +1123,9 @@ mod tests {
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false);
                 eprintln!(
-                    "tool {} (7z={}) exited {:?}: pkg/link.txt is {}",
+                    "tool {} (7z={}) exited {status:?}: pkg/link.txt is {}",
                     exe.display(),
                     is_7z,
-                    status.map(|s| s.code()),
                     match meta {
                         Ok(m) if m.file_type().is_symlink() => "a symlink".to_owned(),
                         Ok(_) => format!(
@@ -1151,6 +1163,118 @@ mod tests {
                 "no link was possible, so the entry must be a plain file"
             );
             assert_eq!(std::fs::read(&link).expect("read"), b"real.txt");
+        }
+    }
+
+    /// Windows reserved device names (`CON`, `NUL`, `COM1`, …) and names a
+    /// trailing dot or space makes unreachable. Writing to `NUL` succeeds and
+    /// discards everything, which is the trap: an extractor can report success
+    /// for a file that does not exist. Measured against the tool Composer would
+    /// run, and we must agree with it — entry by entry, since a tool may skip
+    /// one name and take another.
+    #[test]
+    #[cfg(windows)]
+    fn windows_reserved_names_follow_the_tool() {
+        let names = ["CON", "NUL", "COM1", "trailing.", "trailing ", "ok.txt"];
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for n in names {
+            w.start_file(
+                format!("pkg/{n}"),
+                SimpleFileOptions::default().unix_permissions(0o644),
+            )
+            .expect("start");
+            w.write_all(n.as_bytes()).expect("write");
+        }
+        let zip = w.finish().expect("finish").into_inner();
+
+        let work = tmpdir();
+        let file = work.path().join("dist.zip");
+        std::fs::write(&file, &zip).expect("write zip");
+        let Some(tool) = composers_tool() else {
+            eprintln!(
+                "no 7z and no unzip: Composer would use ZipArchive, out of this test's reach"
+            );
+            return;
+        };
+        let out = work.path().join("tool");
+        let code = run_tool(&tool, &file, &out);
+        let ours = work.path().join("ours");
+        let got = extract_zip(&zip, &ours);
+        eprintln!("tool exited {code:?}; extract_zip said {got:?}");
+        for n in names {
+            let theirs = out.join("pkg").join(n);
+            let mine = ours.join(n);
+            eprintln!(
+                "  {n:?}: tool {} / vivacity {}",
+                theirs.exists(),
+                mine.exists()
+            );
+        }
+        // The verdict first: a tool that refuses the archive makes Composer's
+        // install fail (its ZipArchive fallback cannot create these names
+        // either), so we must not report success.
+        if code != Some(0) {
+            assert!(
+                got.is_err(),
+                "the tool refused the archive, so the install must fail here too"
+            );
+            return;
+        }
+        got.expect("the tool laid it out, so must we");
+        for n in names {
+            assert_eq!(
+                out.join("pkg").join(n).exists(),
+                ours.join(n).exists(),
+                "{n:?} exists on one side only"
+            );
+        }
+    }
+
+    /// A path longer than MAX_PATH (260). Without the long-path opt-in Windows
+    /// refuses it, and 7-Zip is said to work around that with the `\\?\`
+    /// prefix: whether the reference lays such an entry out is a fact of the
+    /// machine, so the test asks it rather than deciding.
+    #[test]
+    #[cfg(windows)]
+    fn a_path_longer_than_max_path_follows_the_tool() {
+        let deep = format!("pkg/{}/f.txt", vec!["d".repeat(40); 8].join("/"));
+        assert!(
+            deep.len() > 260,
+            "the path must exceed MAX_PATH ({})",
+            deep.len()
+        );
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in ["pkg/ok.txt", deep.as_str()] {
+            w.start_file(name, SimpleFileOptions::default().unix_permissions(0o644))
+                .expect("start");
+            w.write_all(b"x").expect("write");
+        }
+        let zip = w.finish().expect("finish").into_inner();
+
+        let work = tmpdir();
+        let file = work.path().join("dist.zip");
+        std::fs::write(&file, &zip).expect("write zip");
+        let Some(tool) = composers_tool() else {
+            eprintln!("no 7z and no unzip: out of this test's reach");
+            return;
+        };
+        let out = work.path().join("tool");
+        let code = run_tool(&tool, &file, &out);
+        let ours = work.path().join("ours");
+        let got = extract_zip(&zip, &ours);
+        let theirs = out.join(&deep).exists();
+        eprintln!("tool exited {code:?} (deep entry laid out: {theirs}); extract_zip said {got:?}");
+        if code == Some(0) && theirs {
+            got.expect("the tool laid the long path out, so must we");
+            assert!(
+                ours.join(deep.trim_start_matches("pkg/")).exists(),
+                "the long path is missing on our side"
+            );
+        } else {
+            assert!(
+                got.is_err(),
+                "the tool could not lay the long path out, so the install must fail here too"
+            );
         }
     }
 
