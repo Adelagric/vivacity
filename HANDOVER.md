@@ -50,6 +50,15 @@ archive qui le fait sortir non nul envoie Composer dans une SECONDE extraction
 par `ZipArchive` par-dessus l'arbre partiel, comportement à deux étages tranché
 par la mesure dans docs/plans/v0.20-hostile-archives.md.
 
+Le code Windows se **typecheck localement** sans attendre le runner (une heure
+par aller-retour) : `brew install mingw-w64` puis
+`rustup target add x86_64-pc-windows-gnu`, et ensuite
+`cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings`
+(~15 s à chaud). Ça ne remplace pas l'exécution — un test qui mesure le vrai
+7-Zip du runner ne peut tourner que là-bas — mais ça attrape les erreurs de
+compilation et les lints propres à `#[cfg(windows)]`, qui sont la cause de
+presque tous les rouges de ce job.
+
 ⚠️ Le store ne porte aucune marque de version : une entrée extraite par une
 version antérieure garde les modes de l'époque et continue d'être servie
 (`<store>/<vendor>/<pkg>/<version>-<ref12>`). Après un changement de sémantique

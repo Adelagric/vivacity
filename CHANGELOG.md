@@ -18,6 +18,15 @@ byte-identical-output promise are the public API.
   archive wrote as a file`.
 
 ### Added
+- **Windows: what an external tool does with a symlink entry is measured, not
+  assumed.** `ZipDownloader` prefers `7z x -bb0 -y` over `unzip -qq` there, and
+  whether 7-Zip recreates a symlink entry as a link without `-snl` was the open
+  question that decided our branch on a box with 7-Zip and no `unzip`. A
+  `#[cfg(windows)]` test now runs the tool Composer would run, looks at what it
+  produced, probes whether the process may create links at all, and demands that
+  `extract_zip` match — the runner's answer lands in the CI log (`--nocapture`)
+  instead of in a guess.
+
 - **`harness/two-stage.sh`: the family where `unzip` fails and `ZipArchive`
   resumes.** `ZipDownloader` runs `unzip -qq … -d …` without `-o`, so any
   non-zero exit triggers a second extraction with `ZipArchive` *on top of the

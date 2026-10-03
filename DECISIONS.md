@@ -2615,3 +2615,29 @@ passent (l'arbre et les codes étaient déjà bons) et les deux contrôles de me
 sont rouges. Trois cas unitaires de plus dans `extract.rs`, dont celui qui
 vérifie qu'une entrée **répertoire** portant le nom d'un répertoire déjà fait
 n'est pas un conflit.
+
+## 2026-10-03 — Windows : mesurer le vrai outil plutôt que raisonner, et le vérifier localement
+
+La question laissée ouverte le 2026-09-30 (`7z x -y` recrée-t-il une entrée de
+lien *en tant que lien*, ou lui faut-il `-snl` ?) ne se tranche pas par la
+lecture : elle décide de notre branche sur une machine qui a 7-Zip et pas
+`unzip`, et personne ici n'a de Windows.
+
+Donc le test la mesure. `a_symlink_entry_follows_whatever_tool_composer_would_use`
+(`#[cfg(windows)]`) : il fabrique un zip avec une entrée de lien, cherche l'outil
+**dans l'ordre de Composer** (`7z.exe` sur le PATH puis dans
+`C:\Program Files\7-Zip`, sinon `unzip.exe`), le lance **avec les arguments de
+Composer** (`x -bb0 -y %file% -o%path%` ou `-qq %file% -d %path%`), regarde ce
+qu'il a produit, sonde si le processus a le droit de créer un lien, puis exige
+d'`extract_zip` la même issue : un lien quand l'outil en a fait un et que le
+droit existe, les octets de la cible dans un fichier ordinaire sinon. Le job
+`windows` le lance avec `-- --nocapture` pour que la réponse du runner soit dans
+le journal, pas seulement dans un échec.
+
+Outillage, consigné dans HANDOVER parce que ça change la façon de travailler sur
+ce job : le code Windows se **typecheck localement** maintenant
+(`brew install mingw-w64`, `rustup target add x86_64-pc-windows-gnu`, puis
+`cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings`,
+~15 s à chaud). Les deux rouges Windows de ce sprint étaient une erreur de
+compilation et un lint, c'est-à-dire exactement ce que ça attrape — pour une
+boucle CI qui coûte une heure. L'exécution réelle reste au runner.

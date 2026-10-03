@@ -985,6 +985,131 @@ mod tests {
         assert!(d.path().join("a").is_dir());
     }
 
+    /// Windows, measured on the machine that runs the test rather than
+    /// assumed: Composer extracts with `7z x -bb0 -y %file% -o%path%` when it
+    /// finds 7-Zip (PATH **or** `C:\Program Files\7-Zip`, preferred over
+    /// `unzip` there) and with `unzip -qq %file% -d %path%` otherwise
+    /// (`ZipDownloader.php:47-51`). Whether that tool recreates a symlink entry
+    /// as a link — 7-Zip may want `-snl` — decides what `extract_zip` must
+    /// produce, and no amount of reading settles it. So the test runs the tool
+    /// Composer would run, looks at what it made, and demands the same of us.
+    ///
+    /// Run with `-- --nocapture` in CI so the answer is in the log, not only in
+    /// a failure.
+    #[test]
+    #[cfg(windows)]
+    fn a_symlink_entry_follows_whatever_tool_composer_would_use() {
+        use std::process::Command;
+        let zip = {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            w.start_file("pkg/real.txt", SimpleFileOptions::default())
+                .expect("start");
+            w.write_all(b"real").expect("write");
+            w.add_symlink(
+                "pkg/link.txt",
+                "real.txt",
+                SimpleFileOptions::default().unix_permissions(0o777),
+            )
+            .expect("symlink");
+            w.finish().expect("finish").into_inner()
+        };
+
+        let work = tmpdir();
+        let file = work.path().join("dist.zip");
+        std::fs::write(&file, &zip).expect("write zip");
+
+        // The tool Composer would pick, in Composer's order.
+        let in_path = |exe: &str| {
+            std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(exe))
+                    .find(|p| p.exists())
+            })
+        };
+        let seven = in_path("7z.exe").or_else(|| {
+            let p = std::path::PathBuf::from("C:\\Program Files\\7-Zip\\7z.exe");
+            p.exists().then_some(p)
+        });
+        let tool = seven
+            .map(|p| (p, true))
+            .or_else(|| in_path("unzip.exe").map(|p| (p, false)));
+
+        // Can this process create a link at all? Without Developer Mode or the
+        // privilege, no — and then the file is the only possible answer.
+        let may_link = {
+            let probe = work.path().join("probe");
+            std::os::windows::fs::symlink_file("target", &probe).is_ok()
+        };
+
+        let tool_made_link = match &tool {
+            Some((exe, is_7z)) => {
+                let out = work.path().join("tool");
+                std::fs::create_dir_all(&out).expect("mkdir");
+                let status = if *is_7z {
+                    Command::new(exe)
+                        .args(["x", "-bb0", "-y"])
+                        .arg(&file)
+                        .arg(format!("-o{}", out.display()))
+                        .status()
+                } else {
+                    Command::new(exe)
+                        .arg("-qq")
+                        .arg(&file)
+                        .arg("-d")
+                        .arg(&out)
+                        .status()
+                };
+                let made = out.join("pkg/link.txt");
+                let meta = std::fs::symlink_metadata(&made);
+                let answer = meta
+                    .as_ref()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                eprintln!(
+                    "tool {} (7z={}) exited {:?}: pkg/link.txt is {}",
+                    exe.display(),
+                    is_7z,
+                    status.map(|s| s.code()),
+                    match meta {
+                        Ok(m) if m.file_type().is_symlink() => "a symlink".to_owned(),
+                        Ok(_) => format!(
+                            "a regular file holding {:?}",
+                            std::fs::read_to_string(&made).unwrap_or_default()
+                        ),
+                        Err(e) => format!("absent ({e})"),
+                    }
+                );
+                answer
+            }
+            None => {
+                eprintln!("no 7z and no unzip on this machine: Composer would use ZipArchive, which never makes a link");
+                false
+            }
+        };
+        eprintln!("this process may create links: {may_link}");
+
+        let ours = work.path().join("ours");
+        extract_zip(&zip, &ours).expect("extract_zip");
+        let link = ours.join("link.txt");
+        let meta = std::fs::symlink_metadata(&link).expect("meta");
+        if tool_made_link && may_link {
+            assert!(
+                meta.file_type().is_symlink(),
+                "the tool made a link and links are allowed, so we must make one"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).expect("readlink"),
+                std::path::Path::new("real.txt")
+            );
+        } else {
+            assert!(
+                !meta.file_type().is_symlink(),
+                "no link was possible, so the entry must be a plain file"
+            );
+            assert_eq!(std::fs::read(&link).expect("read"), b"real.txt");
+        }
+    }
+
     fn tmpdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tmpdir")
     }
