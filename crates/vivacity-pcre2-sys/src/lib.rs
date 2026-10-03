@@ -7,4 +7,4 @@ mod bindings;
 mod tests;
 
 // It is weird that this isn't caught by bindgen. Dunno why.
-pub const PCRE2_UNSET: usize = ::std::usize::MAX;
+pub const PCRE2_UNSET: usize = usize::MAX;

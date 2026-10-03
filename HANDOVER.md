@@ -50,6 +50,12 @@ archive qui le fait sortir non nul envoie Composer dans une SECONDE extraction
 par `ZipArchive` par-dessus l'arbre partiel, comportement à deux étages tranché
 par la mesure dans docs/plans/v0.20-hostile-archives.md.
 
+⚠️ Les runners suivent **stable**, donc une nouvelle version de Rust peut rendre
+`-D warnings` rouge sur du code qui n'a pas bougé : `std::usize::MAX`, déprécié
+en 1.99, a cassé le job `parity` le 2026-10-03 sur un commit qui ne touchait pas
+à `vivacity-pcre2-sys`. Garder la chaîne locale à jour (`rustup update stable`)
+pour que les gates d'ici soient ceux de là-bas.
+
 Le code Windows se **typecheck localement** sans attendre le runner (une heure
 par aller-retour) : `brew install mingw-w64` puis
 `rustup target add x86_64-pc-windows-gnu`, et ensuite
