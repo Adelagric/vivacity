@@ -1,9 +1,16 @@
 //! Local content-addressed store: each (package, version, dist reference) is
-//! extracted ONCE into `<cache>/store/<vendor>/<pkg>/<key>/`, then cloned
-//! into the projects' vendor/ (see clone.rs). Atomic write: extraction into a
-//! sibling temporary directory then `rename`; the final directory only exists
+//! extracted ONCE into `<cache>/store/<layout>/<vendor>/<pkg>/<key>/`, then
+//! cloned into the projects' vendor/ (see clone.rs). Atomic write: extraction
+//! into a staging directory then `rename`; the final directory only exists
 //! complete, and two concurrent processes converge (the loser of the rename
-//! discards its temporary directory).
+//! discards its staging directory).
+//!
+//! The staging directory is `<cache>/store/.staging/`, deliberately OUTSIDE the
+//! served layout: an entry is served from `<layout>/…` and nothing else is ever
+//! read, so whatever an extraction writes beside its own directory — the
+//! extractor refuses that now, this is the belt to its braces — cannot become a
+//! package. It is also on the same filesystem as the layout, which a `rename`
+//! requires.
 
 use crate::error::{Error, Result};
 use crate::extract::{extract_tar, extract_zip};
@@ -29,9 +36,37 @@ pub struct Store {
 /// until the cache is cleared.
 const LAYOUT: &str = "v2";
 
+/// Where extractions happen, swept of orphans on the way in. Six hours is well
+/// past any install, and short enough that a killed process does not leave a
+/// tree there for a month: a parallel install's staging directory is minutes
+/// old, never hours.
+const STAGING: &str = ".staging";
+const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
 impl Store {
     pub fn at(root: PathBuf) -> Store {
         Store { root }
+    }
+
+    /// Removes staging directories no live process can own any more. Silent on
+    /// every error: this is housekeeping, not part of the install's contract,
+    /// and another process may be deleting the same entry.
+    fn sweep_staging(&self) {
+        let staging = self.root.join(STAGING);
+        let Ok(entries) = std::fs::read_dir(&staging) else {
+            return;
+        };
+        let now = std::time::SystemTime::now();
+        for e in entries.flatten() {
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .and_then(|m| now.duration_since(m).map_err(std::io::Error::other))
+                .is_ok_and(|age| age > ORPHAN_AFTER);
+            if old {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
     }
 
     pub fn default_location() -> Store {
@@ -76,10 +111,13 @@ impl Store {
         }
         let parent = final_path.parent().unwrap_or(&self.root).to_path_buf();
         std::fs::create_dir_all(&parent).map_err(Error::io(&parent))?;
+        let staging = self.root.join(STAGING);
+        std::fs::create_dir_all(&staging).map_err(Error::io(&staging))?;
+        self.sweep_staging();
         let tmp = tempfile::Builder::new()
             .prefix(".tmp-")
-            .tempdir_in(&parent)
-            .map_err(Error::io(&parent))?;
+            .tempdir_in(&staging)
+            .map_err(Error::io(&staging))?;
         let extracted = match kind {
             DistKind::Zip => extract_zip(dist_bytes, tmp.path()),
             DistKind::Tar => extract_tar(dist_bytes, tmp.path()),
@@ -161,6 +199,36 @@ mod tests {
         assert_eq!(p1, p2);
         // Different key -> other entry.
         assert!(!store.contains("a/b", "1.0.0", Some("feedfacefeed5678")));
+        // The extraction happens OUTSIDE the served layout, and the staging
+        // directory is left empty behind it: nothing that an extraction writes
+        // beside its own tree can ever be served as a package.
+        let staging = dir.path().join("store").join(".staging");
+        assert!(staging.is_dir(), "the staging directory is created");
+        assert_eq!(
+            std::fs::read_dir(&staging).expect("read_dir").count(),
+            0,
+            "no staging directory survives a successful extraction"
+        );
+        // An orphan older than the cutoff is collected; a fresh one is not.
+        let orphan = staging.join(".tmp-orphan");
+        let fresh = staging.join(".tmp-fresh");
+        std::fs::create_dir_all(orphan.join("inside")).expect("mkdir");
+        std::fs::create_dir_all(&fresh).expect("mkdir");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 3600);
+        filetime::set_file_mtime(&orphan, filetime::FileTime::from_system_time(long_ago))
+            .expect("set mtime");
+        store
+            .ensure(
+                "c/d",
+                "1.0.0",
+                Some("feedfacefeed5678"),
+                &zip,
+                DistKind::Zip,
+            )
+            .expect("extract");
+        assert!(!orphan.exists(), "the orphan is swept");
+        assert!(fresh.exists(), "a fresh staging directory is left alone");
+
         // Hostile version sanitised (no traversal).
         let p3 = store
             .ensure("a/b", "../../evil", None, &zip, DistKind::Zip)

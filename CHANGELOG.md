@@ -17,6 +17,18 @@ byte-identical-output promise are the public API.
   before the write and named: `entry a/b would be written under a, which the
   archive wrote as a file`.
 
+### Changed
+- **Extractions happen outside the served store, and orphans are collected.**
+  The store extracted into a temporary directory *inside* the entry's own
+  parent, so anything an extraction wrote beside its tree landed in the store
+  itself — the extractor refuses that now, but belt and braces: staging moved to
+  `<cache>/store/.staging/`, outside the served layout and on the same
+  filesystem, so a `rename` still works and nothing written there can ever
+  become a package. A staging directory older than six hours (no install lasts
+  that long; a killed process leaves one forever) is swept on the way in,
+  silently, since it is housekeeping and another process may be deleting the
+  same entry.
+
 ### Added
 - **Windows: what an external tool does with a symlink entry is measured, not
   assumed.** `ZipDownloader` prefers `7z x -bb0 -y` over `unzip -qq` there, and

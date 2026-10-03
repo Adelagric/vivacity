@@ -45,6 +45,9 @@ pcre2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Already in the graph through `tar`; declared here to let a test age a staging
+# directory instead of waiting six hours for the sweep.
+filetime = "=0.2.29"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "=1.0.0-alpha.4"

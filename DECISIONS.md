@@ -2641,3 +2641,32 @@ ce job : le code Windows se **typecheck localement** maintenant
 ~15 s à chaud). Les deux rouges Windows de ce sprint étaient une erreur de
 compilation et un lint, c'est-à-dire exactement ce que ça attrape — pour une
 boucle CI qui coûte une heure. L'exécution réelle reste au runner.
+
+## 2026-10-03 — L'extraction sort du store servi, et les orphelins sont ramassés
+
+Fait : `Store::ensure` extrayait dans un `.tmp-XXXX` créé **dans le répertoire
+parent de l'entrée**, donc à l'intérieur du store lui-même. L'évasion corrigée
+en 0.19.0 y posait son fichier (relevé par la méta : « l'inventaire hors projet
+n'aurait pas attrapé l'évasion d'origine, elle atterrit dans le store »), et plus
+rien ne l'en enlevait.
+
+Ceinture et bretelles, maintenant que l'extracteur refuse de sortir de son
+répertoire : le staging devient `<cache>/store/.staging/`, **hors de la
+disposition servie** (`<cache>/store/v2/…`). Une entrée n'est servie que depuis
+`v2` et rien d'autre n'est jamais lu, donc ce qu'une extraction écrirait à côté
+de son arbre ne peut plus devenir un paquet. Même système de fichiers que `v2`,
+ce que le `rename` exige — « hors du store » au sens d'un autre point de montage
+casserait l'atomicité, ce qui serait un recul.
+
+Ajouté avec : un balayage des stagings qu'aucun processus vivant ne peut plus
+posséder, au passage, à l'entrée d'`ensure`. Seuil **six heures** : bien au-delà
+de n'importe quel install (celui d'un staging parallèle a des minutes), assez
+court pour qu'un processus tué ne laisse pas un arbre pour un mois. Silencieux
+sur toutes les erreurs : c'est de l'entretien, pas le contrat de l'install, et un
+autre processus peut être en train de supprimer la même entrée.
+
+Vérifié : le test du store exige que le staging existe, qu'il soit **vide** après
+une extraction réussie, qu'un orphelin vieilli de sept heures (`filetime`, déjà
+dans le graphe via `tar`, déclaré en dev-dependency pour ne pas attendre six
+heures) soit ramassé et qu'un staging frais soit laissé tranquille. Install réel
+de Laravel : `store/v2` et `store/.staging` côte à côte, staging vide.
