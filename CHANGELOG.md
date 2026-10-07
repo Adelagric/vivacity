@@ -58,7 +58,17 @@ byte-identical-output promise are the public API.
   same entry.
 
 ### Fixed
-- **Windows: a name the system cannot carry is renamed as 7-Zip renames it.**
+- **Windows: a name the system cannot carry is renamed as 7-Zip renames it**, and
+  the last entry wins down to the case of its name. Three measurements on the
+  runner, one per question: a reserved device name takes a leading `_`; a
+  trailing run of dots or spaces is replaced character by character (`two..` →
+  `two__`, not `two._`); and of two entries differing only in case — one file on
+  a case-insensitive filesystem — the surviving NAME is the last one's, where
+  reopening the existing file left us the first (`_CON` against the tool's
+  `_con`), so an existing file is removed before the write there. Before all
+  this, vivacity wrote `CON` and `COM1` as they stood, lost `NUL` into the
+  device — a file reported installed that is not there — and let Windows strip
+  trailing dots and spaces.
   The measurement asked for on 2026-10-03 came back: 7-Zip — which Composer
   prefers there — does not skip these entries, it **renames** them. `CON` →
   `_CON`, `COM1` → `_COM1`, `NUL` → `_NUL`, and a trailing dot or space becomes

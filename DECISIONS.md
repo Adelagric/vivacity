@@ -2802,3 +2802,31 @@ apparaît dans le journal au lieu de passer en silence. L'échantillon s'élargi
 Écart qui reste, écrit dans CONTRIBUTING : la règle est celle de 7-Zip. Ce que
 fait l'`unzip` d'Info-ZIP des mêmes noms sur une machine sans 7-Zip n'est pas
 mesuré — et le test le dira là-bas, puisqu'il compare à l'outil qu'il trouve.
+
+## 2026-10-07 — La casse du dernier gagne aussi (dernière des trois mesures Windows)
+
+Les trois questions séparées ont répondu une par une, et c'est bien le découpage
+qui les a rendues lisibles : tant que les trois tenaient dans un seul
+échantillon, le cas qui faisait échouer l'outil masquait les deux autres.
+
+1. **Noms réservés et points/espaces finals** : la règle de `on_disk` est
+   désormais exacte (le test compare l'arbre entier à celui de l'outil et il
+   passe), y compris `two..` → `two__` — la suite est remplacée caractère par
+   caractère.
+2. **Nom réservé en composant de répertoire** : l'outil renomme puis se heurte à
+   son propre `checkdir error` (sortie 2) et nous refusons. Accord.
+3. **Deux entrées ne différant que par la casse** (`CON` puis `con`) : un seul
+   fichier des deux côtés, mais
+
+       tool laid out:     ["_con"]
+       vivacity laid out: ["_CON"]
+
+   L'outil garde le nom de la **dernière** entrée, nous celui de la première —
+   parce que réécrire un fichier existant sous une autre casse conserve le nom
+   d'origine sous Windows. Donc 7-Zip supprime avant de créer, et sa casse suit
+   la dernière entrée comme son contenu.
+
+Correctif : sous Windows, le fichier existant est supprimé avant l'écriture.
+Rien n'est perdu à le faire là-bas, puisque les modes n'y sont pas appliqués —
+contrairement à unix, où c'est justement la survie du mode à travers l'écrasement
+qui fait l'arbre du cas « doublon » (DECISIONS 2026-10-03), d'où le `cfg`.

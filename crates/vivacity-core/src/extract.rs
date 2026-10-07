@@ -574,6 +574,15 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
             let buf = read_within(&mut entry, &mut allowance, hint)
                 .map_err(Error::io(&out))?
                 .ok_or_else(over)?;
+            // Windows: an existing file is removed before the write, so the
+            // name on disk carries THIS entry's case. Measured on the runner —
+            // an archive holding `CON` and then `con` is one file either way,
+            // and 7-Zip leaves `_con` where reopening the existing file left us
+            // `_CON`: the tool's name follows the last entry, as its content
+            // does. Nothing is lost by removing first, since modes are not
+            // applied there.
+            #[cfg(windows)]
+            let _ = std::fs::remove_file(&out);
             std::fs::write(&out, &buf).map_err(Error::io(&out))?;
             apply_mode(&out, &rule)?;
             written.insert(stripped.clone());
