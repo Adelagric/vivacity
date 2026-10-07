@@ -2769,3 +2769,36 @@ il raconte ce que la machine a répondu.
 
 Vérifié localement par `cargo clippy --target x86_64-pc-windows-gnu
 --all-targets -- -D warnings` (voir HANDOVER) ; l'exécution appartient au runner.
+
+## 2026-10-07 — Noms impossibles sous Windows : 7-Zip renomme, il ne saute pas
+
+La mesure demandée le 2026-10-03 a répondu, dans le journal du runner :
+
+    tool laid out:     ["_COM1", "_CON", "_NUL", "ok.txt", "trailing_"]
+    vivacity laid out: ["COM1",  "CON",           "ok.txt", "trailing"]
+
+Donc 7-Zip — que Composer préfère sous Windows — **renomme** : un nom de
+périphérique réservé prend un `_` devant, et un point ou espace final devient
+`_`. Le `trailing_` unique dit autre chose au passage : `trailing.` et
+`trailing ` atterrissent sur le **même** nom, donc deux entrées se télescopent et
+la dernière gagne — ce qui est déjà la règle de l'extraction.
+
+Ce que vivacity faisait : écrire `CON` et `COM1` tels quels (les API que Rust
+utilise le permettent), **perdre `NUL` dans le périphérique** — un fichier
+annoncé installé qui n'existe pas — et laisser Windows retirer le point et
+l'espace finals. Quatre noms que la référence ne produit jamais.
+
+Correctif : `on_disk` applique la règle **par composant de chemin**, donc un
+répertoire au nom réservé est renommé aussi (cas ajouté à l'échantillon, il
+n'était pas mesuré). La liste de noms réservés est celle de Composer, celle que
+porte `hasPackageNamingError` pour les noms de paquets ; elle est recopiée ici
+parce que le résolveur dépend de ce crate et pas l'inverse.
+
+Le test ne compare plus un nom à la fois mais **l'arbre entier** contre celui de
+l'outil, et imprime les deux listings : une forme que personne n'a anticipée
+apparaît dans le journal au lieu de passer en silence. L'échantillon s'élargit à
+`con` (minuscule), `CON.txt`, `LPT1`, `PRN`, `AUX`, `two..` et `CON/inside.txt`.
+
+Écart qui reste, écrit dans CONTRIBUTING : la règle est celle de 7-Zip. Ce que
+fait l'`unzip` d'Info-ZIP des mêmes noms sur une machine sans 7-Zip n'est pas
+mesuré — et le test le dira là-bas, puisqu'il compare à l'outil qu'il trouve.

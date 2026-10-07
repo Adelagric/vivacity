@@ -57,6 +57,19 @@ byte-identical-output promise are the public API.
   silently, since it is housekeeping and another process may be deleting the
   same entry.
 
+### Fixed
+- **Windows: a name the system cannot carry is renamed as 7-Zip renames it.**
+  The measurement asked for on 2026-10-03 came back: 7-Zip — which Composer
+  prefers there — does not skip these entries, it **renames** them. `CON` →
+  `_CON`, `COM1` → `_COM1`, `NUL` → `_NUL`, and a trailing dot or space becomes
+  `_`, so `trailing.` and `trailing ` both land on `trailing_` (two entries, one
+  file, last one wins). vivacity wrote `CON` and `COM1` as they stood, lost `NUL`
+  into the device — a file reported installed that is not there — and let Windows
+  strip the trailing dot and space: four names the reference never produces. The
+  rule is now applied per path component, so a reserved *directory* name is
+  renamed too, and the test compares the whole tree against the tool's rather
+  than one name at a time.
+
 ### Added
 - **Windows reserved names and paths past MAX_PATH are measured against the same
   tool.** `NUL` and its kin are devices, and writing to one *succeeds* while

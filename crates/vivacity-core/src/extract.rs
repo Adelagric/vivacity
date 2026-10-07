@@ -304,6 +304,75 @@ fn windows_unzip_tool_present() -> bool {
         || in_path("unzip.exe")
 }
 
+/// Windows cannot carry every name a zip can hold, and 7-Zip — which Composer
+/// prefers there — RENAMES rather than skips. Measured on the runner
+/// (`windows_reserved_names_follow_the_tool`, log of 2026-10-03):
+///
+/// ```text
+/// tool laid out:     ["_COM1", "_CON", "_NUL", "ok.txt", "trailing_"]
+/// vivacity laid out: ["COM1",  "CON",           "ok.txt", "trailing"]
+/// ```
+///
+/// So: a reserved device name takes a leading `_`, and a trailing dot or space
+/// becomes `_`. Note what the single `trailing_` says: `trailing.` and
+/// `trailing ` both land on the same name, so two entries collide and the last
+/// one wins — which is the extraction's own rule anyway.
+///
+/// vivacity wrote `CON` and `COM1` as they stood (Windows allows it through the
+/// APIs Rust uses), lost `NUL` into the device, and let Windows strip the
+/// trailing dot and space — four names the reference does not produce.
+///
+/// The reserved list is Composer's own, the one `hasPackageNamingError` carries
+/// for package names (`vivacity-resolver::lockfile`); it cannot be shared from
+/// here, since the resolver depends on this crate and not the other way.
+#[cfg(windows)]
+const WINDOWS_RESERVED: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// One path component, as 7-Zip would write it.
+#[cfg(windows)]
+fn windows_safe_component(name: &str) -> String {
+    let stem = name.split('.').next().unwrap_or(name);
+    let reserved = WINDOWS_RESERVED
+        .iter()
+        .any(|r| stem.eq_ignore_ascii_case(r));
+    let mut out = String::with_capacity(name.len() + 1);
+    if reserved {
+        out.push('_');
+    }
+    out.push_str(name);
+    // A trailing dot or space is replaced, not stripped: Windows would drop it
+    // silently and two entries would land on the same name for a different
+    // reason than the reference's.
+    if out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+        out.push('_');
+    }
+    out
+}
+
+/// The path an entry lands at on disk: the archive's own on unix, 7-Zip's
+/// renaming of it on Windows.
+fn on_disk(rel: &Path) -> PathBuf {
+    #[cfg(not(windows))]
+    {
+        rel.to_path_buf()
+    }
+    #[cfg(windows)]
+    {
+        rel.components()
+            .map(|c| match c {
+                Component::Normal(n) => {
+                    std::ffi::OsString::from(windows_safe_component(&n.to_string_lossy()))
+                }
+                other => other.as_os_str().to_owned(),
+            })
+            .collect()
+    }
+}
+
 /// An entry's path as the archive spells it: components joined by `/`, whatever
 /// the platform's separator. Our refusal messages are read by people and grepped
 /// by harnesses, so `a/b` must not become `a\b` on Windows.
@@ -433,7 +502,8 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 ),
             });
         }
-        if made.contains(&dest.join(&stripped)) && !entry.is_dir() {
+        let disk = on_disk(&stripped);
+        if made.contains(&dest.join(&disk)) && !entry.is_dir() {
             return Err(Error::HostileArchive {
                 dest: dest.to_path_buf(),
                 reason: format!(
@@ -442,7 +512,7 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
                 ),
             });
         }
-        let out = dest.join(&stripped);
+        let out = dest.join(&disk);
 
         // Host and attributes from the central directory; an entry the scan
         // did not find falls back to the crate's own answer.
@@ -628,7 +698,7 @@ fn extract_tar_with_limit(tgz_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
         let Some(stripped) = strip_root(&e.path, strip.as_deref()) else {
             continue;
         };
-        let out = dest.join(&stripped);
+        let out = dest.join(on_disk(&stripped));
         if e.kind == tar::EntryType::Directory {
             ensure_dir(&out, &mut made)?;
             continue;
@@ -1179,16 +1249,32 @@ mod tests {
         }
     }
 
-    /// Windows reserved device names (`CON`, `NUL`, `COM1`, …) and names a
-    /// trailing dot or space makes unreachable. Writing to `NUL` succeeds and
-    /// discards everything, which is the trap: an extractor can report success
-    /// for a file that does not exist. Measured against the tool Composer would
-    /// run, and we must agree with it — entry by entry, since a tool may skip
-    /// one name and take another.
+    /// Windows reserved device names and names a trailing dot or space makes
+    /// unreachable. 7-Zip — which Composer prefers there — RENAMES them rather
+    /// than skipping: measured on 2026-10-03, `CON` → `_CON`, `COM1` →
+    /// `_COM1`, `NUL` → `_NUL`, `trailing.` and `trailing ` both → `trailing_`.
+    /// `on_disk` implements that, and this test holds it to the tool, listing
+    /// both trees so a shape nobody anticipated shows up in the log rather than
+    /// as a silent pass.
     #[test]
     #[cfg(windows)]
     fn windows_reserved_names_follow_the_tool() {
-        let names = ["CON", "NUL", "COM1", "trailing.", "trailing ", "ok.txt"];
+        let names = [
+            "CON",
+            "con",
+            "CON.txt",
+            "COM1",
+            "LPT1",
+            "PRN",
+            "AUX",
+            "NUL",
+            "trailing.",
+            "trailing ",
+            "two..",
+            "ok.txt",
+            // A reserved name as a DIRECTORY component, unmeasured until now.
+            "CON/inside.txt",
+        ];
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for n in names {
             w.start_file(
@@ -1214,24 +1300,37 @@ mod tests {
         let ours = work.path().join("ours");
         let got = extract_zip(&zip, &ours);
         eprintln!("tool exited {code:?}; extract_zip said {got:?}");
-        // Both listings, so a tool that RENAMES an entry instead of skipping it
-        // says so in the log rather than looking like a skip.
-        let listing = |d: &Path| -> Vec<String> {
-            let mut v: Vec<String> = std::fs::read_dir(d)
-                .map(|it| {
-                    it.flatten()
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect()
-                })
-                .unwrap_or_default();
+
+        // Every relative path under each tree, so a renamed directory shows up
+        // as well as a renamed file.
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                out.push(
+                    p.strip_prefix(root)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                if p.is_dir() {
+                    walk(root, &p, out);
+                }
+            }
+        }
+        let listing = |root: &Path| -> Vec<String> {
+            let mut v = Vec::new();
+            walk(root, root, &mut v);
             v.sort();
             v
         };
-        eprintln!("  tool laid out:     {:?}", listing(&out.join("pkg")));
-        eprintln!("  vivacity laid out: {:?}", listing(&ours));
-        // The verdict first: a tool that refuses the archive makes Composer's
-        // install fail (its ZipArchive fallback cannot create these names
-        // either), so we must not report success.
+        let theirs = listing(&out.join("pkg"));
+        let mine = listing(&ours);
+        eprintln!("  tool laid out:     {theirs:?}");
+        eprintln!("  vivacity laid out: {mine:?}");
+
         if code != Some(0) {
             assert!(
                 got.is_err(),
@@ -1240,13 +1339,7 @@ mod tests {
             return;
         }
         got.expect("the tool laid it out, so must we");
-        for n in names {
-            assert_eq!(
-                out.join("pkg").join(n).exists(),
-                ours.join(n).exists(),
-                "{n:?} exists on one side only"
-            );
-        }
+        assert_eq!(theirs, mine, "the two trees differ");
     }
 
     /// A path longer than MAX_PATH (260). Without the long-path opt-in Windows
