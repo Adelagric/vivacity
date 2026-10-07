@@ -343,11 +343,15 @@ fn windows_safe_component(name: &str) -> String {
         out.push('_');
     }
     out.push_str(name);
-    // A trailing dot or space is replaced, not stripped: Windows would drop it
-    // silently and two entries would land on the same name for a different
-    // reason than the reference's.
-    if out.ends_with('.') || out.ends_with(' ') {
-        out.pop();
+    // EVERY trailing dot or space is replaced, not stripped — measured on the
+    // runner: `two..` comes out as `two__`, so the run is replaced character by
+    // character, not collapsed. Windows would drop them silently, and two
+    // entries would then land on the same name for a reason that is not the
+    // reference's.
+    let kept = out.trim_end_matches(['.', ' ']).len();
+    let replaced = out.len() - kept;
+    out.truncate(kept);
+    for _ in 0..replaced {
         out.push('_');
     }
     out
@@ -1249,60 +1253,10 @@ mod tests {
         }
     }
 
-    /// Windows reserved device names and names a trailing dot or space makes
-    /// unreachable. 7-Zip — which Composer prefers there — RENAMES them rather
-    /// than skipping: measured on 2026-10-03, `CON` → `_CON`, `COM1` →
-    /// `_COM1`, `NUL` → `_NUL`, `trailing.` and `trailing ` both → `trailing_`.
-    /// `on_disk` implements that, and this test holds it to the tool, listing
-    /// both trees so a shape nobody anticipated shows up in the log rather than
-    /// as a silent pass.
-    #[test]
+    /// Every relative path under a tree, so a renamed directory shows up as
+    /// well as a renamed file.
     #[cfg(windows)]
-    fn windows_reserved_names_follow_the_tool() {
-        let names = [
-            "CON",
-            "con",
-            "CON.txt",
-            "COM1",
-            "LPT1",
-            "PRN",
-            "AUX",
-            "NUL",
-            "trailing.",
-            "trailing ",
-            "two..",
-            "ok.txt",
-            // A reserved name as a DIRECTORY component, unmeasured until now.
-            "CON/inside.txt",
-        ];
-        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for n in names {
-            w.start_file(
-                format!("pkg/{n}"),
-                SimpleFileOptions::default().unix_permissions(0o644),
-            )
-            .expect("start");
-            w.write_all(n.as_bytes()).expect("write");
-        }
-        let zip = w.finish().expect("finish").into_inner();
-
-        let work = tmpdir();
-        let file = work.path().join("dist.zip");
-        std::fs::write(&file, &zip).expect("write zip");
-        let Some(tool) = composers_tool() else {
-            eprintln!(
-                "no 7z and no unzip: Composer would use ZipArchive, out of this test's reach"
-            );
-            return;
-        };
-        let out = work.path().join("tool");
-        let code = run_tool(&tool, &file, &out);
-        let ours = work.path().join("ours");
-        let got = extract_zip(&zip, &ours);
-        eprintln!("tool exited {code:?}; extract_zip said {got:?}");
-
-        // Every relative path under each tree, so a renamed directory shows up
-        // as well as a renamed file.
+    fn tree_listing(root: &Path) -> Vec<String> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -1320,25 +1274,113 @@ mod tests {
                 }
             }
         }
-        let listing = |root: &Path| -> Vec<String> {
-            let mut v = Vec::new();
-            walk(root, root, &mut v);
-            v.sort();
-            v
-        };
-        let theirs = listing(&out.join("pkg"));
-        let mine = listing(&ours);
+        let mut v = Vec::new();
+        walk(root, root, &mut v);
+        v.sort();
+        v
+    }
+
+    /// Builds `pkg/<name>` for each name, runs the tool Composer would run and
+    /// `extract_zip`, prints both trees, and returns them.
+    #[cfg(windows)]
+    fn trees_of(names: &[&str], work: &Path) -> Option<(Option<i32>, Vec<String>, Vec<String>)> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for n in names {
+            w.start_file(
+                format!("pkg/{n}"),
+                SimpleFileOptions::default().unix_permissions(0o644),
+            )
+            .expect("start");
+            w.write_all(n.as_bytes()).expect("write");
+        }
+        let zip = w.finish().expect("finish").into_inner();
+        let file = work.join("dist.zip");
+        std::fs::write(&file, &zip).expect("write zip");
+        let tool = composers_tool()?;
+        let out = work.join("tool");
+        let code = run_tool(&tool, &file, &out);
+        let ours = work.join("ours");
+        let got = extract_zip(&zip, &ours);
+        eprintln!("tool exited {code:?}; extract_zip said {got:?}");
+        let (theirs, mine) = (tree_listing(&out.join("pkg")), tree_listing(&ours));
         eprintln!("  tool laid out:     {theirs:?}");
         eprintln!("  vivacity laid out: {mine:?}");
-
         if code != Some(0) {
             assert!(
                 got.is_err(),
                 "the tool refused the archive, so the install must fail here too"
             );
-            return;
+        } else {
+            got.expect("the tool laid it out, so must we");
         }
-        got.expect("the tool laid it out, so must we");
+        Some((code, theirs, mine))
+    }
+
+    /// Windows reserved device names and names a trailing dot or space makes
+    /// unreachable. 7-Zip — which Composer prefers there — RENAMES them rather
+    /// than skipping: measured, `CON` → `_CON`, a trailing dot or space → `_`
+    /// each (`two..` → `two__`). `on_disk` implements that, and this holds it to
+    /// the tool over the whole tree.
+    #[test]
+    #[cfg(windows)]
+    fn windows_reserved_names_follow_the_tool() {
+        let work = tmpdir();
+        let Some((code, theirs, mine)) = trees_of(
+            &[
+                "CON",
+                "CON.txt",
+                "COM1",
+                "LPT1",
+                "PRN",
+                "AUX",
+                "NUL",
+                "trailing.",
+                "trailing ",
+                "two..",
+                "ok.txt",
+            ],
+            work.path(),
+        ) else {
+            eprintln!(
+                "no 7z and no unzip: Composer would use ZipArchive, out of this test's reach"
+            );
+            return;
+        };
+        assert_eq!(code, Some(0), "the tool is expected to rename, not refuse");
+        assert_eq!(theirs, mine, "the two trees differ");
+    }
+
+    /// The same name as a DIRECTORY component and as a file in one archive. The
+    /// tool renames both, and then has a file where it needs a directory: it
+    /// exits 2, as it does for any such collision, and we refuse. Measured.
+    #[test]
+    #[cfg(windows)]
+    fn windows_a_reserved_name_as_a_directory_follows_the_tool() {
+        let work = tmpdir();
+        let Some((code, _, _)) = trees_of(&["CON", "CON/inside.txt"], work.path()) else {
+            eprintln!("no 7z and no unzip: out of this test's reach");
+            return;
+        };
+        assert_ne!(
+            code,
+            Some(0),
+            "the tool is expected to hit its own checkdir error here"
+        );
+    }
+
+    /// Two names that differ only in case, both reserved. On a case-insensitive
+    /// filesystem they are one file, and which NAME survives is the tool's
+    /// business: this test reports what it did rather than asserting a rule
+    /// nobody has measured. It fails if the two sides disagree, with both trees
+    /// in the log.
+    #[test]
+    #[cfg(windows)]
+    fn windows_two_reserved_names_differing_only_in_case() {
+        let work = tmpdir();
+        let Some((_, theirs, mine)) = trees_of(&["CON", "con"], work.path()) else {
+            eprintln!("no 7z and no unzip: out of this test's reach");
+            return;
+        };
         assert_eq!(theirs, mine, "the two trees differ");
     }
 

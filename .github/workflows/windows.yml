@@ -54,7 +54,7 @@ jobs:
       # it) and a path past MAX_PATH are facts of the machine, so the tests ask
       # the tool and demand that we agree with it.
       - name: Reserved names and long paths, against the same tool (measured)
-        run: cargo test -p vivacity-core --lib -- --nocapture windows_reserved_names_follow_the_tool a_path_longer_than_max_path_follows_the_tool
+        run: cargo test -p vivacity-core --lib -- --nocapture windows_reserved_names_follow_the_tool windows_a_reserved_name_as_a_directory_follows_the_tool windows_two_reserved_names_differing_only_in_case a_path_longer_than_max_path_follows_the_tool
 
       - name: Bin proxy .bat (bin-compat rule, caller, skip, Composer bytes)
         run: cargo test -p vivacity-core --test fixtures_binproxy bat_
