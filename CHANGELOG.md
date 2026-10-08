@@ -4,7 +4,7 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
-## [Unreleased]
+## [0.20.0] — 2026-10-08
 
 ### Fixed
 - **A file/directory collision inside an archive is refused by name.** An
@@ -17,7 +17,6 @@ byte-identical-output promise are the public API.
   before the write and named: `entry a/b would be written under a, which the
   archive wrote as a file`.
 
-### Fixed
 - **The extraction guards no longer scan what they should look up.** The two
   checks that refuse writing through a symlink the archive created, or under a
   path it wrote as a file, scanned their whole set for every entry — O(entries²).
@@ -45,19 +44,6 @@ byte-identical-output promise are the public API.
   convertible to UTF-16, and what 7-Zip does with such a name is listed as
   unmeasured.
 
-### Changed
-- **Extractions happen outside the served store, and orphans are collected.**
-  The store extracted into a temporary directory *inside* the entry's own
-  parent, so anything an extraction wrote beside its tree landed in the store
-  itself — the extractor refuses that now, but belt and braces: staging moved to
-  `<cache>/store/.staging/`, outside the served layout and on the same
-  filesystem, so a `rename` still works and nothing written there can ever
-  become a package. A staging directory older than six hours (no install lasts
-  that long; a killed process leaves one forever) is swept on the way in,
-  silently, since it is housekeeping and another process may be deleting the
-  same entry.
-
-### Fixed
 - **Windows: a name the system cannot carry is renamed as 7-Zip renames it**, and
   the last entry wins down to the case of its name. Three measurements on the
   runner, one per question: a reserved device name takes a leading `_`; a
@@ -79,6 +65,23 @@ byte-identical-output promise are the public API.
   rule is now applied per path component, so a reserved *directory* name is
   renamed too, and the test compares the whole tree against the tool's rather
   than one name at a time.
+
+- **`vivacity-pcre2-sys` builds under Rust 1.99.** A hand-written line vendored
+  with the bindings used `::std::usize::MAX`, deprecated in 1.99, which
+  `-D warnings` turns into an error. It went red on the CI runners — which follow
+  stable — on a commit that did not touch the crate.
+
+### Changed
+- **Extractions happen outside the served store, and orphans are collected.**
+  The store extracted into a temporary directory *inside* the entry's own
+  parent, so anything an extraction wrote beside its tree landed in the store
+  itself — the extractor refuses that now, but belt and braces: staging moved to
+  `<cache>/store/.staging/`, outside the served layout and on the same
+  filesystem, so a `rename` still works and nothing written there can ever
+  become a package. A staging directory older than six hours (no install lasts
+  that long; a killed process leaves one forever) is swept on the way in,
+  silently, since it is housekeeping and another process may be deleting the
+  same entry.
 
 ### Added
 - **Windows reserved names and paths past MAX_PATH are measured against the same
@@ -151,6 +154,22 @@ byte-identical-output promise are the public API.
   none, then 100 ms, then 500 ms. `harness/transport-exit.sh` holds all of it
   with no network, and fails four of its five checks against the published
   0.19.1.
+
+### Known issues
+- **The platform probe's cache does not notice an upgraded library**, a bug
+  present since 0.14, found by this release's own gates. The cache of
+  `platform-probe.json` is keyed on the PHP binary, its `.ini` files and four
+  environment variables — not on the shared libraries PHP loads, nor on shared
+  extensions. After a `brew upgrade pcre2` (or icu, openssl, libxml, a PECL
+  extension…), PHP reports the new version and vivacity keeps serving the old
+  one: measured here, `lib-pcre` 10.47 where PHP says 10.49. `update` then
+  resolves against stale `lib-*` / `ext-*` versions, which changes the lock as
+  soon as a package constrains them. **Workaround:** delete
+  `platform-probe.json` from vivacity's cache directory
+  (`~/Library/Caches/vivacity/` on macOS, `$XDG_CACHE_HOME/vivacity/` or
+  `~/.cache/vivacity/` on Linux, `%LOCALAPPDATA%\vivacity\` on Windows). The
+  fix needs its own design — a cache keyed on every object's dependencies, so
+  the fast path stays a handful of `stat`s — and comes next.
 
 ## [0.19.1] — 2026-09-30
 
