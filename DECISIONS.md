@@ -2830,3 +2830,54 @@ Correctif : sous Windows, le fichier existant est supprimé avant l'écriture.
 Rien n'est perdu à le faire là-bas, puisque les modes n'y sont pas appliqués —
 contrairement à unix, où c'est justement la survie du mode à travers l'écrasement
 qui fait l'arbre du cas « doublon » (DECISIONS 2026-10-03), d'où le `cfg`.
+
+## 2026-10-09 — Le cache de la sonde ne garde que ce qu'il voit
+
+La known issue publiée avec la 0.20.0 : la clé de `platform-probe.json` (binaire
+PHP, `.ini`, quatre variables) ignorait les bibliothèques que PHP charge et ses
+extensions partagées ; après `brew upgrade pcre2`, `lib-pcre` restait à 10.47
+quand PHP disait 10.49. Plan et méta adversariale dans
+`docs/plans/v0.21-platform-probe-cache.md`.
+
+**Le piège qui rendait le correctif évident faux**, mesuré : Homebrew garde
+l'ancien keg (`Cellar/pcre2/10.47_1` et `Cellar/pcre2/10.49` coexistent) et ne
+déplace que le lien `opt/pcre2`. Une clé faite des chemins résolus des images
+chargées — ce que donnent `/proc/self/maps` et la trace de dyld — restait valide
+après la mise à jour, puisque le vieux fichier n'avait pas bougé.
+
+**Ce que la méta a cassé dans la révision 1**, vérifié ici :
+- un wrapper `#!/bin/sh exec php "$@"` donne **0 image** (SIP efface `DYLD_*` à
+  travers `/bin/sh`), alors que la sonde voit le vrai binaire : le plan r1
+  déduisait le marqueur Homebrew des images, donc sans image le bug restait
+  entier derrière n'importe quel wrapper ou shim ;
+- `Probed` exige `name` et `version` : une entrée `kind: images` dans la sortie
+  aurait cassé `platform_packages` dès le second run ;
+- `install` fait `probe().ok()` : toute erreur nouvelle serait devenue « pas de
+  PHP », contrôle de plateforme sauté en silence ;
+- `COMPOSER_ALLOW_XDEBUG` était lu par la sonde et absent de la clé.
+
+**Tranché** :
+1. la sonde rapporte ses faits **à côté** de ses entrées (`binary`, `ext_dir`,
+   `maps`), jamais dedans ;
+2. **échec fermé** : rien n'est mis en cache si la sonde n'est pas le binaire
+   localisé ou, sous unix, si ses images n'ont pas été vues — la sonde tourne
+   alors à chaque fois, sans erreur. 40 ms contre un lock que Composer
+   n'écrirait pas ;
+3. la clé : chaque image sur disque avec mtime, taille, **ctime et inode** ; la
+   **cible du lien `opt/<formule>`** de chaque keg chargé (exact sur le
+   repointage, aveugle à un `brew install` sans rapport — préféré au mtime du
+   répertoire `opt` entier) ; les marqueurs système ; dix variables
+   d'environnement ; un numéro de format **comparé** et le hachage de la sonde ;
+4. course : marqueurs et répertoire `opt` relevés avant et après la sonde ;
+   différents → rien n'est écrit.
+
+Mesuré sur Laravel no-op (`VIVACITY_TRACE`, phase « platform check », M4 Max) :
+0.20.0 3,3–4,2 ms, nouvelle clé 4,0–4,7 ms, sans cache 41,8–47,3 ms. La clé de
+ce Mac : 54 images, 39 liens de keg, 24 marqueurs.
+
+Vérifié par sept tests, dont le rouge d'abord (le lien repointé, l'ancien keg
+intact : la 0.20.0 sert 10.47), le remplacement en place, le wrapper jamais mis
+en cache (deux appels, deux lancements), le vrai php vu et dont le cache égale
+une sonde fraîche, un cache d'ancien format qui ne valide jamais, et les deux
+formats de trace de dyld. Le canal Linux (`/proc/self/maps`) et le canal
+Windows ne s'exécutent que sur leurs runners.

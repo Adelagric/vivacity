@@ -4,6 +4,34 @@ All notable changes to vivacity (named vivace up to 0.5.0). The format follows [
 versions follow [SemVer](https://semver.org/) — the CLI surface and the
 byte-identical-output promise are the public API.
 
+## [Unreleased]
+
+### Fixed
+- **The platform probe's cache sees what PHP loads, and only caches a php it
+  can see** — the known issue of 0.20.0. Its key held the PHP binary, the ini
+  files and four environment variables, not the libraries PHP links nor its
+  shared extensions, so after `brew upgrade pcre2` it kept serving `lib-pcre`
+  10.47 where PHP said 10.49, and `update` resolved against stale `lib-*` /
+  `ext-*` versions. The trap that made the obvious fix wrong: Homebrew keeps the
+  old keg next to the new one and only moves the `opt/<formula>` link, so a key
+  of the loaded files' resolved paths stays valid across the upgrade. The probe
+  now reports its own binary and, on Linux, the files it mapped; on macOS the
+  dyld trace lists the images at no measurable cost; on Windows the DLLs next to
+  `php.exe` and in `extension_dir` stand in. The key holds every image on disk
+  (mtime, size, ctime and inode on unix), the target of the `opt` link of every
+  Homebrew keg loaded, the system's markers (the dynamic linker's cache, the
+  package databases, the dyld shared cache), a compared format number and the
+  probe script itself. And it **fails closed**: a php behind a `#!/bin/sh`
+  wrapper, a version-manager shim, a binary that drops `DYLD_*` — anything whose
+  loaded files cannot be seen, or that reports another binary than the one
+  located — is probed on every run (~40 ms) instead of being served a cache that
+  may be stale. Measured, the warm path costs ~0.4 ms more than the old key.
+- **`COMPOSER_ALLOW_XDEBUG` is part of the probe cache's key.** The probe reads
+  it to decide whether xdebug counts as loaded; the key ignored it, so changing
+  it served the previous answer. Also added: the dynamic linker's own variables
+  (`LD_LIBRARY_PATH`, `LD_PRELOAD`, `DYLD_*`), which load other files without
+  touching any file the key watches.
+
 ## [0.20.0] — 2026-10-08
 
 ### Fixed

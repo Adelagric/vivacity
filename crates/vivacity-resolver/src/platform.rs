@@ -88,43 +88,93 @@ pub fn loaded_extensions(probed: &[Value]) -> std::collections::BTreeSet<String>
         .collect()
 }
 
-/// Identity of a file the probe's result depends on: its path and, when
-/// it exists, its mtime (nanoseconds) and size. An absent file is recorded
-/// as absent, so its appearance invalidates the cache too.
+/// Identity of a file the probe's result depends on: its path and, when it
+/// exists, its mtime (nanoseconds), size, and on unix its ctime and inode — a
+/// copy made with `cp -p`, `tar` or `rsync -t` keeps the mtime, it cannot keep
+/// the ctime. An absent file is recorded as absent, so its appearance
+/// invalidates the cache too.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileId {
     path: String,
     mtime_ns: Option<i128>,
     size: Option<u64>,
+    ctime_ns: Option<i128>,
+    ino: Option<u64>,
 }
 
 impl FileId {
     fn of(path: &str) -> FileId {
-        let meta = std::fs::metadata(path).ok();
+        FileId::from_meta(path, std::fs::metadata(path).ok())
+    }
+
+    fn from_meta(path: &str, meta: Option<std::fs::Metadata>) -> FileId {
         let mtime_ns = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| {
             t.duration_since(std::time::UNIX_EPOCH)
                 .ok()
                 .map(|d| d.as_nanos() as i128)
         });
+        #[cfg(unix)]
+        let (ctime_ns, ino) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (
+                meta.as_ref()
+                    .map(|m| i128::from(m.ctime()) * 1_000_000_000 + i128::from(m.ctime_nsec())),
+                meta.as_ref().map(|m| m.ino()),
+            )
+        };
+        #[cfg(not(unix))]
+        let (ctime_ns, ino) = (None, None);
         FileId {
             path: path.to_owned(),
             mtime_ns,
             size: meta.map(|m| m.len()),
+            ctime_ns,
+            ino,
         }
+    }
+
+    fn exists(&self) -> bool {
+        self.size.is_some()
     }
 }
 
-/// The environment the probe's output depends on (xdebug handling in the
-/// probe, PHP's own ini discovery), captured by value.
-const PROBE_ENV: &[&str] = &["PHPRC", "PHP_INI_SCAN_DIR", "XDEBUG_MODE", "XDEBUG_CONFIG"];
+/// The environment the probe's output depends on, captured by value: the
+/// xdebug handling in the probe (`COMPOSER_ALLOW_XDEBUG` was read by the probe
+/// and missing here until 0.21), PHP's own ini discovery, and what the dynamic
+/// linker reads to decide WHICH libraries to load — a change there loads other
+/// files without touching any file the key watches.
+const PROBE_ENV: &[&str] = &[
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "XDEBUG_MODE",
+    "XDEBUG_CONFIG",
+    "COMPOSER_ALLOW_XDEBUG",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+];
 
-/// One cached probe: valid while the php binary, every ini file PHP read
-/// (and the directory it scans), and the relevant environment are the same.
+/// Bumped whenever the key's shape or meaning changes, and COMPARED on read: an
+/// older cache must not validate by the accident of a field that deserialises
+/// to a default.
+const CACHE_FORMAT: u32 = 2;
+
+/// One cached probe, valid while everything it was derived from is the same:
+/// the probe script itself, the php binary, every ini file PHP read, the
+/// environment, every image the process loaded, the package-manager links
+/// those images were reached through, and the system's own markers.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ProbeCache {
+    format: u32,
+    script: String,
     php: FileId,
     inis: Vec<FileId>,
     env: Vec<(String, Option<String>)>,
+    images: Vec<FileId>,
+    links: Vec<(String, Option<String>)>,
+    markers: Vec<FileId>,
     probed: Vec<Value>,
 }
 
@@ -163,6 +213,95 @@ fn probe_env() -> Vec<(String, Option<String>)> {
         .iter()
         .map(|k| ((*k).to_owned(), std::env::var(k).ok()))
         .collect()
+}
+
+/// The probe script, by content: a vivacity that ships a different
+/// transcription must not serve the output of the previous one.
+fn script_hash() -> String {
+    use sha1::Digest as _;
+    let digest = sha1::Sha1::digest(PROBE.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// For every image under a Homebrew-style keg — `<prefix>/Cellar/<formula>/…` —
+/// the link `<prefix>/opt/<formula>` and where it points. Measured on
+/// 2026-10-08: `brew upgrade pcre2` left `Cellar/pcre2/10.47_1` untouched next
+/// to `Cellar/pcre2/10.49`, and only the link moved; a key of resolved paths
+/// stayed valid across the upgrade. The link's target is what moves, so it is
+/// what the key holds — exact, and blind to a `brew install` of anything else.
+fn keg_links(images: &[String]) -> Vec<(String, Option<String>)> {
+    let mut seen = std::collections::BTreeMap::new();
+    for image in images {
+        let Some(at) = image.find("/Cellar/") else {
+            continue;
+        };
+        let prefix = &image[..at];
+        let Some(formula) = image[at + "/Cellar/".len()..].split('/').next() else {
+            continue;
+        };
+        if formula.is_empty() {
+            continue;
+        }
+        let link = format!("{prefix}/opt/{formula}");
+        seen.entry(link.clone()).or_insert_with(|| read_link(&link));
+    }
+    seen.into_iter().collect()
+}
+
+fn read_link(path: &str) -> Option<String> {
+    std::fs::read_link(path)
+        .ok()
+        .map(|t| t.to_string_lossy().into_owned())
+}
+
+/// Files that change when the system's libraries or their data change, whatever
+/// the images say: the dynamic linker's cache, the package databases (they also
+/// move for data files no image list can see — tzdata, ICU), and on macOS the
+/// dyld shared cache, where `/usr/lib` and the system frameworks actually live.
+fn system_markers() -> Vec<FileId> {
+    let mut out: Vec<FileId> = [
+        "/etc/ld.so.cache",
+        "/var/lib/dpkg/status",
+        "/var/lib/rpm/rpmdb.sqlite",
+        "/var/lib/rpm/Packages",
+        "/lib/apk/db/installed",
+        "/var/lib/pacman/local",
+    ]
+    .iter()
+    .map(|p| FileId::of(p))
+    .filter(FileId::exists)
+    .collect();
+    for dir in [
+        "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld",
+        "/System/Library/dyld",
+    ] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut caches: Vec<FileId> = entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("dyld_shared_cache_")
+                })
+                .map(|e| FileId::from_meta(&e.path().to_string_lossy(), e.metadata().ok()))
+                .collect();
+            caches.sort_by(|a, b| a.path.cmp(&b.path));
+            out.extend(caches);
+        }
+    }
+    out
+}
+
+/// What raced the probe: the system markers, plus the `opt` directory of the
+/// Homebrew prefix the php binary lives in, when it lives in one — any `brew`
+/// operation rewrites it. Taken before and after the run; a difference means
+/// something moved while PHP was answering, and the answer is not cached.
+fn race_snapshot(php_path: &str) -> Vec<FileId> {
+    let mut out = system_markers();
+    if let Some(at) = php_path.find("/Cellar/") {
+        out.push(FileId::of(&format!("{}/opt", &php_path[..at])));
+    }
+    out
 }
 
 /// The php binary `php` names: as given when it holds a path separator,
@@ -207,70 +346,232 @@ fn probe_cache_file() -> std::path::PathBuf {
 }
 
 /// Runs the probe on the current PHP (`VIVACITY_PHP` or `php`), through a
-/// disk cache: a php process costs 30–60 ms, most of a no-op install. The
-/// cache is keyed on what the result depends on — the php binary (path,
-/// mtime, size), every ini file PHP loaded or scanned plus the scan
-/// directory, and PHPRC / PHP_INI_SCAN_DIR / XDEBUG_MODE / XDEBUG_CONFIG.
-/// `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it.
+/// disk cache: a php process costs 30–60 ms, most of a no-op install.
+///
+/// The cache only exists for a php whose loaded files it can SEE (DECISIONS
+/// 2026-10-09): the probe must report that it is the binary that was located,
+/// and on unix the images it loaded must have been listed. A wrapper script,
+/// a version-manager shim, a hardened-runtime binary that drops `DYLD_*`,
+/// a system without `/proc`: the probe runs every time instead, which costs
+/// 40 ms where a stale cache costs a lock Composer would not write.
+/// `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it outright.
 pub fn probe() -> Result<Vec<Value>, PlatformError> {
     let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
     if std::env::var_os("VIVACITY_NO_PLATFORM_CACHE").is_some() {
-        return run_probe(&php);
+        return run_probe(&php).map(|r| r.entries);
     }
-    let Some(php_path) = locate_php(&php) else {
-        return run_probe(&php);
+    probe_at(&php, &probe_cache_file())
+}
+
+/// `probe` with the php and the cache file as arguments: the seam the tests
+/// use to drive a fake php against a cache of their own.
+fn probe_at(php: &str, cache_file: &std::path::Path) -> Result<Vec<Value>, PlatformError> {
+    let Some(php_path) = locate_php(php) else {
+        return run_probe(php).map(|r| r.entries);
     };
-    let php_id = FileId::of(&php_path.to_string_lossy());
+    let php_path = php_path.to_string_lossy().into_owned();
+    let php_id = FileId::of(&php_path);
     let env = probe_env();
-    let cache_file = probe_cache_file();
-    if let Ok(bytes) = std::fs::read(&cache_file) {
+    let script = script_hash();
+    if let Ok(bytes) = std::fs::read(cache_file) {
         if let Ok(cached) = serde_json::from_slice::<ProbeCache>(&bytes) {
-            if cached.php == php_id
+            if cached.format == CACHE_FORMAT
+                && cached.script == script
+                && cached.php == php_id
                 && cached.env == env
                 && cached.inis.iter().all(|f| FileId::of(&f.path) == *f)
+                && cached.images.iter().all(|f| FileId::of(&f.path) == *f)
+                && cached.links.iter().all(|(l, t)| read_link(l) == *t)
+                && cached.markers == system_markers()
             {
                 return Ok(cached.probed);
             }
         }
     }
-    let probed = run_probe(&php)?;
+    let before = race_snapshot(&php_path);
+    let run = run_probe(php)?;
+    let Some(images) = run.loaded_files() else {
+        return Ok(run.entries);
+    };
+    // The php that answered must be the php that was located: a wrapper or a
+    // shim that picks another binary would make the key watch the wrong file.
+    if run.binary.as_deref() != Some(php_path.as_str()) {
+        return Ok(run.entries);
+    }
+    if race_snapshot(&php_path) != before {
+        return Ok(run.entries);
+    }
     let cache = ProbeCache {
+        format: CACHE_FORMAT,
+        script,
         php: php_id,
-        inis: ini_dependencies(&probed),
+        inis: ini_dependencies(&run.entries),
         env,
-        probed: probed.clone(),
+        links: keg_links(&images.iter().map(|f| f.path.clone()).collect::<Vec<_>>()),
+        images,
+        markers: system_markers(),
+        probed: run.entries.clone(),
     };
     if let Some(dir) = cache_file.parent() {
         if std::fs::create_dir_all(dir).is_ok() {
             if let Ok(json) = serde_json::to_vec(&cache) {
                 let tmp = cache_file.with_extension(format!("json.{}.tmp", std::process::id()));
-                if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &cache_file).is_err()
+                if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, cache_file).is_err()
                 {
                     let _ = std::fs::remove_file(&tmp);
                 }
             }
         }
     }
-    Ok(probed)
+    Ok(run.entries)
+}
+
+/// One real run of the probe: Composer's entries, and what this php loaded —
+/// the key's raw material, never the resolution's.
+struct ProbeRun {
+    entries: Vec<Value>,
+    binary: Option<String>,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    ext_dir: Option<String>,
+    /// The images the process mapped (`/proc/self/maps` on Linux, the dyld
+    /// trace on macOS), or `None` when they could not be seen.
+    #[cfg_attr(windows, allow(dead_code))]
+    images: Option<Vec<String>>,
+}
+
+impl ProbeRun {
+    /// The files whose identity the cache holds, or `None` when this php's
+    /// loaded files cannot be seen — and then nothing is cached. On unix, the
+    /// images that exist on disk (the dyld shared cache is not on disk as
+    /// files: it is a marker of its own). On Windows, where no image list
+    /// exists, the DLLs next to `php.exe` and in `extension_dir` — the PHP
+    /// distribution ships its libraries there — read with `read_dir`, whose
+    /// entries carry their metadata without opening each file.
+    fn loaded_files(&self) -> Option<Vec<FileId>> {
+        #[cfg(unix)]
+        {
+            let images = self.images.as_ref()?;
+            let mut files: Vec<FileId> = images
+                .iter()
+                .map(|p| FileId::of(p))
+                .filter(FileId::exists)
+                .collect();
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            files.dedup_by(|a, b| a.path == b.path);
+            (!files.is_empty()).then_some(files)
+        }
+        #[cfg(not(unix))]
+        {
+            let binary = self.binary.as_ref()?;
+            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(parent) = std::path::Path::new(binary).parent() {
+                dirs.push(parent.to_path_buf());
+            }
+            if let Some(ext) = self.ext_dir.as_deref().filter(|d| !d.is_empty()) {
+                dirs.push(std::path::PathBuf::from(ext));
+            }
+            let mut files = Vec::new();
+            for dir in dirs {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    if name.ends_with(".dll") || name.ends_with(".exe") {
+                        files.push(FileId::from_meta(
+                            &e.path().to_string_lossy(),
+                            e.metadata().ok(),
+                        ));
+                    }
+                }
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            Some(files)
+        }
+    }
+}
+
+/// The images dyld reports loading under `DYLD_PRINT_LIBRARIES=1`, in either
+/// format seen: `dyld[pid]: <UUID> /path` (macOS 12 and later, measured on 26)
+/// and `dyld: loaded: /path` (earlier). Paths may contain spaces.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn dyld_images(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            if let Some(rest) = line.strip_prefix("dyld: loaded: ") {
+                return Some(rest.to_owned());
+            }
+            let rest = line.strip_prefix("dyld[")?;
+            let (_, rest) = rest.split_once("]: ")?;
+            let rest = rest.strip_prefix('<')?;
+            let (_, path) = rest.split_once("> ")?;
+            path.starts_with('/').then(|| path.to_owned())
+        })
+        .collect()
+}
+
+/// stderr without the dyld trace, for an error message a person reads.
+fn without_dyld(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|l| !l.starts_with("dyld[") && !l.starts_with("dyld: "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One real run of assets/platform-probe.php.
-fn run_probe(php: &str) -> Result<Vec<Value>, PlatformError> {
+fn run_probe(php: &str) -> Result<ProbeRun, PlatformError> {
     let dir = tempfile::tempdir().map_err(|e| PlatformError(e.to_string()))?;
     let script = dir.path().join("platform-probe.php");
     std::fs::write(&script, PROBE).map_err(|e| PlatformError(e.to_string()))?;
-    let out = Command::new(php)
-        .arg(&script)
+    let mut cmd = Command::new(php);
+    cmd.arg(&script);
+    // The images this php loads, at no cost on a run that happens anyway
+    // (measured: 30 ms with or without). Stripped by SIP behind `/bin/sh` or
+    // `/usr/bin/env` — measured on a wrapper script: 0 images — which is the
+    // case `loaded_files` turns into "do not cache".
+    #[cfg(target_os = "macos")]
+    cmd.env("DYLD_PRINT_LIBRARIES", "1");
+    let out = cmd
         .output()
         .map_err(|e| PlatformError(format!("cannot run {php}: {e}")))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         return Err(PlatformError(format!(
             "platform probe failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            without_dyld(&stderr)
         )));
     }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| PlatformError(format!("platform probe output: {e}")))
+    let doc: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| PlatformError(format!("platform probe output: {e}")))?;
+    let entries = match doc.get("entries") {
+        Some(Value::Array(a)) => a.clone(),
+        _ => {
+            return Err(PlatformError(
+                "platform probe output: no `entries` array".to_owned(),
+            ))
+        }
+    };
+    let text = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
+    #[cfg(target_os = "macos")]
+    let images = {
+        let seen = dyld_images(&stderr);
+        (!seen.is_empty()).then_some(seen)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let images = doc.get("maps").and_then(Value::as_array).map(|a| {
+        a.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    Ok(ProbeRun {
+        entries,
+        binary: text("binary"),
+        ext_dir: text("ext_dir"),
+        images,
+    })
 }
 
 struct Override {
@@ -612,6 +913,248 @@ pub fn check_install(
 
 #[cfg(test)]
 mod tests {
+    /// A fake `php` whose answer depends on a library reached through a
+    /// Homebrew-style link (`opt/pcre2 -> ../Cellar/pcre2/<keg>`), the shape
+    /// measured on 2026-10-08: the old keg stays on disk, only the link moves.
+    /// It speaks the probe's format — its entries, its own path as `binary`,
+    /// and the library it "loaded" both as `maps` (Linux's channel) and as a
+    /// dyld trace line on stderr (macOS's) — and appends a line to `count` on
+    /// every launch, so a test can tell a cache hit from a probe.
+    #[cfg(unix)]
+    fn fake_php(root: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        for (keg, v) in [("a", "10.47"), ("b", "10.49")] {
+            let lib = root.join("Cellar/pcre2").join(keg).join("lib");
+            std::fs::create_dir_all(&lib).expect("mkdir");
+            std::fs::write(lib.join("libpcre2-8.0.dylib"), v).expect("lib");
+        }
+        std::fs::create_dir_all(root.join("opt")).expect("mkdir");
+        std::os::unix::fs::symlink("../Cellar/pcre2/a", root.join("opt/pcre2")).expect("link");
+        let php = root.join("php");
+        std::fs::write(
+            &php,
+            format!(
+                "#!/bin/sh\n\
+                 echo x >> '{root}/count'\n\
+                 lib=\"$(cd '{root}/opt/pcre2/lib' && pwd -P)/libpcre2-8.0.dylib\"\n\
+                 v=$(cat \"$lib\")\n\
+                 echo \"dyld[1]: <00000000-0000-0000-0000-000000000000> $lib\" >&2\n\
+                 printf '{{\"entries\":[{{\"kind\":\"lib\",\"name\":\"pcre\",\"version\":\"%s\",\"description\":\"x\"}}],\"binary\":\"{php}\",\"ext_dir\":\"\",\"maps\":[\"%s\"]}}' \"$v\" \"$lib\"\n",
+                root = root.display(),
+                php = root.join("php").display()
+            ),
+        )
+        .expect("php");
+        std::fs::set_permissions(&php, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        php
+    }
+
+    #[cfg(unix)]
+    fn launches(root: &std::path::Path) -> usize {
+        std::fs::read_to_string(root.join("count"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    fn pcre_of(probed: &[Value]) -> String {
+        probed
+            .iter()
+            .find(|v| v.get("name").and_then(Value::as_str) == Some("pcre"))
+            .and_then(|v| v.get("version").and_then(Value::as_str))
+            .unwrap_or("?")
+            .to_owned()
+    }
+
+    /// The known issue of 0.20.0, reproduced without Homebrew: the link is
+    /// repointed to a new keg while the old keg stays untouched, and the cache
+    /// must notice.
+    #[test]
+    #[cfg(unix)]
+    fn a_repointed_library_invalidates_the_cache() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = vivacity_core::pathutil::canonicalize(dir.path()).expect("canon");
+        let php = fake_php(&root);
+        let cache = root.join("platform-probe.json");
+        let php = php.to_string_lossy().into_owned();
+        assert_eq!(pcre_of(&probe_at(&php, &cache).expect("probe")), "10.47");
+        assert_eq!(launches(&root), 1);
+        // Same link target: a hit, no second launch — the cache still works.
+        assert_eq!(pcre_of(&probe_at(&php, &cache).expect("probe")), "10.47");
+        assert_eq!(launches(&root), 1, "an unchanged system must hit the cache");
+        // `brew upgrade pcre2`: the link moves, the old keg is left as it was.
+        std::fs::remove_file(root.join("opt/pcre2")).expect("rm link");
+        std::os::unix::fs::symlink("../Cellar/pcre2/b", root.join("opt/pcre2")).expect("link");
+        assert_eq!(
+            pcre_of(&probe_at(&php, &cache).expect("probe")),
+            "10.49",
+            "the cache served the old keg's version after the link moved"
+        );
+        assert_eq!(launches(&root), 2);
+    }
+
+    /// A cache written by 0.20.0 or earlier has no `format`, and must not
+    /// validate — not by a deserialisation that happens to fail, but by a
+    /// comparison: every field is present here except `format`'s value.
+    #[test]
+    #[cfg(unix)]
+    fn a_cache_of_an_older_format_never_validates() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = vivacity_core::pathutil::canonicalize(dir.path()).expect("canon");
+        let php = fake_php(&root).to_string_lossy().into_owned();
+        let cache = root.join("platform-probe.json");
+        probe_at(&php, &cache).expect("probe");
+        assert_eq!(launches(&root), 1);
+        let mut doc: Value =
+            serde_json::from_slice(&std::fs::read(&cache).expect("read")).expect("json");
+        doc["format"] = Value::from(CACHE_FORMAT - 1);
+        std::fs::write(&cache, serde_json::to_vec(&doc).expect("json")).expect("write");
+        probe_at(&php, &cache).expect("probe");
+        assert_eq!(
+            launches(&root),
+            2,
+            "an older format must send the probe again"
+        );
+        // And a file without the field at all — 0.20.0's shape — likewise.
+        doc.as_object_mut().expect("object").remove("format");
+        std::fs::write(&cache, serde_json::to_vec(&doc).expect("json")).expect("write");
+        probe_at(&php, &cache).expect("probe");
+        assert_eq!(launches(&root), 3);
+    }
+
+    /// A library replaced IN PLACE (apt, dnf): same path, new content. The
+    /// image's own identity has to move the key.
+    #[test]
+    #[cfg(unix)]
+    fn a_library_replaced_in_place_invalidates_the_cache() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = vivacity_core::pathutil::canonicalize(dir.path()).expect("canon");
+        let php = fake_php(&root).to_string_lossy().into_owned();
+        let cache = root.join("platform-probe.json");
+        assert_eq!(pcre_of(&probe_at(&php, &cache).expect("probe")), "10.47");
+        // Rewritten through a new inode, as a package manager does.
+        let lib = root.join("Cellar/pcre2/a/lib/libpcre2-8.0.dylib");
+        let tmp = lib.with_extension("new");
+        std::fs::write(&tmp, "10.48").expect("write");
+        std::fs::rename(&tmp, &lib).expect("rename");
+        assert_eq!(pcre_of(&probe_at(&php, &cache).expect("probe")), "10.48");
+    }
+
+    /// Fail closed: a php that cannot be seen — here a `#!/bin/sh` wrapper,
+    /// which drops `DYLD_*` on macOS and reports another binary than the one
+    /// located everywhere — is probed on EVERY call, never cached. Measured
+    /// before this rule existed: such a wrapper kept the 0.20.0 bug intact.
+    #[test]
+    #[cfg(unix)]
+    fn a_php_behind_a_wrapper_is_never_cached() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Some(real) = locate_php("php") else {
+            panic!("this test needs a real php on PATH (dev and CI have one)");
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = vivacity_core::pathutil::canonicalize(dir.path()).expect("canon");
+        let wrapper = root.join("php");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\necho x >> '{}/count'\nexec '{}' \"$@\"\n",
+                root.display(),
+                real.display()
+            ),
+        )
+        .expect("wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let cache = root.join("platform-probe.json");
+        let w = wrapper.to_string_lossy().into_owned();
+        let first = probe_at(&w, &cache).expect("probe");
+        let second = probe_at(&w, &cache).expect("probe");
+        assert_eq!(
+            launches(&root),
+            2,
+            "a wrapper must not be served from the cache"
+        );
+        assert_eq!(first, second);
+        assert!(
+            !cache.exists(),
+            "nothing may be cached for a php we cannot see"
+        );
+    }
+
+    /// The real php, directly: its images are seen, they include its own binary
+    /// and the PCRE2 library behind `lib-pcre`, and a cached answer is the
+    /// uncached one — the sentinel the 0.20.0 known issue lacked.
+    #[test]
+    #[cfg(unix)]
+    fn the_real_php_is_seen_and_its_cache_matches_a_fresh_probe() {
+        let Some(real) = locate_php("php") else {
+            panic!("this test needs a real php on PATH (dev and CI have one)");
+        };
+        let real = real.to_string_lossy().into_owned();
+        let run = run_probe(&real).expect("probe");
+        assert_eq!(run.binary.as_deref(), Some(real.as_str()));
+        let files = run
+            .loaded_files()
+            .expect("the images of a direct php are seen");
+        assert!(
+            files.iter().any(|f| f.path == real),
+            "the binary itself is among the images"
+        );
+        assert!(
+            files.iter().any(|f| f.path.contains("pcre2")),
+            "the PCRE2 library is among the images: {:?}",
+            files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+        let dir = tempfile::tempdir().expect("tmp");
+        let cache = dir.path().join("platform-probe.json");
+        let cold = probe_at(&real, &cache).expect("probe");
+        assert!(cache.exists(), "a php we can see is cached");
+        let warm = probe_at(&real, &cache).expect("probe");
+        assert_eq!(cold, warm);
+        assert_eq!(
+            warm, run.entries,
+            "the cache serves exactly what a fresh probe says"
+        );
+    }
+
+    /// Both trace formats dyld has used, and a path with a space.
+    #[test]
+    fn dyld_trace_lines_are_read_in_both_formats() {
+        let stderr = "dyld[123]: <0729711C-3D0D-3112-9FE8-5BAEC75F9439> /opt/homebrew/Cellar/php/8.5.10/bin/php\n\
+                      dyld: loaded: /usr/local/lib/libfoo.dylib\n\
+                      dyld[123]: <AB> /Users/x/Library/Application Support/lib.dylib\n\
+                      dyld[123]: move loaded to delayed: Montreal\n\
+                      PHP Warning: something\n";
+        assert_eq!(
+            dyld_images(stderr),
+            vec![
+                "/opt/homebrew/Cellar/php/8.5.10/bin/php".to_owned(),
+                "/usr/local/lib/libfoo.dylib".to_owned(),
+                "/Users/x/Library/Application Support/lib.dylib".to_owned(),
+            ]
+        );
+        assert_eq!(without_dyld(stderr), "PHP Warning: something");
+    }
+
+    /// The links the key watches are the Homebrew `opt` links of the kegs the
+    /// images live in, once each.
+    #[test]
+    fn keg_links_name_the_opt_link_of_each_formula() {
+        let images = vec![
+            "/opt/homebrew/Cellar/pcre2/10.49/lib/libpcre2-8.0.dylib".to_owned(),
+            "/opt/homebrew/Cellar/pcre2/10.49/lib/libpcre2-posix.dylib".to_owned(),
+            "/opt/homebrew/Cellar/icu4c@78/78.3/lib/libicuuc.78.3.dylib".to_owned(),
+            "/usr/lib/libz.1.dylib".to_owned(),
+        ];
+        let links: Vec<String> = keg_links(&images).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            links,
+            vec![
+                "/opt/homebrew/opt/icu4c@78".to_owned(),
+                "/opt/homebrew/opt/pcre2".to_owned()
+            ]
+        );
+    }
+
     use super::*;
 
     /// A probed platform: PHP 8.2.5 (64-bit) with mbstring and intl.

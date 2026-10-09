@@ -6,7 +6,11 @@
 // normalisation et ses replis sont rejoués côté Rust avec le port exact de
 // VersionParser). Les surcharges `config.platform` sont appliquées côté Rust.
 //
-// Sortie : JSON [{"kind": "php|ext|lib|fixed", "name", "version", "description", "replaces": {}, "provides": {}}]
+// Sortie : JSON {"entries": [{"kind": "php|ext|lib|fixed|ini", "name", "version", …}],
+//                "binary": realpath(PHP_BINARY), "ext_dir": extension_dir,
+//                "maps": [fichiers mappés] | null}
+// `entries` est ce que Composer verrait ; le reste ne sert qu'à la clé du cache
+// côté Rust (ce que ce PHP a réellement chargé), jamais à la résolution.
 // Les entrées composer / composer-plugin-api / composer-runtime-api sont
 // ajoutées par Rust (constantes de la version de Composer émulée).
 error_reporting(0);
@@ -394,4 +398,40 @@ $scanned = php_ini_scanned_files();
 // scan_dir: the directory PHP scans for extra .ini files (PHP_INI_SCAN_DIR
 // or the compiled-in default), so the probe cache can watch it.
 $out[] = ['kind' => 'ini', 'name' => 'ini', 'version' => '', 'loaded' => (string) php_ini_loaded_file(), 'scanned' => $scanned === false ? null : $scanned, 'scan_dir' => (string) (getenv('PHP_INI_SCAN_DIR') !== false ? getenv('PHP_INI_SCAN_DIR') : PHP_CONFIG_FILE_SCAN_DIR)];
-echo json_encode($out);
+// Ce que ce processus a réellement chargé, lu EN DERNIER : les extensions
+// interrogées plus haut ont pu charger leurs bibliothèques à la demande. Linux
+// seulement (/proc) ; ailleurs le Rust a son propre canal (dyld sur macOS, les
+// répertoires de DLL sous Windows). Fichiers ordinaires, dédupliqués, sans ce
+// script — un chemin temporaire qui changerait la clé à chaque run. Un mapping
+// « (deleted) » rend la liste inutilisable : null, donc pas de cache.
+$maps = null;
+$raw = @file('/proc/self/maps', FILE_IGNORE_NEW_LINES);
+if (is_array($raw)) {
+    $maps = [];
+    $self = realpath(__FILE__);
+    foreach ($raw as $line) {
+        $fields = preg_split('/\s+/', $line, 6);
+        if (!isset($fields[5]) || $fields[5] === '' || $fields[5][0] !== '/') {
+            continue;
+        }
+        $path = $fields[5];
+        if (substr($path, -10) === ' (deleted)') {
+            $maps = null;
+            break;
+        }
+        if ($path === $self || $path === __FILE__ || !is_file($path)) {
+            continue;
+        }
+        $maps[$path] = true;
+    }
+    if ($maps !== null) {
+        $maps = array_keys($maps);
+    }
+}
+$binary = realpath(PHP_BINARY);
+echo json_encode([
+    'entries' => $out,
+    'binary' => $binary === false ? PHP_BINARY : $binary,
+    'ext_dir' => (string) ini_get('extension_dir'),
+    'maps' => $maps,
+]);
