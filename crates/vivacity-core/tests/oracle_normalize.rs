@@ -1,5 +1,7 @@
 //! Differential of normalize_pretty against the phar's VersionParser::normalize.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -57,19 +59,7 @@ const VERSIONS: &[&str] = &[
 
 #[test]
 fn matches_version_parser_normalize() {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
+    let phar = oracle_phar::composer_phar();
     let script = format!(
         r#"require "phar://{}/vendor/autoload.php";
            $p = new \Composer\Semver\VersionParser();

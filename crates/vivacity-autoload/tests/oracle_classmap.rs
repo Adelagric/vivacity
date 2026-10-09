@@ -3,6 +3,8 @@
 //! ALL .php/.inc files of the laravel and sylius fixture vendors (about 50k
 //! files, a single PHP process). Every divergence is listed.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -36,19 +38,7 @@ fn php_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn oracle(files: &[PathBuf]) -> std::collections::BTreeMap<String, Option<Vec<String>>> {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
+    let phar = oracle_phar::composer_phar();
     let script = format!(
         r#"require "phar://{}/vendor/autoload.php";
            $out = [];

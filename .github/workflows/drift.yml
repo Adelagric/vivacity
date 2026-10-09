@@ -67,17 +67,23 @@ jobs:
       - name: Fixtures
         run: fixtures/make.sh
 
+      # Every command runs whatever the previous one said: under `bash -e` the
+      # first failing test ended the step, and for weeks the snapshot channel
+      # reported one expected difference (`plugin-api-version` 2.9.0 → 2.11.0)
+      # while no harness ran behind it. A drift report is only useful complete.
       - name: Stage 2 — tests and harness
         id: harness
         continue-on-error: true
         run: |
-          cargo test
-          harness/diff-vendor.sh
-          harness/diff-vendor.sh --with-autoloader
-          harness/removal.sh
-          harness/transitions.sh
-          harness/path-repos.sh
-          harness/boot.sh
+          status=0
+          cargo test --no-fail-fast || status=1
+          for h in "harness/diff-vendor.sh" "harness/diff-vendor.sh --with-autoloader" \
+                   harness/removal.sh harness/transitions.sh harness/path-repos.sh harness/boot.sh; do
+            echo "::group::$h"
+            $h || status=1
+            echo "::endgroup::"
+          done
+          exit $status
 
       - name: Report
         if: steps.twins.outcome == 'failure' || steps.harness.outcome == 'failure'

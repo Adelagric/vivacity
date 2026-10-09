@@ -10,6 +10,8 @@
 //! `php` + `composer` installed. If missing, the test FAILS with an explicit
 //! message; no silent skip.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,24 +69,7 @@ fn oracle_hash(manifest: &str) -> String {
 /// The phar is the `composer` binary from the PATH, copied under a .phar
 /// extension (the phar:// stream requires the extension).
 fn which_composer_phar() -> PathBuf {
-    let target = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !target.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which composer")
-                .stdout,
-        )
-        .expect("utf8");
-        let src = src.trim();
-        assert!(
-            !src.is_empty(),
-            "composer must be installed (brew install composer)"
-        );
-        std::fs::copy(src, &target).expect("phar copy");
-    }
-    target
+    oracle_phar::composer_phar()
 }
 
 #[test]

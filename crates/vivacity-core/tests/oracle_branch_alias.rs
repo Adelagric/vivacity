@@ -2,6 +2,8 @@
 //! for each package config, Composer produces (or not) an AliasPackage;
 //! we compare the alias's (version, pretty_version).
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use serde_json::{json, Value};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -44,19 +46,7 @@ fn cases() -> Vec<Value> {
 
 #[test]
 fn matches_array_loader_branch_alias() {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
+    let phar = oracle_phar::composer_phar();
     let script = format!(
         r#"require "phar://{}/vendor/autoload.php";
            $l = new \Composer\Package\Loader\ArrayLoader();

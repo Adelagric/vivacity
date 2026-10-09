@@ -5,26 +5,15 @@
 //! back error-free, since a false positive would refuse a real project.
 //!
 //! Prerequisite: `composer` on the PATH (dev/CI). Missing it FAILS the test.
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use vivacity_resolver::lockfile::package_naming_error;
 
 fn phar() -> PathBuf {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
-    phar
+    oracle_phar::composer_phar()
 }
 
 fn root() -> PathBuf {

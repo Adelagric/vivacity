@@ -2923,3 +2923,33 @@ tenu même si le cache ne validait jamais.
 Reste écrit : FreeBSD et les autres unix sans `/proc` n'ont pas de liste
 d'images, donc pas de cache — 40 ms par run de plus qu'en 0.20.0, le prix de
 l'échec fermé.
+
+## 2026-10-09 — Le canal de dérive se taisait derrière son premier échec, et les oracles testaient un Composer figé
+
+**Le rapport hebdomadaire était incomplet depuis des semaines.** L'étape 2 de
+`drift.yml` (`cargo test` puis six harnais) tournait sous `bash -e` : le premier
+test en échec contre `2.11-dev` — un écart attendu, `plugin-api-version` 2.9.0 →
+2.11.0 — terminait l'étape, et **aucun harnais ne tournait derrière**. Le rapport
+disait « tests + harness : failure » sans dire qu'il n'avait presque rien
+regardé. Corrigé : chaque commande tourne quoi que dise la précédente, `cargo
+test --no-fail-fast`.
+
+Rejoué en local contre `2.11-dev+43f74517` pour ne pas attendre une semaine :
+**8 tests et 127 cas de harnais** diffèrent, là où le rapport en montrait un. Tous
+se ramènent à trois causes, mesurées et confirmées dans la source de 2.11-dev —
+`PLUGIN_API_VERSION` à `2.11.0`, un nouveau champ de lock `published-time`
+(`ArrayDumper.php:98-99`, `ArrayLoader.php:259-260`), et semver #187. L'install,
+elle, est inchangée (diff-vendor, removal, transitions, boot, root-manifest
+verts). La liste de ré-épinglage est dans `docs/plans/repin-composer-2.11.md`.
+
+**Les onze oracles PHP copiaient le phar de Composer une fois pour toutes.**
+Chacun portait son propre bloc « si `$TMPDIR/vivacity-oracle-composer.phar`
+n'existe pas, copier `which composer` » : après une mise à jour de Composer, ils
+continuaient de tester l'ancien, sans un mot — la même classe de défaut que le
+cache de sonde corrigé le même jour. Trouvé parce que tester contre le snapshot
+exigeait un `TMPDIR` à part. Un seul helper maintenant, `tools/oracle_phar.rs`,
+inclus par `#[path]` dans les trois crates : la copie est nommée d'après
+l'identité de la source (chemin canonique, taille, mtime), et écrite par un
+renommage atomique puisque les binaires de test tournent en parallèle. Vérifié :
+le Composer 2.10.3 et le snapshot donnent deux copies distinctes ; 296 tests
+verts.

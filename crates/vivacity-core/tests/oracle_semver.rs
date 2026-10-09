@@ -4,6 +4,8 @@
 //! Pairs that vivacity refuses (outside the subset) are counted but not
 //! compared; an explicit refusal is expected behaviour, lying is not.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -78,22 +80,7 @@ const CONSTRAINTS: &[&str] = &[
 ];
 
 fn oracle_matrix() -> Vec<(String, String, bool)> {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which composer")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(
-            !src.trim().is_empty(),
-            "composer required (brew install composer)"
-        );
-        std::fs::copy(src.trim(), &phar).expect("phar copy");
-    }
+    let phar = oracle_phar::composer_phar();
     let script = format!(
         r#"require "phar://{}/vendor/autoload.php";
            $in = json_decode(stream_get_contents(STDIN), true);

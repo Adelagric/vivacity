@@ -7,6 +7,8 @@
 //! (tools/oracle-version-selector.php) and by the port, on the same
 //! snapshot and the same PHP platform.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -26,20 +28,7 @@ fn root() -> PathBuf {
 }
 
 fn phar() -> PathBuf {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
-    phar
+    oracle_phar::composer_phar()
 }
 
 struct Setup {

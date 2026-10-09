@@ -39,8 +39,13 @@ bench/profile.sh ; bench/spike-vs-composer.sh   # M0, longs
 ```
 
 Les tests intégration `tests/oracle_*.rs` et `tests/fixtures_*.rs` copient le
-binaire `composer` du PATH vers `$TMPDIR/vivacity-oracle-composer.phar` et
-appellent ses classes via `php -r`. Sans php/composer ils ÉCHOUENT avec un
+binaire `composer` du PATH dans `$TMPDIR` (`tools/oracle_phar.rs`, une copie par
+identité de Composer : une mise à jour est prise en compte) et
+appellent ses classes via `php -r`. Pour tout rejouer contre un autre Composer
+(un snapshot, une version candidate) sans toucher à celui installé : un lien
+`composer` vers son phar en tête du `PATH`, plus `VIVACITY_HARNESS_DIR` et
+`VIVACITY_CACHE_DIR` à part — recette complète dans
+`docs/plans/repin-composer-2.11.md`. Sans php/composer ils ÉCHOUENT avec un
 message explicite (jamais de skip silencieux).
 
 `tests/oracle_zip.rs` est l'exception : son oracle n'est pas le phar mais

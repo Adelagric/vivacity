@@ -10,6 +10,8 @@
 //! only checks that the refusal is of the expected category; when it accepts
 //! it, equality is mandatory.
 
+#[path = "../../../tools/oracle_phar.rs"]
+mod oracle_phar;
 use serde_json::{json, Value};
 use std::io::Write as _;
 use std::path::Path;
@@ -137,19 +139,7 @@ fn cases() -> Vec<Case> {
 }
 
 fn php_oracle(cases: &[Case], cwd: &Path) -> Vec<Vec<Value>> {
-    let phar = std::env::temp_dir().join("vivacity-oracle-composer.phar");
-    if !phar.exists() {
-        let src = String::from_utf8(
-            Command::new("which")
-                .arg("composer")
-                .output()
-                .expect("which")
-                .stdout,
-        )
-        .expect("utf8");
-        assert!(!src.trim().is_empty(), "composer required");
-        std::fs::copy(src.trim(), &phar).expect("copy");
-    }
+    let phar = oracle_phar::composer_phar();
     let installers_src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/reference/installers/src/Composer/Installers")
         .canonicalize()
