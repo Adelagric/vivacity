@@ -25,7 +25,15 @@ byte-identical-output promise are the public API.
   wrapper, a version-manager shim, a binary that drops `DYLD_*` — anything whose
   loaded files cannot be seen, or that reports another binary than the one
   located — is probed on every run (~40 ms) instead of being served a cache that
-  may be stale. Measured, the warm path costs ~0.4 ms more than the old key.
+  may be stale. Measured, the warm path costs ~0.4 ms more than the old key. The facts the cache needs can never cost the probe itself: a disabled
+  `realpath` or `file`, a path that is not UTF-8, a wrapper merging stderr into
+  stdout — each now leaves the entries whole and the run uncached, where the
+  first version of this change made the probe fail and `install` skip its
+  platform check in silence (found by an independent review before release).
+  Linux's opcache shared memory no longer reads as a deleted file, which would
+  have kept the cache from ever being written under `opcache.enable_cli=1`. A
+  unix without `/proc` (FreeBSD) gets no image list, hence no cache — the price
+  of failing closed.
 - **`COMPOSER_ALLOW_XDEBUG` is part of the probe cache's key.** The probe reads
   it to decide whether xdebug counts as loaded; the key ignored it, so changing
   it served the previous answer. Also added: the dynamic linker's own variables

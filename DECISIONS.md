@@ -2881,3 +2881,45 @@ en cache (deux appels, deux lancements), le vrai php vu et dont le cache égale
 une sonde fraîche, un cache d'ancien format qui ne valide jamais, et les deux
 formats de trace de dyld. Le canal Linux (`/proc/self/maps`) et le canal
 Windows ne s'exécutent que sur leurs runners.
+
+### 2026-10-09 (suite) — Ce que la revue indépendante a trouvé dans le correctif
+
+Une revue par un sous-agent qui n'avait pas écrit le code, avant le push. Trois
+régressions de la règle « ne jamais transformer une sonde qui marchait en
+erreur » — chacune aurait fait sauter le contrôle de plateforme en silence,
+puisque `install` fait `probe().ok()` :
+
+- `disable_functions=realpath` (ou `file`) **tuait la sonde entière** : sortie
+  255, mesuré ici. Le bloc des faits est désormais sous `try { … } catch
+  (\Throwable)` et remet tout à null en cas d'échec — null veut dire « pas de
+  cache », pas « pas de PHP ». Test : un wrapper qui désactive `realpath`, `file`
+  et `ini_get` rend les mêmes entrées qu'une sonde directe ;
+- un chemin non UTF-8 dans `maps` faisait rendre `false` à `json_encode`, donc
+  **aucune sortie** : les faits sont encodés à part et annulés s'ils échouent,
+  sans toucher à l'encodage des entrées ;
+- sous macOS, un wrapper qui fusionne stderr dans stdout recevait la trace dyld
+  dans le JSON : une sortie illisible sous la trace est relancée une fois sans
+  elle, et ce run n'est pas mis en cache.
+
+Et deux défauts qui rendaient le cache inutile ou partiel :
+
+- sous Linux, `opcache.enable_cli=1` crée un segment de mémoire partagée qui
+  apparaît comme `/dev/zero (deleted)` — que la sonde prenait pour un fichier
+  supprimé, donc **jamais de cache** sur une image Docker courante. Les
+  pseudo-fichiers de mémoire partagée (`/dev/zero`, `/SYSV…`, `/memfd:`,
+  `/dev/shm/`) sont ignorés avant le test ;
+- sous `open_basedir`, `is_file` répond faux hors des répertoires permis : des
+  bibliothèques sortaient de la clé **en silence**. Le filtre est retiré de la
+  sonde ; le Rust garde ce qui existe.
+
+Plus : les marqueurs relevés **une fois avant** la sonde et stockés tels quels
+(la course prouve qu'ils n'ont pas bougé), la course vérifie aussi les
+répertoires `opt` des préfixes Homebrew standards, la branche Windows échoue
+fermé quand un répertoire ne se lit pas ou que `extension_dir` est relatif, et
+le test du vrai php **prouve** maintenant que le second appel est servi par le
+cache (le fichier n'est pas réécrit) — l'égalité des deux réponses seule aurait
+tenu même si le cache ne validait jamais.
+
+Reste écrit : FreeBSD et les autres unix sans `/proc` n'ont pas de liste
+d'images, donc pas de cache — 40 ms par run de plus qu'en 0.20.0, le prix de
+l'échec fermé.

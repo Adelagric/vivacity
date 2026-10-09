@@ -401,37 +401,53 @@ $out[] = ['kind' => 'ini', 'name' => 'ini', 'version' => '', 'loaded' => (string
 // Ce que ce processus a réellement chargé, lu EN DERNIER : les extensions
 // interrogées plus haut ont pu charger leurs bibliothèques à la demande. Linux
 // seulement (/proc) ; ailleurs le Rust a son propre canal (dyld sur macOS, les
-// répertoires de DLL sous Windows). Fichiers ordinaires, dédupliqués, sans ce
-// script — un chemin temporaire qui changerait la clé à chaque run. Un mapping
-// « (deleted) » rend la liste inutilisable : null, donc pas de cache.
-$maps = null;
-$raw = @file('/proc/self/maps', FILE_IGNORE_NEW_LINES);
-if (is_array($raw)) {
-    $maps = [];
-    $self = realpath(__FILE__);
-    foreach ($raw as $line) {
-        $fields = preg_split('/\s+/', $line, 6);
-        if (!isset($fields[5]) || $fields[5] === '' || $fields[5][0] !== '/') {
-            continue;
+// répertoires de DLL sous Windows). Ces faits ne servent que la clé du cache et
+// ne doivent JAMAIS coûter les entrées : une fonction désactivée
+// (`disable_functions=realpath,file` tuait la sonde entière, mesuré), un chemin
+// qui n'est pas de l'UTF-8 (json_encode rendait false et rien ne sortait) —
+// tout échec les remet à null, et null veut dire « pas de cache ».
+$facts = ['binary' => null, 'ext_dir' => null, 'maps' => null];
+try {
+    $binary = function_exists('realpath') ? realpath(PHP_BINARY) : false;
+    $facts['binary'] = $binary === false ? PHP_BINARY : $binary;
+    $facts['ext_dir'] = (string) ini_get('extension_dir');
+    // Pas d'`is_file` ici : sous `open_basedir` il répond faux pour une
+    // bibliothèque hors des répertoires permis, et la clé aurait perdu ce
+    // fichier en silence. Le Rust garde ce qui existe.
+    $raw = function_exists('file') ? @file('/proc/self/maps', FILE_IGNORE_NEW_LINES) : false;
+    if (is_array($raw)) {
+        $maps = [];
+        $self = function_exists('realpath') ? realpath(__FILE__) : __FILE__;
+        foreach ($raw as $line) {
+            $fields = preg_split('/\s+/', $line, 6);
+            if (!isset($fields[5]) || $fields[5] === '' || $fields[5][0] !== '/') {
+                continue;
+            }
+            $path = $fields[5];
+            // La mémoire partagée anonyme apparaît comme un pseudo-fichier
+            // supprimé — le segment d'opcache (`/dev/zero (deleted)`), SysV,
+            // memfd (JIT de PCRE2), /dev/shm : rien qu'on charge, et la traiter
+            // comme un fichier supprimé désactivait le cache à chaque run sous
+            // `opcache.enable_cli=1`.
+            if (strncmp($path, '/dev/zero', 9) === 0 || strncmp($path, '/SYSV', 5) === 0
+                || strncmp($path, '/memfd:', 7) === 0 || strncmp($path, '/dev/shm/', 9) === 0) {
+                continue;
+            }
+            if (substr($path, -10) === ' (deleted)') {
+                $maps = null;
+                break;
+            }
+            if ($path === $self || $path === __FILE__) {
+                continue;
+            }
+            $maps[$path] = true;
         }
-        $path = $fields[5];
-        if (substr($path, -10) === ' (deleted)') {
-            $maps = null;
-            break;
-        }
-        if ($path === $self || $path === __FILE__ || !is_file($path)) {
-            continue;
-        }
-        $maps[$path] = true;
+        $facts['maps'] = $maps === null ? null : array_keys($maps);
     }
-    if ($maps !== null) {
-        $maps = array_keys($maps);
-    }
+} catch (\Throwable $e) {
+    $facts = ['binary' => null, 'ext_dir' => null, 'maps' => null];
 }
-$binary = realpath(PHP_BINARY);
-echo json_encode([
-    'entries' => $out,
-    'binary' => $binary === false ? PHP_BINARY : $binary,
-    'ext_dir' => (string) ini_get('extension_dir'),
-    'maps' => $maps,
-]);
+if (json_encode($facts) === false) {
+    $facts = ['binary' => null, 'ext_dir' => null, 'maps' => null];
+}
+echo json_encode(['entries' => $out] + $facts);

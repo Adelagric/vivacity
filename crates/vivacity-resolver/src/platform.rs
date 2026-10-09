@@ -292,16 +292,25 @@ fn system_markers() -> Vec<FileId> {
     out
 }
 
-/// What raced the probe: the system markers, plus the `opt` directory of the
-/// Homebrew prefix the php binary lives in, when it lives in one — any `brew`
-/// operation rewrites it. Taken before and after the run; a difference means
-/// something moved while PHP was answering, and the answer is not cached.
-fn race_snapshot(php_path: &str) -> Vec<FileId> {
-    let mut out = system_markers();
+/// The `opt` directories a `brew` operation rewrites: the standard Homebrew
+/// prefixes, and the one the php binary lives in when it lives in a keg. A
+/// concurrent `brew upgrade` touches one of them, which is what the race check
+/// needs to see — the images' own prefixes are only known after the run.
+fn brew_opt_dirs(php_path: &str) -> Vec<FileId> {
+    let mut dirs: Vec<String> = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"]
+        .iter()
+        .map(|p| format!("{p}/opt"))
+        .collect();
     if let Some(at) = php_path.find("/Cellar/") {
-        out.push(FileId::of(&format!("{}/opt", &php_path[..at])));
+        let own = format!("{}/opt", &php_path[..at]);
+        if !dirs.contains(&own) {
+            dirs.push(own);
+        }
     }
-    out
+    dirs.iter()
+        .map(|d| FileId::of(d))
+        .filter(FileId::exists)
+        .collect()
 }
 
 /// The php binary `php` names: as given when it holds a path separator,
@@ -388,7 +397,11 @@ fn probe_at(php: &str, cache_file: &std::path::Path) -> Result<Vec<Value>, Platf
             }
         }
     }
-    let before = race_snapshot(&php_path);
+    // Read once, before the run, and stored as read: the race check below
+    // proves they did not move while PHP answered, so these are the values
+    // the answer goes with.
+    let markers = system_markers();
+    let opt_before = brew_opt_dirs(&php_path);
     let run = run_probe(php)?;
     let Some(images) = run.loaded_files() else {
         return Ok(run.entries);
@@ -398,7 +411,9 @@ fn probe_at(php: &str, cache_file: &std::path::Path) -> Result<Vec<Value>, Platf
     if run.binary.as_deref() != Some(php_path.as_str()) {
         return Ok(run.entries);
     }
-    if race_snapshot(&php_path) != before {
+    // Something moved while PHP was answering (a `brew upgrade`, a package
+    // install): the answer may belong to either side of it, so it is not kept.
+    if system_markers() != markers || brew_opt_dirs(&php_path) != opt_before {
         return Ok(run.entries);
     }
     let cache = ProbeCache {
@@ -409,7 +424,7 @@ fn probe_at(php: &str, cache_file: &std::path::Path) -> Result<Vec<Value>, Platf
         env,
         links: keg_links(&images.iter().map(|f| f.path.clone()).collect::<Vec<_>>()),
         images,
-        markers: system_markers(),
+        markers,
         probed: run.entries.clone(),
     };
     if let Some(dir) = cache_file.parent() {
@@ -462,26 +477,27 @@ impl ProbeRun {
         }
         #[cfg(not(unix))]
         {
+            // Fail closed here too: a directory that cannot be read, or an
+            // `extension_dir` that is relative (PHP resolves it against ITS
+            // working directory, not ours), means the DLLs cannot be watched.
             let binary = self.binary.as_ref()?;
-            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-            if let Some(parent) = std::path::Path::new(binary).parent() {
-                dirs.push(parent.to_path_buf());
-            }
+            let mut dirs: Vec<std::path::PathBuf> =
+                vec![std::path::Path::new(binary).parent()?.to_path_buf()];
             if let Some(ext) = self.ext_dir.as_deref().filter(|d| !d.is_empty()) {
-                dirs.push(std::path::PathBuf::from(ext));
+                let ext = std::path::PathBuf::from(ext);
+                if !ext.is_absolute() {
+                    return None;
+                }
+                dirs.push(ext);
             }
             let mut files = Vec::new();
             for dir in dirs {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for e in entries.flatten() {
+                for e in std::fs::read_dir(&dir).ok()?.flatten() {
                     let name = e.file_name().to_string_lossy().to_lowercase();
                     if name.ends_with(".dll") || name.ends_with(".exe") {
-                        files.push(FileId::from_meta(
-                            &e.path().to_string_lossy(),
-                            e.metadata().ok(),
-                        ));
+                        // `FileId::of`, as the validation reads it: the same
+                        // source on both sides.
+                        files.push(FileId::of(&e.path().to_string_lossy()));
                     }
                 }
             }
@@ -520,8 +536,26 @@ fn without_dyld(stderr: &str) -> String {
         .join("\n")
 }
 
-/// One real run of assets/platform-probe.php.
+/// One real run of assets/platform-probe.php. On macOS the dyld trace is asked
+/// for; a wrapper that merges stderr into stdout would then corrupt the JSON
+/// (measured with an interpreter SIP does not protect), so an unreadable
+/// output under the trace is retried once without it — and that run's images
+/// are unknown, hence not cached. A probe that worked before must keep working.
 fn run_probe(php: &str) -> Result<ProbeRun, PlatformError> {
+    #[cfg(target_os = "macos")]
+    {
+        match run_probe_once(php, true) {
+            Ok(run) => Ok(run),
+            Err(_) => run_probe_once(php, false),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_probe_once(php, false)
+    }
+}
+
+fn run_probe_once(php: &str, trace: bool) -> Result<ProbeRun, PlatformError> {
     let dir = tempfile::tempdir().map_err(|e| PlatformError(e.to_string()))?;
     let script = dir.path().join("platform-probe.php");
     std::fs::write(&script, PROBE).map_err(|e| PlatformError(e.to_string()))?;
@@ -531,8 +565,9 @@ fn run_probe(php: &str) -> Result<ProbeRun, PlatformError> {
     // (measured: 30 ms with or without). Stripped by SIP behind `/bin/sh` or
     // `/usr/bin/env` — measured on a wrapper script: 0 images — which is the
     // case `loaded_files` turns into "do not cache".
-    #[cfg(target_os = "macos")]
-    cmd.env("DYLD_PRINT_LIBRARIES", "1");
+    if trace {
+        cmd.env("DYLD_PRINT_LIBRARIES", "1");
+    }
     let out = cmd
         .output()
         .map_err(|e| PlatformError(format!("cannot run {php}: {e}")))?;
@@ -556,7 +591,11 @@ fn run_probe(php: &str) -> Result<ProbeRun, PlatformError> {
     let text = |k: &str| doc.get(k).and_then(Value::as_str).map(str::to_owned);
     #[cfg(target_os = "macos")]
     let images = {
-        let seen = dyld_images(&stderr);
+        let seen = if trace {
+            dyld_images(&stderr)
+        } else {
+            Vec::new()
+        };
         (!seen.is_empty()).then_some(seen)
     };
     #[cfg(not(target_os = "macos"))]
@@ -1015,7 +1054,8 @@ mod tests {
             2,
             "an older format must send the probe again"
         );
-        // And a file without the field at all — 0.20.0's shape — likewise.
+        // And a file without the field at all — 0.20.0's shape — likewise;
+        // that one fails at deserialisation, the other half of the guarantee.
         doc.as_object_mut().expect("object").remove("format");
         std::fs::write(&cache, serde_json::to_vec(&doc).expect("json")).expect("write");
         probe_at(&php, &cache).expect("probe");
@@ -1080,6 +1120,42 @@ mod tests {
         );
     }
 
+    /// The facts the cache needs must never cost the probe itself. With
+    /// `disable_functions=realpath,file` the first version of this change made
+    /// the probe die (exit 255, measured), and `install` turns a failed probe
+    /// into "no php" — the platform check skipped in silence. The entries must
+    /// come back whole; the run is simply not offered to the cache.
+    #[test]
+    #[cfg(unix)]
+    fn disabled_functions_cost_the_cache_never_the_probe() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Some(real) = locate_php("php") else {
+            panic!("this test needs a real php on PATH (dev and CI have one)");
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = vivacity_core::pathutil::canonicalize(dir.path()).expect("canon");
+        let wrapper = root.join("php");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexec '{}' -d disable_functions=realpath,file,ini_get \"$@\"\n",
+                real.display()
+            ),
+        )
+        .expect("wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let crippled = run_probe(&wrapper.to_string_lossy()).expect("the probe must still answer");
+        let direct = run_probe(&real.to_string_lossy()).expect("probe");
+        assert_eq!(
+            crippled.entries, direct.entries,
+            "the entries are untouched"
+        );
+        assert!(
+            crippled.binary.is_none() || crippled.loaded_files().is_none(),
+            "what cannot be seen is not offered to the cache"
+        );
+    }
+
     /// The real php, directly: its images are seen, they include its own binary
     /// and the PCRE2 library behind `lib-pcre`, and a cached answer is the
     /// uncached one — the sentinel the 0.20.0 known issue lacked.
@@ -1108,7 +1184,15 @@ mod tests {
         let cache = dir.path().join("platform-probe.json");
         let cold = probe_at(&real, &cache).expect("probe");
         assert!(cache.exists(), "a php we can see is cached");
+        let written = FileId::of(&cache.to_string_lossy());
         let warm = probe_at(&real, &cache).expect("probe");
+        // A hit does not rewrite the file; equality of the two answers alone
+        // would hold even if the cache never validated.
+        assert_eq!(
+            FileId::of(&cache.to_string_lossy()),
+            written,
+            "the second call must be served from the cache"
+        );
         assert_eq!(cold, warm);
         assert_eq!(
             warm, run.entries,
