@@ -25,7 +25,8 @@ byte-identical-output promise are the public API.
   wrapper, a version-manager shim, a binary that drops `DYLD_*` — anything whose
   loaded files cannot be seen, or that reports another binary than the one
   located — is probed on every run (~40 ms) instead of being served a cache that
-  may be stale. Measured, the warm path costs ~0.4 ms more than the old key. The facts the cache needs can never cost the probe itself: a disabled
+  may be stale. Measured, the warm path costs ~0.4 ms more than the old key.
+  The facts the cache needs can never cost the probe itself: a disabled
   `realpath` or `file`, a path that is not UTF-8, a wrapper merging stderr into
   stdout — each now leaves the entries whole and the run uncached, where the
   first version of this change made the probe fail and `install` skip its
@@ -39,6 +40,13 @@ byte-identical-output promise are the public API.
   it served the previous answer. Also added: the dynamic linker's own variables
   (`LD_LIBRARY_PATH`, `LD_PRELOAD`, `DYLD_*`), which load other files without
   touching any file the key watches.
+
+### Changed
+- **`crates/vivacity/src/lib.rs` is split by command** (4 649 lines → 548):
+  `install.rs`, `update.rs`, `remove.rs`, `dump.rs`, `manifest.rs`,
+  `fallback.rs`, `flex_install.rs`. Items moved as they were, no behaviour
+  change — same suite, same harnesses. The command line itself (clap
+  structures, `run`, exit codes) stays in `lib.rs`.
 
 ## [0.20.0] — 2026-10-08
 

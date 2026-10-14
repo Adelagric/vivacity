@@ -110,6 +110,18 @@ the roadmap below.
   explanations. (`--with` and the `a/b:^1` shorthand are done, plan
   v0.18.)
 
+## Where a command lives in `crates/vivacity`
+
+`lib.rs` is the command line only: the clap structures, `run`, the dispatch
+and the exit codes. Each command has its module — `install.rs` (and the
+plugins emulated while laying out the lock), `update.rs` (resolution and lock,
+which `require` and `remove` go through), `remove.rs`, `require.rs`,
+`dump.rs` (the autoloader every command ends with). Around them:
+`manifest.rs` (the root manifest's refusals and config keys, the merged root
+of composer-merge-plugin), `fallback.rs` (handing the command to Composer),
+`flex.rs` and `flex_install.rs` (symfony/flex at resolution and at install),
+`scripts.rs` (`--run-scripts`).
+
 ## Ground rules that keep the project honest
 
 - **Composer is the oracle.** Any behaviour is ported from the pinned Composer

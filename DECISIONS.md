@@ -2953,3 +2953,35 @@ l'identité de la source (chemin canonique, taille, mtime), et écrite par un
 renommage atomique puisque les binaires de test tournent en parallèle. Vérifié :
 le Composer 2.10.3 et le snapshot donnent deux copies distinctes ; 296 tests
 verts.
+
+## 2026-10-14 — `lib.rs` découpé par commande, la ligne de commande laissée en place
+
+Point de forme de la critique externe du 2026-09-30 : `crates/vivacity/src/lib.rs`
+faisait 4 649 lignes, les cinq commandes et tout ce qu'elles partagent dans un
+fichier. Il en fait 548 : `install.rs` (1 407), `update.rs` (1 090),
+`flex_install.rs` (667), `dump.rs` (305), `remove.rs` (300), `manifest.rs` (208),
+`fallback.rs` (191). Carte et mécanique dans `docs/plans/split-lib-rs.md`.
+
+**Un déplacement, pas une réécriture.** Chaque item part avec ses commentaires
+de doc et ses attributs, devient `pub(crate)`, et chaque module commence par
+`use super::*;` — `require.rs`, qui importe par `crate::…`, n'a pas bougé.
+Vérifié mécaniquement : le multiensemble des lignes non vides de l'ancien
+`lib.rs` et celui des huit fichiers ne diffèrent que par `pub(crate)`, les
+signatures que rustfmt a repliées en devenant plus longues, et les en-têtes de
+module. Une seule correction de forme au passage : trois commentaires de doc
+empilés sur `PlatformOutcome` (ceux de `run_update` et de `http_transport`,
+détachés lors d'un ancien déplacement) sont revenus sur leur fonction.
+
+**La ligne de commande reste dans `lib.rs`, exprès.** `Cli`, les cinq structures
+d'arguments, `run`, la dispatch et les codes de sortie : le patch de Luther
+(ePHPm, options globales `-n`/`-q`/`-v`/`--no-ansi`, `ephpm/vivace#2`) touche
+exactement ces lignes et attend d'être proposé ici. Les déplacer maintenant lui
+imposerait un rebase pour rien ; un `cli.rs` viendra après sa PR.
+
+**Hors périmètre, noté :** `run_install` fait encore ~720 lignes. Le couper,
+c'est toucher à la logique, pas la déplacer — un autre chantier, avec son plan.
+
+Vérifié : `cargo fmt --check`, clippy `-D warnings` sur macOS et
+`x86_64-pc-windows-gnu`, 296 tests verts, et tous les harnais de la CI contre
+Composer 2.10.3 — 27 passages (dont `diff-vendor --with-autoloader` cache
+froid puis chaud), tous à 0, 488 cas `OK`.
