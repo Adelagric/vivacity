@@ -14,10 +14,102 @@ fn say_lock_resolution(since: std::time::Instant) {
     );
 }
 
+/// What a phase of `run_install` that can end the command returns:
+/// `Break(code)` is the exit code of the command, `Continue` carries what
+/// the phases after it need.
+type Flow<T = ()> = std::ops::ControlFlow<i32, T>;
+
+/// `?` for a [`Flow`] inside `run_install`: the value it carries, or
+/// `return Ok(code)`.
+macro_rules! proceed {
+    ($flow:expr) => {
+        match $flow {
+            std::ops::ControlFlow::Continue(value) => value,
+            std::ops::ControlFlow::Break(code) => return Ok(code),
+        }
+    };
+}
+
+/// `InstallCommand` then `Installer::run` / `doInstall`, phase by phase.
+/// The policy check waits on the network on its own thread while the
+/// platform, the local-repository transaction, the scope and (for a no-op)
+/// the autoloader are computed in silence; it is joined before anything is
+/// printed or written past that point, then the checks are reported in
+/// the order below.
 pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
+    // `InstallCommand` and `Factory::create`.
+    let run = proceed!(read_manifests(args)?);
+    let run = proceed!(merge_plugin(run)?);
+    // `Installer::run` (bamarni's `COMMAND` listener comes before it in
+    // Composer, see docs/plans/split-run-install.md).
+    let run = proceed!(pre_install_cmd(run)?);
+    command_listeners(&run);
+    // `Installer::doInstall`.
+    let verify_start = headline(&run);
+    let policy = spawn_policy_check(&run)?;
+    let platform = check_platform(&run)?;
+    let tx = local_repository_transaction(&run)?;
+    let scope = analyze_scope(&run);
+    let early_dump = plan_autoload_early(&run, &tx, scope.as_ref());
+    // Join: policy first (exit 2), then the platform (exit 4), then the
+    // missing requirements, in `Installer::doInstall`'s order.
+    proceed!(join_policy(&run, policy, verify_start)?);
+    proceed!(report_platform(platform));
+    proceed!(report_missing(&run, &tx.missing)?);
+    if !args.after_update {
+        say_lock_resolution(verify_start);
+    }
+    report_operations(&tx);
+    if args.dry_run {
+        return Ok(dry_run(&run, &tx));
+    }
+    let layout = proceed!(native_layout(&run, scope)?);
+    let installed = proceed!(execute_operations(&run, &tx, &layout)?);
+    // `Installer::run`, after `doInstall`.
+    let autoload_note = if args.no_autoloader {
+        String::new()
+    } else {
+        proceed!(dump_autoloader(
+            &run,
+            &tx,
+            &layout,
+            &installed.report,
+            early_dump
+        )?)
+    };
+    proceed!(post_install(&run, &layout, &installed.report)?);
+    say_summary(&run, &installed.report, &autoload_note);
+    Ok(0)
+}
+
+/// What the phases of one install share, fixed before the first line is
+/// printed: built by `read_manifests`, the root package replaced by
+/// `merge_plugin`, the scripts runner set by `pre_install_cmd`.
+struct Run<'a> {
+    args: &'a InstallArgs,
+    /// The start of the command: the `trace` origin, and the duration the
+    /// closing line reports.
+    t0: std::time::Instant,
+    project: PathBuf,
+    /// composer.json as written: the content-hash and `config.lock` read the
+    /// file, not the root package below.
+    manifest_text: String,
+    /// The root package Composer works with: the effective
+    /// `preferred-install` written in, then merged by composer-merge-plugin.
+    manifest: serde_json::Value,
+    merged: Option<vivacity_resolver::merge_plugin::Merged>,
+    lock_value: serde_json::Value,
+    lock: vivacity_core::lock::Lock,
+    with_dev: bool,
+    runner: Option<scripts::Runner>,
+}
+
+/// `InstallCommand`'s refusals, then the manifest (with the effective
+/// `preferred-install`) and the lock as `Factory::create` reads them.
+fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
     if args.no_install {
         vivacity_core::say!("Invalid option \"--no-install\". Use \"composer update --no-install\" instead if you are trying to update the composer.lock file.");
-        return Ok(1);
+        return Ok(Flow::Break(1));
     }
     let t0 = std::time::Instant::now();
     let project = project_dir(args.working_dir.as_deref())?;
@@ -25,7 +117,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let lock_path = project.join("composer.lock");
     refuse_alternate_manifest()?;
     if let Some(code) = refuse_missing_manifest(&project) {
-        return Ok(code);
+        return Ok(Flow::Break(code));
     }
 
     let manifest_text = std::fs::read_to_string(&manifest_path)
@@ -37,7 +129,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // Before the lock is even looked at: Composer refuses the manifest before
     // it reads the lock, so a stale lock is not the error to report.
     if let Some(code) = refuse_invalid_root(&manifest) {
-        return Ok(code);
+        return Ok(Flow::Break(code));
     }
     // `--prefer-source` / `--prefer-dist` / `--prefer-install` are what
     // `getPreferredInstallOptions` makes of them: the effective
@@ -53,7 +145,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     ) {
         Err(message) => {
             vivacity_core::say_always!("{message}");
-            return Ok(1);
+            return Ok(Flow::Break(1));
         }
         Ok(Some(value)) => {
             if let Some(config) = manifest.get_mut("config").and_then(|c| c.as_object_mut()) {
@@ -92,33 +184,63 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     trace("read manifests", t0);
 
     let with_dev = !args.no_dev && std::env::var("COMPOSER_NO_DEV").as_deref() != Ok("1");
-    // `wikimedia/composer-merge-plugin`: the root package Composer works
-    // with is the merged one (INIT, before any output — a merge error
-    // fails Composer inside Factory::create). Everything below reads the
-    // merged manifest; the content-hash keeps reading the file.
-    let merged = match merge_plugin_root(&project, &lock, &manifest, with_dev, !args.no_plugins) {
+    Ok(Flow::Continue(Run {
+        args,
+        t0,
+        project,
+        manifest_text,
+        manifest,
+        merged: None,
+        lock_value,
+        lock,
+        with_dev,
+        runner: None,
+    }))
+}
+
+/// `wikimedia/composer-merge-plugin`: the root package Composer works
+/// with is the merged one (INIT, before any output — a merge error
+/// fails Composer inside Factory::create). Everything after reads the
+/// merged manifest; the content-hash keeps reading the file.
+fn merge_plugin(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
+    let merged = match merge_plugin_root(
+        &run.project,
+        &run.lock,
+        &run.manifest,
+        run.with_dev,
+        !run.args.no_plugins,
+    ) {
         Ok(m) => m,
         Err(reason) => {
             let report = vivacity_core::scope::ScopeReport {
                 issues: vec![vivacity_core::scope::ScopeIssue::MergePlugin(reason)],
                 ..Default::default()
             };
-            return fallback_or_fail(args, &report);
+            return Ok(Flow::Break(fallback_or_fail(run.args, &report)?));
         }
     };
     let manifest = match &merged {
         Some(m) => m.manifest.clone(),
-        None => manifest,
+        None => run.manifest,
     };
-    // `--run-scripts`: the declared events go to `composer run-script` at
-    // Composer's own points; `pre-install-cmd` fires before anything
-    // (before the headline and the lock validation, Installer::run).
+    Ok(Flow::Continue(Run {
+        manifest,
+        merged,
+        ..run
+    }))
+}
+
+/// `--run-scripts`: the declared events go to `composer run-script` at
+/// Composer's own points; `pre-install-cmd` fires before anything
+/// (before the headline and the lock validation, Installer::run).
+fn pre_install_cmd(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
+    let args = run.args;
     let runner = if args.run_scripts && !args.no_scripts {
-        match scripts::Runner::new(&project, &manifest, with_dev, which_composer()) {
+        match scripts::Runner::new(&run.project, &run.manifest, run.with_dev, which_composer()) {
             Ok(r) => r,
             Err(e) => {
                 vivacity_core::say_always!("vivacity: {e}");
-                return Ok(3);
+                return Ok(Flow::Break(3));
             }
         }
     } else {
@@ -127,27 +249,35 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if let Some(r) = &runner {
         let code = r.run(scripts::PRE_INSTALL_CMD)?;
         if code != 0 {
-            return Ok(code);
+            return Ok(Flow::Break(code));
         }
     }
-    // bamarni/composer-bin-plugin's `COMMAND` listener (the plugin
-    // already installed: loaded from installed.json before the command).
-    if vivacity_core::scope::active_plugins(&project, &manifest, !args.no_plugins)
+    Ok(Flow::Continue(Run { runner, ..run }))
+}
+
+/// bamarni/composer-bin-plugin's `COMMAND` listener (the plugin
+/// already installed: loaded from installed.json before the command).
+fn command_listeners(run: &Run<'_>) {
+    if vivacity_core::scope::active_plugins(&run.project, &run.manifest, !run.args.no_plugins)
         .iter()
         .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
     {
-        if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
+        if let Ok(cfg) = vivacity_core::bamarni_bin::config(run.manifest.get("extra")) {
             vivacity_core::bamarni_bin::print_deprecations(&cfg);
         }
     }
-    let config_lock = config_lock_enabled(&manifest_text);
-    // `Installer::doInstall`: the headline, then the platform verification
-    // notice (the lock is solved against the platform when not coming
-    // straight from an update), then the freshness warning.
+}
+
+/// `Installer::doInstall`: the headline, then the platform verification
+/// notice (the lock is solved against the platform when not coming
+/// straight from an update), then the freshness warning. Returns when the
+/// verification started, for the resolution line.
+fn headline(run: &Run<'_>) -> std::time::Instant {
+    let config_lock = config_lock_enabled(&run.manifest_text);
     if config_lock {
         vivacity_core::say!(
             "Installing dependencies from lock file{}",
-            if with_dev {
+            if run.with_dev {
                 " (including require-dev)"
             } else {
                 ""
@@ -157,12 +287,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // vivacity reads the transaction off the lock where Composer solves it
     // again: the resolution line `-v` shows measures that stretch instead.
     let verify_start = std::time::Instant::now();
-    if !args.after_update {
+    if !run.args.after_update {
         vivacity_core::say!("Verifying lock file contents can be installed on current platform.");
         // Lock freshness: same behaviour as Composer, a warning.
         if let (Ok(actual), Some(expected)) = (
-            vivacity_core::content_hash::content_hash(&manifest_text),
-            lock.content_hash.as_deref(),
+            vivacity_core::content_hash::content_hash(&run.manifest_text),
+            run.lock.content_hash.as_deref(),
         ) {
             if actual != expected {
                 vivacity_core::say_always!(
@@ -172,22 +302,31 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             }
         }
     }
+    verify_start
+}
 
-    // `Installer::doInstall` runs the lock pool through the list filter in
-    // install scope: a flagged locked version (malware list) is not
-    // installed. One conditional request per install (Composer's
-    // `loadFilterSummary`, `packages.json` cached 600 s), the only network
-    // wait of an install from lock: it runs on its own thread while the
-    // platform check, the transaction and the scope are computed, and is
-    // joined before anything is printed or written past this point — the
-    // output order and the decision order are Composer's.
-    let policy_thread = if args.after_update {
+/// The policy check running on its own thread: the problems and the
+/// warnings of the lock pool's list filter.
+type PolicyThread = std::thread::JoinHandle<anyhow::Result<(Vec<String>, Vec<String>)>>;
+
+/// `Installer::doInstall` runs the lock pool through the list filter in
+/// install scope: a flagged locked version (malware list) is not
+/// installed. One conditional request per install (Composer's
+/// `loadFilterSummary`, `packages.json` cached 600 s), the only network
+/// wait of an install from lock: it runs on its own thread while the
+/// platform check, the transaction and the scope are computed, and is
+/// joined before anything is printed or written past this point — the
+/// output order and the decision order are Composer's.
+fn spawn_policy_check(run: &Run<'_>) -> anyhow::Result<Option<PolicyThread>> {
+    let args = run.args;
+    Ok(if args.after_update {
         None
     } else {
-        let http = http_transport(&project, args.offline)?;
+        let http = http_transport(&run.project, args.offline)?;
         let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
         let composer_home = vivacity_core::fetch::composer_home();
-        let project_dir = project.clone();
+        let project_dir = run.project.clone();
+        let with_dev = run.with_dev;
         let no_blocking = args.no_blocking || args.no_security_blocking;
         Some(std::thread::spawn(move || {
             vivacity_resolver::session::install_policy_problems(
@@ -200,9 +339,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             )
             .map_err(session_error)
         }))
-    };
+    })
+}
 
-    // Platform (computed now, reported after the policy join).
+/// Platform (computed now, reported after the policy join).
+fn check_platform(run: &Run<'_>) -> anyhow::Result<PlatformOutcome> {
+    let args = run.args;
     let mut ignored = args.ignore_platform_req.clone();
     if args.ignore_platform_reqs {
         ignored.push("*".to_owned());
@@ -214,7 +356,8 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         match vivacity_resolver::platform::probe().ok() {
             Some(probed) => {
                 let empty = serde_json::Map::new();
-                let overrides = manifest
+                let overrides = run
+                    .manifest
                     .get("config")
                     .and_then(|c| c.get("platform"))
                     .and_then(serde_json::Value::as_object)
@@ -222,30 +365,52 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 let platform = vivacity_resolver::platform::platform_packages(&probed, overrides)
                     .map_err(|e| anyhow::anyhow!("{}", e.0))?;
                 PlatformOutcome::Failures(vivacity_resolver::platform::check_install(
-                    &lock, &platform, with_dev, &ignored,
+                    &run.lock,
+                    &platform,
+                    run.with_dev,
+                    &ignored,
                 ))
             }
             None => PlatformOutcome::NoPhp {
-                warn: !lock.platform.is_empty() || (with_dev && !lock.platform_dev.is_empty()),
+                warn: !run.lock.platform.is_empty()
+                    || (run.with_dev && !run.lock.platform_dev.is_empty()),
             },
         }
     } else {
         PlatformOutcome::Failures(Vec::new())
     };
-    trace("platform check", t0);
-    // `LocalRepoTransaction` (installed.json against the lock): the
-    // `Package operations` summary, and in a dry run the operation lines
-    // in transaction order, then the abandoned warnings of `Installer::run`.
+    trace("platform check", run.t0);
+    Ok(platform_outcome)
+}
+
+/// The local repository against the lock, and the root requirements the
+/// lock does not satisfy.
+struct LocalTransaction {
+    /// The packages of both repositories (left empty by the no-op proof).
+    arena: Vec<vivacity_resolver::package::Package>,
+    /// installed.json's packages, as arena indices.
+    present: Vec<usize>,
+    /// The no-op proof: the present names, in installed.json order.
+    unchanged_names: Option<Vec<String>>,
+    transaction: vivacity_resolver::transaction::Transaction,
+    /// `Locker::getMissingRequirementInfo`'s lines (empty: nothing missing).
+    missing: Vec<String>,
+}
+
+/// `LocalRepoTransaction` (installed.json against the lock) and
+/// `Locker::getMissingRequirementInfo`, computed in silence: reported by
+/// `report_missing`, `report_operations` and `dry_run`.
+fn local_repository_transaction(run: &Run<'_>) -> anyhow::Result<LocalTransaction> {
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
-    let installed_now = installed_packages(&project, &manifest);
-    trace("installed.json", t0);
+    let installed_now = installed_packages(&run.project, &run.manifest);
+    trace("installed.json", run.t0);
     // Nothing to do at all (the commonest install): proved on the raw
     // entries, so the two repositories are not loaded into the arena —
     // ~8 ms of constraint parsing on a 100-package lock. `None` falls back
     // to the full computation.
-    let unchanged_names = unchanged_local_repository(&installed_now, &lock_value, with_dev);
+    let unchanged_names = unchanged_local_repository(&installed_now, &run.lock_value, run.with_dev);
     let (present, result) = if unchanged_names.is_some() {
         (Vec::new(), Vec::new())
     } else {
@@ -254,90 +419,123 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             vivacity_resolver::repository::locked_repository_with(&as_lock, &mut arena, true)
                 .map_err(|e| anyhow::anyhow!("installed.json: {}", e.0))?;
         let result = vivacity_resolver::repository::locked_repository_with(
-            &lock_value,
+            &run.lock_value,
             &mut arena,
-            with_dev,
+            run.with_dev,
         )
         .map_err(|e| anyhow::anyhow!("composer.lock: {}", e.0))?;
         (present, result)
     };
     // `Locker::getMissingRequirementInfo`: a root requirement the lock does
-    // not satisfy (a hand-edited composer.json) stops here with code 4.
-    let merged_links = merged
+    // not satisfy (a hand-edited composer.json) stops with code 4
+    // (`report_missing`).
+    let merged_links = run
+        .merged
         .as_ref()
         .map(|m| (m.requires.as_slice(), m.requires_dev.as_slice()));
-    let root_pkg = vivacity_core::state::RootPackage::detect(&manifest, &project, with_dev);
+    let root_pkg =
+        vivacity_core::state::RootPackage::detect(&run.manifest, &run.project, run.with_dev);
     let missing = missing_requirement_info(
-        &manifest,
-        &lock_value,
-        with_dev,
+        &run.manifest,
+        &run.lock_value,
+        run.with_dev,
         &root_pkg.version,
         &root_pkg.pretty_version,
         merged_links,
     )?;
-    trace("local repositories", t0);
+    trace("local repositories", run.t0);
     let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
-    // The scope analysis is pure (lock, manifest, installed.json, global
-    // config): computed here, reported after the join.
+    Ok(LocalTransaction {
+        arena,
+        present,
+        unchanged_names,
+        transaction,
+        missing,
+    })
+}
+
+/// The scope analysis is pure (lock, manifest, installed.json, global
+/// config): computed here, reported after the join. `None` for a dry run.
+fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
+    let args = run.args;
     let scope = if args.dry_run {
         None
     } else {
         Some(vivacity_core::scope::analyze(
-            &project,
-            &lock,
-            &manifest,
-            with_dev,
+            &run.project,
+            &run.lock,
+            &run.manifest,
+            run.with_dev,
             !args.no_plugins,
         ))
     };
 
-    trace("scope analysis", t0);
-    // The autoloader, planned during the network wait when the install has
-    // nothing to place (every wanted package present, same identity): its
-    // inputs are then all known — the local repository the install would
-    // produce, the manifest, the layout — and `plan` writes nothing under
-    // vendor/. Kept as a `Result` and only looked at where the dump runs
-    // today, so an error surfaces at the same point with the same text.
-    // Not with `--run-scripts` (pre-autoload-dump may edit sources).
+    trace("scope analysis", run.t0);
+    scope
+}
+
+/// The autoloader, planned during the network wait when the install has
+/// nothing to place (every wanted package present, same identity): its
+/// inputs are then all known — the local repository the install would
+/// produce, the manifest, the layout — and `plan` writes nothing under
+/// vendor/. Kept as a `Result` and only looked at where the dump runs
+/// today, so an error surfaces at the same point with the same text.
+/// Not with `--run-scripts` (pre-autoload-dump may edit sources).
+fn plan_autoload_early(
+    run: &Run<'_>,
+    tx: &LocalTransaction,
+    scope: Option<&vivacity_core::scope::ScopeReport>,
+) -> Option<anyhow::Result<PlannedDump>> {
+    let args = run.args;
     let early_dump: Option<anyhow::Result<PlannedDump>> = if args.dry_run
         || args.no_autoloader
-        || runner.is_some()
-        || !transaction.operations.is_empty()
+        || run.runner.is_some()
+        || !tx.transaction.operations.is_empty()
     {
         None
     } else {
         scope
-            .as_ref()
             .filter(|s| s.is_native_ok())
             .and_then(|s| s.layout.as_ref())
             .and_then(|layout| {
-                vivacity_core::installer::local_repository_if_unchanged(&lock, layout, with_dev)
-                    .map(|local| {
-                        dump_autoload_plan(
-                            &project,
-                            &local,
-                            &manifest,
-                            layout,
-                            with_dev,
-                            args.optimize_autoloader || args.classmap_authoritative,
-                            args.classmap_authoritative,
-                            args.ignore_platform_reqs,
-                            &args.ignore_platform_req,
-                            (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
-                            !args.no_plugins,
-                            lock.packages_dev
-                                .iter()
-                                .map(|p| p.name().to_owned())
-                                .collect(),
-                        )
-                    })
+                vivacity_core::installer::local_repository_if_unchanged(
+                    &run.lock,
+                    layout,
+                    run.with_dev,
+                )
+                .map(|local| {
+                    dump_autoload_plan(
+                        &run.project,
+                        &local,
+                        &run.manifest,
+                        layout,
+                        run.with_dev,
+                        args.optimize_autoloader || args.classmap_authoritative,
+                        args.classmap_authoritative,
+                        args.ignore_platform_reqs,
+                        &args.ignore_platform_req,
+                        (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+                        !args.no_plugins,
+                        run.lock
+                            .packages_dev
+                            .iter()
+                            .map(|p| p.name().to_owned())
+                            .collect(),
+                    )
+                })
             })
     };
-    trace("autoload planned", t0);
+    trace("autoload planned", run.t0);
+    early_dump
+}
 
-    // Join: policy first (exit 2), then the platform (exit 4), then the
-    // missing requirements, in `Installer::doInstall`'s order.
-    if let Some(handle) = policy_thread {
+/// The policy check joined: its warnings, then its problems (exit 2).
+fn join_policy(
+    run: &Run<'_>,
+    policy: Option<PolicyThread>,
+    verify_start: std::time::Instant,
+) -> anyhow::Result<Flow> {
+    if let Some(handle) = policy {
         let (problems, warnings) = handle
             .join()
             .map_err(|_| anyhow::anyhow!("the policy check thread panicked"))??;
@@ -360,10 +558,16 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 text.push_str(&format!("  Problem {}\n    {p}\n", seen.len()));
             }
             vivacity_core::say!("{text}");
-            return Ok(2);
+            return Ok(Flow::Break(2));
         }
-        trace("policy", t0);
+        trace("policy", run.t0);
     }
+    Ok(Flow::Continue(()))
+}
+
+/// The platform check's report: the failures (exit 4), or the warning
+/// when php could not be probed.
+fn report_platform(platform_outcome: PlatformOutcome) -> Flow {
     match platform_outcome {
         PlatformOutcome::Failures(failures) if !failures.is_empty() => {
             vivacity_core::say_always!("Your lock file cannot be installed on this platform:");
@@ -384,7 +588,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             vivacity_core::say_always!(
                 "Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass."
             );
-            return Ok(4);
+            return Flow::Break(4);
         }
         PlatformOutcome::NoPhp { warn: true } => {
             vivacity_core::say!(
@@ -394,17 +598,26 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         }
         _ => {}
     }
+    Flow::Continue(())
+}
+
+/// The root requirements the lock does not satisfy: printed, then exit 4
+/// unless `allow-missing-requirements`.
+fn report_missing(run: &Run<'_>, missing: &[String]) -> anyhow::Result<Flow> {
     if !missing.is_empty() {
         // On a bare vendor the plugin is not active yet in Composer's run:
         // it would install itself, then run a partial `composer update` of
         // the merged requirements and rewrite the lock. vivacity does not
         // do that on a user's behalf: the lock goes to Composer, with the
         // reason. With the plugin installed, Composer refuses like this.
-        if let Some(m) = &merged {
-            let plugin_installed = installed_packages(&project, &manifest).iter().any(|p| {
-                p.get("name").and_then(|n| n.as_str())
-                    == Some(vivacity_resolver::merge_plugin::PLUGIN_NAME)
-            });
+        if let Some(m) = &run.merged {
+            let plugin_installed =
+                installed_packages(&run.project, &run.manifest)
+                    .iter()
+                    .any(|p| {
+                        p.get("name").and_then(|n| n.as_str())
+                            == Some(vivacity_resolver::merge_plugin::PLUGIN_NAME)
+                    });
             if !plugin_installed {
                 let report = vivacity_core::scope::ScopeReport {
                     issues: vec![vivacity_core::scope::ScopeIssue::MergePlugin(format!(
@@ -413,76 +626,87 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                     ))],
                     ..Default::default()
                 };
-                return fallback_or_fail(args, &report);
+                return Ok(Flow::Break(fallback_or_fail(run.args, &report)?));
             }
         }
-        for line in &missing {
+        for line in missing {
             vivacity_core::say!("{line}");
         }
         if !require::truthy(require::config_value(
-            &manifest,
+            &run.manifest,
             "allow-missing-requirements",
         )) {
-            return Ok(4);
+            return Ok(Flow::Break(4));
         }
     }
-    if !args.after_update {
-        say_lock_resolution(verify_start);
-    }
-    {
-        use vivacity_resolver::transaction::Operation;
-        let ops = &transaction.operations;
-        let installs = ops
-            .iter()
-            .filter(|o| matches!(o, Operation::Install(_)))
-            .count();
-        let updates = ops
-            .iter()
-            .filter(|o| matches!(o, Operation::Update(..)))
-            .count();
-        let removals = ops
-            .iter()
-            .filter(|o| matches!(o, Operation::Uninstall(_)))
-            .count();
-        if installs + updates + removals == 0 {
-            vivacity_core::say!("Nothing to install, update or remove");
-        } else {
-            vivacity_core::say!(
-                "Package operations: {installs} install{}, {updates} update{}, {removals} removal{}",
-                if installs == 1 { "" } else { "s" },
-                if updates == 1 { "" } else { "s" },
-                if removals == 1 { "" } else { "s" }
-            );
-            for line in vivacity_resolver::transaction::verbose_operation_summary(ops, &arena) {
-                vivacity_core::say_verbose!("{line}");
-            }
-        }
-    }
-    if args.dry_run {
-        for op in &transaction.operations {
-            if let Some(line) = op.show(&arena, false) {
-                vivacity_core::say!("  - {line}");
-            }
-        }
-        // `Installer::run` after `doInstall` (an update prints its own
-        // report after this phase).
-        if !args.after_update {
-            for line in abandoned_warnings(&lock_value) {
-                vivacity_core::say!("{line}");
-            }
-            print_funding(&project, &manifest);
-        }
-        return Ok(0);
-    }
+    Ok(Flow::Continue(()))
+}
 
-    // Out of scope: Composer as fallback (default) or fail explicitly.
+/// `Package operations: …` (the operation list itself at `-v`), or
+/// `Nothing to install, update or remove`.
+fn report_operations(tx: &LocalTransaction) {
+    use vivacity_resolver::transaction::Operation;
+    let ops = &tx.transaction.operations;
+    let installs = ops
+        .iter()
+        .filter(|o| matches!(o, Operation::Install(_)))
+        .count();
+    let updates = ops
+        .iter()
+        .filter(|o| matches!(o, Operation::Update(..)))
+        .count();
+    let removals = ops
+        .iter()
+        .filter(|o| matches!(o, Operation::Uninstall(_)))
+        .count();
+    if installs + updates + removals == 0 {
+        vivacity_core::say!("Nothing to install, update or remove");
+    } else {
+        vivacity_core::say!(
+            "Package operations: {installs} install{}, {updates} update{}, {removals} removal{}",
+            if installs == 1 { "" } else { "s" },
+            if updates == 1 { "" } else { "s" },
+            if removals == 1 { "" } else { "s" }
+        );
+        for line in vivacity_resolver::transaction::verbose_operation_summary(ops, &tx.arena) {
+            vivacity_core::say_verbose!("{line}");
+        }
+    }
+}
+
+/// A dry run stops after the operations: their lines in transaction order,
+/// then the abandoned packages and the funding count. Always 0.
+fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> i32 {
+    for op in &tx.transaction.operations {
+        if let Some(line) = op.show(&tx.arena, false) {
+            vivacity_core::say!("  - {line}");
+        }
+    }
+    // `Installer::run` after `doInstall` (an update prints its own
+    // report after this phase).
+    if !run.args.after_update {
+        for line in abandoned_warnings(&run.lock_value) {
+            vivacity_core::say!("{line}");
+        }
+        print_funding(&run.project, &run.manifest);
+    }
+    0
+}
+
+/// Out of scope: Composer as fallback (default) or fail explicitly. In
+/// scope: the notes on what is emulated or skipped, then the layout the
+/// install places packages by (`--check-scope` stops here).
+fn native_layout(
+    run: &Run<'_>,
+    scope: Option<vivacity_core::scope::ScopeReport>,
+) -> anyhow::Result<Flow<vivacity_core::layout::Layout>> {
     let Some(scope) = scope else {
         anyhow::bail!("internal: scope was not analysed");
     };
     if !scope.is_native_ok() {
-        return fallback_or_fail(args, &scope);
+        return Ok(Flow::Break(fallback_or_fail(run.args, &scope)?));
     }
-    let Some(layout) = scope.layout.as_ref() else {
+    let Some(layout) = scope.layout else {
         anyhow::bail!("internal: scope is native but no layout was resolved");
     };
     if let Some(tag) = &layout.installers_tag {
@@ -495,12 +719,31 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             "Note: plugin {plugin} installed as a plain library (vivacity never runs plugins)"
         );
     }
-    trace("scope", t0);
-    if args.check_scope {
+    trace("scope", run.t0);
+    if run.args.check_scope {
         vivacity_core::say_always!("vivacity: this lock is installed natively");
-        return Ok(0);
+        return Ok(Flow::Break(0));
     }
+    Ok(Flow::Continue(layout))
+}
 
+/// The installer's report, and the runtime it ran on: kept until the end
+/// of `run_install`, where it always was dropped (dropping a runtime waits
+/// for its blocking tasks).
+struct Installed {
+    report: vivacity_core::installer::InstallReport,
+    _runtime: tokio::runtime::Runtime,
+}
+
+/// The operations: their lines decided on the state before the
+/// transaction, the transaction itself, then the lines; then, as
+/// `Installer::run` prints them before the dump, the abandoned packages.
+fn execute_operations(
+    run: &Run<'_>,
+    tx: &LocalTransaction,
+    layout: &vivacity_core::layout::Layout,
+) -> anyhow::Result<Flow<Installed>> {
+    let args = run.args;
     // The operation lines of a real install, in transaction order, with the
     // downloader's appendix (`getInstallOperationAppendix`: `: Extracting
     // archive`, `: Symlinking from …`, `: Mirroring from …`, `: Source
@@ -509,33 +752,45 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // transaction has succeeded: the placements run in parallel, and a
     // failure is reported alone.
     let operation_lines = operation_lines(
-        &project,
-        &arena,
-        &transaction.operations,
+        &run.project,
+        &tx.arena,
+        &tx.transaction.operations,
         layout,
-        lock.flex_packs(&manifest, with_dev, !args.no_plugins),
+        run.lock
+            .flex_packs(&run.manifest, run.with_dev, !args.no_plugins),
         !args.no_plugins,
     )?;
     // Composer decides these before it fetches anything; computed here for the
     // same reason `operation_lines` is — our own fetch fills that cache.
-    let downloading = download_lines(&lock, &arena, &transaction.operations, with_dev);
+    let downloading = download_lines(
+        &run.lock,
+        &tx.arena,
+        &tx.transaction.operations,
+        run.with_dev,
+    );
 
     // Transaction.
     let store = Arc::new(vivacity_core::store::Store::default_location());
-    let auth = vivacity_core::fetch::Auth::load(&project);
+    let auth = vivacity_core::fetch::Auth::load(&run.project);
     let fetcher = Arc::new(vivacity_core::fetch::Fetcher::new(
         vivacity_core::fetch::composer_cache_dir(),
         auth,
     )?);
     let opts = vivacity_core::installer::InstallOptions {
-        with_dev,
+        with_dev: run.with_dev,
         offline: args.offline,
         plugins_enabled: !args.no_plugins,
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;
     let report = match runtime.block_on(vivacity_core::installer::install(
-        &project, &lock, &manifest, layout, store, fetcher, &opts,
+        &run.project,
+        &run.lock,
+        &run.manifest,
+        layout,
+        store,
+        fetcher,
+        &opts,
     )) {
         Ok(r) => r,
         // Emulation refusal detected before any write: vendor/ is intact.
@@ -545,15 +800,15 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 skipped_plugins: vec![],
                 layout: None,
             };
-            return fallback_or_fail(args, &scope);
+            return Ok(Flow::Break(fallback_or_fail(args, &scope)?));
         }
         Err(vivacity_core::Error::Refused(msg)) => {
             vivacity_core::say_always!("{msg}");
-            return Ok(1);
+            return Ok(Flow::Break(1));
         }
         Err(e) => return Err(e.into()),
     };
-    trace("install transaction", t0);
+    trace("install transaction", run.t0);
     for line in &downloading {
         vivacity_core::say!("{line}");
     }
@@ -568,144 +823,186 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // before the dump, the funding count after it; an install driven by
     // `update` reports through it.
     if !args.after_update {
-        for line in abandoned_warnings(&lock_value) {
+        for line in abandoned_warnings(&run.lock_value) {
             vivacity_core::say!("{line}");
         }
     }
-    let mut autoload_note = String::new();
-    if !args.no_autoloader {
-        if let Some(r) = &runner {
-            let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
-            if code != 0 {
-                return Ok(code);
-            }
+    Ok(Flow::Continue(Installed {
+        report,
+        _runtime: runtime,
+    }))
+}
+
+/// `Installer::run`'s dump, after `doInstall`: pre-autoload-dump, the autoloader (the
+/// plan made during the network wait, or made now), the emulated
+/// post-autoload-dump plugins, post-autoload-dump. Returns the closing
+/// line's autoloader note.
+fn dump_autoloader(
+    run: &Run<'_>,
+    tx: &LocalTransaction,
+    layout: &vivacity_core::layout::Layout,
+    report: &vivacity_core::installer::InstallReport,
+    early_dump: Option<anyhow::Result<PlannedDump>>,
+) -> anyhow::Result<Flow<String>> {
+    let args = run.args;
+    if let Some(r) = &run.runner {
+        let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
+        if code != 0 {
+            return Ok(Flow::Break(code));
         }
-        // `Installer::doInstall`: "optimized" as soon as the effective
-        // optimize flag is on — the option, `config.optimize-autoloader`,
-        // or class-map authoritative (which implies it), the same
-        // computation `dump_autoload_plan` makes.
-        vivacity_core::say!(
-            "Generating{} autoload files",
-            if effective_optimize(
-                &manifest,
-                args.optimize_autoloader,
-                args.classmap_authoritative
-            ) {
-                " optimized"
-            } else {
-                ""
-            }
-        );
-        // `AutoloadGenerator::dump($localRepo)`: the local repository, not
-        // the lock (they differ for an unchanged package whose lock entry
-        // moved).
-        let local = report.local_repository.as_ref().unwrap_or(&lock);
-        let planned = match early_dump {
-            // Planned during the network wait: the install placed nothing,
-            // the inputs are what they were.
-            Some(planned) => planned?,
-            None => dump_autoload_plan(
-                &project,
-                local,
-                &manifest,
-                layout,
-                with_dev,
-                args.optimize_autoloader || args.classmap_authoritative,
-                args.classmap_authoritative,
-                args.ignore_platform_reqs,
-                &args.ignore_platform_req,
-                (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
-                !args.no_plugins,
-                // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`
-                lock.packages_dev
-                    .iter()
-                    .map(|p| p.name().to_owned())
-                    .collect(),
-            )?,
-        };
-        let report = planned.finish(&project, &manifest, layout)?;
-        autoload_note = format!(", autoloader with {} classes", report.classes);
-        // Plugins listening to post-autoload-dump, emulated: the local
-        // repository's order is the previous installed.json order minus
-        // the removed and updated packages, then the operations' order.
-        {
-            use vivacity_resolver::transaction::Operation;
-            let previous: Vec<&str> = match &unchanged_names {
-                Some(names) => names.iter().map(String::as_str).collect(),
-                None => present.iter().map(|&i| arena[i].name.as_str()).collect(),
-            };
-            let mut gone: Vec<&str> = Vec::new();
-            let mut fresh: Vec<&str> = Vec::new();
-            for op in &transaction.operations {
-                match *op {
-                    Operation::Uninstall(p) => gone.push(arena[p].name.as_str()),
-                    Operation::Update(i, t) => {
-                        gone.push(arena[i].name.as_str());
-                        fresh.push(arena[t].name.as_str());
-                    }
-                    Operation::Install(p) => fresh.push(arena[p].name.as_str()),
-                    _ => {}
-                }
-            }
-            let order =
-                vivacity_core::pest_plugin::local_repository_order(&previous, &gone, &fresh);
-            let previously_present = previous.contains(&vivacity_core::pest_plugin::PLUGIN_NAME);
-            emulate_pest_plugin(
-                &project,
-                local,
-                &manifest,
-                with_dev,
-                &order,
-                !args.no_plugins,
-                previously_present,
-            )?;
-            // yiisoft/yii2-composer: `activate` then its installer's
-            // per-operation rewrites of extensions.php — one write here,
-            // when an extension was installed, updated or removed.
-            let touched: Vec<&str> = gone.iter().chain(fresh.iter()).copied().collect();
-            emulate_yii2_composer(
-                &project,
-                local,
-                &manifest,
-                with_dev,
-                &order,
-                &touched,
-                !args.no_plugins,
-            )?;
-            // codeception/c3: its `uninstall` when the plugin leaves the
-            // vendor (during the transaction), its `POST_INSTALL_CMD` /
-            // `POST_UPDATE_CMD` copy afterwards.
-            emulate_c3(
-                &project,
-                local,
-                &manifest,
-                with_dev,
-                previous.contains(&vivacity_core::c3_plugin::PLUGIN_NAME),
-                args.after_update,
-                !args.no_plugins,
-            )?;
-            emulate_bamarni_bin(local, &manifest, with_dev, !args.no_plugins);
-            emulate_package_versions(&project, local, &manifest, with_dev, !args.no_plugins)?;
-        }
-        // `AutoloadGenerator::dump`: post-autoload-dump once the files are
-        // written (the emulated post-autoload-dump plugins included).
-        if let Some(r) = &runner {
-            let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;
-            if code != 0 {
-                return Ok(code);
-            }
-        }
-        trace("autoload dump", t0);
     }
+    // `Installer::doInstall`: "optimized" as soon as the effective
+    // optimize flag is on — the option, `config.optimize-autoloader`,
+    // or class-map authoritative (which implies it), the same
+    // computation `dump_autoload_plan` makes.
+    vivacity_core::say!(
+        "Generating{} autoload files",
+        if effective_optimize(
+            &run.manifest,
+            args.optimize_autoloader,
+            args.classmap_authoritative
+        ) {
+            " optimized"
+        } else {
+            ""
+        }
+    );
+    // `AutoloadGenerator::dump($localRepo)`: the local repository, not
+    // the lock (they differ for an unchanged package whose lock entry
+    // moved).
+    let local = report.local_repository.as_ref().unwrap_or(&run.lock);
+    let planned = match early_dump {
+        // Planned during the network wait: the install placed nothing,
+        // the inputs are what they were.
+        Some(planned) => planned?,
+        None => dump_autoload_plan(
+            &run.project,
+            local,
+            &run.manifest,
+            layout,
+            run.with_dev,
+            args.optimize_autoloader || args.classmap_authoritative,
+            args.classmap_authoritative,
+            args.ignore_platform_reqs,
+            &args.ignore_platform_req,
+            (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
+            !args.no_plugins,
+            // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`
+            run.lock
+                .packages_dev
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect(),
+        )?,
+    };
+    let dumped = planned.finish(&run.project, &run.manifest, layout)?;
+    let autoload_note = format!(", autoloader with {} classes", dumped.classes);
+    post_autoload_dump_plugins(run, tx, local)?;
+    // `AutoloadGenerator::dump`: post-autoload-dump once the files are
+    // written (the emulated post-autoload-dump plugins included).
+    if let Some(r) = &run.runner {
+        let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;
+        if code != 0 {
+            return Ok(Flow::Break(code));
+        }
+    }
+    trace("autoload dump", run.t0);
+    Ok(Flow::Continue(autoload_note))
+}
+
+/// Plugins listening to post-autoload-dump, emulated: the local
+/// repository's order is the previous installed.json order minus
+/// the removed and updated packages, then the operations' order.
+fn post_autoload_dump_plugins(
+    run: &Run<'_>,
+    tx: &LocalTransaction,
+    local: &vivacity_core::lock::Lock,
+) -> anyhow::Result<()> {
+    use vivacity_resolver::transaction::Operation;
+    let args = run.args;
+    let arena = &tx.arena;
+    let previous: Vec<&str> = match &tx.unchanged_names {
+        Some(names) => names.iter().map(String::as_str).collect(),
+        None => tx.present.iter().map(|&i| arena[i].name.as_str()).collect(),
+    };
+    let mut gone: Vec<&str> = Vec::new();
+    let mut fresh: Vec<&str> = Vec::new();
+    for op in &tx.transaction.operations {
+        match *op {
+            Operation::Uninstall(p) => gone.push(arena[p].name.as_str()),
+            Operation::Update(i, t) => {
+                gone.push(arena[i].name.as_str());
+                fresh.push(arena[t].name.as_str());
+            }
+            Operation::Install(p) => fresh.push(arena[p].name.as_str()),
+            _ => {}
+        }
+    }
+    let order = vivacity_core::pest_plugin::local_repository_order(&previous, &gone, &fresh);
+    let previously_present = previous.contains(&vivacity_core::pest_plugin::PLUGIN_NAME);
+    emulate_pest_plugin(
+        &run.project,
+        local,
+        &run.manifest,
+        run.with_dev,
+        &order,
+        !args.no_plugins,
+        previously_present,
+    )?;
+    // yiisoft/yii2-composer: `activate` then its installer's
+    // per-operation rewrites of extensions.php — one write here,
+    // when an extension was installed, updated or removed.
+    let touched: Vec<&str> = gone.iter().chain(fresh.iter()).copied().collect();
+    emulate_yii2_composer(
+        &run.project,
+        local,
+        &run.manifest,
+        run.with_dev,
+        &order,
+        &touched,
+        !args.no_plugins,
+    )?;
+    // codeception/c3: its `uninstall` when the plugin leaves the
+    // vendor (during the transaction), its `POST_INSTALL_CMD` /
+    // `POST_UPDATE_CMD` copy afterwards.
+    emulate_c3(
+        &run.project,
+        local,
+        &run.manifest,
+        run.with_dev,
+        previous.contains(&vivacity_core::c3_plugin::PLUGIN_NAME),
+        args.after_update,
+        !args.no_plugins,
+    )?;
+    emulate_bamarni_bin(local, &run.manifest, run.with_dev, !args.no_plugins);
+    emulate_package_versions(
+        &run.project,
+        local,
+        &run.manifest,
+        run.with_dev,
+        !args.no_plugins,
+    )?;
+    Ok(())
+}
+
+/// What runs after the transaction and the dump: the post-install-cmd
+/// listeners vivacity emulates (dealerdirect, the extension-installers),
+/// the funding count, Flex's listener, then post-install-cmd.
+fn post_install(
+    run: &Run<'_>,
+    layout: &vivacity_core::layout::Layout,
+    report: &vivacity_core::installer::InstallReport,
+) -> anyhow::Result<Flow> {
+    let args = run.args;
     // `dealerdirect/phpcodesniffer-composer-installer` listens to
     // post-install-cmd: after the transaction and the dump, plugins on.
     if !args.no_plugins {
-        let local = report.local_repository.as_ref().unwrap_or(&lock);
+        let local = report.local_repository.as_ref().unwrap_or(&run.lock);
         let installed: Vec<&vivacity_core::lock::LockPackage> =
-            local.wanted_packages(with_dev).collect();
+            local.wanted_packages(run.with_dev).collect();
         let allowed = matches!(
             vivacity_core::layout::plugin_allowed(
-                &manifest,
+                &run.manifest,
                 vivacity_core::phpcs_installer::PLUGIN_NAME
             ),
             vivacity_core::layout::PluginVerdict::Allowed
@@ -716,24 +1013,42 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 .any(|p| p.name() == vivacity_core::phpcs_installer::PLUGIN_NAME)
         {
             vivacity_core::phpcs_installer::register_standards(
-                &project, layout, &installed, &manifest,
+                &run.project,
+                layout,
+                &installed,
+                &run.manifest,
             )?;
         }
-        extension_installers::phpstan(layout, local, &manifest, with_dev, !args.no_plugins)?;
-        extension_installers::rector(layout, local, &manifest, with_dev, !args.no_plugins)?;
+        extension_installers::phpstan(
+            layout,
+            local,
+            &run.manifest,
+            run.with_dev,
+            !args.no_plugins,
+        )?;
+        extension_installers::rector(layout, local, &run.manifest, run.with_dev, !args.no_plugins)?;
     }
     if !args.after_update {
-        print_funding(&project, &manifest);
+        print_funding(&run.project, &run.manifest);
         // symfony/flex's `POST_INSTALL_CMD` listener (after an update it is
         // `POST_UPDATE_CMD` that fires, handled by the update path).
-        emulate_flex_install(&project, &manifest, !args.no_plugins)?;
+        emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?;
     }
-    if let Some(r) = &runner {
+    if let Some(r) = &run.runner {
         let code = r.run(scripts::POST_INSTALL_CMD)?;
         if code != 0 {
-            return Ok(code);
+            return Ok(Flow::Break(code));
         }
     }
+    Ok(Flow::Continue(()))
+}
+
+/// vivacity's closing line: what the install did and where it found it.
+fn say_summary(
+    run: &Run<'_>,
+    report: &vivacity_core::installer::InstallReport,
+    autoload_note: &str,
+) {
     let warmed = if report.store_warmed > 0 {
         format!(", store warmed for {} packages", report.store_warmed)
     } else {
@@ -747,9 +1062,8 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         report.store_hits,
         report.from_cache,
         report.from_network,
-        t0.elapsed().as_secs_f32()
+        run.t0.elapsed().as_secs_f32()
     );
-    Ok(0)
 }
 
 /// `pestphp/pest-plugin`'s post-autoload-dump listener, emulated: with

@@ -50,6 +50,12 @@ byte-identical-output promise are the public API.
 - `rm x --no-autoloader -vv`: the alias kept `--no-autoloader`, which
   Composer's `remove` does not have.
 
+### Changed
+- **`run_install` is split into named phases** (one 737-line function →
+  a 45-line sequence of calls, one function per step of Composer's
+  `Installer::run`/`doInstall`). No behaviour change: same literals in the
+  same order, same exit codes, same trace points, same suite and harnesses.
+
 ### Added
 - `harness/fallback-args.sh` (in CI): a fake `composer` first on the `PATH`
   records each call — argv, directory, `SHELL_VERBOSITY`,

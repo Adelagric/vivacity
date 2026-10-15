@@ -3129,3 +3129,58 @@ comparent l'enregistrement entier (argv, répertoire, `SHELL_VERBOSITY`,
 est décidé après que vivacity a imprimé l'en-tête et « Package operations »,
 que Composer réimprime ; sous `--run-scripts`, `pre-install-cmd` tourne avant
 cette décision puis encore dans Composer.
+
+## 2026-10-16 — `run_install` coupé en phases nommées, sans changer un octet
+
+Suite notée le 2026-10-14 : après le découpage de `lib.rs`, `run_install`
+faisait encore 737 lignes d'un seul tenant, quinze étapes de Composer et une
+quarantaine de variables vivantes de bout en bout. Il en fait 45 : une suite
+d'appels qui se lit contre `Installer::run`/`doInstall`, vingt et une phases
+en dessous, dans l'ordre d'exécution. Plan, méta-analyse (sous-agent frais),
+revue indépendante et carte des phases : `docs/plans/split-run-install.md`.
+
+**Un découpage, pas une correction.** Un contexte `Run` (arguments, `t0`,
+projet, texte de composer.json, manifeste effectif, racine fusionnée, lock,
+`with_dev`, `Runner`) fixé avant la première impression ; chaque phase qui
+peut arrêter la commande rend `Result<ControlFlow<i32, T>>`, et une macro
+`proceed!` fait pour `ControlFlow` ce que `?` fait pour `Result`. Le runtime
+tokio vit jusqu'à la fin de `run_install`, comme avant (son `drop` attend les
+tâches bloquantes) ; le thread de politique est lancé et joint aux mêmes
+points. Écarté : un enum de sortie maison (`ControlFlow` dit déjà « continuer
+ou s'arrêter avec ») ; un module frère pour les phases (tout le diff en
+déplacement pour rien) ; fusionner les trois rapports de la jointure —
+leur ordre est justement un défaut noté ci-dessous, mieux visible en trois
+appels.
+
+**La preuve compare des séquences, pas des ensembles.** La méta a montré
+qu'un multiensemble de littéraux laisse passer un déplacement de part et
+d'autre d'un `?`, un `say!` devenu `say_always!` ou un code de sortie changé.
+Comparés à l'ancien fichier : la séquence des 250 littéraux, celle des paires
+(macro ou fonction appelée, littéral), celle des sorties et celle des 116
+appels à effet — identiques, aux écarts de placement près (le `return Ok(0)`
+du dry run devenu la valeur de `dry_run`, deux appels placés dans une autre
+fonction). Deux mutations (`say!` → `say_always!`, une sortie 2 → 1) font
+échouer les contrôles. Deux choix du premier jet sont revenus pour garder la
+séquence intacte : la préférence d'installation reste en ligne dans
+`read_manifests`, les « abandonné » de l'installation réelle restent à la fin
+des opérations. Et `VIVACITY_TRACE` donne les mêmes libellés dans le même
+ordre, ancien contre nouveau binaire, sur douze modes d'`install`.
+
+**Défauts vus en route, laissés** (préexistants, à reprendre chacun avec son
+plan) : l'ordre de la jointure — vivacity rapporte politique (2), plateforme
+(4) puis exigences manquantes, alors que `doInstall` teste les exigences
+manquantes avant le pool et le solveur ; le `COMMAND` de
+bamarni/composer-bin-plugin passe après `pre-install-cmd` (avant
+`Installer::run` chez Composer, visible sous `--run-scripts`) ; dealerdirect
+et les extension-installers émulés avant le funding, que Composer imprime
+avant `POST_INSTALL_CMD` (visible seulement sur leur échec) ; deux
+commentaires qui attribuent à `doInstall` ce qui est dans `run()` ou dans un
+autre ordre.
+
+Vérifié : `cargo fmt --check`, clippy `-D warnings` sur macOS et
+`x86_64-pc-windows-gnu`, 304 tests verts, et tous les harnais contre
+Composer 2.10.3 sur le binaire final — 29 passages (dont `diff-vendor
+--with-autoloader` cache froid puis chaud), tous à 0, 584 cas `OK`. No-op
+laravel (Mac, hyperfine, binaires alternés) : `install --no-plugins` médiane
+114,0 ms sur `main` contre 113,8 ms (5 passages), 47,3 contre 47,3 ms hors
+ligne (30 passages) — dans le bruit.
