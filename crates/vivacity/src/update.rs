@@ -248,6 +248,7 @@ pub(crate) fn install_after_update(
     virtual_manifest: Option<serde_json::Value>,
 ) -> anyhow::Result<i32> {
     run_install(&InstallArgs {
+        compat: GlobalCompatArgs::default(),
         prefer_source: false,
         prefer_dist: false,
         prefer_install: None,

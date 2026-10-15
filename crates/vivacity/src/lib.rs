@@ -133,6 +133,9 @@ struct RequireArgs {
     quiet: bool,
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+    /// Accepted for compatibility: vivacity never writes ANSI escapes.
+    #[arg(long)]
+    no_ansi: bool,
     #[arg(long)]
     no_scripts: bool,
     #[arg(long)]
@@ -146,6 +149,28 @@ struct RequireArgs {
     offline: bool,
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
+}
+
+/// Composer's global options that a CI command line passes to every command
+/// (), accepted where a
+/// command did not declare them so that line runs instead of exiting 2 with
+/// a usage error. All are true no-ops here: vivacity never prompts, writes no
+/// ANSI escapes, and its narrative does not depend on the verbosity (the same
+/// treatment  and  already give //).
+#[derive(clap::Args, Debug, Default)]
+struct GlobalCompatArgs {
+    /// Accepted for compatibility: vivacity is never interactive.
+    #[arg(short = 'n', long)]
+    no_interaction: bool,
+    /// Accepted for compatibility: the output does not change.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+    /// Accepted for compatibility: the output does not change.
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Accepted for compatibility: vivacity never writes ANSI escapes.
+    #[arg(long)]
+    no_ansi: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -205,6 +230,9 @@ struct RemoveArgs {
     quiet: bool,
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+    /// Accepted for compatibility: vivacity never writes ANSI escapes.
+    #[arg(long)]
+    no_ansi: bool,
     #[arg(long)]
     no_progress: bool,
     #[arg(long)]
@@ -232,6 +260,8 @@ struct RemoveArgs {
 
 #[derive(clap::Args, Debug)]
 struct UpdateArgs {
+    #[command(flatten)]
+    compat: GlobalCompatArgs,
     /// Accepted for compatibility: vivacity prints no progress bar.
     #[arg(long)]
     no_progress: bool,
@@ -328,12 +358,20 @@ struct DumpArgs {
     /// `composer run-script`.
     #[arg(long)]
     run_scripts: bool,
+    /// Composer's global : accepted, and already the default
+    /// here (scripts only run with ).
+    #[arg(long, conflicts_with = "run_scripts")]
+    no_scripts: bool,
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
+    #[command(flatten)]
+    compat: GlobalCompatArgs,
 }
 
 #[derive(clap::Args, Debug)]
 struct InstallArgs {
+    #[command(flatten)]
+    compat: GlobalCompatArgs,
     /// Do not install require-dev packages.
     #[arg(long)]
     no_dev: bool,

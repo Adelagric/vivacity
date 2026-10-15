@@ -231,6 +231,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        compat: GlobalCompatArgs::default(),
         no_progress: args.no_progress,
         with: Vec::new(),
         packages: Vec::new(),

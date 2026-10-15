@@ -48,6 +48,19 @@ byte-identical-output promise are the public API.
   change — same suite, same harnesses. The command line itself (clap
   structures, `run`, exit codes) stays in `lib.rs`.
 
+### Added
+- **Composer's global options parse on every command.** `-n`/`--no-interaction`,
+  `-q`/`--quiet`, `-v`/`-vv`/`-vvv`/`--verbose` and `--no-ansi` are global in
+  Composer, so a CI line such as `composer install --no-dev --no-interaction
+  --no-ansi -o` passes them to whatever command it runs. `require` and `remove`
+  already accepted `-n`/`-q`/`-v` as no-ops; `install`, `update` and
+  `dump-autoload` rejected them with clap's usage error and exit 2, and no
+  command accepted `--no-ansi`. All five now accept the four, as true no-ops:
+  vivacity never prompts, never writes an ANSI escape, and prints the same
+  narrative at every verbosity. `dump-autoload` also accepts Composer's global
+  `--no-scripts`, which is already its default (scripts only run with
+  `--run-scripts`, and asking for both is a usage error).
+
 ## [0.20.0] — 2026-10-08
 
 ### Fixed
