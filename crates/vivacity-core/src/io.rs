@@ -16,7 +16,7 @@
 //! The level is process-wide, like the `ARGV` vivacity keeps for the
 //! fallback: an embedder that runs two commands concurrently in one process
 //! shares it. A thread-local would miss lines printed from a worker thread
-//! (the policy check of `install` runs on one). [`Scope`] sets it for one run
+//! (the lock verification of `install` runs on one). [`Scope`] sets it for one run
 //! and puts it back to `NORMAL` when dropped, panics included.
 
 use std::sync::atomic::{AtomicU8, Ordering};

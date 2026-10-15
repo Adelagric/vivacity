@@ -47,6 +47,10 @@ echo "OK   drupal: core-composer-scaffold handed over to Composer without touchi
 # dist never has to be fetchable.
 prefer_project() { # répertoire, version du paquet, préférence
   rm -rf "$1"; mkdir -p "$1"
+  # Le drapeau qu'`update` écrit pour une exigence `dev-…` : sans lui, la
+  # stabilité du lock refuse le paquet et Composer sort en 4 (« cannot be
+  # installed on this system without changes ») avant la décision de portée.
+  local flags="{}"; case "$2" in dev-*) flags='{"acme/thing": 20}' ;; esac
   cat > "$1/composer.json" <<JSON
 {
     "name": "vivace/prefer",
@@ -73,7 +77,7 @@ JSON
     "packages-dev": [],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {},
+    "stability-flags": $flags,
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {},

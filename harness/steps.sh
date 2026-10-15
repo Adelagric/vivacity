@@ -38,6 +38,7 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius r
 #   @platform:php=7.4.0     config.platform.php dans le manifeste
 #   @lockfile:name          copie `name` (dans le répertoire de la fixture) sur composer.lock
 #   @jq:expr                applique l'expression jq au manifeste (ex. .config.policy.abandoned.block=true)
+#   @lockjq:expr            applique l'expression jq à composer.lock (ex. .platform={"php":"^99"})
 #   @pkgedit:dir            change la description du composer.json d'un paquet
 #                           `path` de la fixture (dir relatif au projet) : sa
 #                           référence dist change
@@ -262,6 +263,33 @@ STEPS=(
   "laravel|install @require:laravel/tinker=^99"
   "laravel|install @jq:.[\"require-dev\"][\"acme/nope\"]=\"^1.0\" @stub:acme/nope"
   "laravel|install --no-dev @jq:.[\"require-dev\"][\"acme/nope\"]=\"^1.0\" @stub:acme/nope"
+  # `Installer::doInstall` résout le lock sur la plateforme : les exigences
+  # de plateforme de la racine (require, require-dev en mode dev), puis
+  # celles du lock que la racine ne déclare pas, sous le filtre
+  # `--ignore-platform-req(s)` ; un échec sort par `SolverProblemsException`
+  # (code 2). Les exigences manquantes passent avant (code 4).
+  "laravel|install @require:ext-nope=*"
+  "laravel|install @lockjq:.platform={\"php\":\"^99\"}"
+  "laravel|install @lockjq:.platform={\"ext-nope\":\"*\"}"
+  "laravel|install @require:ext-nope=* @lockjq:.platform={\"php\":\"^99\"}"
+  "laravel|install --ignore-platform-req=ext-nope @require:ext-nope=*"
+  "laravel|install --ignore-platform-reqs @lockjq:.platform={\"ext-nope\":\"*\"}"
+  "laravel|install @require:laravel/tinker=^99 @require:ext-nope=*"
+  "laravel|install --no-dev @lockjq:.[\"platform-dev\"]={\"ext-nope\":\"*\"}"
+  "laravel|install @lockjq:.[\"platform-dev\"]={\"ext-nope\":\"*\"}"
+  "laravel|install --ignore-platform-req=php+ @jq:.require.php=\"<8.0\""
+  "laravel|install --ignore-platform-req=ext-* @require:ext-nope=*"
+  # `BaseCommand::initialize` : les variables d'environnement tiennent lieu
+  # des options laissées vides.
+  "laravel|install @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
+  "laravel|install @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
+  # La racine figée garde ses `conflict` : un conflit avec un paquet
+  # verrouillé est un problème du solveur.
+  "laravel|install @jq:.conflict={\"laravel/tinker\":\"*\"}"
+  "laravel|install @jq:.replace={\"laravel/tinker\":\"*\"}"
+  # Un paquet verrouillé que la stabilité du lock refuse, requis par d'autres :
+  # problème (code 2) ; feuille (rector plus bas) : « without changes » (4).
+  "laravel|install @lockjq:.packages|=map(if(.name==\"psr/log\")then(.version=\"3.0.2-beta1\")else(.)end)"
   "rector|update --dry-run @require:phpstan/phpstan=^99"
   "rector|update --dry-run --no-dev"
   "symfony|require symfony/yaml --dry-run"
@@ -272,6 +300,10 @@ STEPS=(
   "rector|update @require:phpstan/phpstan=^99 @stderr"
   "rector|update phpstan/phpstan @require:phpstan/phpstan=^99 @stderr"
   "rector|require phpstan/phpstan:^99 @stderr"
+  # Un paquet verrouillé que la stabilité du lock refuse reste hors du pool
+  # (`unacceptableFixedOrLockedPackages`) mais présent : la résolution
+  # réussit avec une désinstallation — « without changes », code 4.
+  "rector|install @lockjq:.[\"minimum-stability\"]=\"stable\"|.[\"stability-flags\"]={}"
   "solver-problems|update @nolock @stderr @require:acme/missing-dep=^1.0"
   "solver-problems|update @nolock @stderr @require:acme/unstable=^1.0 @jq:.[\"minimum-stability\"]=\"stable\""
   "solver-problems|update @nolock @stderr @require:acme/unstable=^1.0@beta @jq:.[\"minimum-stability\"]=\"stable\""
@@ -316,6 +348,9 @@ STEPS=(
   "solver-policies|update @nolock @stderr @jq:.config.policy.abandoned.block=true"
   "solver-policies|update acme/vuln @stderr @lockfile:composer.lock.malware"
   "solver-policies|install @stderr @lockfile:composer.lock.malware"
+  # Le paquet bloqué et l'échec de plateforme viennent du MÊME solveur :
+  # une seule liste de problèmes.
+  "solver-policies|install @lockfile:composer.lock.malware @require:ext-nope=* @stderr"
   # Dépôts `path` : glob, accolades, dépôt git imbriqué (référence HEAD,
   # branche de fonctionnalité + parente), version devinée via le dépôt du
   # projet, `reference: none`, `versions`, paquet symlinké déverrouillé par
@@ -405,6 +440,7 @@ for fx in "${FIXTURES[@]}"; do
           @platform:*) kv="${prep#@platform:}"; jq --arg p "${kv%%=*}" --arg v "${kv#*=}" '.config.platform[$p] = $v' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;
           @lockfile:*) cp "$ROOT/fixtures/projects/$fx/${prep#@lockfile:}" "$d/composer.lock" ;;
           @jq:*) jq "${prep#@jq:}" "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;
+          @lockjq:*) jq "${prep#@lockjq:}" "$d/composer.lock" > "$d/l.tmp" && mv "$d/l.tmp" "$d/composer.lock" ;;
           @pkgedit:*) pd="$d/${prep#@pkgedit:}"; jq '.description = "edited"' "$pd/composer.json" > "$pd/c.tmp" && mv "$pd/c.tmp" "$pd/composer.json" ;;
           @nolock) rm -f "$d/composer.lock" ;;
           @badlock) printf '{"_readme": [], "content-hash": "x"}\n' > "$d/composer.lock" ;;
@@ -473,7 +509,7 @@ for fx in "${FIXTURES[@]}"; do
       mv "$WORK/$fx-$n.vivacity.tail2" "$WORK/$fx-$n.vivacity.tail"
       if ! [ -s "$WORK/$fx-$n.composer.tail" ]; then
         echo "FAIL $label : pas de ligne d'ancrage dans la sortie de Composer (cas mal choisi)"; ok=0
-      elif ! grep -q '^ *- \|^Nothing to modify\|^Nothing to install\|^The temporary constraint ' "$WORK/$fx-$n.composer.tail"; then
+      elif ! grep -q '^ *- \|^Nothing to modify\|^Nothing to install\|^The temporary constraint \|^Your lock file cannot be installed on this system without changes' "$WORK/$fx-$n.composer.tail"; then
         echo "FAIL $label : oracle aveugle — Composer n'a écrit aucune raison ni opération (\`  - …\`)"; ok=0
       elif ! diff -q "$WORK/$fx-$n.composer.tail" "$WORK/$fx-$n.vivacity.tail" >/dev/null 2>&1; then
         echo "FAIL $label : les explications diffèrent"

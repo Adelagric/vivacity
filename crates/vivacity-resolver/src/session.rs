@@ -1310,78 +1310,544 @@ fn say_events(events: &[(vivacity_core::io::Verbosity, String)]) {
     events.iter().for_each(say_event);
 }
 
-/// Running the lock pool through the filter list filter in `install` scope
-/// (`Installer::doInstall` -> `createFilterListPoolFilter(BLOCK_SCOPE_INSTALL)`):
-/// Composer's problems for the removed locked versions, in lock order;
-/// empty when nothing blocks. Warnings (ignored unreachable repositories)
-/// are returned separately.
-pub fn install_policy_problems(
-    project_dir: &Path,
-    composer_home: Option<&Path>,
-    http: Option<HttpTransports>,
-    cache_repo_dir: Option<&Path>,
-    with_dev: bool,
-    no_blocking: bool,
-) -> Result<(Vec<String>, Vec<String>), SessionError> {
-    let manifest_text = std::fs::read_to_string(project_dir.join("composer.json"))
+/// What `verify_install` reads, gathered by `install` before it starts the
+/// verification on its own thread.
+pub struct InstallVerifyInput {
+    pub project_dir: std::path::PathBuf,
+    pub composer_home: Option<std::path::PathBuf>,
+    pub http: Option<HttpTransports>,
+    pub cache_repo_dir: Option<std::path::PathBuf>,
+    /// composer.json as written: the merged config (repositories, `policy`)
+    /// the list filter reads.
+    pub manifest_text: String,
+    /// The root package Composer works with (merged by composer-merge-plugin
+    /// when it is active): its platform requirements and the fixed root.
+    pub root_manifest: Value,
+    /// `Installer::$devMode`.
+    pub dev_mode: bool,
+    /// `--no-blocking` / `--no-security-blocking`.
+    pub no_blocking: bool,
+    /// `--ignore-platform-reqs`.
+    pub ignore_platform_reqs: bool,
+    /// `--ignore-platform-req`.
+    pub ignore_platform_req: Vec<String>,
+    /// Set by `install` when it stops before the join (missing
+    /// requirements, a hand-over): the thread then skips what is left after
+    /// its network wait — in a program that embeds vivacity it would
+    /// otherwise keep probing and solving after the command returned.
+    pub abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What `Installer::doInstall` concluded about the lock.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstallVerdict {
+    /// The solve kept the lock as it is.
+    Installable,
+    /// `SolverProblemsException::getPrettyString`.
+    Problems(String),
+    /// The solve succeeded with operations: the lock cannot be installed
+    /// without changes.
+    NeedsChanges,
+    /// A kept package failed `ValidatingArrayLoader::validatePackage`
+    /// (`LockTransaction`, inside the solve): the exception's message.
+    Invalid(String),
+}
+
+#[derive(Debug)]
+pub struct InstallVerification {
+    /// The list filter's warnings (unreachable sources ignored per policy).
+    pub warnings: Vec<String>,
+    /// php could not be probed: the lock was solved without php, its
+    /// extensions and libraries (their requirements ignored), the
+    /// `composer-*` packages kept.
+    pub php_missing: bool,
+    pub verdict: InstallVerdict,
+}
+
+/// The lock's settings `Installer` reads when it does not update
+/// (`createRepositorySet(false)`, `createPolicy(false)`,
+/// `createPlatformRepo(false)`).
+struct LockSettings {
+    minimum_stability: String,
+    stability_flags: BTreeMap<String, i32>,
+    /// `null` for a lock written before Composer recorded them: the root's
+    /// `prefer-stable` then, and `--prefer-lowest` (which `install` does not
+    /// have).
+    prefer_stable: Option<bool>,
+    prefer_lowest: Option<bool>,
+}
+
+impl LockSettings {
+    fn of(lock: &Value) -> LockSettings {
+        // `$lockData[$key] ?? null`, then PHP's truthiness.
+        let truthy = |key: &str| match lock.get(key)? {
+            Value::Null => None,
+            Value::Bool(b) => Some(*b),
+            Value::Number(n) => Some(n.as_f64() != Some(0.0)),
+            Value::String(s) => Some(!(s.is_empty() || s == "0")),
+            Value::Array(a) => Some(!a.is_empty()),
+            Value::Object(o) => Some(!o.is_empty()),
+        };
+        LockSettings {
+            minimum_stability: lock
+                .get("minimum-stability")
+                .and_then(Value::as_str)
+                .unwrap_or("stable")
+                .to_owned(),
+            stability_flags: lock
+                .get("stability-flags")
+                .and_then(Value::as_object)
+                .map(|flags| {
+                    flags
+                        .iter()
+                        .filter_map(|(n, v)| Some((n.clone(), i32::try_from(v.as_i64()?).ok()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            prefer_stable: truthy("prefer-stable"),
+            prefer_lowest: truthy("prefer-lowest"),
+        }
+    }
+}
+
+/// `$this->package->getRequires()`, plus `getDevRequires()` in dev mode:
+/// `array_merge` keyed by target (a `require-dev` link replaces the
+/// `require` one at its position).
+fn root_requires(root: &Package, dev_mode: bool) -> crate::package::Links {
+    let mut links = root.requires.clone();
+    if dev_mode {
+        for link in root.dev_requires.iter() {
+            links.insert(link.clone());
+        }
+    }
+    links
+}
+
+/// `Installer::createRequest` and what `doInstall` adds to it before the
+/// solve: the root (and its alias), the platform packages the root does not
+/// provide at their version, every locked package fixed; then
+/// `requireName` for the root's platform requirements, and for the lock's
+/// (`platform`, plus `platform-dev` in dev mode) the root does not declare.
+fn install_request(
+    arena: &[Package],
+    (fixed_root, fixed_root_alias): (usize, Option<usize>),
+    platform: &[usize],
+    locked: &[usize],
+    root_links: &crate::package::Links,
+    lock: &Value,
+    dev_mode: bool,
+) -> Result<Request, SessionError> {
+    use crate::package::LinkType;
+    let mut request = Request::new(Some(locked.to_vec()));
+    if let Some(a) = fixed_root_alias {
+        request.fix_package(a);
+    }
+    request.fix_package(fixed_root);
+    for &p in platform {
+        let provided_here = arena[fixed_root]
+            .provides
+            .get(&arena[p].name)
+            .is_some_and(|l| {
+                l.constraint
+                    .matches(&Constraint::new(Op::Eq, arena[p].version.clone()))
+            });
+        if !provided_here {
+            request.fix_package(p);
+        }
+    }
+    for &idx in locked {
+        request.fix_locked_package(idx);
+    }
+    for link in root_links.iter() {
+        if crate::platform::is_platform_package(&link.target) {
+            request.require_name_pretty(
+                &link.target,
+                Some(link.constraint.clone()),
+                &link.pretty_constraint,
+            )?;
+        }
+    }
+    // `Locker::getPlatformRequirements`: `parseLinks('__root__', '1.0.0', …)`
+    // of `platform`, `array_merge`d with `platform-dev` in dev mode.
+    let parse = |key: &str| {
+        crate::loader::parse_links("__root__", "1.0.0", LinkType::Require, lock.get(key), false)
+            .map_err(|e| SessionError::new(format!("composer.lock: {}", e.0)))
+    };
+    let mut lock_links = parse("platform")?;
+    if dev_mode {
+        for link in parse("platform-dev")?.iter() {
+            lock_links.insert(link.clone());
+        }
+    }
+    for link in lock_links.iter() {
+        if root_links.get(&link.target).is_none() {
+            request.require_name_pretty(
+                &link.target,
+                Some(link.constraint.clone()),
+                &link.pretty_constraint,
+            )?;
+        }
+    }
+    Ok(request)
+}
+
+/// `Installer::createRepositorySet(false, …)`: the lock's stability, the
+/// root's stability flag, the locked versions as root requirements
+/// (`=` constraints, filtered by the platform requirement filter), and the
+/// root, platform and lock repositories.
+fn install_repository_set(
+    arena: &[Package],
+    root: &RootPackage,
+    root_members: Vec<usize>,
+    platform: &[usize],
+    locked: &[usize],
+    settings: &LockSettings,
+    filter: &PlatformRequirementFilter,
+) -> RepositorySet {
+    let mut requires: OrderedMap<Constraint> = OrderedMap::default();
+    for &idx in locked {
+        let p = &arena[idx];
+        if filter.is_ignored(&p.name) {
+            continue;
+        }
+        let constraint = Constraint::new(Op::Eq, p.version.clone());
+        let constraint = filter.filter_constraint(&p.name, &constraint, true);
+        requires.insert(&p.name, constraint);
+    }
+    // `$stabilityFlags[$this->package->getName()]`: the version of the
+    // root alias if there is one.
+    let mut stability_flags = settings.stability_flags.clone();
+    let root_version = match &root.branch_alias {
+        Some((normalized, _)) => normalized.clone(),
+        None => root.package.version.clone(),
+    };
+    stability_flags.insert(
+        root.package.name.clone(),
+        stability_rank(parse_stability(&root_version)),
+    );
+    let mut set = RepositorySet::new(
+        &settings.minimum_stability,
+        stability_flags,
+        &[],
+        root.references.clone(),
+        requires,
+        BTreeMap::new(),
+    );
+    set.add_repository(Repository::Root(root_members));
+    set.add_repository(Repository::Platform(platform.to_vec()));
+    set.add_repository(Repository::Locked(locked.to_vec()));
+    set
+}
+
+/// `createPlatformRepo(false)`: the probed platform under the overrides
+/// recorded in the lock (`platform-overrides`), not the manifest's
+/// `config.platform`.
+fn locked_platform(probed: &[Value], lock: &Value) -> Result<Vec<Package>, SessionError> {
+    let empty = Map::new();
+    let overrides = lock
+        .get("platform-overrides")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    platform_packages(probed, overrides).map_err(SessionError::from)
+}
+
+/// The fixed root (`$fixedRootPackage`: requires emptied) and its alias,
+/// pushed into the arena; the root repository's members, alias first.
+fn push_fixed_root(arena: &mut Vec<Package>, root: &RootPackage) -> (usize, Option<usize>) {
+    let mut fixed = root.package.clone();
+    fixed.requires = Default::default();
+    fixed.dev_requires = Default::default();
+    arena.push(fixed);
+    let fixed_root = arena.len() - 1;
+    let alias = root.branch_alias.as_ref().map(|(normalized, pretty)| {
+        let a = arena[fixed_root].alias(fixed_root, normalized, pretty);
+        arena.push(a);
+        arena.len() - 1
+    });
+    (fixed_root, alias)
+}
+
+/// The locked pool's ingredients that do not depend on the root version:
+/// the lock, its packages and the platform's, already in the arena.
+struct LockedPool<'a> {
+    lock: &'a Value,
+    settings: LockSettings,
+    locked: Vec<usize>,
+    platform: Vec<usize>,
+    dev_mode: bool,
+    /// `--ignore-platform-req(s)` (`IgnoreAll` without php).
+    filter: PlatformRequirementFilter,
+}
+
+/// What the final solve needs from the list filter: the arena indices of
+/// the locked packages it removed and their records.
+type Filtered = (BTreeSet<usize>, crate::pool::FilterListRemoved);
+
+impl LockedPool<'_> {
+    /// The repository set, the request and the pool (no optimizer, no
+    /// filter yet) around `root`, pushed into the arena as the fixed root.
+    fn build(
+        &self,
+        arena: &mut Vec<Package>,
+        root: &RootPackage,
+    ) -> Result<(RepositorySet, Request, Pool), SessionError> {
+        let (fixed_root, alias) = push_fixed_root(arena, root);
+        let members: Vec<usize> = alias.into_iter().chain([fixed_root]).collect();
+        let set = install_repository_set(
+            arena,
+            root,
+            members,
+            &self.platform,
+            &self.locked,
+            &self.settings,
+            &self.filter,
+        );
+        let mut request = install_request(
+            arena,
+            (fixed_root, alias),
+            &self.platform,
+            &self.locked,
+            &root_requires(&root.package, self.dev_mode),
+            self.lock,
+            self.dev_mode,
+        )?;
+        let pool = set.create_pool(&mut request, arena, None)?;
+        Ok((set, request, pool))
+    }
+
+    /// The pool around the real root, less what the list filter removed,
+    /// then `Solver::solve` and, on failure, `getPrettyString`.
+    fn solve(
+        &self,
+        arena: &mut Vec<Package>,
+        root: &RootPackage,
+        filtered: Option<Filtered>,
+        probed: Option<&[Value]>,
+    ) -> Result<InstallVerdict, SessionError> {
+        let (set, request, mut pool) = self.build(arena, root)?;
+        if let Some((removed, records)) = filtered {
+            // The filter saw every locked package; the pool holds those the
+            // lock's stability accepts. What it removed among them leaves,
+            // with their records (`filterListRemovedVersions`) — and only
+            // theirs: Composer never filtered the others.
+            let removed_here: Vec<usize> = pool
+                .packages
+                .iter()
+                .copied()
+                .filter(|idx| removed.contains(idx))
+                .collect();
+            if !removed_here.is_empty() {
+                let mut kept_records = crate::pool::FilterListRemoved::new();
+                for &idx in &removed_here {
+                    let p = &arena[idx];
+                    for name in p.names(false) {
+                        let Some(record) = records
+                            .get(&name)
+                            .and_then(|versions| versions.iter().find(|(v, _)| *v == p.version))
+                        else {
+                            continue;
+                        };
+                        let versions = kept_records.entry(name).or_default();
+                        if !versions.iter().any(|(v, _)| *v == p.version) {
+                            versions.push(record.clone());
+                        }
+                    }
+                }
+                let kept: Vec<usize> = pool
+                    .packages
+                    .iter()
+                    .copied()
+                    .filter(|idx| !removed.contains(idx))
+                    .collect();
+                pool = pool.with_packages(kept, arena);
+                pool.filter_list_removed = kept_records;
+            }
+        }
+        // `createPolicy(false)`: the lock's preferences, the root's
+        // `prefer-stable` for a lock without them.
+        let mut policy = DefaultPolicy::new(
+            self.settings.prefer_stable.unwrap_or(root.prefer_stable),
+            self.settings.prefer_lowest.unwrap_or(false),
+            None,
+        );
+        let solved = Solver::new(&pool, arena).solve(&request, &mut policy, &self.filter);
+        match solved {
+            Ok(transaction) => {
+                // `LockTransaction::setResultPackages` validates every kept
+                // package, as in `update`.
+                for &idx in &transaction.all {
+                    if let Err(e) = crate::lockfile::validate_package(&arena[idx]) {
+                        return Ok(InstallVerdict::Invalid(e));
+                    }
+                }
+                Ok(if transaction.transaction.operations.is_empty() {
+                    InstallVerdict::Installable
+                } else {
+                    InstallVerdict::NeedsChanges
+                })
+            }
+            Err(SolveError::Problems(problems)) => {
+                let ini_files = probed.map(crate::platform::ini_files).unwrap_or_default();
+                let loaded_extensions = probed
+                    .map(crate::platform::loaded_extensions)
+                    .unwrap_or_default();
+                let mut ctx = crate::problem::MessageContext {
+                    arena,
+                    set: &set,
+                    pool: &pool,
+                    request: &request,
+                    is_verbose: vivacity_core::io::shows(vivacity_core::io::Verbosity::Verbose),
+                    ini_files: &ini_files,
+                    loaded_extensions: &loaded_extensions,
+                };
+                Ok(InstallVerdict::Problems(crate::problem::pretty_string(
+                    &mut ctx, &problems, false,
+                )))
+            }
+            Err(SolveError::Bug(b)) => Err(SessionError::new(b)),
+        }
+    }
+}
+
+/// `Installer::doInstall` before it lays out a lock it did not just solve:
+/// the request of `install_request`, the pool on [root, platform, lock]
+/// through the filter list filter in `install` scope, then
+/// `Solver::solve` under the `--ignore-platform-req(s)` filter. One solve,
+/// one list of problems: the root's platform requirements, the lock's,
+/// the conflicts of the fixed root and the locked versions a list blocks.
+///
+/// Runs on its own thread while `install` reads the local repository, in
+/// the order that keeps the network wait first: the list filter runs on
+/// the locked packages alone (it never judges the root or the platform),
+/// then the platform is probed and the root version — detected by the
+/// command for its missing requirements, git runs once — received; the
+/// pool built around them loses what the filter removed.
+pub fn verify_install(
+    input: InstallVerifyInput,
+    root_version: std::sync::mpsc::Receiver<vivacity_core::root_version::RootVersion>,
+) -> Result<InstallVerification, SessionError> {
+    let manifest: Value = serde_json::from_str(&input.manifest_text)
         .map_err(|e| SessionError::new(format!("composer.json: {e}")))?;
-    let manifest: Value = serde_json::from_str(&manifest_text)
-        .map_err(|e| SessionError::new(format!("composer.json: {e}")))?;
-    let config = MergedConfig::load(&manifest, composer_home)?;
+    let config = MergedConfig::load(&manifest, input.composer_home.as_deref())?;
     let mut policy =
         crate::policy_config::PolicyConfig::from_raw(&config.policy).map_err(SessionError::from)?;
     policy
-        .apply_no_blocking(no_blocking)
+        .apply_no_blocking(input.no_blocking)
         .map_err(SessionError::from)?;
-    if !policy.malware_blocks("install") {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let lock_text = std::fs::read_to_string(project_dir.join("composer.lock"))
+    let lock_text = std::fs::read_to_string(input.project_dir.join("composer.lock"))
         .map_err(|e| SessionError::new(format!("composer.lock: {e}")))?;
     let lock: Value = serde_json::from_str(&lock_text)
         .map_err(|e| SessionError::new(format!("composer.lock: {e}")))?;
-    // Only `composer` repositories carry lists; the other types (which
-    // `install` otherwise accepts) are left aside here.
-    let mut repositories: Vec<Repository> = Vec::new();
-    for repo in &config.repositories {
-        if repo.definition.get("type").and_then(Value::as_str) != Some("composer") {
-            continue;
-        }
-        // The constructor does no I/O: an error here is a configuration
-        // error, fatal as in Composer.
-        repositories.push(open_repository_with(
-            repo,
-            http.as_ref(),
-            cache_repo_dir,
-            true,
-        )?);
-    }
+
     let mut arena: Vec<Package> = Vec::new();
-    let locked = crate::repository::locked_repository_with(&lock, &mut arena, with_dev)
+    let locked = crate::repository::locked_repository_with(&lock, &mut arena, input.dev_mode)
         .map_err(SessionError::from)?;
-    let mut request = Request::new(Some(locked.clone()));
-    for &idx in &locked {
-        request.fix_locked_package(idx);
-    }
-    let pool = Pool::new(locked.clone(), Vec::new(), &arena);
+
     let mut warnings = Vec::new();
-    let pool = crate::pool_filters::filter_list_filter(
-        pool,
-        &arena,
-        &repositories,
-        &request,
-        &policy,
-        "install",
-        &mut warnings,
-    )
-    .map_err(SessionError::from)?;
-    let problems: Vec<String> = locked
-        .iter()
-        .map(|&idx| &arena[idx])
-        .filter(|p| pool.is_filter_list_removed(&p.name, &p.version))
-        .map(|p| crate::pool_filters::locked_removed_problem_text(&pool, p))
-        .collect();
-    Ok((problems, warnings))
+    let filtered: Option<Filtered> = if policy.malware_blocks("install") {
+        // Only `composer` repositories carry lists; the other types (which
+        // `install` otherwise accepts) are left aside here.
+        let mut repositories: Vec<Repository> = Vec::new();
+        for repo in &config.repositories {
+            if repo.definition.get("type").and_then(Value::as_str) != Some("composer") {
+                continue;
+            }
+            // The constructor does no I/O: an error here is a configuration
+            // error, fatal as in Composer.
+            let mut opened = open_repository_with(
+                repo,
+                input.http.as_ref(),
+                input.cache_repo_dir.as_deref(),
+                true,
+            )?;
+            if let Repository::Composer(r) = &mut opened {
+                r.hold_output();
+            }
+            repositories.push(opened);
+        }
+        let pool = Pool::new(locked.clone(), Vec::new(), &arena);
+        let before = pool.packages.clone();
+        // (In `install` scope the filter does not read the request.)
+        let request = Request::new(Some(locked.clone()));
+        let mut filter_warnings = Vec::new();
+        let pool = crate::pool_filters::filter_list_filter(
+            pool,
+            &arena,
+            &repositories,
+            &request,
+            &policy,
+            "install",
+            &mut filter_warnings,
+        )
+        .map_err(SessionError::from)?;
+        // What the repositories wrote while loading came first.
+        for repo in &repositories {
+            if let Repository::Composer(r) = repo {
+                warnings.extend(r.take_held());
+            }
+        }
+        warnings.extend(filter_warnings);
+        let removed: BTreeSet<usize> = before
+            .into_iter()
+            .filter(|idx| pool.id_of(*idx).is_none())
+            .collect();
+        Some((removed, pool.filter_list_removed))
+    } else {
+        None
+    };
+    let abandoned = || {
+        if input.abandoned.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(SessionError::new("the lock verification was abandoned"))
+        } else {
+            Ok(())
+        }
+    };
+    abandoned()?;
+
+    // `createPlatformRepo(false)`. Without php (no reference: Composer
+    // cannot run), the `composer-*` packages and the lock's overrides only,
+    // and the requirements on php, its extensions and libraries ignored.
+    let probed = probe().ok();
+    let packages = match &probed {
+        Some(probed) => locked_platform(probed, &lock)?,
+        None => locked_platform(&[], &lock)?,
+    };
+    let mut platform: Vec<usize> = Vec::new();
+    for p in packages {
+        arena.push(p);
+        platform.push(arena.len() - 1);
+    }
+    let filter = if input.ignore_platform_reqs {
+        PlatformRequirementFilter::IgnoreAll
+    } else if probed.is_none() {
+        let mut list = input.ignore_platform_req.clone();
+        list.extend(["php", "php-*", "hhvm", "ext-*", "lib-*"].map(str::to_owned));
+        PlatformRequirementFilter::from_list(&list)
+    } else if !input.ignore_platform_req.is_empty() {
+        PlatformRequirementFilter::from_list(&input.ignore_platform_req)
+    } else {
+        PlatformRequirementFilter::IgnoreNothing
+    };
+    let locked_pool = LockedPool {
+        lock: &lock,
+        settings: LockSettings::of(&lock),
+        locked,
+        platform,
+        dev_mode: input.dev_mode,
+        filter,
+    };
+    let rv = root_version
+        .recv()
+        .map_err(|_| SessionError::new("the root version was not detected"))?;
+    let root = RootPackage::load_with_version(&input.root_manifest, rv)
+        .map_err(|e| SessionError::new(e.0))?;
+    abandoned()?;
+    let verdict = locked_pool.solve(&mut arena, &root, filtered, probed.as_deref())?;
+    Ok(InstallVerification {
+        warnings,
+        php_missing: probed.is_none(),
+        verdict,
+    })
 }
 
 /// `RepositoryManager::createRepository` for the `composer` and `path`
@@ -1533,5 +1999,388 @@ mod tests {
         let mut cfg = MergedConfig::load(&json!({}), None).unwrap();
         cfg.merge(&json!({"repositories": [{"packagist": false}]}));
         assert!(cfg.repositories.is_empty());
+    }
+
+    // -- install verification ---------------------------------------------
+
+    /// A probed PHP 8.2.5 with mbstring and intl.
+    fn probed() -> Vec<Value> {
+        vec![
+            json!({"kind": "php", "name": "php", "version": "8.2.5", "description": "The PHP interpreter"}),
+            json!({"kind": "ext", "name": "mbstring", "version": "8.2.5"}),
+            json!({"kind": "ext", "name": "intl", "version": "8.2.5"}),
+        ]
+    }
+
+    fn root_version() -> vivacity_core::root_version::RootVersion {
+        vivacity_core::root_version::RootVersion {
+            pretty_version: "1.0.0+no-version-set".to_owned(),
+            version: "1.0.0.0".to_owned(),
+            reference: None,
+        }
+    }
+
+    /// `verify_install` without the probe, the network or the thread.
+    fn verify(
+        manifest: Value,
+        lock: Value,
+        dev_mode: bool,
+        filter: PlatformRequirementFilter,
+    ) -> (InstallVerdict, Request) {
+        verify_flagged(manifest, lock, dev_mode, filter, &[])
+    }
+
+    /// `verify`, with the locked packages named in `flagged` removed by the
+    /// list filter (a malware entry each).
+    fn verify_flagged(
+        manifest: Value,
+        lock: Value,
+        dev_mode: bool,
+        filter: PlatformRequirementFilter,
+        flagged: &[&str],
+    ) -> (InstallVerdict, Request) {
+        let mut arena = Vec::new();
+        let locked = crate::repository::locked_repository_with(&lock, &mut arena, dev_mode)
+            .expect("locked repository");
+        let mut platform = Vec::new();
+        for p in locked_platform(&probed(), &lock).expect("platform") {
+            arena.push(p);
+            platform.push(arena.len() - 1);
+        }
+        let pool = LockedPool {
+            lock: &lock,
+            settings: LockSettings::of(&lock),
+            locked,
+            platform,
+            dev_mode,
+            filter,
+        };
+        let root = RootPackage::load_with_version(&manifest, root_version()).expect("root");
+        let (_, request, _) = pool.build(&mut arena.clone(), &root).expect("build");
+        let filtered = (!flagged.is_empty()).then(|| {
+            let mut removed = BTreeSet::new();
+            let mut records = crate::pool::FilterListRemoved::new();
+            for &idx in &pool.locked {
+                let p = &arena[idx];
+                if !flagged.contains(&p.name.as_str()) {
+                    continue;
+                }
+                removed.insert(idx);
+                let entry = crate::repository::FilterEntry {
+                    package_name: p.name.clone(),
+                    constraint: Constraint::MatchAll,
+                    list_name: "malware".to_owned(),
+                    url: None,
+                    reason: None,
+                    id: None,
+                    source: Some("testsource".to_owned()),
+                };
+                records
+                    .entry(p.name.clone())
+                    .or_default()
+                    .push((p.version.clone(), vec![entry]));
+            }
+            (removed, records)
+        });
+        let verdict = pool
+            .solve(&mut arena, &root, filtered, Some(&probed()))
+            .expect("solve");
+        (verdict, request)
+    }
+
+    fn requires(request: &Request) -> Vec<(String, String)> {
+        request
+            .pretty_requires
+            .iter()
+            .map(|(n, p)| (n.clone(), p.clone()))
+            .collect()
+    }
+
+    fn lock_with(packages: Value, dev: Value, platform: Value, platform_dev: Value) -> Value {
+        json!({
+            "packages": packages, "packages-dev": dev, "aliases": [],
+            "minimum-stability": "stable", "stability-flags": {},
+            "prefer-stable": false, "prefer-lowest": false,
+            "platform": platform, "platform-dev": platform_dev,
+        })
+    }
+
+    fn pair(n: &str, p: &str) -> (String, String) {
+        (n.to_owned(), p.to_owned())
+    }
+
+    #[test]
+    fn requires_the_roots_platform_requirements_then_the_locks_it_does_not_declare() {
+        let manifest = json!({
+            "name": "acme/root",
+            "require": {"php": "^8.0", "ext-intl": "*", "acme/lib": "^1.0"},
+            "require-dev": {"ext-intl": ">=1", "ext-mbstring": "*"},
+        });
+        let lock = lock_with(
+            json!([]),
+            json!([]),
+            json!({"php": ">=8.3", "ext-mbstring": "^8", "ext-json": "*"}),
+            json!({"ext-intl": "^9", "ext-zip": "*"}),
+        );
+        // Dev mode: `array_merge(require, require-dev)` — the `require-dev`
+        // constraint at the `require` position; the lock's `php`,
+        // `ext-mbstring` and `ext-intl` are the root's already.
+        let (_, request) = verify(
+            manifest.clone(),
+            lock.clone(),
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(
+            requires(&request),
+            vec![
+                pair("php", "^8.0"),
+                pair("ext-intl", ">=1"),
+                pair("ext-mbstring", "*"),
+                pair("ext-json", "*"),
+                pair("ext-zip", "*"),
+            ]
+        );
+        // `--no-dev`: no `require-dev`, no `platform-dev`; the lock's
+        // `ext-mbstring` is no longer the root's.
+        let (_, request) = verify(
+            manifest,
+            lock,
+            false,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(
+            requires(&request),
+            vec![
+                pair("php", "^8.0"),
+                pair("ext-intl", "*"),
+                pair("ext-mbstring", "^8"),
+                pair("ext-json", "*"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_roots_constraint_wins_over_the_locks() {
+        let lock = lock_with(json!([]), json!([]), json!({"php": "^99"}), json!({}));
+        let (verdict, _) = verify(
+            json!({"require": {"php": "^8.0"}}),
+            lock.clone(),
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(verdict, InstallVerdict::Installable);
+        let (verdict, _) = verify(
+            json!({}),
+            lock,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        let InstallVerdict::Problems(text) = verdict else {
+            panic!("{verdict:?}")
+        };
+        assert!(
+            text.contains("Root composer.json requires php ^99 but your php version (8.2.5)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn locked_packages_platform_requirements_and_the_ignore_filter() {
+        let lock = lock_with(
+            json!([{"name": "acme/a", "version": "1.0.0", "type": "library", "require": {"ext-gd": "*"}}]),
+            json!([]),
+            json!({}),
+            json!({}),
+        );
+        let (verdict, _) = verify(
+            json!({"require": {"acme/a": "^1.0"}}),
+            lock.clone(),
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        let InstallVerdict::Problems(text) = verdict else {
+            panic!("{verdict:?}")
+        };
+        assert!(
+            text.contains("acme/a 1.0.0 requires ext-gd * -> it is missing from your system."),
+            "{text}"
+        );
+        for ignored in [
+            PlatformRequirementFilter::IgnoreAll,
+            PlatformRequirementFilter::from_list(&["ext-gd".to_owned()]),
+            PlatformRequirementFilter::from_list(&["ext-*".to_owned()]),
+        ] {
+            let (verdict, _) = verify(
+                json!({"require": {"acme/a": "^1.0"}}),
+                lock.clone(),
+                true,
+                ignored,
+            );
+            assert_eq!(verdict, InstallVerdict::Installable);
+        }
+    }
+
+    #[test]
+    fn platform_dev_only_in_dev_mode() {
+        let lock = lock_with(
+            json!([]),
+            json!([{"name": "acme/dev", "version": "1.0.0", "type": "library", "require": {"ext-zip": "*"}}]),
+            json!({}),
+            json!({"ext-zip": "*"}),
+        );
+        let (verdict, _) = verify(
+            json!({}),
+            lock.clone(),
+            false,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(verdict, InstallVerdict::Installable);
+        let (verdict, _) = verify(
+            json!({}),
+            lock,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert!(
+            matches!(verdict, InstallVerdict::Problems(_)),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn the_locks_platform_overrides_apply() {
+        let mut lock = lock_with(
+            json!([]),
+            json!([]),
+            json!({"php": ">=8.3", "ext-gd": "*"}),
+            json!({}),
+        );
+        let (verdict, _) = verify(
+            json!({}),
+            lock.clone(),
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert!(
+            matches!(verdict, InstallVerdict::Problems(_)),
+            "{verdict:?}"
+        );
+        lock["platform-overrides"] = json!({"php": "8.3.0", "ext-gd": "2.0.0"});
+        let (verdict, _) = verify(
+            json!({}),
+            lock,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(verdict, InstallVerdict::Installable);
+    }
+
+    #[test]
+    fn the_fixed_root_keeps_its_conflicts() {
+        let lock = lock_with(
+            json!([{"name": "acme/a", "version": "1.0.0", "type": "library"}]),
+            json!([]),
+            json!({}),
+            json!({}),
+        );
+        let (verdict, _) = verify(
+            json!({"name": "acme/root", "require": {"acme/a": "*"}, "conflict": {"acme/a": "*"}}),
+            lock,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        let InstallVerdict::Problems(text) = verdict else {
+            panic!("{verdict:?}")
+        };
+        assert!(
+            text.contains("acme/root 1.0.0+no-version-set conflicts with acme/a 1.0.0."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn without_php_the_composer_packages_remain() {
+        let names: Vec<String> = platform_packages(&[], &Map::new())
+            .expect("platform")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["composer", "composer-plugin-api", "composer-runtime-api"]
+        );
+    }
+
+    #[test]
+    fn a_lock_without_preferences_leaves_them_to_the_root() {
+        let mut lock = lock_with(json!([]), json!([]), json!({}), json!({}));
+        assert_eq!(LockSettings::of(&lock).prefer_stable, Some(false));
+        lock.as_object_mut().expect("lock").remove("prefer-stable");
+        lock.as_object_mut().expect("lock").remove("prefer-lowest");
+        let settings = LockSettings::of(&lock);
+        assert_eq!(
+            (settings.prefer_stable, settings.prefer_lowest),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_locked_package_the_locks_stability_rejects_needs_changes() {
+        // Outside the pool (`unacceptableFixedOrLockedPackages`) but present:
+        // the solve succeeds with its removal.
+        let lock = lock_with(
+            json!([{"name": "acme/dev", "version": "dev-main", "type": "library"}]),
+            json!([]),
+            json!({}),
+            json!({}),
+        );
+        let (verdict, _) = verify(
+            json!({"require": {"acme/dev": "dev-main"}}),
+            lock.clone(),
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(verdict, InstallVerdict::NeedsChanges);
+        let mut flagged = lock;
+        flagged["stability-flags"] = json!({"acme/dev": 20});
+        let (verdict, _) = verify(
+            json!({"require": {"acme/dev": "dev-main"}}),
+            flagged,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+        );
+        assert_eq!(verdict, InstallVerdict::Installable);
+    }
+
+    #[test]
+    fn what_the_list_filter_removed_is_one_problem_among_the_others() {
+        let lock = lock_with(
+            json!([
+                {"name": "acme/bad", "version": "1.1.0", "type": "library"},
+                {"name": "acme/dev", "version": "dev-main", "type": "library"},
+            ]),
+            json!([]),
+            json!({"ext-nope": "*"}),
+            json!({}),
+        );
+        let (verdict, _) = verify_flagged(
+            json!({}),
+            lock,
+            true,
+            PlatformRequirementFilter::IgnoreNothing,
+            &["acme/bad", "acme/dev"],
+        );
+        let InstallVerdict::Problems(text) = verdict else {
+            panic!("{verdict:?}")
+        };
+        // The root requirement first, then the blocked package; `acme/dev`,
+        // outside the pool (its stability), was never judged by the filter.
+        let nope = text.find("requires PHP extension ext-nope").expect(&text);
+        let bad = text
+            .find("acme/bad 1.1.0 (in the lock file) was not loaded, because it was flagged as malware reported by testsource")
+            .expect(&text);
+        assert!(nope < bad, "{text}");
+        assert!(!text.contains("acme/dev"), "{text}");
     }
 }

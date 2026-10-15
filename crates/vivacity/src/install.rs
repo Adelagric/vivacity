@@ -31,11 +31,11 @@ macro_rules! proceed {
 }
 
 /// `InstallCommand` then `Installer::run` / `doInstall`, phase by phase.
-/// The policy check waits on the network on its own thread while the
-/// platform, the local-repository transaction, the scope and (for a no-op)
-/// the autoloader are computed in silence; it is joined before anything is
-/// printed or written past that point, then the checks are reported in
-/// the order below.
+/// The lock verification (the list filter's network wait, the platform,
+/// the solve) runs on its own thread while the local-repository
+/// transaction, the scope and (for a no-op) the autoloader are computed in
+/// silence; it is joined before anything is printed or written past that
+/// point, after the missing requirements, in `doInstall`'s order.
 pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
@@ -46,18 +46,17 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     command_listeners(&run);
     // `Installer::doInstall`.
     let verify_start = headline(&run);
-    let policy = spawn_policy_check(&run)?;
-    let platform = check_platform(&run)?;
-    let tx = local_repository_transaction(&run)?;
+    let verification = spawn_verification(&run)?;
+    let root = verification.as_ref().map(|v| root_package(&run, v));
+    let tx = local_repository_transaction(&run, root.as_ref())?;
     let scope = analyze_scope(&run);
     let early_dump = plan_autoload_early(&run, &tx, scope.as_ref());
-    // Join: policy first (exit 2), then the platform (exit 4), then the
-    // missing requirements, in `Installer::doInstall`'s order.
-    proceed!(join_policy(&run, policy, verify_start)?);
-    proceed!(report_platform(platform));
-    proceed!(report_missing(&run, &tx.missing)?);
-    if !args.after_update {
-        say_lock_resolution(verify_start);
+    // `if (!$alreadySolved)`: the missing requirements (exit 4) before the
+    // pool exists, then the solve on the locked pool (exit 2, or 4). None
+    // of it after an update, which installs the lock it just solved.
+    if let Some(verification) = verification {
+        proceed!(report_missing(&run, &tx.missing, &verification)?);
+        proceed!(join_verification(&run, verification, verify_start)?);
     }
     report_operations(&tx);
     if args.dry_run {
@@ -101,12 +100,18 @@ struct Run<'a> {
     lock_value: serde_json::Value,
     lock: vivacity_core::lock::Lock,
     with_dev: bool,
+    /// `--ignore-platform-reqs` / `--ignore-platform-req` as
+    /// `BaseCommand::initialize` leaves them: the environment fills what the
+    /// command line left empty.
+    ignore_platform_reqs: bool,
+    ignore_platform_req: Vec<String>,
     runner: Option<scripts::Runner>,
 }
 
 /// `InstallCommand`'s refusals, then the manifest (with the effective
 /// `preferred-install`) and the lock as `Factory::create` reads them.
 fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
+    let (ignore_platform_reqs, ignore_platform_req) = platform_requirement_options(args);
     if args.no_install {
         vivacity_core::say!("Invalid option \"--no-install\". Use \"composer update --no-install\" instead if you are trying to update the composer.lock file.");
         return Ok(Flow::Break(1));
@@ -194,8 +199,40 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
         lock_value,
         lock,
         with_dev,
+        ignore_platform_reqs,
+        ignore_platform_req,
         runner: None,
     }))
+}
+
+/// `BaseCommand::initialize`: `COMPOSER_IGNORE_PLATFORM_REQS` (truthy)
+/// stands for `--ignore-platform-reqs`, then `COMPOSER_IGNORE_PLATFORM_REQ`
+/// (comma-separated) for an empty `--ignore-platform-req` list, each with
+/// its warning, before the command prints anything. The install that
+/// follows an update reads them without printing: the update already did.
+fn platform_requirement_options(args: &InstallArgs) -> (bool, Vec<String>) {
+    let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
+    let mut all = args.ignore_platform_reqs;
+    let mut list = args.ignore_platform_req.clone();
+    if !all && env_flag("COMPOSER_IGNORE_PLATFORM_REQS") {
+        all = true;
+        if !args.after_update {
+            vivacity_core::say!(
+                "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
+            );
+        }
+    }
+    if !all && list.is_empty() {
+        if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
+            if !env.is_empty() {
+                if !args.after_update {
+                    vivacity_core::say!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
+                }
+                list = env.split(',').map(str::to_owned).collect();
+            }
+        }
+    }
+    (all, list)
 }
 
 /// `wikimedia/composer-merge-plugin`: the root package Composer works
@@ -284,8 +321,9 @@ fn headline(run: &Run<'_>) -> std::time::Instant {
             }
         );
     }
-    // vivacity reads the transaction off the lock where Composer solves it
-    // again: the resolution line `-v` shows measures that stretch instead.
+    // The resolution line `-v` shows measures from here to the join: the
+    // solve runs on the verification thread, alongside the local
+    // repository's transaction.
     let verify_start = std::time::Instant::now();
     if !run.args.after_update {
         vivacity_core::say!("Verifying lock file contents can be installed on current platform.");
@@ -305,82 +343,93 @@ fn headline(run: &Run<'_>) -> std::time::Instant {
     verify_start
 }
 
-/// The policy check running on its own thread: the problems and the
-/// warnings of the lock pool's list filter.
-type PolicyThread = std::thread::JoinHandle<anyhow::Result<(Vec<String>, Vec<String>)>>;
-
-/// `Installer::doInstall` runs the lock pool through the list filter in
-/// install scope: a flagged locked version (malware list) is not
-/// installed. One conditional request per install (Composer's
-/// `loadFilterSummary`, `packages.json` cached 600 s), the only network
-/// wait of an install from lock: it runs on its own thread while the
-/// platform check, the transaction and the scope are computed, and is
-/// joined before anything is printed or written past this point — the
-/// output order and the decision order are Composer's.
-fn spawn_policy_check(run: &Run<'_>) -> anyhow::Result<Option<PolicyThread>> {
-    let args = run.args;
-    Ok(if args.after_update {
-        None
-    } else {
-        let http = http_transport(&run.project, args.offline)?;
-        let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
-        let composer_home = vivacity_core::fetch::composer_home();
-        let project_dir = run.project.clone();
-        let with_dev = run.with_dev;
-        let no_blocking = args.no_blocking || args.no_security_blocking;
-        Some(std::thread::spawn(move || {
-            vivacity_resolver::session::install_policy_problems(
-                &project_dir,
-                composer_home.as_deref(),
-                Some(http),
-                Some(&cache_repo_dir),
-                with_dev,
-                no_blocking,
-            )
-            .map_err(session_error)
-        }))
-    })
+/// The lock verification running on its own thread, and the channel the
+/// root version reaches it by. Dropped without being joined (the command
+/// stopped before the join), it tells the thread to stop after its network
+/// wait.
+struct Verification {
+    handle: Option<
+        std::thread::JoinHandle<anyhow::Result<vivacity_resolver::session::InstallVerification>>,
+    >,
+    root_version: Option<std::sync::mpsc::Sender<vivacity_core::root_version::RootVersion>>,
+    abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `--ignore-platform-reqs` (or `--ignore-platform-req=*`): no warning
+    /// without php.
+    ignores_all: bool,
+    /// The lock has platform requirements to check (the warning without
+    /// php).
+    lock_platform: bool,
 }
 
-/// Platform (computed now, reported after the policy join).
-fn check_platform(run: &Run<'_>) -> anyhow::Result<PlatformOutcome> {
-    let args = run.args;
-    let mut ignored = args.ignore_platform_req.clone();
-    if args.ignore_platform_reqs {
-        ignored.push("*".to_owned());
+impl Verification {
+    /// The command stops (or hands over) before the join: the thread skips
+    /// what is left after its network wait.
+    fn abandon(&self) {
+        self.abandoned
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let platform_outcome: PlatformOutcome = if ignored.iter().all(|p| p != "*") {
-        // The full platform repository (php, extensions, libraries, the
-        // composer-*-api packages, `config.platform`), probed through php
-        // like `update` does; without php, a warning.
-        match vivacity_resolver::platform::probe().ok() {
-            Some(probed) => {
-                let empty = serde_json::Map::new();
-                let overrides = run
-                    .manifest
-                    .get("config")
-                    .and_then(|c| c.get("platform"))
-                    .and_then(serde_json::Value::as_object)
-                    .unwrap_or(&empty);
-                let platform = vivacity_resolver::platform::platform_packages(&probed, overrides)
-                    .map_err(|e| anyhow::anyhow!("{}", e.0))?;
-                PlatformOutcome::Failures(vivacity_resolver::platform::check_install(
-                    &run.lock,
-                    &platform,
-                    run.with_dev,
-                    &ignored,
-                ))
-            }
-            None => PlatformOutcome::NoPhp {
-                warn: !run.lock.platform.is_empty()
-                    || (run.with_dev && !run.lock.platform_dev.is_empty()),
-            },
+}
+
+impl Drop for Verification {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            self.abandon();
         }
-    } else {
-        PlatformOutcome::Failures(Vec::new())
+    }
+}
+
+/// `Installer::doInstall` solves the lock again before laying it out
+/// (`session::verify_install`): the locked packages through the list
+/// filter in install scope (one conditional request per install,
+/// Composer's `loadFilterSummary`, `packages.json` cached 600 s — the only
+/// network wait of an install from lock), then the platform probed and the
+/// solve. On its own thread while the transaction and the scope are
+/// computed; joined before anything is printed or written past this point.
+/// None after an update (`$alreadySolved`).
+fn spawn_verification(run: &Run<'_>) -> anyhow::Result<Option<Verification>> {
+    let args = run.args;
+    if args.after_update {
+        return Ok(None);
+    }
+    let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = vivacity_resolver::session::InstallVerifyInput {
+        project_dir: run.project.clone(),
+        composer_home: vivacity_core::fetch::composer_home(),
+        http: Some(http_transport(&run.project, args.offline)?),
+        cache_repo_dir: Some(vivacity_core::fetch::composer_cache_dir().join("repo")),
+        manifest_text: run.manifest_text.clone(),
+        root_manifest: run.manifest.clone(),
+        dev_mode: run.with_dev,
+        no_blocking: args.no_blocking || args.no_security_blocking,
+        ignore_platform_reqs: run.ignore_platform_reqs,
+        ignore_platform_req: run.ignore_platform_req.clone(),
+        abandoned: abandoned.clone(),
     };
-    trace("platform check", run.t0);
-    Ok(platform_outcome)
+    let (root_version, received) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        vivacity_resolver::session::verify_install(input, received).map_err(session_error)
+    });
+    Ok(Some(Verification {
+        handle: Some(handle),
+        root_version: Some(root_version),
+        abandoned,
+        ignores_all: run.ignore_platform_reqs || run.ignore_platform_req.iter().any(|p| p == "*"),
+        lock_platform: !run.lock.platform.is_empty()
+            || (run.with_dev && !run.lock.platform_dev.is_empty()),
+    }))
+}
+
+/// The root package (`RootPackageLoader`) the missing requirements are
+/// checked against: its version guessed once (git), and handed to the
+/// verification thread, which waits for it only after its network wait.
+fn root_package(run: &Run<'_>, verification: &Verification) -> vivacity_core::state::RootPackage {
+    let rv = vivacity_core::root_version::detect(&run.manifest, &run.project);
+    // A thread that already ended (an error) has dropped its receiver: its
+    // error is reported at the join.
+    if let Some(sender) = &verification.root_version {
+        let _ = sender.send(rv.clone());
+    }
+    vivacity_core::state::RootPackage::with_version(&run.manifest, rv, run.with_dev)
 }
 
 /// The local repository against the lock, and the root requirements the
@@ -400,7 +449,10 @@ struct LocalTransaction {
 /// `LocalRepoTransaction` (installed.json against the lock) and
 /// `Locker::getMissingRequirementInfo`, computed in silence: reported by
 /// `report_missing`, `report_operations` and `dry_run`.
-fn local_repository_transaction(run: &Run<'_>) -> anyhow::Result<LocalTransaction> {
+fn local_repository_transaction(
+    run: &Run<'_>,
+    root: Option<&vivacity_core::state::RootPackage>,
+) -> anyhow::Result<LocalTransaction> {
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
@@ -428,21 +480,23 @@ fn local_repository_transaction(run: &Run<'_>) -> anyhow::Result<LocalTransactio
     };
     // `Locker::getMissingRequirementInfo`: a root requirement the lock does
     // not satisfy (a hand-edited composer.json) stops with code 4
-    // (`report_missing`).
+    // (`report_missing`). Not after an update (`$alreadySolved`): no root
+    // was detected for it then.
     let merged_links = run
         .merged
         .as_ref()
         .map(|m| (m.requires.as_slice(), m.requires_dev.as_slice()));
-    let root_pkg =
-        vivacity_core::state::RootPackage::detect(&run.manifest, &run.project, run.with_dev);
-    let missing = missing_requirement_info(
-        &run.manifest,
-        &run.lock_value,
-        run.with_dev,
-        &root_pkg.version,
-        &root_pkg.pretty_version,
-        merged_links,
-    )?;
+    let missing = match root {
+        None => Vec::new(),
+        Some(root) => missing_requirement_info(
+            &run.manifest,
+            &run.lock_value,
+            run.with_dev,
+            &root.version,
+            &root.pretty_version,
+            merged_links,
+        )?,
+    };
     trace("local repositories", run.t0);
     let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
     Ok(LocalTransaction {
@@ -512,8 +566,8 @@ fn plan_autoload_early(
                         run.with_dev,
                         args.optimize_autoloader || args.classmap_authoritative,
                         args.classmap_authoritative,
-                        args.ignore_platform_reqs,
-                        &args.ignore_platform_req,
+                        run.ignore_platform_reqs,
+                        &run.ignore_platform_req,
                         (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
                         !args.no_plugins,
                         run.lock
@@ -529,81 +583,62 @@ fn plan_autoload_early(
     early_dump
 }
 
-/// The policy check joined: its warnings, then its problems (exit 2).
-fn join_policy(
+/// The verification joined, reported as `doInstall` does: the list
+/// filter's warnings (written while the pool was built), the resolution
+/// line (`-v`), then the problems (`SolverProblemsException`, exit
+/// `max(1, 2)`) or the operations a solved lock should not have (exit 4).
+fn join_verification(
     run: &Run<'_>,
-    policy: Option<PolicyThread>,
+    verification: Verification,
     verify_start: std::time::Instant,
 ) -> anyhow::Result<Flow> {
-    if let Some(handle) = policy {
-        let (problems, warnings) = handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("the policy check thread panicked"))??;
-        for w in &warnings {
-            vivacity_core::say!("{w}");
-        }
-        if !problems.is_empty() {
-            // `Installer::doInstall`: the headline, then
-            // `SolverProblemsException::getPrettyString` (problems
-            // deduplicated and numbered, each ending with a newline).
-            say_lock_resolution(verify_start);
+    use vivacity_resolver::session::InstallVerdict;
+    let mut verification = verification;
+    let Some(handle) = verification.handle.take() else {
+        return Ok(Flow::Continue(()));
+    };
+    // Sent before the join already; dropped so that a thread still waiting
+    // could never wait forever.
+    drop(verification.root_version.take());
+    let verified = handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("the lock verification thread panicked"))??;
+    trace("lock verification", run.t0);
+    for w in &verified.warnings {
+        vivacity_core::say!("{w}");
+    }
+    // No reference here: Composer does not run without php.
+    if verified.php_missing && !verification.ignores_all && verification.lock_platform {
+        vivacity_core::say!(
+            "Warning: php not found, platform requirements were not checked \
+             (--ignore-platform-reqs silences this warning)"
+        );
+    }
+    say_lock_resolution(verify_start);
+    match verified.verdict {
+        InstallVerdict::Installable => Ok(Flow::Continue(())),
+        InstallVerdict::Problems(pretty) => {
+            // The headline at QUIET, the problems at the default level.
             vivacity_core::say_always!("Your lock file does not contain a compatible set of packages. Please run composer update.");
-            let mut text = String::from("\n");
-            let mut seen: Vec<&String> = Vec::new();
-            for p in &problems {
-                if seen.contains(&p) {
-                    continue;
-                }
-                seen.push(p);
-                text.push_str(&format!("  Problem {}\n    {p}\n", seen.len()));
-            }
-            vivacity_core::say!("{text}");
-            return Ok(Flow::Break(2));
+            vivacity_core::say!("{pretty}");
+            Ok(Flow::Break(2))
         }
-        trace("policy", run.t0);
+        InstallVerdict::NeedsChanges => {
+            vivacity_core::say_always!("Your lock file cannot be installed on this system without changes. Please run composer update.");
+            Ok(Flow::Break(4))
+        }
+        // The exception leaves `doInstall` after the resolution line.
+        InstallVerdict::Invalid(message) => Err(anyhow::anyhow!("{message}")),
     }
-    Ok(Flow::Continue(()))
-}
-
-/// The platform check's report: the failures (exit 4), or the warning
-/// when php could not be probed.
-fn report_platform(platform_outcome: PlatformOutcome) -> Flow {
-    match platform_outcome {
-        PlatformOutcome::Failures(failures) if !failures.is_empty() => {
-            vivacity_core::say_always!("Your lock file cannot be installed on this platform:");
-            for f in &failures {
-                let by = f
-                    .required_by
-                    .as_deref()
-                    .map(|p| format!(" (required by {p})"))
-                    .unwrap_or_default();
-                vivacity_core::say_always!(
-                    "  - {} {}{}: {:?}",
-                    f.requirement,
-                    f.constraint,
-                    by,
-                    f.reason
-                );
-            }
-            vivacity_core::say_always!(
-                "Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass."
-            );
-            return Flow::Break(4);
-        }
-        PlatformOutcome::NoPhp { warn: true } => {
-            vivacity_core::say!(
-                "Warning: php not found, platform requirements were not checked \
-                 (--ignore-platform-reqs silences this warning)"
-            );
-        }
-        _ => {}
-    }
-    Flow::Continue(())
 }
 
 /// The root requirements the lock does not satisfy: printed, then exit 4
 /// unless `allow-missing-requirements`.
-fn report_missing(run: &Run<'_>, missing: &[String]) -> anyhow::Result<Flow> {
+fn report_missing(
+    run: &Run<'_>,
+    missing: &[String],
+    verification: &Verification,
+) -> anyhow::Result<Flow> {
     if !missing.is_empty() {
         // On a bare vendor the plugin is not active yet in Composer's run:
         // it would install itself, then run a partial `composer update` of
@@ -626,6 +661,7 @@ fn report_missing(run: &Run<'_>, missing: &[String]) -> anyhow::Result<Flow> {
                     ))],
                     ..Default::default()
                 };
+                verification.abandon();
                 return Ok(Flow::Break(fallback_or_fail(run.args, &report)?));
             }
         }
@@ -636,6 +672,7 @@ fn report_missing(run: &Run<'_>, missing: &[String]) -> anyhow::Result<Flow> {
             &run.manifest,
             "allow-missing-requirements",
         )) {
+            verification.abandon();
             return Ok(Flow::Break(4));
         }
     }
@@ -883,8 +920,8 @@ fn dump_autoloader(
             run.with_dev,
             args.optimize_autoloader || args.classmap_authoritative,
             args.classmap_authoritative,
-            args.ignore_platform_reqs,
-            &args.ignore_platform_req,
+            run.ignore_platform_reqs,
+            &run.ignore_platform_req,
             (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
             !args.no_plugins,
             // `$localRepo->setDevPackageNames($this->locker->getDevPackageNames())`

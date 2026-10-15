@@ -21,7 +21,12 @@ for fx in laravel symfony sylius rector wordpress drupal; do
   src="$ROOT/fixtures/work/$fx"; dst="$WORK/$fx"
   rm -rf "$dst"; mkdir -p "$dst"
   (cd "$src" && tar --exclude=./.git --exclude=./vendor --exclude=./node_modules --exclude=./var --exclude=./web --exclude=./wp-content --exclude=./recipes --exclude=./.editorconfig --exclude=./.gitattributes -cf - .) | (cd "$dst" && tar -xf -)
-  if ! (cd "$dst" && "$VIVACITY" install --offline 2>"$WORK/$fx.vivacity.log"); then
+  # La copie n'a pas le dépôt git de la fixture : la version racine de rector
+  # est fixée comme dans les autres harnais (`dev-main`), sinon rector-src
+  # (`replace: rector/rector self.version`) entre en conflit avec
+  # `rector/rector <2.0` et `install` refuse le lock, comme Composer.
+  root_version=""; [ "$fx" = rector ] && root_version=dev-main
+  if ! (cd "$dst" && COMPOSER_ROOT_VERSION="${COMPOSER_ROOT_VERSION:-$root_version}" "$VIVACITY" install --offline 2>"$WORK/$fx.vivacity.log"); then
     echo "FAIL $fx : vivacity install a échoué :"; tail -20 "$WORK/$fx.vivacity.log"; status=1; continue
   fi
   if out=$(cd "$dst" && $(boot_cmd "$fx") 2>&1); then

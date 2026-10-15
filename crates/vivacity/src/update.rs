@@ -4,14 +4,6 @@
 
 use super::*;
 
-/// What the platform check found, reported after the policy join.
-pub(crate) enum PlatformOutcome {
-    /// php probed: the requirements the lock cannot satisfy (empty = fine).
-    Failures(Vec<vivacity_core::platform::PlatformFailure>),
-    /// No php: a warning when the lock has platform requirements to check.
-    NoPhp { warn: bool },
-}
-
 /// Network transport for remote composer repositories: the vivacity-core
 /// Fetcher (Composer auth, retries), made synchronous, with a parallel
 /// batch (Composer: curl multi, 12 downloads at a time).

@@ -77,6 +77,19 @@ impl RootPackage {
     /// COMPOSER_ROOT_VERSION, else guessed from git, else
     /// `1.0.0+no-version-set` (see root_version.rs).
     pub fn detect(manifest: &Value, project_dir: &std::path::Path, dev: bool) -> RootPackage {
+        Self::with_version(
+            manifest,
+            crate::root_version::detect(manifest, project_dir),
+            dev,
+        )
+    }
+
+    /// `detect` with the version already detected.
+    pub fn with_version(
+        manifest: &Value,
+        rv: crate::root_version::RootVersion,
+        dev: bool,
+    ) -> RootPackage {
         let name = manifest
             .get("name")
             .and_then(Value::as_str)
@@ -87,7 +100,6 @@ impl RootPackage {
             .and_then(Value::as_str)
             .unwrap_or("library")
             .to_owned();
-        let rv = crate::root_version::detect(manifest, project_dir);
         let alias = crate::root_version::branch_alias(manifest, &rv);
         RootPackage {
             name,

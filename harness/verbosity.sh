@@ -47,6 +47,12 @@ CASES=(
   "laravel|install --dry-run --no-dev"
   # Lock périmé : l'avertissement est écrit au niveau QUIET chez Composer.
   "laravel|install --dry-run @require:psr/log=^3.0"
+  # Lock insoluble sur la plateforme (`doInstall` le résout) : tête QUIET,
+  # problèmes au niveau normal, durée de résolution sous -v.
+  "laravel|install --dry-run @require:ext-nope=*"
+  # … que les variables d'environnement font ignorer, avec leur avertissement.
+  "laravel|install --dry-run @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
+  "laravel|install --dry-run @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope,ext-other"
   # Pas de composer.json : message au niveau normal (muet sous -q), exit 1.
   "laravel|install --dry-run @nojson"
   # Une vraie installation (cache chaud), puis un install sans opération.

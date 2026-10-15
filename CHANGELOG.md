@@ -7,6 +7,30 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`install` verifies the lock the way `Installer::doInstall` does: one
+  solve, one list of problems.** It used to check only the lock's
+  `platform`/`platform-dev` sections, with a message of its own and exit 4,
+  and the blocking lists on the side. A root `require` of a missing
+  extension (lock unchanged) installed where Composer exits 2; a lock
+  `platform` of `php: ^99` under a root `php: ^8.3` failed where Composer
+  installs (the root's constraint wins); a root `conflict` or `replace`
+  aimed at a locked package was not seen; a locked version the lock's own stability rejects
+  was installed. `install` now builds Composer's request — every locked
+  package fixed, the fixed root with its `conflict`/`provide`/`replace`, the
+  platform under the lock's `platform-overrides`, the root's platform
+  requirements (`require`, plus `require-dev` in dev mode) then the lock's
+  the root does not declare — solves it under `--ignore-platform-req(s)`,
+  and prints Composer's text: `Your lock file does not contain a compatible
+  set of packages. Please run composer update.` and the numbered problems
+  (the `.ini` hint included, blocked packages in the same list), exit 2; or
+  `Your lock file cannot be installed on this system without changes.`,
+  exit 4. The missing requirements are reported first, as in Composer, and
+  none of it runs on the install that follows an update. The solve stays on
+  the thread that waits for the network; the no-op install's time is
+  unchanged.
+- **`COMPOSER_IGNORE_PLATFORM_REQS` / `COMPOSER_IGNORE_PLATFORM_REQ`** are
+  read by `install` as by every Composer command, with their warning: for
+  the lock verification and for the autoloader's `platform_check.php`.
 - **The `install` fallback hands Composer the command line it was given.**
   It rebuilt a `composer install` line from nine options and dropped the
   rest: `install --dry-run` on a lock that goes to Composer before the dry

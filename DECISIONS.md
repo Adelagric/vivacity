@@ -3184,3 +3184,87 @@ Composer 2.10.3 sur le binaire final — 29 passages (dont `diff-vendor
 laravel (Mac, hyperfine, binaires alternés) : `install --no-plugins` médiane
 114,0 ms sur `main` contre 113,8 ms (5 passages), 47,3 contre 47,3 ms hors
 ligne (30 passages) — dans le bruit.
+
+## 2026-10-16 — `install` résout le lock comme `doInstall` : un solveur, une liste de problèmes
+
+Défaut 1 noté par le découpage de `run_install`, fait ici. Plan, méta-analyse
+(sous-agent frais), revue indépendante et résultat :
+`docs/plans/install-verify.md`. L'entrée « plateforme → code 4 » plus haut
+décrivait le comportement d'alors ; elle reste telle quelle.
+
+**Mesuré d'abord** (binaire de `main`, laravel, `install --dry-run`) :
+`install` ne vérifiait que les sections `platform`/`platform-dev` du lock,
+avec son propre texte et le code 4, et les listes de blocage à part.
+`Installer::doInstall` *résout* le lock. Dix cas divergeaient : une
+extension absente requise par la racine (lock inchangé) installait là où
+Composer sort en 2 ; `platform: {php: ^99}` dans le lock sous une racine
+`php: ^8.3` échouait là où Composer installe (la contrainte de la racine
+l'emporte) ; un `conflict` ou un `replace` de la racine visant un paquet verrouillé passait ;
+un paquet verrouillé que la stabilité du lock refuse s'installait (Composer :
+2 s'il est requis, 4 « without changes » sinon) ; un lock bloqué *et* en
+échec de plateforme ne montrait que le paquet bloqué.
+
+**Décision : la requête, le pool et la résolution de `doInstall`, sur le fil
+qui attend déjà le réseau.** Chaque paquet verrouillé fixé, la racine figée
+(sans `require`, avec `conflict`/`provide`/`replace`), la plateforme sous les
+`platform-overrides` du lock, `requireName` pour les exigences de plateforme
+de la racine puis pour celles du lock qu'elle ne déclare pas, la stabilité et
+les préférences du lock, `Solver::solve` sous le filtre
+`--ignore-platform-req(s)`, le texte de `SolverProblemsException` déjà porté
+pour `update`. Ordre de Composer : exigences manquantes (4) avant tout pool,
+puis la jointure. Rien de tout cela après un `update` (`$alreadySolved`).
+Le fil fait le filtre de liste sur les seuls paquets verrouillés d'abord (la
+requête réseau part aussi tôt qu'avant), puis la sonde, puis la version
+racine que le fil principal calcule une fois pour les exigences manquantes
+(git ne tourne qu'une fois) et lui envoie par un canal. Écarté : la version
+racine calculée avant le lancement (git, ~9 ms, devant la requête) ou une
+seconde fois sur le fil ; un pool provisoire autour d'une racine provisoire
+(premier jet : la méta y a trouvé un écart, le drapeau de stabilité du nom
+racine).
+
+**Ce que la méta a changé.** La branche « without changes » que le plan
+disait inatteignable l'est (paquet refusé par la stabilité du lock, présent
+mais hors du pool) — deux cas de harnais, verts sans toucher au code ;
+`COMPOSER_IGNORE_PLATFORM_REQ(S)`, que l'`install` de vivacity ignorait, lus
+comme `BaseCommand::initialize` les lit (avertissement compris), pour la
+vérification et pour `platform_check.php` ; un fil abandonné (sortie avant la
+jointure) s'arrête après son attente réseau au lieu de sonder et résoudre
+dans le processus d'un embarqueur ; la ligne `could not be fully loaded` d'un
+dépôt dégradé est gardée par le fil et imprimée à la jointure ; sans php, les
+paquets `composer-*` restent et seules les exigences php/extensions/
+bibliothèques sont ignorées ; `prefer-stable` absent d'un vieux lock retombe
+sur celui de la racine.
+
+**Sans php** : pas de référence (Composer ne tourne pas sans php) ;
+l'avertissement de vivacity reste, à la même condition.
+
+**La revue indépendante** (sous-agent frais, sur le diff) n'a rien trouvé de
+bloquant ; corrigé sur sa lecture : le drapeau d'abandon, lu une seule fois,
+laissait le fil résoudre après une sortie au 4 — `report_missing` le lève
+maintenant avant de sortir ou de rendre la main, et le fil le relit avant de
+résoudre ; une erreur de `validatePackage` sort après les avertissements et la
+ligne de durée, comme chez Composer ; la version racine n'est plus devinée
+après un `update` ; un test du verdict « without changes » et un de la
+recopie des enregistrements du filtre ; du code mort et trois commentaires.
+
+**Deux fixtures de harnais que Composer refusait déjà**, corrigées :
+`transitions.sh` fabriquait un lock `dev-main` sans drapeau de stabilité
+(Composer : 4, avant la décision de portée que le cas visait), `boot.sh`
+installait rector sans sa version racine `dev-main` (conflit de rector-src
+avec `rector/rector <2.0`, Composer : 2).
+
+**Défaut vu, laissé** (avec huit autres, préexistants, au résultat du plan) :
+`problem::strip_output_styles` double le texte quand un `<` n'a pas de `>`
+après lui (`out.push_str(rest)` au lieu de `&rest[start..]`) — un problème
+`conflicts with rector/rector <2.0 (…)` sort deux fois, le premier coupé au
+`<`. Touche aussi `update`. Correctif d'une ligne, hors périmètre ici.
+
+Vérifié : `cargo fmt --check`, clippy `-D warnings` sur macOS et
+`x86_64-pc-windows-gnu`, 308 tests verts (304 sur `main`, six partis avec
+`check_install`, dix ajoutés), et tous les harnais contre Composer 2.10.3 sur
+le binaire final — 29 passages, tous à 0 (update relancé une fois :
+`packages.drupal.org`, dépôt vivant, avait rendu un corps vide), steps 269
+cas dont les dix rouges sur `main`, verbosity 76. No-op laravel (Mac,
+binaires alternés, 60 passages, médianes) : `install --no-plugins` 114,6
+contre 113,4 ms en ligne, 48,2 contre 47,8 ms hors ligne, `--no-blocking`
+hors ligne 46,7 contre 46,0 ms — inchangé.

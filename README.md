@@ -145,7 +145,7 @@ explanation — the numbered problems with their reasons, the hints
 (`Potential causes`, the php.ini list for a missing extension, the `-W`
 advice) — word for word: `Problem::getPrettyString`, `Rule::getPrettyString`
 and `SolverProblemsException` are ported, and `harness/steps.sh` compares
-that text byte for byte with Composer's on 50 unsolvable cases (a
+that text byte for byte with Composer's on 78 cases that exit 2 (a
 synthetic registry built by `fixtures/make-solver-problems.py` reaches every
 reason branch the CLI can produce, plus real-registry cases).
 
@@ -156,7 +156,7 @@ line, `install`'s `Package operations`, and `--dry-run` on `update`,
 `require` and `remove` (resolution and listing, nothing written — the
 install phase lists its operations from the unwritten lock). The stderr
 of every `steps.sh` case is compared byte for byte from the first of
-those lines to the end (206 cases). A real `install` prints the same
+those lines to the end (234 cases). A real `install` prints the same
 `  - Installing … : Extracting archive` / `Symlinking from …` lines and
 `Generating autoload files`, plus one `vivacity:` summary line.
 
@@ -189,6 +189,15 @@ come from the same metadata files Composer reads, so the frozen snapshots
 carry them and the parity checks run with the policies on. Custom policy
 lists with sources and a repository `filter.api-url` are not supported
 (refused when reached).
+
+Before laying out a lock it did not just resolve, `install` solves it
+again, as `Installer::doInstall` does: every locked package fixed, the
+root's platform requirements and then the lock's, the root's `conflict`
+links, the lock's stability and `platform-overrides`, the blocking lists,
+`--ignore-platform-req(s)` (and `COMPOSER_IGNORE_PLATFORM_REQ(S)`). A lock
+that fails gets Composer's explanation and exit code — 4 for a root
+requirement the lock does not contain (checked first), 2 for an unsolvable
+lock, 4 for one that would need changes.
 
 `vivacity require` and `vivacity remove` edit `composer.json` the way Composer
 does — a port of `JsonManipulator`, which rewrites only the affected keys

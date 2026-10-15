@@ -64,6 +64,20 @@ impl RootPackage {
     /// Loads composer.json (already parsed) with the root version guessed by
     /// vivacity-core (same rules as RootPackageLoader + VersionGuesser).
     pub fn load(manifest: &Value, project_dir: &Path) -> Result<RootPackage, RootError> {
+        Self::load_with_version(
+            manifest,
+            vivacity_core::root_version::detect(manifest, project_dir),
+        )
+    }
+
+    /// `load` with the root version already detected: `install` detects it
+    /// for its missing requirements and hands it to the lock verification,
+    /// which then does not run git again. Used only when composer.json has
+    /// no `version` of its own, as in `load`.
+    pub fn load_with_version(
+        manifest: &Value,
+        rv: vivacity_core::root_version::RootVersion,
+    ) -> Result<RootPackage, RootError> {
         let mut config = manifest
             .as_object()
             .cloned()
@@ -73,7 +87,6 @@ impl RootPackage {
         }
         let mut auto_versioned = false;
         if !config.contains_key("version") {
-            let rv = vivacity_core::root_version::detect(manifest, project_dir);
             if rv.pretty_version == vivacity_core::root_version::DEFAULT_PRETTY_VERSION {
                 config.insert("version".into(), Value::String("1.0.0".into()));
                 auto_versioned = true;

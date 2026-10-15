@@ -425,6 +425,11 @@ pub struct ComposerRepository {
     /// The repository was already reported in degraded mode (network down,
     /// cache used): a single warning.
     degraded: std::cell::Cell<bool>,
+    /// `hold_output`: the warnings this repository writes while it loads,
+    /// kept for the caller instead of printed — a repository working on a
+    /// thread of its own would otherwise write them at whatever point the
+    /// main thread has reached.
+    held: Option<std::cell::RefCell<Vec<String>>>,
     /// `filter` option of the repository definition: `None` = `false` (no
     /// list), otherwise the disabled lists.
     pub user_filter: Option<Vec<String>>,
@@ -518,10 +523,25 @@ impl ComposerRepository {
             members: std::cell::OnceCell::new(),
             cache: None,
             degraded: std::cell::Cell::new(false),
+            held: None,
             user_filter: Some(Vec::new()),
             fresh_metadata: std::cell::Cell::new(false),
             name_filter: None,
         })
+    }
+
+    /// From now on, keep the warnings written while loading
+    /// (`take_held`) instead of printing them.
+    pub fn hold_output(&mut self) {
+        self.held = Some(std::cell::RefCell::new(Vec::new()));
+    }
+
+    /// The warnings kept since `hold_output`, in the order they were written.
+    pub fn take_held(&self) -> Vec<String> {
+        self.held
+            .as_ref()
+            .map(|h| std::mem::take(&mut *h.borrow_mut()))
+            .unwrap_or_default()
     }
 
     /// `FilterRepository::__construct`: `only` or `exclude` (not both).
@@ -930,10 +950,14 @@ impl ComposerRepository {
             Err(e) => {
                 if let Some((v, Some(_))) = cached {
                     if !self.degraded.replace(true) {
-                        vivacity_core::say!(
+                        let line = format!(
                             "Warning: {} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
                             self.url, e.0
                         );
+                        match &self.held {
+                            Some(held) => held.borrow_mut().push(line),
+                            None => vivacity_core::say!("{line}"),
+                        }
                     }
                     return Ok(Some(v));
                 }
