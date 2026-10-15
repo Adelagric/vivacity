@@ -115,6 +115,8 @@ jobs:
         run: harness/transport-exit.sh
       - name: -q and -v print what Composer prints (stdout and stderr whole)
         run: harness/verbosity.sh
+      - name: The fallback hands Composer the command line (argv, cwd, env, exit code)
+        run: harness/fallback-args.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/root-scan.sh

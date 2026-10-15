@@ -213,11 +213,11 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
             }
         }
     }
-    run_update_resolved(args, options, prefer_stable, prefer_lowest)
+    // `update` edits nothing before resolving: nothing to undo.
+    run_update_resolved(args, options, prefer_stable, prefer_lowest, &|| Ok(()))
+        .map(|ended| ended.status)
 }
 
-/// Resolution, lock write and install, once the list and the update mode
-/// are decided (shared by `update` and `remove`).
 /// A session error the command prints itself: each part at its Composer
 /// level when the session split it, else the whole message at the default
 /// level (`UpdateCommand`'s temporary-constraint refusal).
@@ -233,15 +233,37 @@ fn print_session_error(e: &vivacity_resolver::session::SessionError) {
     }
 }
 
+/// How [`run_update_resolved`] ended: the exit code, and whether the whole
+/// command went to Composer after the resolution — the caller (`remove`)
+/// then adds nothing of its own: no revert, no local-repository check.
+pub(crate) struct Ended {
+    pub(crate) status: i32,
+    pub(crate) by_composer: bool,
+}
+
+/// Resolution, lock write and install, once the list and the update mode
+/// are decided (shared by `update` and `remove`). `undo_edit` restores the
+/// caller's composer.json before a hand-over ([`hand_resolution_over`]).
 pub(crate) fn run_update_resolved(
     args: &UpdateArgs,
     options: vivacity_resolver::session::UpdateOptions,
     prefer_stable: bool,
     prefer_lowest: bool,
-) -> anyhow::Result<i32> {
+    undo_edit: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<Ended> {
     let resolved = resolve_and_lock(args, options, prefer_stable, prefer_lowest)?;
+    if let Some(issue) = &resolved.hand_over {
+        return Ok(Ended {
+            status: hand_resolution_over(issue, args.no_fallback, undo_edit)?,
+            by_composer: true,
+        });
+    }
+    let ended = |status| Ended {
+        status,
+        by_composer: false,
+    };
     if resolved.status != 0 {
-        return Ok(resolved.status);
+        return Ok(ended(resolved.status));
     }
     let project = project_dir(args.working_dir.as_deref())?;
     if !args.no_install {
@@ -250,13 +272,26 @@ pub(crate) fn run_update_resolved(
         } else {
             (None, None)
         };
-        let status = install_after_update(args, virtual_lock, virtual_manifest)?;
-        if status != 0 {
-            return Ok(status);
+        let phase = install_after_update(args, virtual_lock, virtual_manifest)?;
+        if phase.status != 0 {
+            return Ok(ended(phase.status));
+        }
+        if phase.handed_over {
+            return Ok(ended(0));
         }
     }
     print_post_update(&resolved, &project);
-    Ok(0)
+    Ok(ended(0))
+}
+
+/// What the install phase of a resolution command did: its status, and
+/// whether it went to Composer. Composer's `install` then printed its own
+/// end of `Installer::run` — the abandoned packages, the funding count —
+/// so the command does not print its post-update report over it (the
+/// suggestions, which only an update prints, are what is missing).
+pub(crate) struct InstallPhase {
+    pub(crate) status: i32,
+    pub(crate) handed_over: bool,
 }
 
 /// The install that follows the lock write (`Installer::run` with
@@ -265,12 +300,12 @@ pub(crate) fn install_after_update(
     args: &UpdateArgs,
     virtual_lock: Option<serde_json::Value>,
     virtual_manifest: Option<serde_json::Value>,
-) -> anyhow::Result<i32> {
-    run_install(&InstallArgs {
+) -> anyhow::Result<InstallPhase> {
+    let install = InstallArgs {
         compat: GlobalCompatArgs::default(),
-        prefer_source: false,
-        prefer_dist: false,
-        prefer_install: None,
+        prefer_source: args.prefer_source,
+        prefer_dist: args.prefer_dist,
+        prefer_install: args.prefer_install.clone(),
         no_progress: args.no_progress,
         no_dev: args.no_dev,
         no_autoloader: args.no_autoloader,
@@ -291,10 +326,16 @@ pub(crate) fn install_after_update(
         no_install: false,
         dry_run: args.dry_run,
         working_dir: args.working_dir.clone(),
-        spawn_fallback: args.spawn_fallback,
+        fallback_line: Some(after_update_line(args)),
+        handed_over: std::cell::Cell::new(false),
         after_update: true,
         virtual_lock,
         virtual_manifest,
+    };
+    let status = run_install(&install)?;
+    Ok(InstallPhase {
+        status,
+        handed_over: install.handed_over.get(),
     })
 }
 
@@ -319,6 +360,41 @@ pub(crate) struct Resolved {
     /// `POST_PACKAGE_UPDATE`); computed before the install, since it needs
     /// the state the install replaces.
     pub(crate) thanks_reminder: bool,
+    /// The solved lock shows a Flex behaviour vivacity does not emulate:
+    /// nothing is written, and the whole command goes to Composer — run by
+    /// the caller ([`hand_resolution_over`]), which first undoes its own
+    /// edit of composer.json (`require`/`remove`): Composer must start from
+    /// the manifest the user had, or `remove` finds its package gone.
+    pub(crate) hand_over: Option<vivacity_core::scope::ScopeIssue>,
+}
+
+impl Resolved {
+    /// The command stops with `status` before anything is written.
+    fn stopped(status: i32) -> Resolved {
+        Resolved {
+            status,
+            lock: None,
+            post: Vec::new(),
+            manifest: serde_json::Value::Null,
+            flex_active: false,
+            thanks_reminder: false,
+            hand_over: None,
+        }
+    }
+}
+
+/// The resolution handed to Composer once solved ([`Resolved::hand_over`]):
+/// `undo_edit` restores composer.json as it was, silently — Composer prints
+/// its own `has been updated` and reverts on its own failure — then
+/// [`delegate_resolution`] (exit 3 under `--no-fallback`, the edit undone
+/// all the same). The command adds nothing after it: no revert, no report.
+pub(crate) fn hand_resolution_over(
+    issue: &vivacity_core::scope::ScopeIssue,
+    no_fallback: bool,
+    undo_edit: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<i32> {
+    undo_edit()?;
+    delegate_resolution(std::slice::from_ref(issue), no_fallback)
 }
 
 /// Prints the post-update report of `Installer::run` once the install
@@ -356,14 +432,7 @@ pub(crate) fn resolve_and_lock(
         // `RootPackage::load` refuses these too, but through the error path,
         // which prefixes the message; here it is worded as Composer words it.
         if let Some(code) = refuse_invalid_root(&m) {
-            return Ok(Resolved {
-                status: code,
-                lock: None,
-                post: Vec::new(),
-                manifest: serde_json::Value::Null,
-                flex_active: false,
-                thanks_reminder: false,
-            });
+            return Ok(Resolved::stopped(code));
         }
         refuse_merge_plugin_resolution(&project, &m, !args.no_plugins)?;
         // composer-merge-plugin installed and allowed: the root Composer
@@ -412,14 +481,7 @@ pub(crate) fn resolve_and_lock(
             let vivacity_resolver::session::SessionErrorKind::Printed(code) = e.kind else {
                 unreachable!()
             };
-            return Ok(Resolved {
-                status: code,
-                lock: None,
-                post: Vec::new(),
-                manifest: serde_json::Value::Null,
-                flex_active: false,
-                thanks_reminder: false,
-            });
+            return Ok(Resolved::stopped(code));
         }
         Err(e) => return Err(session_error(e)),
     };
@@ -487,14 +549,7 @@ pub(crate) fn resolve_and_lock(
         Ok(r) => r,
         Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsolvable => {
             print_session_error(&e);
-            return Ok(Resolved {
-                status: 2,
-                lock: None,
-                post: Vec::new(),
-                manifest: serde_json::Value::Null,
-                flex_active: false,
-                thanks_reminder: false,
-            });
+            return Ok(Resolved::stopped(2));
         }
         Err(e) => return Err(session_error(e)),
     };
@@ -513,22 +568,12 @@ pub(crate) fn resolve_and_lock(
             if let Some(reason) =
                 flex_reinstall_reason(&project, &m, &lock, installer_dev_mode, !args.no_plugins)
             {
-                let code = delegate_resolution(
-                    &project,
-                    vivacity_core::scope::ResolutionCommand::Update,
-                    &[vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                return Ok(Resolved {
+                    hand_over: Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
                         "symfony/flex".to_owned(),
                         reason,
-                    )],
-                    args.no_fallback,
-                )?;
-                return Ok(Resolved {
-                    status: code,
-                    lock: None,
-                    post: Vec::new(),
-                    manifest: serde_json::Value::Null,
-                    flex_active: false,
-                    thanks_reminder: false,
+                    )),
+                    ..Resolved::stopped(0)
                 });
             }
         }
@@ -549,22 +594,12 @@ pub(crate) fn resolve_and_lock(
             }
             .or_else(|| flex_sync_reason(&project, &m, &lock));
             if let Some(reason) = reason {
-                let code = delegate_resolution(
-                    &project,
-                    vivacity_core::scope::ResolutionCommand::Update,
-                    &[vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                return Ok(Resolved {
+                    hand_over: Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
                         "symfony/flex".to_owned(),
                         reason,
-                    )],
-                    args.no_fallback,
-                )?;
-                return Ok(Resolved {
-                    status: code,
-                    lock: None,
-                    post: Vec::new(),
-                    manifest: serde_json::Value::Null,
-                    flex_active: false,
-                    thanks_reminder: false,
+                    )),
+                    ..Resolved::stopped(0)
                 });
             }
         }
@@ -677,6 +712,7 @@ pub(crate) fn resolve_and_lock(
         // recipes hint. `--no-install` does dispatch it.
         flex_active: flex_active && !args.dry_run,
         thanks_reminder,
+        hand_over: None,
     })
 }
 

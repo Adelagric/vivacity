@@ -6,6 +6,62 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Fixed
+- **The `install` fallback hands Composer the command line it was given.**
+  It rebuilt a `composer install` line from nine options and dropped the
+  rest: `install --dry-run` on a lock that goes to Composer before the dry
+  run returns (composer-merge-plugin with a missing required file) made
+  Composer perform a **real install**; `--prefer-source`/`--prefer-dist`/
+  `--prefer-install`, `--apcu-autoloader[-prefix]`, `--no-blocking`,
+  `--no-progress`, `-n`, `--no-ansi` were lost, and `--offline` reached
+  Composer as nothing. It now forwards the original arguments the way the
+  `-vv` delegation does — vivacity's own options dropped (`--no-fallback`,
+  `--check-scope`, `--offline`, which becomes `COMPOSER_DISABLE_NETWORK=1`,
+  `--run-scripts`, whose absence becomes `--no-scripts`) — and the
+  `delegating to` line shows that whole line.
+- **No more `exec()`.** On unix the `install` fallback replaced vivacity's
+  process with Composer's: a program that embeds `vivacity::run` (ePHPm)
+  disappeared with it. Every hand-over is now a child process whose exit code
+  is returned.
+- **A relative `--working-dir` is applied once.** `update`/`require`/`remove`
+  ran Composer *inside* the project with the same `--working-dir`, so
+  Composer looked for `<project>/<dir>`. Composer now runs in vivacity's own
+  directory and applies the option itself; `--offline` reaches it there too.
+- **The install phase of `update`/`require`/`remove` hands over a complete
+  `composer install`** — built from the parsed options, since by then the
+  lock is written and the manifest edited: `--no-dev` (`--update-no-dev`),
+  `--no-progress`, `--no-autoloader`, `-o`, `-a`, `--apcu-autoloader[-prefix]`,
+  `--ignore-platform-req[s]`, `--no-plugins`, `--no-blocking`,
+  `--no-security-blocking`, `-n`, `--no-ansi`, `--working-dir`, `--no-scripts`.
+  `require --prefer-source`/`--prefer-dist`/`--prefer-install` were accepted
+  and ignored: its install phase now reads them, as `RequireCommand` does, so
+  a source install goes to Composer with the option instead of laying out
+  dists — and an impossible preference (`--prefer-source` with
+  `--prefer-install`) is refused before resolving, files restored, as
+  `doUpdate` does. After a handed-over install the command no longer prints
+  its own abandoned packages and funding count over Composer's.
+- **A hand-over decided on the solved lock (symfony/flex) stops the
+  command.** `update`, `require` and `remove` went on after Composer had run
+  the whole command — a second install, or `require`'s constraint update and
+  `remove`'s revert on top of Composer's result — and `require`/`remove`
+  handed Composer a composer.json they had already edited (`remove` then
+  found its package gone). The edit is now undone, silently, before Composer
+  starts, and nothing follows it.
+- `rm x --no-autoloader -vv`: the alias kept `--no-autoloader`, which
+  Composer's `remove` does not have.
+
+### Added
+- `harness/fallback-args.sh` (in CI): a fake `composer` first on the `PATH`
+  records each call — argv, directory, `SHELL_VERBOSITY`,
+  `COMPOSER_DISABLE_NETWORK`, the manifest it starts from — and every case
+  compares the record whole: `install` out of scope under `-q`/`-v`/
+  `--run-scripts`/a relative `--working-dir`, the merge-plugin dry run,
+  `update`/`require`/`remove` delegated, the install phase of `update` and
+  `require` (success, failure and revert, `--prefer-source`, an impossible
+  preference), the Flex hand-over after resolution with Composer succeeding
+  and failing, `--no-fallback`, `-vv`. 29 cases, 21 of them red on 0.21.0
+  (the other 8 had no defect to show).
+
 ## [0.21.0] — 2026-10-15
 
 ### Fixed

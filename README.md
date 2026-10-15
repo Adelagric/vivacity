@@ -253,8 +253,13 @@ notice. Forms the harness does not cover (absolute or `..` paths, `~`,
 Anything else — other plugins, `composer/installers` cases with custom
 naming, source-only packages, a `path` package on Windows, a plugin
 upgrade in progress — is detected
-before `vendor/` is touched, and vivacity execs the real `composer install`
-instead (`--no-fallback` to make it fail).
+before `vendor/` is touched, and vivacity hands the command to the real
+`composer install` instead (`--no-fallback` to make it fail): the command
+line it was given, minus vivacity's own options (`--offline` becomes
+`COMPOSER_DISABLE_NETWORK=1`; `--no-scripts` is added unless
+`--run-scripts`), run as a child process in the same directory — a
+relative `--working-dir` means the same thing — whose exit code is
+vivacity's. A program that embeds `vivacity::run` keeps its process.
 
 The resolution commands have the same policy. Composer loads the
 installed plugins before resolving, and some change what gets resolved
@@ -264,8 +269,11 @@ merges other manifests into the root, `drupal/core-recipe-unpack` edits
 composer.json on `require`. When one of those does something vivacity
 does not emulate (or a plugin outside vivacity's lists is installed and
 allowed), `update`, `require` and `remove` hand the whole command to
-Composer with the same arguments, before any write, and say why;
-`--no-fallback` stops with exit 3 instead. Plugins with no
+Composer with the same arguments, before any write (an edit of
+composer.json by `require`/`remove` is undone first), and say why;
+`--no-fallback` stops with exit 3 instead. When only their install phase
+is out of scope, the lock is written as Composer writes it and Composer
+gets a `composer install` built from the same options. Plugins with no
 resolution-time listener (`composer/installers`, `symfony/runtime`, the
 extension-installers, `php-http/discovery`, `ergebnis/composer-normalize`,
 `cweagans/composer-patches`…) do not trigger it; `symfony/thanks` only on

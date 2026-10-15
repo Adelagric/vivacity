@@ -235,7 +235,12 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
-        compat: GlobalCompatArgs::default(),
+        // Read by the install phase's fallback line (`after_update_line`).
+        compat: GlobalCompatArgs {
+            no_interaction: args.no_interaction,
+            no_ansi: args.no_ansi,
+            ..GlobalCompatArgs::default()
+        },
         no_progress: args.no_progress,
         with: Vec::new(),
         packages: Vec::new(),
@@ -261,15 +266,22 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         no_fallback: args.no_fallback,
         offline: args.offline,
         working_dir: args.working_dir.clone(),
-        // The rest of `remove` (restore, local repository check) must run
-        // even if the install is handed over to Composer.
-        spawn_fallback: true,
+        prefer_source: false,
+        prefer_dist: false,
+        prefer_install: None,
     };
     // `remove` has no prefer-stable/lowest option: only the manifest
     // counts.
     // An exception (transport, invalid manifest) propagates without a
     // restore; only a non-zero status from `Installer::run` restores.
-    let status = run_update_resolved(&update_args, options, false, false)?;
+    let ended = run_update_resolved(&update_args, options, false, false, &|| {
+        std::fs::write(&file, &backup).with_context(|| format!("cannot restore {}", file.display()))
+    })?;
+    // Composer ran `remove` itself, from the manifest as it was.
+    if ended.by_composer {
+        return Ok(ended.status);
+    }
+    let status = ended.status;
     if status != 0 {
         vivacity_core::say!("\nRemoval failed, reverting {file_label} to its original content.");
         std::fs::write(&file, &backup)

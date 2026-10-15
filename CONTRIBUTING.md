@@ -63,9 +63,12 @@ the roadmap below.
   Composer fallback there.
 - **`--prefer-source` / `--prefer-dist` / `--prefer-install` on `update`,
   `require` and `remove`** — `install` honours them since v0.19 (the ported
-  `getPreferredInstallOptions`); the other three reject them, because their
-  path re-reads composer.json once the in-memory manifest is gone and
-  carrying the effective preference there is plumbing, not a patch.
+  `getPreferredInstallOptions`), and `require` carries them to its install
+  phase since the fallback rework (a source install goes to Composer with
+  the option); `update` still rejects them — the plumbing now exists
+  (`UpdateArgs::prefer_*`, read by the install phase), what is left is to
+  expose them as options and validate them before resolving, as `require`
+  does. (`remove` has none, as in Composer.)
 - **The refusals that come from Composer's JSON schema** — vivacity refuses
   the root manifest's own rules at every command since v0.19 (invalid root
   name, self-require, invalid link name) but does not validate the schema,
@@ -141,7 +144,9 @@ of composer-merge-plugin), `fallback.rs` (handing the command to Composer),
   `harness/steps.sh` (stderr is compared on every case unless `@nostderr`;
   a case whose reference output has no operation or reason line is
   reported as blind, not green), `harness/verbosity.sh` (stdout and stderr
-  whole under normal, `-q` and `-v`), `harness/drift-reference.sh` (every
+  whole under normal, `-q` and `-v`), `harness/fallback-args.sh` (what the
+  fallback hands Composer: argv, directory, environment, exit code — a
+  fake `composer` records it), `harness/drift-reference.sh` (every
   vendored file under `docs/reference/` identical to the phar).
   `harness/linux.sh` runs the whole chain in a Linux container; the
   Windows parity job runs on `windows-latest` in CI.

@@ -3047,3 +3047,85 @@ Vérifié : `harness/verbosity.sh` (en CI) — 23 scénarios sous normal, `-q`,
 `-v`, un sous `-vv`, un avec plugins actifs, 67 cas, stdout et stderr entiers
 identiques à Composer 2.10.3, durées et chemin du projet normalisés ; suite
 complète et tous les harnais existants verts : la sortie normale n'a pas bougé.
+
+## 2026-10-16 — Le fallback rejoue la ligne de commande, en processus fils
+
+Noté hors périmètre par la revue de la 0.21 (`-q`/`-v`), fait ici. Plan,
+méta-analyse (sous-agent frais) et ce qu'elle a changé :
+`docs/plans/fallback-argv.md`.
+
+**Mesuré d'abord, avec un faux `composer` qui enregistre ses arguments.**
+`install --dry-run --working-dir proj --offline` sur la fixture merge-plugin
+privée de son fichier requis : Composer recevait `install --no-scripts` — une
+**installation réelle** pour un dry run, sans `--offline` ni `--working-dir`.
+Le fallback d'`install` reconstruisait sa ligne de neuf champs et faisait
+`exec()` sous unix (chez ePHPm, l'hôte disparaissait) ; celui des commandes de
+résolution rejouait bien l'argv, mais lançait Composer *dans* le projet avec
+le même `--working-dir` relatif — appliqué deux fois — et perdait `--offline`.
+
+**Décision : un seul modèle, celui de la délégation `-vv` de la 0.21.**
+L'argv d'origine moins les options propres à vivacity (`--no-fallback`,
+`--check-scope`, `--offline` → `COMPOSER_DISABLE_NETWORK=1`, `--run-scripts`
+dont l'absence devient `--no-scripts`, `--no-autoloader` sur
+`require`/`remove` — alias `r`/`rm` compris, que la délégation `-vv`
+ratait), un processus fils dans le répertoire de vivacity (Composer applique
+`--working-dir` lui-même, `Application::doRun`), son code de sortie rendu. Une
+fonction (`hand_over`) pour les trois chemins. Écarté : garder `exec` hors
+embarquement — deux comportements pour un même fallback, et le processus fils
+est déjà ce que font `-vv` et `--run-scripts`.
+
+**La phase d'installation d'un `update`/`require`/`remove` : une ligne
+construite, pas l'argv.** À ce point composer.lock est écrit (sauf dry run ou
+`config.lock: false`), composer.json est édité pour `require`/`remove`,
+vendor/ n'est pas touché ; Composer, lui, enchaîne `doInstall` sur le lock
+qu'il vient de résoudre, et `composer install` relit ce même lock. Rejouer la
+commande la ferait résoudre une seconde fois, et `remove` trouverait son
+paquet déjà retiré. Traduire l'argv demanderait une table par commande
+(`--update-no-dev` → `--no-dev`, le `--dev` de `require` à jeter, les options
+à valeur séparée, les courtes groupées `-oW`) : fragile. D'où
+`after_update_line`, depuis les arguments analysés, chaque option de l'update
+que l'install lit, sous le nom d'`install`. Écarté exprès : l'audit — `install
+--audit` pose aussi `setErrorOnAudit` (sortie 5 sur un avis) là où `update`
+audite sans échouer ; ce n'est pas le même régime, et vivacity n'audite pas
+nativement non plus. Après une installation rendue, la commande n'imprime plus
+son rapport d'après-update : `composer install` a imprimé les abandonnés et le
+funding (`Installer::run`), seules manquent les suggestions, que seul un
+update imprime. Sans cela, quitter `exec` aurait fait imprimer à `update` deux
+fois ces lignes. `require` garde sa mise à jour des contraintes devinées après
+l'install, comme `RequireCommand` (elle écrit composer.json).
+
+**`--dry-run` sur un lock hors portée : reste natif.** Ce que la portée
+détecte (disposition, sources, plugins à l'install) ne change pas la liste
+d'opérations, lue dans le lock. Mesuré : laravel avec `preferred-install:
+source`, `install --dry-run --no-plugins` — stderr et stdout identiques à
+Composer 2.10.3, 112 lignes. Les fallbacks atteints avant le retour du dry run
+(plugin de fusion) transmettent désormais `--dry-run`.
+
+**Ce que la méta a renversé.** (1) La délégation Flex décidée sur le lock
+résolu (`resolve_and_lock`) rendait un statut que l'appelant prenait pour le
+sien : sur un succès de Composer, `update` réinstallait, `require` réécrivait
+ses contraintes, `remove` restaurait ou vérifiait par-dessus le résultat de
+Composer — et `require`/`remove` lui passaient un composer.json **déjà
+édité**. La délégation remonte maintenant à l'appelant
+(`Resolved::hand_over`), qui défait son édition en silence, puis rien ne suit.
+(2) Le plan disait `--prefer-*` hors sujet ; or `RequireCommand` les lit pour
+son install, et vivacity les acceptait sans les lire : une install depuis les
+sources posée en dists. Ils passent maintenant à la phase d'installation
+(champs internes de `UpdateArgs` ; `update` ne les accepte toujours pas), et
+une préférence impossible est refusée avant la résolution, fichiers restaurés,
+là où `doUpdate` appelle `getPreferredInstallOptions`. La revue indépendante a
+ajouté : les valeurs de la ligne construite en un seul mot (`--working-dir=x`,
+Symfony ne prendrait pas une valeur séparée qui commence par `-`), le
+`require` rendu après la résolution ne touche plus au lock (pas encore écrit),
+et le scénario Flex joué avec un Composer qui réussit — le cas où l'ancien code
+continuait.
+
+Vérifié : `harness/fallback-args.sh` (en CI, ubuntu et macos), 29 cas qui
+comparent l'enregistrement entier (argv, répertoire, `SHELL_VERBOSITY`,
+`COMPOSER_DISABLE_NETWORK`, manifeste de départ) ; 21 rouges sur le binaire
+0.21.0, les 8 autres sans défaut à montrer (le dry run natif, les six
+`--no-fallback`/`--check-scope`, le `-vv` d'`install`) ; tests unitaires de `forwarded_arguments` et de
+`after_update_line`. Noté, hors périmètre : le fallback de portée d'`install`
+est décidé après que vivacity a imprimé l'en-tête et « Package operations »,
+que Composer réimprime ; sous `--run-scripts`, `pre-install-cmd` tourne avant
+cette décision puis encore dans Composer.

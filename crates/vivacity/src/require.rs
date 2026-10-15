@@ -59,6 +59,19 @@ impl Files {
         }
         Ok(())
     }
+
+    /// composer.json as it was before the edit, without a word, for a
+    /// hand-over to Composer decided once the resolution is solved: the
+    /// lock is not written yet, so it stays as it is.
+    fn undo_edit(&self) -> anyhow::Result<()> {
+        if self.newly_created {
+            let _ = std::fs::remove_file(&self.json);
+        } else {
+            std::fs::write(&self.json, &self.composer_backup)
+                .with_context(|| format!("cannot restore {}", self.json.display()))?;
+        }
+        Ok(())
+    }
 }
 
 /// `Factory::getLockFile`: `composer.json` to `composer.lock`.
@@ -618,6 +631,21 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         },
         Err(_) => false,
     };
+    // `getPreferredInstallOptions`, in `doUpdate` before the installer is
+    // set up: an impossible preference throws before anything is resolved
+    // or written, and the exception path reverts the files
+    // (`dependencyResolutionCompleted` still false). The install phase reads
+    // the preference (`UpdateArgs::prefer_*`).
+    if let Err(message) = vivacity_core::scope::effective_preferred_install(
+        &manifest,
+        args.prefer_source,
+        args.prefer_dist,
+        args.prefer_install.as_deref(),
+    ) {
+        files.revert()?;
+        vivacity_core::say_always!("{message}");
+        return Ok(1);
+    }
     // Without a written lock (`config.lock: false`), Composer installs and
     // guesses from its virtual lock; vivacity only installs from the file.
     let lock_enabled = crate::config_lock_enabled(&files.composer_backup);
@@ -641,7 +669,12 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
-        compat: crate::GlobalCompatArgs::default(),
+        // Read by the install phase's fallback line (`after_update_line`).
+        compat: crate::GlobalCompatArgs {
+            no_interaction: args.no_interaction,
+            no_ansi: args.no_ansi,
+            ..crate::GlobalCompatArgs::default()
+        },
         no_progress: args.no_progress,
         with: Vec::new(),
         packages: Vec::new(),
@@ -667,7 +700,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         no_fallback: args.no_fallback,
         offline: args.offline,
         working_dir: args.working_dir.clone(),
-        spawn_fallback: true,
+        prefer_source: args.prefer_source,
+        prefer_dist: args.prefer_dist,
+        prefer_install: args.prefer_install.clone(),
     };
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
     let prefer_lowest = args.prefer_lowest || env_flag("COMPOSER_PREFER_LOWEST");
@@ -680,6 +715,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             return Err(e);
         }
     };
+    // Composer runs `require` itself, from the files as they were.
+    if let Some(issue) = &resolved.hand_over {
+        return crate::hand_resolution_over(issue, args.no_fallback, &|| files.undo_edit());
+    }
     let status = resolved.status;
     if status != 0 {
         if status == 2 {
@@ -696,6 +735,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `$status = $install->run(); if ($status !== 0) revertComposerFile()`:
     // a failing install phase restores the files too (an EXCEPTION after
     // the resolution would not, `dependencyResolutionCompleted`).
+    let mut handed_over = false;
     if !args.no_install {
         let virtual_lock = if args.dry_run {
             resolved.lock.clone()
@@ -707,16 +747,20 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         } else {
             None
         };
-        let status = install_after_update(&update_args, virtual_lock, virtual_manifest)?;
-        if status != 0 {
+        let phase = install_after_update(&update_args, virtual_lock, virtual_manifest)?;
+        if phase.status != 0 {
             files.revert()?;
             if args.dry_run && newly_created {
                 let _ = std::fs::remove_file(&json);
             }
-            return Ok(status);
+            return Ok(phase.status);
         }
+        handed_over = phase.handed_over;
     }
-    crate::print_post_update(&resolved, &project);
+    // Composer's `install` printed the end of its own report.
+    if !handed_over {
+        crate::print_post_update(&resolved, &project);
+    }
     let status = if !to_guess.is_empty() {
         update_requirements_after_resolution(
             &project,

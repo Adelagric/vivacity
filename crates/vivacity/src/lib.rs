@@ -328,8 +328,16 @@ struct UpdateArgs {
     offline: bool,
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
+    /// Internal: `require`'s `--prefer-source` / `--prefer-dist` /
+    /// `--prefer-install`, which its install phase reads
+    /// (`RequireCommand` → `setPreferSource`/`setPreferDist`). `update`
+    /// does not accept them yet; `remove` has none, as in Composer.
     #[arg(skip)]
-    spawn_fallback: bool,
+    prefer_source: bool,
+    #[arg(skip)]
+    prefer_dist: bool,
+    #[arg(skip)]
+    prefer_install: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -453,14 +461,17 @@ struct InstallArgs {
     /// Project directory (default: current directory).
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
-    /// Internal: run `composer install` as a subprocess instead of
-    /// replacing the process (when the caller still has work to do after).
-    /// Off Unix there is no `exec()`: the subprocess is the only mode, and
-    /// this field is never read (hence the `allow` — callers still set it
-    /// so there is a single construction flow).
+    /// Internal: the line handed to Composer when this install goes to the
+    /// fallback, where it is not the command line itself — the install
+    /// phase of `update`/`require`/`remove` (`after_update_line`). `None`:
+    /// the command line, forwarded.
     #[arg(skip)]
-    #[cfg_attr(not(unix), allow(dead_code))]
-    spawn_fallback: bool,
+    fallback_line: Option<Vec<std::ffi::OsString>>,
+    /// Internal: set once the fallback has run Composer, so that the
+    /// command around this install does not print over Composer's own
+    /// report (`InstallPhase`).
+    #[arg(skip)]
+    handed_over: std::cell::Cell<bool>,
     /// Internal: install following a resolution (`doInstall` with
     /// `alreadySolved`); the lock pool has already been filtered.
     #[arg(skip)]

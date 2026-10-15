@@ -103,7 +103,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 issues: vec![vivacity_core::scope::ScopeIssue::MergePlugin(reason)],
                 ..Default::default()
             };
-            return fallback_or_fail(args, &project, &report);
+            return fallback_or_fail(args, &report);
         }
     };
     let manifest = match &merged {
@@ -413,7 +413,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                     ))],
                     ..Default::default()
                 };
-                return fallback_or_fail(args, &project, &report);
+                return fallback_or_fail(args, &report);
             }
         }
         for line in &missing {
@@ -475,12 +475,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         return Ok(0);
     }
 
-    // Out of scope: exec composer as fallback (default) or fail explicitly.
+    // Out of scope: Composer as fallback (default) or fail explicitly.
     let Some(scope) = scope else {
         anyhow::bail!("internal: scope was not analysed");
     };
     if !scope.is_native_ok() {
-        return fallback_or_fail(args, &project, &scope);
+        return fallback_or_fail(args, &scope);
     }
     let Some(layout) = scope.layout.as_ref() else {
         anyhow::bail!("internal: scope is native but no layout was resolved");
@@ -545,7 +545,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 skipped_plugins: vec![],
                 layout: None,
             };
-            return fallback_or_fail(args, &project, &scope);
+            return fallback_or_fail(args, &scope);
         }
         Err(vivacity_core::Error::Refused(msg)) => {
             vivacity_core::say_always!("{msg}");
