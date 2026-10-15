@@ -106,8 +106,7 @@ the roadmap below.
   (NOTICE.md).
 - **Auth** — `gitlab-token`/`gitlab-oauth`; custom CAs (`SSL_CERT_FILE`) with rustls.
 - **Remaining `update` options** — `--minimal-changes`,
-  `bump-after-update`, `--patch-only`, `-i`, the audit, `--verbose`
-  explanations. (`--with` and the `a/b:^1` shorthand are done, plan
+  `bump-after-update`, `--patch-only`, `-i`, the audit. (`--with` and the `a/b:^1` shorthand are done, plan
   v0.18.)
 
 ## Where a command lives in `crates/vivacity`
@@ -141,7 +140,8 @@ of composer-merge-plugin), `fallback.rs` (handing the command to Composer),
   `harness/diff-vendor.sh --with-autoloader`, `harness/update.sh`,
   `harness/steps.sh` (stderr is compared on every case unless `@nostderr`;
   a case whose reference output has no operation or reason line is
-  reported as blind, not green), `harness/drift-reference.sh` (every
+  reported as blind, not green), `harness/verbosity.sh` (stdout and stderr
+  whole under normal, `-q` and `-v`), `harness/drift-reference.sh` (every
   vendored file under `docs/reference/` identical to the phar).
   `harness/linux.sh` runs the whole chain in a Linux container; the
   Windows parity job runs on `windows-latest` in CI.

@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod glob;
 pub mod installer;
 pub mod installers;
+pub mod io;
 pub mod jsonfile;
 pub mod layout;
 pub mod lock;

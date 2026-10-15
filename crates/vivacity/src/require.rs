@@ -35,7 +35,7 @@ impl Files {
     /// `revertComposerFile`.
     fn revert(&self) -> anyhow::Result<()> {
         if self.newly_created {
-            eprintln!("\nInstallation failed, deleting {}.", self.file_label);
+            vivacity_core::say!("\nInstallation failed, deleting {}.", self.file_label);
             let _ = std::fs::remove_file(&self.json);
             if self.lock.exists() {
                 let _ = std::fs::remove_file(&self.lock);
@@ -46,7 +46,7 @@ impl Files {
             } else {
                 " to its ".to_owned()
             };
-            eprintln!(
+            vivacity_core::say!(
                 "\nInstallation failed, reverting {}{msg}original content.",
                 self.file_label
             );
@@ -262,8 +262,14 @@ fn find_best_version_and_name(
             &mut warnings,
         );
         if warn {
-            for w in warnings.iter().filter(|w| !w.verbose) {
-                eprintln!("{}", w.message);
+            // `VersionSelector::findBestCandidate`: the first warning at the
+            // default level, the repeats at VERBOSE.
+            for w in &warnings {
+                if w.verbose {
+                    vivacity_core::say_verbose!("{}", w.message);
+                } else {
+                    vivacity_core::say!("{}", w.message);
+                }
             }
         }
         Ok(found)
@@ -331,7 +337,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         }
     }
     if args.no_suggest {
-        eprintln!("You are using the deprecated option \"--no-suggest\". It has no effect and will break in Composer 3.");
+        vivacity_core::say!("You are using the deprecated option \"--no-suggest\". It has no effect and will break in Composer 3.");
     }
     let project = project_dir(args.working_dir.as_deref())?;
     let json = project.join("composer.json");
@@ -395,9 +401,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             _ => "library".to_owned(),
         };
         if package_type != "project" && !args.dev {
-            eprintln!("The \"--fixed\" option is only allowed for packages with a \"project\" type or for dev dependencies to prevent possible misuses.");
+            vivacity_core::say!("The \"--fixed\" option is only allowed for packages with a \"project\" type or for dev dependencies to prevent possible misuses.");
             if manifest.get("type").is_none_or(Value::is_null) {
-                eprintln!("If your package is not a library, you can explicitly specify the \"type\" by using \"composer config type project\".");
+                vivacity_core::say!("If your package is not a library, you can explicitly specify the \"type\" by using \"composer config type project\".");
             }
             return Ok(1);
         }
@@ -464,7 +470,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     for (name, version) in parse_name_version_pairs(&args.packages) {
         if let Some(v) = &version {
             if looks_too_strict(v) {
-                eprintln!("The \"{v}\" constraint for \"{name}\" appears too strict and will likely not match what you want. See https://getcomposer.org/constraints");
+                vivacity_core::say!("The \"{v}\" constraint for \"{name}\" appears too strict and will likely not match what you want. See https://getcomposer.org/constraints");
             }
         }
         match version {
@@ -489,7 +495,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                     }
                 };
                 if use_best_version_constraint {
-                    eprintln!("Using version {constraint} for {canonical}");
+                    vivacity_core::say!("Using version {constraint} for {canonical}");
                     requirements.push((canonical, constraint));
                 } else {
                     requirements.push((canonical, "guess".to_owned()));
@@ -520,7 +526,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     }
     for (name, constraint) in &requirements {
         if name.to_lowercase() == session.root.package.name {
-            eprintln!("Root package '{name}' cannot require itself in its composer.json");
+            vivacity_core::say!("Root package '{name}' cannot require itself in its composer.json");
             return Ok(1);
         }
         if constraint == "self.version" {
@@ -550,7 +556,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     }
     for (package, key) in &current {
         if requirements.iter().any(|(n, _)| n == package) && *key != require_key {
-            eprintln!(
+            vivacity_core::say!(
                 "{package} is currently present in the {remove_key} key and you ran the command {} the --dev flag, which will move it to the {require_key} key.",
                 if args.dev { "with" } else { "without" }
             );
@@ -565,7 +571,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     if !args.dry_run {
         update_file(&json, &requirements, require_key, remove_key, sort_packages)?;
     }
-    eprintln!(
+    vivacity_core::say!(
         "{file_label} has been {}",
         if newly_created { "created" } else { "updated" }
     );
@@ -595,7 +601,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         None => "",
     };
     let names: Vec<String> = requirements.iter().map(|(n, _)| n.clone()).collect();
-    eprintln!("Running composer update {}{flags}", names.join(" "));
+    vivacity_core::say!("Running composer update {}{flags}", names.join(" "));
     // `Locker::isLocked`: a readable lock with a non-null `packages` key;
     // an unreadable lock is a ParsingException in `doUpdate`, hence restore
     // and error.
@@ -681,7 +687,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 .into_iter()
                 .find(|(_, v)| v.is_none())
             {
-                eprintln!("You can also try re-running composer require with an explicit version constraint, e.g. \"composer require {name}:*\" to figure out if any version is installable, or \"composer require {name}:^2.1\" if you know which you need.");
+                vivacity_core::say!("You can also try re-running composer require with an explicit version constraint, e.g. \"composer require {name}:*\" to figure out if any version is installable, or \"composer require {name}:^2.1\" if you know which you need.");
             }
         }
         files.revert()?;
@@ -802,11 +808,11 @@ fn update_requirements_after_resolution(
         } else {
             find_recommended_require_version(&pkg, &session.arena, &session.php_version)
         };
-        eprintln!("Using version {constraint} for {package_name}");
+        vivacity_core::say!("Using version {constraint} for {package_name}");
         if constraint.starts_with("dev-")
             && !["dev-main", "dev-master", "dev-trunk", "dev-latest"].contains(&constraint.as_str())
         {
-            eprintln!("Version {constraint} looks like it may be a feature branch which is unlikely to keep working in the long run and may be in an unstable state");
+            vivacity_core::say!("Version {constraint} looks like it may be a feature branch which is unlikely to keep working in the long run and may be in an unstable state");
         }
         requirements.push((package_name.clone(), constraint));
     }

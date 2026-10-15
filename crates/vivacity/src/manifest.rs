@@ -163,6 +163,22 @@ pub(crate) fn refuse_alternate_manifest() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `Factory::createComposer` without a composer.json: Composer's two lines
+/// (`Factory.php:303`, `$fullLoad`), written by `Application::getComposer`
+/// at the default level — silent under `-q` — and exit 1. The directory is
+/// the physical one, as PHP's `getcwd()` gives it.
+pub(crate) fn refuse_missing_manifest(project: &std::path::Path) -> Option<i32> {
+    if project.join("composer.json").exists() {
+        return None;
+    }
+    let cwd = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    vivacity_core::say!(
+        "Composer could not find a composer.json file in {}\nTo initialize a project, please create a composer.json file. See https://getcomposer.org/basic-usage",
+        cwd.display()
+    );
+    Some(1)
+}
+
 /// `RootPackageLoader::load`'s own refusals, which Composer raises for EVERY
 /// command because `Factory::createComposer` loads the root package: an invalid
 /// root name, a package that requires itself, an invalid link name. vivacity
@@ -175,7 +191,7 @@ pub(crate) fn refuse_alternate_manifest() -> anyhow::Result<()> {
 /// sometimes chained. Exit 1, as Composer, and nothing written.
 pub(crate) fn refuse_invalid_root(manifest: &serde_json::Value) -> Option<i32> {
     let err = vivacity_resolver::root::manifest_error(manifest)?;
-    eprintln!("{err}");
+    vivacity_core::say_always!("{err}");
     Some(1)
 }
 

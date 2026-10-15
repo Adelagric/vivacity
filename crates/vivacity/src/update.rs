@@ -155,6 +155,10 @@ pub(crate) fn temporary_requirements(
 /// `composer update`: resolution (exact port of Composer's solver), lock
 /// written if its data changes, then `install`.
 pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
+    refuse_alternate_manifest()?;
+    if let Some(code) = refuse_missing_manifest(&project_dir(args.working_dir.as_deref())?) {
+        return Ok(code);
+    }
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     for p in &args.packages {
@@ -214,6 +218,21 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
 
 /// Resolution, lock write and install, once the list and the update mode
 /// are decided (shared by `update` and `remove`).
+/// A session error the command prints itself: each part at its Composer
+/// level when the session split it, else the whole message at the default
+/// level (`UpdateCommand`'s temporary-constraint refusal).
+fn print_session_error(e: &vivacity_resolver::session::SessionError) {
+    use vivacity_core::io::shows;
+    if e.parts.is_empty() {
+        vivacity_core::say!("{}", e.message);
+    }
+    for (level, text) in &e.parts {
+        if shows(*level) {
+            eprintln!("{text}");
+        }
+    }
+}
+
 pub(crate) fn run_update_resolved(
     args: &UpdateArgs,
     options: vivacity_resolver::session::UpdateOptions,
@@ -308,7 +327,7 @@ pub(crate) struct Resolved {
 /// run).
 pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) {
     for line in &resolved.post {
-        eprintln!("{line}");
+        vivacity_core::say!("{line}");
     }
     print_funding(project, &resolved.manifest);
     if resolved.flex_active {
@@ -386,9 +405,9 @@ pub(crate) fn resolve_and_lock(
                 vivacity_resolver::session::SessionErrorKind::Printed(_)
             ) =>
         {
-            eprintln!("{}", e.message);
+            print_session_error(&e);
             if let Some(line) = &e.stdout {
-                println!("{line}");
+                vivacity_core::out!("{line}");
             }
             let vivacity_resolver::session::SessionErrorKind::Printed(code) = e.kind else {
                 unreachable!()
@@ -442,13 +461,15 @@ pub(crate) fn resolve_and_lock(
     if !ignore_all && ignore_list.is_empty() {
         if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
             if !env.is_empty() {
-                eprintln!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
+                vivacity_core::say!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
                 ignore_list = env.split(',').map(str::to_owned).collect();
             }
         }
     }
     if ignore_all && env_flag("COMPOSER_IGNORE_PLATFORM_REQS") && !args.ignore_platform_reqs {
-        eprintln!("COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors.");
+        vivacity_core::say!(
+            "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
+        );
     }
     let filter = if ignore_all {
         PlatformRequirementFilter::IgnoreAll
@@ -457,7 +478,7 @@ pub(crate) fn resolve_and_lock(
     } else {
         PlatformRequirementFilter::IgnoreNothing
     };
-    eprintln!("Loading composer repositories with package information");
+    vivacity_core::say!("Loading composer repositories with package information");
     // (`Updating dependencies` is printed by the session once the pool is
     // built — Flex's notice comes before it.)
     // `Installer::run`: an unsolvable set means exit code 2
@@ -465,7 +486,7 @@ pub(crate) fn resolve_and_lock(
     let (lock, report) = match session.update(&manifest_text, &filter) {
         Ok(r) => r,
         Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsolvable => {
-            eprintln!("{e}");
+            print_session_error(&e);
             return Ok(Resolved {
                 status: 2,
                 lock: None,
@@ -596,9 +617,16 @@ pub(crate) fn resolve_and_lock(
     // `config.lock: false`: Composer resolves without writing a lock.
     let write_lock = config_lock_enabled(&manifest_text);
     let ops = &report.transaction.transaction.operations;
-    if ops.is_empty() {
-        eprintln!("Nothing to modify in lock file");
-    } else if write_lock {
+    // What `Installer::doUpdate` writes between the resolution and the lock
+    // operations (the resolution lines, `Nothing to modify in lock file`),
+    // held by the session until the checks above have decided the run is
+    // vivacity's: a delegation lets Composer write its own.
+    for (level, line) in &report.events {
+        if vivacity_core::io::shows(*level) {
+            eprintln!("{line}");
+        }
+    }
+    if !ops.is_empty() && write_lock {
         let count = |f: &dyn Fn(&vivacity_resolver::transaction::Operation) -> bool| {
             ops.iter().filter(|o| f(o)).count()
         };
@@ -606,21 +634,25 @@ pub(crate) fn resolve_and_lock(
         let installs = count(&|o| matches!(o, Operation::Install(_)));
         let updates = count(&|o| matches!(o, Operation::Update(..)));
         let removals = count(&|o| matches!(o, Operation::Uninstall(_)));
-        eprintln!(
+        vivacity_core::say!(
             "Lock file operations: {installs} install{}, {updates} update{}, {removals} removal{}",
             if installs == 1 { "" } else { "s" },
             if updates == 1 { "" } else { "s" },
             if removals == 1 { "" } else { "s" }
         );
+        // At VERBOSE, the names in the transaction's own order.
+        for line in vivacity_resolver::transaction::verbose_operation_summary(ops, &session.arena) {
+            vivacity_core::say_verbose!("{line}");
+        }
         // `  - Locking …` / `Upgrading` / `Removing`, removals first, by name.
         for line in vivacity_resolver::transaction::lock_operation_lines(&session.arena, ops) {
-            eprintln!("{line}");
+            vivacity_core::say!("{line}");
         }
     }
     // `$updatedLock && $this->writeLock && $this->executeOperations`: a dry
     // run neither writes nor says so.
     if write_lock && !args.dry_run {
-        eprintln!("Writing lock file");
+        vivacity_core::say!("Writing lock file");
         if !unchanged {
             std::fs::write(&lock_path, &text)
                 .with_context(|| format!("cannot write {}", lock_path.display()))?;

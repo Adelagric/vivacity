@@ -29,7 +29,7 @@ pub(crate) fn print_flex_post_update(manifest: &serde_json::Value, thanks_remind
     let enabled = flex_downloader_enabled(manifest);
     // `fetchRecipes` writes this one before `install`'s blank line.
     if !enabled {
-        eprintln!(
+        vivacity_core::say!(
             "Symfony recipes are disabled: \"symfony/flex\" not found in the root composer.json"
         );
     }
@@ -42,23 +42,25 @@ pub(crate) fn print_flex_post_update(manifest: &serde_json::Value, thanks_remind
         } else {
             ("\u{1f496} ", "\u{2605} ")
         };
-        eprintln!();
-        eprintln!(
+        vivacity_core::say!();
+        vivacity_core::say!(
             "What about running composer global require symfony/thanks && composer thanks now?"
         );
-        eprintln!(
+        vivacity_core::say!(
             "This will spread some {love} by sending a {star} to the GitHub repositories of your fellow package maintainers."
         );
     }
-    eprintln!();
+    vivacity_core::say!();
     if !sync {
-        eprintln!("Skip synchronizing package.json with PHP packages");
+        vivacity_core::say!("Skip synchronizing package.json with PHP packages");
     } else if !enabled {
-        eprintln!("Synchronizing package.json is disabled: \"symfony/flex\" not found in the root composer.json");
+        vivacity_core::say!("Synchronizing package.json is disabled: \"symfony/flex\" not found in the root composer.json");
     }
     if enabled {
-        eprintln!("Run composer recipes at any time to see the status of your Symfony recipes.");
-        eprintln!();
+        vivacity_core::say!(
+            "Run composer recipes at any time to see the status of your Symfony recipes."
+        );
+        vivacity_core::say!();
     }
 }
 
@@ -504,10 +506,12 @@ pub(crate) fn emulate_flex_install(
             })?;
         }
     }
-    eprintln!();
+    vivacity_core::say!();
     if flex_downloader_enabled(manifest) {
-        eprintln!("Run composer recipes at any time to see the status of your Symfony recipes.");
-        eprintln!();
+        vivacity_core::say!(
+            "Run composer recipes at any time to see the status of your Symfony recipes."
+        );
+        vivacity_core::say!();
     }
     Ok(())
 }

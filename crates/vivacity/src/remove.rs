@@ -18,7 +18,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     let dry_run = args.dry_run;
     let mut to_remove: Vec<(bool, String)> = Vec::new();
     if args.packages.is_empty() && !args.unused {
-        eprintln!("Not enough arguments (missing: \"packages\").");
+        vivacity_core::say_always!("Not enough arguments (missing: \"packages\").");
         return Ok(1);
     }
     let project = project_dir(args.working_dir.as_deref())?;
@@ -67,7 +67,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         })?;
         packages.extend(unused_locked_packages(&manifest, &lock));
         if packages.is_empty() {
-            eprintln!("No unused packages to remove");
+            vivacity_core::say!("No unused packages to remove");
             return Ok(0);
         }
     }
@@ -90,7 +90,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         ("require", "require-dev")
     };
     if args.update_with_dependencies {
-        eprintln!("You are using the deprecated option \"update-with-dependencies\". This is now default behaviour. The --no-update-with-dependencies option can be used to remove a package without its dependencies.");
+        vivacity_core::say!("You are using the deprecated option \"update-with-dependencies\". This is now default behaviour. The --no-update-with-dependencies option can be used to remove a package without its dependencies.");
     }
     // `$composer[$linkType][strtolower($name)] = $name`: the lowercase keys
     // are added to the decoded array (the originals stay, and `array_keys`
@@ -145,7 +145,9 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         } else if let Some(name) = lookup(alt_type, package) {
-            eprintln!("{name} could not be found in {link_type} but it is present in {alt_type}");
+            vivacity_core::say!(
+                "{name} could not be found in {link_type} but it is present in {alt_type}"
+            );
         } else if has_section(link_type) && !grep(link_type, package).is_empty() {
             for matched in grep(link_type, package) {
                 if dry_run {
@@ -157,15 +159,17 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
             }
         } else if has_section(alt_type) && !grep(alt_type, package).is_empty() {
             for matched in grep(alt_type, package) {
-                eprintln!(
+                vivacity_core::say!(
                     "{matched} could not be found in {link_type} but it is present in {alt_type}"
                 );
             }
         } else {
-            eprintln!("{package} is not required in your composer.json and has not been removed");
+            vivacity_core::say!(
+                "{package} is not required in your composer.json and has not been removed"
+            );
         }
     }
-    eprintln!("{file_label} has been updated");
+    vivacity_core::say!("{file_label} has been updated");
     if args.no_update {
         return Ok(0);
     }
@@ -216,7 +220,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     } else if transitive == vivacity_resolver::pool::UpdateMode::OnlyListed {
         flags.push_str(" --with-dependencies");
     }
-    eprintln!("Running composer update {}{flags}", packages.join(" "));
+    vivacity_core::say!("Running composer update {}{flags}", packages.join(" "));
     // `setUpdateAllowList` only if a lock exists.
     let mut options = if locked_data.is_some() {
         vivacity_resolver::session::UpdateOptions::partial(&packages, transitive)
@@ -267,7 +271,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // restore; only a non-zero status from `Installer::run` restores.
     let status = run_update_resolved(&update_args, options, false, false)?;
     if status != 0 {
-        eprintln!("\nRemoval failed, reverting {file_label} to its original content.");
+        vivacity_core::say!("\nRemoval failed, reverting {file_label} to its original content.");
         std::fs::write(&file, &backup)
             .with_context(|| format!("cannot restore {}", file.display()))?;
     }
@@ -281,7 +285,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     }
     for package in &packages {
         if locally_installed(&project, &manifest, package) {
-            eprintln!("Removal failed, {package} is still present, it may be required by another package. See `composer why {package}`.");
+            vivacity_core::say!("Removal failed, {package} is still present, it may be required by another package. See `composer why {package}`.");
             return Ok(2);
         }
     }

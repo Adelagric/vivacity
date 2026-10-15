@@ -165,9 +165,20 @@ files, local or over HTTPS) and `path` (globs and braces, a package's own
 git repository as reference, the version guessed from its branch or the
 project's, symlinked or mirrored with Composer's exclusion rules — on
 Linux and macOS; on Windows a lock with a `path` package goes through the
-Composer fallback). Not yet: `--with`, `vcs` repositories,
-`--minimal-changes`, the audit (`--no-audit` is the compared behaviour),
-the `--verbose` form of the explanations.
+Composer fallback). Not yet: `vcs` repositories, `--minimal-changes`, the
+audit (`--no-audit` is the compared behaviour).
+
+Composer's global options work on every command: `-q` leaves only what
+Composer prints at its quiet level (errors, the headline of an unsolvable
+set, the stale-lock warning) and the exit code; `-v` adds Composer's
+verbose lines in their places — resolution durations, the pool and rule
+counts, the `Installs:` / `Updates:` / `Removals:` summaries, the detailed
+explanations. `-vv` and `-vvv` hand the command to Composer, whose debug
+output vivacity does not reproduce; so does `-v` when a plugin is active,
+since Composer then logs each plugin listener it dispatches. The level is
+read as Symfony Console reads it (`SHELL_VERBOSITY`, then `-q`, then
+`-v…`), and passed on to every Composer process vivacity starts.
+`harness/verbosity.sh` compares stdout and stderr whole, at each level.
 
 Composer 2.10's dependency policies are applied the same way: versions
 covered by a security advisory or flagged on Packagist's malware list are

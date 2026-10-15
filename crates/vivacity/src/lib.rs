@@ -152,20 +152,22 @@ struct RequireArgs {
 }
 
 /// Composer's global options that a CI command line passes to every command
-/// (), accepted where a
-/// command did not declare them so that line runs instead of exiting 2 with
-/// a usage error. All are true no-ops here: vivacity never prompts, writes no
-/// ANSI escapes, and its narrative does not depend on the verbosity (the same
-/// treatment  and  already give //).
+/// (`composer install --no-dev --no-interaction --no-ansi -o`), accepted where
+/// a command did not declare them so that line runs instead of exiting 2 with
+/// a usage error. `-n` and `--no-ansi` are true no-ops: vivacity never prompts
+/// and never writes an ANSI escape. The verbosity is not read from these
+/// fields: `run` computes it from the command line as Symfony Console does
+/// (`vivacity_core::io::requested_verbosity`), for every command alike.
 #[derive(clap::Args, Debug, Default)]
 struct GlobalCompatArgs {
     /// Accepted for compatibility: vivacity is never interactive.
     #[arg(short = 'n', long)]
     no_interaction: bool,
-    /// Accepted for compatibility: the output does not change.
+    /// Only the lines Composer writes at QUIET (errors, the stale-lock
+    /// warning).
     #[arg(short = 'q', long)]
     quiet: bool,
-    /// Accepted for compatibility: the output does not change.
+    /// Composer's VERBOSE lines; `-vv`/`-vvv` hand the command to Composer.
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
     /// Accepted for compatibility: vivacity never writes ANSI escapes.
@@ -358,10 +360,15 @@ struct DumpArgs {
     /// `composer run-script`.
     #[arg(long)]
     run_scripts: bool,
-    /// Composer's global : accepted, and already the default
-    /// here (scripts only run with ).
+    /// Composer's global `--no-scripts`: accepted, and already the default
+    /// here (scripts only run with `--run-scripts`).
     #[arg(long, conflicts_with = "run_scripts")]
     no_scripts: bool,
+    /// Stop with exit 3 instead of handing the command to Composer (the
+    /// other commands' option; `dump-autoload` stops with 3 anyway on what
+    /// it cannot dump, and hands `-vv`/`-vvv` to Composer without it).
+    #[arg(long)]
+    no_fallback: bool,
     #[arg(long, value_name = "DIR")]
     working_dir: Option<PathBuf>,
     #[command(flatten)]
@@ -495,7 +502,23 @@ where
     if let Ok(mut a) = ARGV.lock() {
         *a = argv.clone();
     }
-    let cli = match Cli::try_parse_from(argv) {
+    // The run's verbosity, computed as Symfony Console computes Composer's
+    // (`Application::configureIO`), and reset when the run ends.
+    let tokens: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let requested = vivacity_core::io::requested_verbosity(
+        &tokens,
+        std::env::var("SHELL_VERBOSITY").ok().as_deref(),
+    );
+    let _verbosity = vivacity_core::io::Scope::new(match requested {
+        0 => vivacity_core::io::Verbosity::Quiet,
+        1 => vivacity_core::io::Verbosity::Normal,
+        _ => vivacity_core::io::Verbosity::Verbose,
+    });
+    let cli = match Cli::try_parse_from(argv.clone()) {
         Ok(cli) => cli,
         Err(e) => {
             // `e.exit()` writes the help to stdout, the error to stderr.
@@ -503,10 +526,30 @@ where
             return e.exit_code();
         }
     };
+    // What vivacity cannot print as Composer does goes to Composer, whole,
+    // before anything is read or written: `-vv`/`-vvv`, and `-v` when an
+    // emulated plugin whose output changes with it takes part.
+    // `--check-scope` asks what vivacity would do with the lock, not for a
+    // run: it is answered natively whatever the verbosity.
+    let tail = &argv[1..];
+    let check_scope = tail.iter().any(|t| t == "--check-scope");
+    if requested >= 3 && !check_scope {
+        return delegate_for_verbosity(tail, "-vv/-vvv, Composer's debug output");
+    }
+    if requested == 2 && !check_scope {
+        if let Ok(project) = project_dir(cli.working_dir()) {
+            if let Some(plugin) = active_plugin(&project, cli.plugins_enabled()) {
+                return delegate_for_verbosity(
+                    tail,
+                    &format!("-v while {plugin} is active (its listeners' lines)"),
+                );
+            }
+        }
+    }
     match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("Error: {e:?}");
+            vivacity_core::say_always!("Error: {e:?}");
             exit_code_of(&e)
         }
     }
@@ -562,6 +605,28 @@ fn exit_code_of(e: &anyhow::Error) -> i32 {
 }
 
 static ARGV: std::sync::Mutex<Vec<std::ffi::OsString>> = std::sync::Mutex::new(Vec::new());
+
+impl Cli {
+    fn working_dir(&self) -> Option<&std::path::Path> {
+        match self {
+            Cli::Install(a) => a.working_dir.as_deref(),
+            Cli::DumpAutoload(a) => a.working_dir.as_deref(),
+            Cli::Update(a) => a.working_dir.as_deref(),
+            Cli::Remove(a) => a.working_dir.as_deref(),
+            Cli::Require(a) => a.working_dir.as_deref(),
+        }
+    }
+
+    fn plugins_enabled(&self) -> bool {
+        !match self {
+            Cli::Install(a) => a.no_plugins,
+            Cli::DumpAutoload(a) => a.no_plugins,
+            Cli::Update(a) => a.no_plugins,
+            Cli::Remove(a) => a.no_plugins,
+            Cli::Require(a) => a.no_plugins,
+        }
+    }
+}
 
 fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     match cli {

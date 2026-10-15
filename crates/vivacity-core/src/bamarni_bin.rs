@@ -83,7 +83,7 @@ pub fn config(root_extra: Option<&Value>) -> Result<BinConfig, String> {
 /// `Logger::logStandard`: the lines as they reach stderr.
 pub fn print_deprecations(cfg: &BinConfig) {
     for d in &cfg.deprecations {
-        eprintln!("[bamarni-bin] {d}");
+        crate::say!("[bamarni-bin] {d}");
     }
 }
 

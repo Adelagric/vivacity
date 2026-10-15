@@ -2985,3 +2985,65 @@ Vérifié : `cargo fmt --check`, clippy `-D warnings` sur macOS et
 `x86_64-pc-windows-gnu`, 296 tests verts, et tous les harnais de la CI contre
 Composer 2.10.3 — 27 passages (dont `diff-vendor --with-autoloader` cache
 froid puis chaud), tous à 0, 488 cas `OK`.
+
+## 2026-10-15 — `-q` et `-v` écrivent ce que Composer écrit ; `-vv` et les plugins sous `-v` vont à Composer
+
+La PR #7 de Luther (ePHPm) fait accepter `-n`/`-q`/`-v`/`--no-ansi` à toutes
+les commandes, sans effet. Or la sortie d'erreur est le contrat : sous `-q`
+ou `-v`, vivacity disait autre chose que Composer. Plan, méta-analyse et
+revue dans `docs/plans/v0.21-verbosity.md` — deux lectures indépendantes de la
+source de Composer, qui ont chacune renversé une hypothèse du plan.
+
+**`-q` ne fait pas taire Composer.** Le plan généralisait un seul cas (pas de
+composer.json, écrit au niveau normal). La plupart des erreurs sont écrites à
+`IOInterface::QUIET` (`Installer.php:508, 548, 551, 730, 775, 818, 826`) et
+les encadrés d'exception de Symfony aussi : la tête d'un ensemble insoluble,
+l'avertissement `--no-dev`, le lock périmé restent sous `-q`. D'où trois
+niveaux d'écriture (`vivacity_core::io` : `say_always!`, `say!`,
+`say_verbose!`, `out!`), et chacun des ~115 sites d'écriture classé d'après
+son homologue chez Composer. Les raisons propres à vivacity suivent la même
+logique : QUIET quand la commande s'arrête en 3 (jamais muette), normal quand
+Composer prend la main.
+
+**Le niveau se calcule comme Symfony, pas comme clap.** `-v -v` vaut `-v`
+(recherche de jetons par préfixe, pas un compte), `-q -vvv` vaut `-q`,
+`SHELL_VERBOSITY` compte (avec le cast `(int)` de PHP : `"1e1"` vaut 10),
+`-vvvv` vaut `-vvv`. Mesuré, puis lu dans `Application::configureIO` et
+`ArgvInput::hasParameterOption`. Un niveau global au processus (atomique), posé
+par `run` et remis à normal à la fin : un thread-local raterait le thread de
+politique d'`install`, et ePHPm embarque `run` dans son processus.
+
+**Les lignes `-v` ne s'écrivent pas depuis le solveur.** À l'install vivacity
+ne résout pas (la transaction vient du lock) ; à l'update Composer intercale
+« Nothing to modify in lock file » entre les deux résolutions, et la commande
+peut encore rendre la main à Composer (Flex) après la résolution. La session
+retient donc ses lignes d'après-résolution (`SolveReport::events`, avec leur
+niveau) et la commande les écrit une fois sûre que la run reste ici ; sur les
+chemins d'erreur, la session les écrit elle-même avant de rendre l'erreur.
+Les compteurs `Analyzed N packages / N rules` sont identiques à ceux de
+Composer (laravel 767/4487, symfony 952/6778, drupal 385/1652) : une preuve de
+plus que le pool et le jeu de règles sont les siens.
+
+**`-vv`, `-vvv`, et `-v` avec un plugin actif : délégation entière.** Les
+niveaux de débogage de Composer (226 et 585 lignes sur laravel, requêtes et
+lectures de fichiers) ne se reproduisent pas ; et sous `-v` Composer écrit une
+ligne par écouteur de plugin qu'il dispatche (`EventDispatcher.php:230`), que
+les plugins émulés complètent de leurs propres lignes — la revue l'a mesuré
+sur bamarni (deux lignes manquantes), là où le plan ne visait que Flex et
+dealerdirect. La délégation se fait en tête de `run`, avant toute lecture, par
+un processus fils (jamais `exec` : ePHPm), avec l'argv d'origine moins les
+options propres à vivacity. Tout processus Composer que vivacity lance reçoit
+le niveau (`SHELL_VERBOSITY`, ce que Symfony exporte lui-même) : la revue a
+trouvé que le fallback d'`install`, qui reconstruit sa ligne, ignorait
+`-q`/`-v`. Sa remise à plat sur le modèle de la nouvelle délégation est notée,
+hors périmètre.
+
+**En passant, deux écarts au niveau normal corrigés :** `dump-autoload`
+n'écrivait pas les deux lignes de Composer sur stdout (« Generating … » /
+« Generated … containing N classes ») ; un composer.json absent donnait une
+chaîne `Error: cannot read …` au lieu du message de `Factory::createComposer`.
+
+Vérifié : `harness/verbosity.sh` (en CI) — 23 scénarios sous normal, `-q`,
+`-v`, un sous `-vv`, un avec plugins actifs, 67 cas, stdout et stderr entiers
+identiques à Composer 2.10.3, durées et chemin du projet normalisés ; suite
+complète et tous les harnais existants verts : la sortie normale n'a pas bougé.

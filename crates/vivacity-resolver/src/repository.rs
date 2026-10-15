@@ -930,7 +930,7 @@ impl ComposerRepository {
             Err(e) => {
                 if let Some((v, Some(_))) = cached {
                     if !self.degraded.replace(true) {
-                        eprintln!(
+                        vivacity_core::say!(
                             "Warning: {} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
                             self.url, e.0
                         );
@@ -1200,7 +1200,7 @@ impl ComposerRepository {
                             } else {
                                 requested.join(", ")
                             };
-                            eprintln!(
+                            vivacity_core::say!(
                                 "{} returned names which were not requested in response to the security-advisories API. {name} was not requested but is present in the response. Requested names were: {requested_list}",
                                 self.repo_name()
                             );

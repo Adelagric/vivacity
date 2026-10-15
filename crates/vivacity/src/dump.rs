@@ -100,7 +100,7 @@ impl PlannedDump {
             vivacity_core::runtime_stub::write_stub(&layout.vendor_dir(), project, manifest)?;
         }
         for w in &self.report.warnings {
-            eprintln!("{w}");
+            vivacity_core::say!("{w}");
         }
         Ok(self.report)
     }
@@ -143,6 +143,9 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     let t0 = std::time::Instant::now();
     let project = project_dir(args.working_dir.as_deref())?;
     refuse_alternate_manifest()?;
+    if let Some(code) = refuse_missing_manifest(&project) {
+        return Ok(code);
+    }
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join("composer.json"))
             .context("cannot read composer.json")?,
@@ -187,9 +190,11 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         Ok(Some(m)) => m.manifest,
         Ok(None) => manifest,
         Err(reason) => {
-            eprintln!("vivacity: this lock is outside what vivacity handles natively:");
-            eprintln!("  - wikimedia/composer-merge-plugin: {reason}");
-            eprintln!("Run `composer dump-autoload` instead.");
+            vivacity_core::say_always!(
+                "vivacity: this lock is outside what vivacity handles natively:"
+            );
+            vivacity_core::say_always!("  - wikimedia/composer-merge-plugin: {reason}");
+            vivacity_core::say_always!("Run `composer dump-autoload` instead.");
             return Ok(3);
         }
     };
@@ -202,11 +207,13 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     ) {
         Ok(l) => l,
         Err(issues) => {
-            eprintln!("vivacity: this lock is outside what vivacity handles natively:");
+            vivacity_core::say_always!(
+                "vivacity: this lock is outside what vivacity handles natively:"
+            );
             for i in &issues {
-                eprintln!("  - {i}");
+                vivacity_core::say_always!("  - {i}");
             }
-            eprintln!("Run `composer dump-autoload` instead.");
+            vivacity_core::say_always!("Run `composer dump-autoload` instead.");
             return Ok(3);
         }
     };
@@ -217,11 +224,13 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     if !args.no_plugins {
         let issues = vivacity_core::scope::plugin_issues(&lock, installed_dev);
         if !issues.is_empty() {
-            eprintln!("vivacity: this lock is outside what vivacity handles natively:");
+            vivacity_core::say_always!(
+                "vivacity: this lock is outside what vivacity handles natively:"
+            );
             for i in &issues {
-                eprintln!("  - {i}");
+                vivacity_core::say_always!("  - {i}");
             }
-            eprintln!("Run `composer dump-autoload` instead.");
+            vivacity_core::say_always!("Run `composer dump-autoload` instead.");
             return Ok(3);
         }
     }
@@ -238,13 +247,28 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         match scripts::Runner::new(&project, &manifest, dev_mode, which_composer()) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("vivacity: {e}");
+                vivacity_core::say_always!("vivacity: {e}");
                 return Ok(3);
             }
         }
     } else {
         None
     };
+    // `DumpAutoloadCommand`: its two lines go to STDOUT (`$io->write`), the
+    // first before `AutoloadGenerator::dump` (whose PRE_AUTOLOAD_DUMP comes
+    // after it), the second once the dump and its POST_AUTOLOAD_DUMP are
+    // done.
+    let authoritative =
+        args.classmap_authoritative || config_bool(&manifest, "classmap-authoritative");
+    let optimize = authoritative || args.optimize || config_bool(&manifest, "optimize-autoloader");
+    let kind = if authoritative {
+        "optimized autoload files (authoritative)"
+    } else if optimize {
+        "optimized autoload files"
+    } else {
+        "autoload files"
+    };
+    vivacity_core::out!("Generating {kind}");
     if let Some(r) = &runner {
         let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
         if code != 0 {
@@ -296,7 +320,12 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             return Ok(code);
         }
     }
-    eprintln!(
+    if optimize {
+        vivacity_core::out!("Generated {kind} containing {} classes", report.classes);
+    } else {
+        vivacity_core::out!("Generated {kind}");
+    }
+    vivacity_core::say!(
         "vivacity: autoloader generated ({} classes) in {:.2}s",
         report.classes,
         t0.elapsed().as_secs_f32()

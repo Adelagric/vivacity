@@ -85,6 +85,17 @@ impl Runner {
         if !self.with_dev {
             cmd.arg("--no-dev");
         }
+        // The run's verbosity: Composer's own dispatch writes its script
+        // lines (`> event: …`) at the level the user asked for.
+        match vivacity_core::io::level() {
+            vivacity_core::io::Verbosity::Quiet => {
+                cmd.arg("-q");
+            }
+            vivacity_core::io::Verbosity::Verbose => {
+                cmd.arg("-v");
+            }
+            vivacity_core::io::Verbosity::Normal => {}
+        }
         cmd.arg(event);
         let status = cmd
             .status()

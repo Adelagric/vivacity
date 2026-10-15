@@ -425,6 +425,38 @@ pub fn full_pretty_version(p: &Package, truncate: bool, mode: DisplayRef) -> Str
     format!("{} {}", p.pretty_version, reference)
 }
 
+/// The `Installs: …` / `Updates: …` / `Removals: …` lines Composer writes at
+/// VERBOSE after its operation count (`Installer::doUpdate` after « Lock file
+/// operations », `Installer::doInstall` after « Package operations »), in the
+/// operations' own order — before any sort. Installs and updates carry
+/// `name:fullPrettyVersion`, removals the name alone; alias operations are
+/// not listed; an empty list has no line.
+pub fn verbose_operation_summary(operations: &[Operation], arena: &[Package]) -> Vec<String> {
+    let full = |idx: usize| full_pretty_version(&arena[idx], true, DisplayRef::SourceRefIfDev);
+    let (mut installs, mut updates, mut removals) = (Vec::new(), Vec::new(), Vec::new());
+    for op in operations {
+        match *op {
+            Operation::Install(p) => installs.push(format!("{}:{}", arena[p].pretty_name, full(p))),
+            Operation::Update(_, t) => {
+                updates.push(format!("{}:{}", arena[t].pretty_name, full(t)))
+            }
+            Operation::Uninstall(p) => removals.push(arena[p].pretty_name.clone()),
+            Operation::MarkAliasInstalled(_) | Operation::MarkAliasUninstalled(_) => {}
+        }
+    }
+    let mut lines = Vec::new();
+    for (label, names) in [
+        ("Installs", installs),
+        ("Updates", updates),
+        ("Removals", removals),
+    ] {
+        if !names.is_empty() {
+            lines.push(format!("{label}: {}", names.join(", ")));
+        }
+    }
+    lines
+}
+
 /// `VersionParser::isUpgrade`.
 pub fn is_upgrade(from: &str, to: &str) -> bool {
     if from == to {

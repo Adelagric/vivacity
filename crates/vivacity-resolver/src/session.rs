@@ -34,6 +34,11 @@ pub struct SessionError {
     /// after `$io->writeError`), as `UpdateCommand` does for a temporary
     /// constraint that misses the root's.
     pub stdout: Option<String>,
+    /// The message as Composer writes it, piece by piece with each piece's
+    /// level (`IOInterface::QUIET` for the headline of an unsolvable set and
+    /// the `--no-dev` warning, the default level for the problems). Empty
+    /// when the whole message has one level, the caller's.
+    pub parts: Vec<(vivacity_core::io::Verbosity, String)>,
 }
 
 /// What Composer does with the error: an unsolvable set
@@ -59,6 +64,7 @@ impl SessionError {
             message: message.into(),
             kind: SessionErrorKind::Other,
             stdout: None,
+            parts: Vec::new(),
         }
     }
 }
@@ -74,6 +80,7 @@ impl From<PoolError> for SessionError {
                 SessionErrorKind::Other
             },
             stdout: None,
+            parts: Vec::new(),
         }
     }
 }
@@ -108,6 +115,7 @@ impl From<crate::pool_filters::FilterError> for SessionError {
             },
             message: e.0,
             stdout: None,
+            parts: Vec::new(),
         }
     }
 }
@@ -127,6 +135,7 @@ impl From<crate::repository::RepoError> for SessionError {
                 SessionErrorKind::Other
             },
             stdout: None,
+            parts: Vec::new(),
         }
     }
 }
@@ -317,6 +326,12 @@ pub struct SolveReport {
     pub rules: usize,
     /// Learned rules (conflicts encountered).
     pub learned: usize,
+    /// What `Installer::doUpdate` writes after a successful resolution and
+    /// before the lock operations, in order, each line with its level: the
+    /// resolution's duration, the `Analyzed …` counts, `Nothing to modify in
+    /// lock file`, the dev extraction's duration. Held rather than written so
+    /// that the command prints them once it knows the run stays here.
+    pub events: Vec<(vivacity_core::io::Verbosity, String)>,
 }
 
 /// Options of an `update` (`Installer::setUpdateAllowList`,
@@ -393,6 +408,7 @@ fn temporary_constraints(
         message,
         kind: SessionErrorKind::Printed(1),
         stdout,
+        parts: Vec::new(),
     };
     let mut out: BTreeMap<String, crate::pool::TemporaryConstraint> = BTreeMap::new();
     for (name, text) in &pairs {
@@ -711,6 +727,11 @@ impl UpdateSession {
                 message: "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.".to_owned(),
                 kind: SessionErrorKind::Printed(3),
                 stdout: None,
+                // `Installer.php:508`: at QUIET.
+                parts: vec![(
+                    vivacity_core::io::Verbosity::Quiet,
+                    "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.".to_owned(),
+                )],
             });
         }
         let mut request = Request::new(locked.clone());
@@ -819,6 +840,7 @@ impl UpdateSession {
         transaction: &mut LockTransaction,
         policy: &mut DefaultPolicy,
         filter: &PlatformRequirementFilter,
+        events: &mut Vec<(vivacity_core::io::Verbosity, String)>,
     ) -> Result<(), SessionError> {
         if self.root.package.dev_requires.is_empty() {
             return Ok(());
@@ -895,7 +917,12 @@ impl UpdateSession {
             )?;
         }
         let mut solver = Solver::new(&pool, &self.arena);
-        let non_dev = match solver.solve(&request, policy, filter) {
+        let before = std::time::Instant::now();
+        let solved = solver.solve(&request, policy, filter);
+        // `Solver::solve`: the duration at VERBOSE, before any problem —
+        // held with the caller's lines on success.
+        events.push(resolution_completed(before));
+        let non_dev = match solved {
             Ok(t) => t,
             Err(SolveError::Problems(problems)) => {
                 drop(solver);
@@ -907,16 +934,24 @@ impl UpdateSession {
                         set: &self.set,
                         pool: &pool,
                         request: &request,
-                        is_verbose: false,
+                        is_verbose: vivacity_core::io::shows(vivacity_core::io::Verbosity::Verbose),
                         ini_files: &self.ini_files,
                         loaded_extensions: &self.loaded_extensions,
                     };
                     crate::problem::pretty_string(&mut ctx, &problems, true)
                 };
+                // `Installer::extractDevPackages`: the headline at QUIET, the
+                // rest at the default level.
+                let head = "Unable to find a compatible set of packages based on your non-dev requirements alone.";
+                let rest = format!("Your requirements can be resolved successfully when require-dev packages are present.\nYou may need to move packages from require-dev or some of their dependencies to require.\n{pretty}");
                 return Err(SessionError {
-                    message: format!("Unable to find a compatible set of packages based on your non-dev requirements alone.\nYour requirements can be resolved successfully when require-dev packages are present.\nYou may need to move packages from require-dev or some of their dependencies to require.\n{pretty}"),
+                    message: format!("{head}\n{rest}"),
                     kind: SessionErrorKind::Unsolvable,
                     stdout: None,
+                    parts: vec![
+                        (vivacity_core::io::Verbosity::Quiet, head.to_owned()),
+                        (vivacity_core::io::Verbosity::Normal, rest),
+                    ],
                 });
             }
             Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),
@@ -1002,11 +1037,11 @@ impl UpdateSession {
         // of it), then `Updating dependencies`, then the policy filters'
         // warnings as they happened.
         if let Some(notice) = &pool.flex_notice {
-            eprintln!("{notice}");
+            vivacity_core::say!("{notice}");
         }
-        eprintln!("Updating dependencies");
+        vivacity_core::say!("Updating dependencies");
         for w in &pool.warnings {
-            eprintln!("{w}");
+            vivacity_core::say!("{w}");
         }
         lap("pool", &t);
         let pool = if std::env::var("COMPOSER_POOL_OPTIMIZER").as_deref() == Ok("0") {
@@ -1015,36 +1050,85 @@ impl UpdateSession {
             PoolOptimizer::new().optimize(&self.request, &pool, &self.arena, &mut policy)
         };
         lap("optimize", &t);
-        let mut report = match self.solve(&pool, &mut policy, filter) {
-            Ok(r) => r,
+        let before = std::time::Instant::now();
+        let solved = self.solve(&pool, &mut policy, filter);
+        let completed = resolution_completed(before);
+        let mut report = match solved {
+            Ok(mut r) => {
+                r.events.push(completed);
+                r
+            }
             Err(SolveError::Problems(problems)) => {
+                // `Solver::solve` wrote its duration before throwing.
+                say_event(&completed);
                 // `Installer::doUpdate`: the headline, the pretty problems,
                 // the `--no-dev` warning.
+                // The headline and the warning at QUIET, the problems at the
+                // default level.
                 let pretty = self.pretty_problems(&pool, &problems, false);
-                let mut message = format!(
-                    "Your requirements could not be resolved to an installable set of packages.\n{pretty}"
-                );
+                let head =
+                    "Your requirements could not be resolved to an installable set of packages.";
+                let mut parts = vec![
+                    (vivacity_core::io::Verbosity::Quiet, head.to_owned()),
+                    (vivacity_core::io::Verbosity::Normal, pretty),
+                ];
                 if !self.installer_dev_mode {
-                    message.push_str("\nRunning update with --no-dev does not mean require-dev is ignored, it just means the packages will not be installed. If dev requirements are blocking the update you have to resolve those problems.");
+                    parts.push((vivacity_core::io::Verbosity::Quiet, "Running update with --no-dev does not mean require-dev is ignored, it just means the packages will not be installed. If dev requirements are blocking the update you have to resolve those problems.".to_owned()));
                 }
+                let message = parts
+                    .iter()
+                    .map(|(_, p)| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 return Err(SessionError {
                     message,
                     kind: SessionErrorKind::Unsolvable,
                     stdout: None,
+                    parts,
                 });
             }
-            Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),
+            Err(SolveError::Bug(b)) => {
+                say_event(&completed);
+                return Err(SessionError::new(b));
+            }
         };
         lap("solve", &t);
         // `ValidatingArrayLoader::validatePackage` on every kept package
-        // (`LockTransaction::setResultPackages`): a SecurityException stops
-        // the update.
+        // (`LockTransaction::setResultPackages`, inside `Solver::solve`): a
+        // SecurityException stops the update before anything else is written.
         for &idx in &report.transaction.all {
-            crate::lockfile::validate_package(&self.arena[idx]).map_err(SessionError::new)?;
+            if let Err(e) = crate::lockfile::validate_package(&self.arena[idx]) {
+                say_events(&report.events);
+                return Err(SessionError::new(e));
+            }
+        }
+        // `Installer::doUpdate`, in its order: the pool and rule set sizes
+        // at VERBOSE, `Nothing to modify in lock file`, then the dev
+        // extraction (its own resolution line).
+        use vivacity_core::io::Verbosity;
+        report.events.push((
+            Verbosity::Verbose,
+            format!("Analyzed {} packages to resolve dependencies", pool.len()),
+        ));
+        report.events.push((
+            Verbosity::Verbose,
+            format!("Analyzed {} rules to resolve dependencies", report.rules),
+        ));
+        if report.transaction.transaction.operations.is_empty() {
+            report.events.push((
+                Verbosity::Normal,
+                "Nothing to modify in lock file".to_owned(),
+            ));
         }
         drop(pool);
         let mut transaction = std::mem::replace(&mut report.transaction, LockTransaction::empty());
-        self.extract_dev_packages(&mut transaction, &mut policy, filter)?;
+        if let Err(e) =
+            self.extract_dev_packages(&mut transaction, &mut policy, filter, &mut report.events)
+        {
+            // Composer wrote the lines above before the extraction failed.
+            say_events(&report.events);
+            return Err(e);
+        }
         lap("extract dev", &t);
         let lock = self.lock_json(&transaction, manifest_text)?;
         lap("lock data", &t);
@@ -1065,7 +1149,7 @@ impl UpdateSession {
             set: &self.set,
             pool,
             request: &self.request,
-            is_verbose: false,
+            is_verbose: vivacity_core::io::shows(vivacity_core::io::Verbosity::Verbose),
             ini_files: &self.ini_files,
             loaded_extensions: &self.loaded_extensions,
         };
@@ -1196,8 +1280,34 @@ impl UpdateSession {
             rules: solver.rule_set_size(),
             decisions,
             transaction,
+            events: Vec::new(),
         })
     }
+}
+
+/// `Solver.php:231`: `Dependency resolution completed in %.3f seconds` at
+/// VERBOSE, after every resolution, before its problems are thrown.
+fn resolution_completed(before: std::time::Instant) -> (vivacity_core::io::Verbosity, String) {
+    (
+        vivacity_core::io::Verbosity::Verbose,
+        format!(
+            "Dependency resolution completed in {:.3} seconds",
+            before.elapsed().as_secs_f64()
+        ),
+    )
+}
+
+/// A held line, written at its level.
+fn say_event((level, line): &(vivacity_core::io::Verbosity, String)) {
+    if vivacity_core::io::shows(*level) {
+        eprintln!("{line}");
+    }
+}
+
+/// The held lines, in order — on the error paths, where the command never
+/// gets a report to print them from.
+fn say_events(events: &[(vivacity_core::io::Verbosity, String)]) {
+    events.iter().for_each(say_event);
 }
 
 /// Running the lock pool through the filter list filter in `install` scope

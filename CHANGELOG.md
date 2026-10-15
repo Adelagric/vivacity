@@ -41,6 +41,14 @@ byte-identical-output promise are the public API.
   (`LD_LIBRARY_PATH`, `LD_PRELOAD`, `DYLD_*`), which load other files without
   touching any file the key watches.
 
+- **`dump-autoload` writes Composer's two lines on stdout**: « Generating
+  [optimized] autoload files [(authoritative)] », then « Generated … containing
+  N classes » (the count is Composer's). vivacity wrote nothing there.
+- **A missing composer.json gets Composer's message**: « Composer could not
+  find a composer.json file in <dir> » and its pointer to the docs, exit 1, on
+  `install`, `update` and `dump-autoload`, where vivacity printed its own
+  `Error: cannot read …` chain.
+
 ### Changed
 - **`crates/vivacity/src/lib.rs` is split by command** (4 649 lines → 548):
   `install.rs`, `update.rs`, `remove.rs`, `dump.rs`, `manifest.rs`,
@@ -55,11 +63,39 @@ byte-identical-output promise are the public API.
   --no-ansi -o` passes them to whatever command it runs. `require` and `remove`
   already accepted `-n`/`-q`/`-v` as no-ops; `install`, `update` and
   `dump-autoload` rejected them with clap's usage error and exit 2, and no
-  command accepted `--no-ansi`. All five now accept the four, as true no-ops:
-  vivacity never prompts, never writes an ANSI escape, and prints the same
-  narrative at every verbosity. `dump-autoload` also accepts Composer's global
-  `--no-scripts`, which is already its default (scripts only run with
-  `--run-scripts`, and asking for both is a usage error).
+  command accepted `--no-ansi`. All five now accept the four; `-n` and
+  `--no-ansi` are no-ops (vivacity never prompts, never writes an ANSI
+  escape). `dump-autoload` also accepts Composer's global `--no-scripts`,
+  which is already its default (scripts only run with `--run-scripts`, and
+  asking for both is a usage error). Contributed by Luther Monson (ePHPm).
+- **`-q` and `-v` print what Composer prints.** Every line vivacity writes now
+  has the level of its Composer counterpart. Under `-q` only the lines
+  Composer writes at QUIET remain — the headline of an unsolvable set and the
+  `--no-dev` warning, the stale-lock warning, an error, vivacity's own
+  reasons for stopping with exit 3 — and the exit code; the rest, stdout
+  included, is silent. Under `-v` come Composer's VERBOSE lines, at their
+  places: `Dependency resolution completed in N seconds` after each
+  resolution (two on an update with dev requirements, one on an install from
+  the lock), `Analyzed N packages` / `Analyzed N rules to resolve
+  dependencies` — counts identical to Composer's, measured on laravel,
+  symfony and drupal — the `Installs:` / `Updates:` / `Removals:` summaries,
+  the detailed explanation of an unsolvable set, and the repeated
+  `Cannot use …` warnings of `require`. The level is computed as Symfony
+  Console computes it: `SHELL_VERBOSITY`, then `-q` (which wins over any
+  `-v`), then `-vvv`/`-vv`/`-v` by prefix — `-v -v` is `-v`.
+  **`-vv` and `-vvv` hand the command to Composer**, whose debug output
+  vivacity does not reproduce, and so does `-v` when a plugin is active
+  (installed or locked, and allowed): Composer then writes a line per
+  plugin listener it dispatches (`> post-autoload-dump: Class->method`),
+  and the emulated plugins log lines of their own, which vivacity does not
+  reproduce; `--no-fallback` stops with exit 3 instead, before anything is
+  read or written. Every Composer child process — the fallbacks,
+  `composer run-script` under `--run-scripts` — gets the run's verbosity
+  (`SHELL_VERBOSITY`, as Symfony Console exports it); the reasons for a
+  fallback are silent under `-q` when Composer takes over, and kept when
+  the run stops with exit 3. Proven by `harness/verbosity.sh`: 23 scenarios
+  under normal, `-q` and `-v` (one under `-vv`, one with plugins active),
+  67 cases, stdout and stderr compared whole, byte for byte.
 
 ## [0.20.0] — 2026-10-08
 

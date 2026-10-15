@@ -3,9 +3,20 @@
 
 use super::*;
 
+/// `Installer::doInstall` solves the lock again (`Solver.php:231`): its
+/// duration at VERBOSE, after the stale-lock warning and the missing
+/// requirements, before the problems or the operation count. Never for the
+/// install that follows an update (`$alreadySolved`).
+fn say_lock_resolution(since: std::time::Instant) {
+    vivacity_core::say_verbose!(
+        "Dependency resolution completed in {:.3} seconds",
+        since.elapsed().as_secs_f64()
+    );
+}
+
 pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if args.no_install {
-        eprintln!("Invalid option \"--no-install\". Use \"composer update --no-install\" instead if you are trying to update the composer.lock file.");
+        vivacity_core::say!("Invalid option \"--no-install\". Use \"composer update --no-install\" instead if you are trying to update the composer.lock file.");
         return Ok(1);
     }
     let t0 = std::time::Instant::now();
@@ -13,6 +24,9 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let manifest_path = project.join("composer.json");
     let lock_path = project.join("composer.lock");
     refuse_alternate_manifest()?;
+    if let Some(code) = refuse_missing_manifest(&project) {
+        return Ok(code);
+    }
 
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
@@ -38,7 +52,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         args.prefer_install.as_deref(),
     ) {
         Err(message) => {
-            eprintln!("{message}");
+            vivacity_core::say_always!("{message}");
             return Ok(1);
         }
         Ok(Some(value)) => {
@@ -103,7 +117,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         match scripts::Runner::new(&project, &manifest, with_dev, which_composer()) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("vivacity: {e}");
+                vivacity_core::say_always!("vivacity: {e}");
                 return Ok(3);
             }
         }
@@ -131,7 +145,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // notice (the lock is solved against the platform when not coming
     // straight from an update), then the freshness warning.
     if config_lock {
-        eprintln!(
+        vivacity_core::say!(
             "Installing dependencies from lock file{}",
             if with_dev {
                 " (including require-dev)"
@@ -140,15 +154,18 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             }
         );
     }
+    // vivacity reads the transaction off the lock where Composer solves it
+    // again: the resolution line `-v` shows measures that stretch instead.
+    let verify_start = std::time::Instant::now();
     if !args.after_update {
-        eprintln!("Verifying lock file contents can be installed on current platform.");
+        vivacity_core::say!("Verifying lock file contents can be installed on current platform.");
         // Lock freshness: same behaviour as Composer, a warning.
         if let (Ok(actual), Some(expected)) = (
             vivacity_core::content_hash::content_hash(&manifest_text),
             lock.content_hash.as_deref(),
         ) {
             if actual != expected {
-                eprintln!(
+                vivacity_core::say_always!(
                     "Warning: The lock file is not up to date with the latest changes in composer.json. \
                      You may be getting outdated dependencies. It is recommended that you run `composer update` or `composer update <package name>`."
                 );
@@ -325,13 +342,14 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             .join()
             .map_err(|_| anyhow::anyhow!("the policy check thread panicked"))??;
         for w in &warnings {
-            eprintln!("{w}");
+            vivacity_core::say!("{w}");
         }
         if !problems.is_empty() {
             // `Installer::doInstall`: the headline, then
             // `SolverProblemsException::getPrettyString` (problems
             // deduplicated and numbered, each ending with a newline).
-            eprintln!("Your lock file does not contain a compatible set of packages. Please run composer update.");
+            say_lock_resolution(verify_start);
+            vivacity_core::say_always!("Your lock file does not contain a compatible set of packages. Please run composer update.");
             let mut text = String::from("\n");
             let mut seen: Vec<&String> = Vec::new();
             for p in &problems {
@@ -341,30 +359,35 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
                 seen.push(p);
                 text.push_str(&format!("  Problem {}\n    {p}\n", seen.len()));
             }
-            eprintln!("{text}");
+            vivacity_core::say!("{text}");
             return Ok(2);
         }
         trace("policy", t0);
     }
     match platform_outcome {
         PlatformOutcome::Failures(failures) if !failures.is_empty() => {
-            eprintln!("Your lock file cannot be installed on this platform:");
+            vivacity_core::say_always!("Your lock file cannot be installed on this platform:");
             for f in &failures {
                 let by = f
                     .required_by
                     .as_deref()
                     .map(|p| format!(" (required by {p})"))
                     .unwrap_or_default();
-                eprintln!(
+                vivacity_core::say_always!(
                     "  - {} {}{}: {:?}",
-                    f.requirement, f.constraint, by, f.reason
+                    f.requirement,
+                    f.constraint,
+                    by,
+                    f.reason
                 );
             }
-            eprintln!("Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass.");
+            vivacity_core::say_always!(
+                "Use --ignore-platform-req=<req> or --ignore-platform-reqs to bypass."
+            );
             return Ok(4);
         }
         PlatformOutcome::NoPhp { warn: true } => {
-            eprintln!(
+            vivacity_core::say!(
                 "Warning: php not found, platform requirements were not checked \
                  (--ignore-platform-reqs silences this warning)"
             );
@@ -394,7 +417,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             }
         }
         for line in &missing {
-            eprintln!("{line}");
+            vivacity_core::say!("{line}");
         }
         if !require::truthy(require::config_value(
             &manifest,
@@ -402,6 +425,9 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         )) {
             return Ok(4);
         }
+    }
+    if !args.after_update {
+        say_lock_resolution(verify_start);
     }
     {
         use vivacity_resolver::transaction::Operation;
@@ -419,27 +445,30 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             .filter(|o| matches!(o, Operation::Uninstall(_)))
             .count();
         if installs + updates + removals == 0 {
-            eprintln!("Nothing to install, update or remove");
+            vivacity_core::say!("Nothing to install, update or remove");
         } else {
-            eprintln!(
+            vivacity_core::say!(
                 "Package operations: {installs} install{}, {updates} update{}, {removals} removal{}",
                 if installs == 1 { "" } else { "s" },
                 if updates == 1 { "" } else { "s" },
                 if removals == 1 { "" } else { "s" }
             );
+            for line in vivacity_resolver::transaction::verbose_operation_summary(ops, &arena) {
+                vivacity_core::say_verbose!("{line}");
+            }
         }
     }
     if args.dry_run {
         for op in &transaction.operations {
             if let Some(line) = op.show(&arena, false) {
-                eprintln!("  - {line}");
+                vivacity_core::say!("  - {line}");
             }
         }
         // `Installer::run` after `doInstall` (an update prints its own
         // report after this phase).
         if !args.after_update {
             for line in abandoned_warnings(&lock_value) {
-                eprintln!("{line}");
+                vivacity_core::say!("{line}");
             }
             print_funding(&project, &manifest);
         }
@@ -457,16 +486,18 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         anyhow::bail!("internal: scope is native but no layout was resolved");
     };
     if let Some(tag) = &layout.installers_tag {
-        eprintln!("Note: composer/installers {tag} emulated natively (custom install paths)");
+        vivacity_core::say!(
+            "Note: composer/installers {tag} emulated natively (custom install paths)"
+        );
     }
     for plugin in &scope.skipped_plugins {
-        eprintln!(
+        vivacity_core::say!(
             "Note: plugin {plugin} installed as a plain library (vivacity never runs plugins)"
         );
     }
     trace("scope", t0);
     if args.check_scope {
-        eprintln!("vivacity: this lock is installed natively");
+        vivacity_core::say_always!("vivacity: this lock is installed natively");
         return Ok(0);
     }
 
@@ -517,28 +548,28 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             return fallback_or_fail(args, &project, &scope);
         }
         Err(vivacity_core::Error::Refused(msg)) => {
-            eprintln!("{msg}");
+            vivacity_core::say_always!("{msg}");
             return Ok(1);
         }
         Err(e) => return Err(e.into()),
     };
     trace("install transaction", t0);
     for line in &downloading {
-        eprintln!("{line}");
+        vivacity_core::say!("{line}");
     }
     for line in &operation_lines {
-        eprintln!("{line}");
+        vivacity_core::say!("{line}");
     }
     // `BinaryInstaller` notices belong to the operations, before the dump.
     for m in &report.messages {
-        eprintln!("{m}");
+        vivacity_core::say!("{m}");
     }
     // `Installer::run`: the abandoned packages of the lock (dev included)
     // before the dump, the funding count after it; an install driven by
     // `update` reports through it.
     if !args.after_update {
         for line in abandoned_warnings(&lock_value) {
-            eprintln!("{line}");
+            vivacity_core::say!("{line}");
         }
     }
     let mut autoload_note = String::new();
@@ -553,7 +584,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         // optimize flag is on — the option, `config.optimize-autoloader`,
         // or class-map authoritative (which implies it), the same
         // computation `dump_autoload_plan` makes.
-        eprintln!(
+        vivacity_core::say!(
             "Generating{} autoload files",
             if effective_optimize(
                 &manifest,
@@ -708,7 +739,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     } else {
         String::new()
     };
-    eprintln!(
+    vivacity_core::say!(
         "vivacity: {} installed, {} unchanged, {} removed ({} from store, {} from cache, {} from network){warmed}{autoload_note} in {:.2}s",
         report.installed,
         report.unchanged,
@@ -843,7 +874,9 @@ pub(crate) fn emulate_c3(
         .any(|p| p.name() == c3::PLUGIN_NAME);
     if !wanted {
         if previously_present && allowed && c3::delete_c3(project)? {
-            println!("[codeception/c3] Deleting c3.php from the root of your project...");
+            vivacity_core::out!(
+                "[codeception/c3] Deleting c3.php from the root of your project..."
+            );
         }
         return Ok(());
     }
@@ -855,11 +888,11 @@ pub(crate) fn emulate_c3(
         .vendor_dir(project);
     match c3::copy_c3(&vendor, project)? {
         c3::C3Action::UpToDate if !after_update => {
-            println!("[codeception/c3] c3.php is already up-to-date");
+            vivacity_core::out!("[codeception/c3] c3.php is already up-to-date");
         }
         c3::C3Action::Copied => {
-            println!("[codeception/c3] Copying c3.php to the root of your project...");
-            println!("[codeception/c3] Include c3.php into index.php in order to collect codecoverage from server scripts");
+            vivacity_core::out!("[codeception/c3] Copying c3.php to the root of your project...");
+            vivacity_core::out!("[codeception/c3] Include c3.php into index.php in order to collect codecoverage from server scripts");
         }
         _ => {}
     }
@@ -1265,7 +1298,7 @@ pub(crate) fn print_funding(project: &std::path::Path, manifest: &serde_json::Va
         })
         .count();
     if funding > 0 {
-        eprintln!(
+        vivacity_core::say!(
             "{funding} package{} you are using {} looking for funding.\nUse the `composer fund` command to find out more!",
             if funding == 1 { "" } else { "s" },
             if funding == 1 { "is" } else { "are" }

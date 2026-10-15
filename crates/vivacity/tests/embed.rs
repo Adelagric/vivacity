@@ -32,7 +32,7 @@ fn composer_global_options_parse_on_every_command() {
     for command in [
         &["install", "--no-fallback", "--prefer-dist", "--no-progress"][..],
         &["update", "--no-fallback"],
-        &["dump-autoload", "--no-scripts"],
+        &["dump-autoload", "--no-fallback", "--no-scripts"],
         &["require", "--no-fallback", "psr/log"],
         &["remove", "--no-fallback", "psr/log"],
     ] {
@@ -42,9 +42,11 @@ fn composer_global_options_parse_on_every_command() {
             &["-q"],
             &["--quiet"],
             &["-v"],
-            &["-vvv"],
+            &["-v", "-v"],
             &["--no-ansi"],
             &["-n", "-q", "--no-ansi"],
+            // Quiet wins over any -v, as in Symfony: no delegation.
+            &["-q", "-vvv"],
         ] {
             let argv: Vec<&str> = std::iter::once("vivacity")
                 .chain(command.iter().copied())
@@ -52,6 +54,23 @@ fn composer_global_options_parse_on_every_command() {
                 .chain(["--working-dir", dir])
                 .collect();
             assert_eq!(vivacity::run(argv.clone()), 1, "{argv:?}");
+        }
+    }
+    // `-vv`/`-vvv` go to Composer whole (its debug output is not
+    // reproduced); `--no-fallback` stops with exit 3 before anything is read.
+    for command in [
+        &["install", "--no-fallback"][..],
+        &["update", "--no-fallback"],
+        &["dump-autoload", "--no-fallback"],
+        &["require", "--no-fallback", "psr/log"],
+        &["remove", "--no-fallback", "psr/log"],
+    ] {
+        for verbose in ["-vv", "-vvv"] {
+            let argv: Vec<&str> = std::iter::once("vivacity")
+                .chain(command.iter().copied())
+                .chain([verbose, "--working-dir", dir])
+                .collect();
+            assert_eq!(vivacity::run(argv.clone()), 3, "{argv:?}");
         }
     }
     // `--no-scripts` is dump-autoload's default; asking for both is a usage error.
