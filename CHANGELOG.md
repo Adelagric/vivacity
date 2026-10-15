@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-15
+
 ### Fixed
 - **The platform probe's cache sees what PHP loads, and only caches a php it
   can see** — the known issue of 0.20.0. Its key held the PHP binary, the ini
