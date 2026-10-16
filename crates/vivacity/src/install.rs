@@ -336,6 +336,8 @@ fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
     {
         let message = "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.";
         vivacity_core::say_always!("{message}");
+        // `Application::doRun` annotates the exception's message.
+        vivacity_core::io::github_action_error(message);
         return Ok(Flow::Break(1));
     }
     // The resolution line `-v` shows measures from here to the join: the
@@ -662,8 +664,11 @@ fn join_verification(
         InstallVerdict::Installable => Ok(Flow::Continue(())),
         InstallVerdict::Problems(pretty) => {
             // The headline at QUIET, the problems at the default level.
-            vivacity_core::say_always!("Your lock file does not contain a compatible set of packages. Please run composer update.");
+            let head = "Your lock file does not contain a compatible set of packages. Please run composer update.";
+            vivacity_core::say_always!("{head}");
             vivacity_core::say!("{pretty}");
+            // `$ghe->emit($err."\n".$prettyProblem)` (Installer.php:829).
+            vivacity_core::io::github_action_error(&format!("{head}\n{pretty}"));
             Ok(Flow::Break(2))
         }
         InstallVerdict::NeedsChanges => {

@@ -78,6 +78,15 @@ CASES=(
   "laravel|install --dry-run @env:COMPOSER_NO_DEV=yes"
   "laravel|install --dry-run @env:COMPOSER_NO_DEV=0"
   "laravel|dump-autoload @vendor @env:COMPOSER_NO_DEV=true @files:vendor/composer/autoload_static.php"
+  # `GithubActionError::emit` : sous GitHub Actions, sans
+  # COMPOSER_TESTS_ARE_RUNNING, l'annotation `::error ::…` d'un ensemble
+  # insoluble sur stdout (niveau normal) — résolution d'`update` (sans
+  # l'avertissement `--no-dev`), vérification du lock d'`install` ; `0` ne
+  # compte pas.
+  "solver-problems|update --no-install @nolock @require:acme/missing-dep=^1.0 @unset:COMPOSER_TESTS_ARE_RUNNING @env:GITHUB_ACTIONS=true"
+  "solver-problems|update --no-install --no-dev @nolock @require:acme/nope=^1.0 @unset:COMPOSER_TESTS_ARE_RUNNING @env:GITHUB_ACTIONS=true"
+  "laravel|install --dry-run @require:ext-nope=* @unset:COMPOSER_TESTS_ARE_RUNNING @env:GITHUB_ACTIONS=true"
+  "laravel|install --dry-run @require:ext-nope=* @unset:COMPOSER_TESTS_ARE_RUNNING @env:GITHUB_ACTIONS=0"
   # Pas de composer.json : message au niveau normal (muet sous -q), exit 1.
   "laravel|install --dry-run @nojson"
   # Une vraie installation (cache chaud), puis un install sans opération.

@@ -124,6 +124,29 @@ pub fn drop_held() {
     HOLDING.store(false, Ordering::Release);
 }
 
+/// `GithubActionError::emit` (src/Composer/Console/GithubActionError.php):
+/// under GitHub Actions (`GITHUB_ACTIONS` true as PHP reads an environment
+/// string, `COMPOSER_TESTS_ARE_RUNNING` not), an error annotation on STDOUT
+/// at the default level — `::error ::` and the message with `%`, `\r` and
+/// `\n` escaped (`escapeData`). Composer emits one for an unsolvable set
+/// (`Installer::doUpdate`, `extractDevPackages`, `doInstall`) and for the
+/// message of any exception (`Application::doRun`).
+pub fn github_action_error(message: &str) {
+    let truthy = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
+    if !truthy("GITHUB_ACTIONS") || truthy("COMPOSER_TESTS_ARE_RUNNING") {
+        return;
+    }
+    crate::out!("::error ::{}", escape_data(message));
+}
+
+/// `GithubActionError::escapeData`: `%` first, so that the escapes it
+/// writes are not escaped again.
+fn escape_data(data: &str) -> String {
+    data.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
 /// `Application::configureIO`'s verbosity, from the arguments (the command
 /// line after the program name) and `SHELL_VERBOSITY`, as Symfony computes
 /// it: the variable first (PHP's `(int)` cast, then exactly `-1` quiet, `1`
@@ -260,6 +283,15 @@ macro_rules! out {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_annotation_escapes_like_escape_data() {
+        assert_eq!(
+            escape_data("100% sure\r\n  Problem 1\n"),
+            "100%25 sure%0D%0A  Problem 1%0A"
+        );
+        assert_eq!(escape_data("%0A"), "%250A");
+    }
 
     // One test: the level is process-wide and cargo runs tests in threads.
     #[test]

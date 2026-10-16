@@ -45,8 +45,8 @@ run() { # nom, expression jq, commande...
   done
   local rc=0 vc=0
   touch "$WORK/$name.marker"
-  (cd "$d-ref" && COLUMNS=400 COMPOSER_NO_INTERACTION=1 composer "$@" --no-ansi >/dev/null 2>"$WORK/$name.composer.err") || rc=$?
-  (cd "$d-viv" && "$VIVACITY" "$@" >/dev/null 2>"$WORK/$name.vivacity.err") || vc=$?
+  (cd "$d-ref" && COLUMNS=400 COMPOSER_NO_INTERACTION=1 composer "$@" --no-ansi >"$WORK/$name.composer.out" 2>"$WORK/$name.composer.err") || rc=$?
+  (cd "$d-viv" && "$VIVACITY" "$@" >"$WORK/$name.vivacity.out" 2>"$WORK/$name.vivacity.err") || vc=$?
   if [ "$rc" != "$vc" ]; then
     echo "FAIL $name : codes $rc vs $vc"; head -4 "$WORK/$name.vivacity.err"; status=1; return
   fi
@@ -60,6 +60,11 @@ run() { # nom, expression jq, commande...
   fi
   if ! diff -q "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" >/dev/null; then
     echo "FAIL $name : message différent"; diff "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" | head -6; status=1; return
+  fi
+  # stdout : rien, ou l'annotation de GitHub Actions (`Application::doRun`)
+  # quand GITHUB_ACTIONS est posé sans COMPOSER_TESTS_ARE_RUNNING.
+  if ! diff -q "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" >/dev/null; then
+    echo "FAIL $name : stdout différente"; diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" | head -4; status=1; return
   fi
   local written
   for side in ref viv; do
@@ -90,8 +95,8 @@ run_lock() {
   done
   local rc=0 vc=0
   touch "$WORK/$name.marker"
-  (cd "$d-ref" && COLUMNS=400 COMPOSER_NO_INTERACTION=1 composer "$@" --no-ansi >/dev/null 2>"$WORK/$name.composer.err") || rc=$?
-  (cd "$d-viv" && "$VIVACITY" "$@" >/dev/null 2>"$WORK/$name.vivacity.err") || vc=$?
+  (cd "$d-ref" && COLUMNS=400 COMPOSER_NO_INTERACTION=1 composer "$@" --no-ansi >"$WORK/$name.composer.out" 2>"$WORK/$name.composer.err") || rc=$?
+  (cd "$d-viv" && "$VIVACITY" "$@" >"$WORK/$name.vivacity.out" 2>"$WORK/$name.vivacity.err") || vc=$?
   if [ "$rc" != "$vc" ]; then
     echo "FAIL $name : codes $rc vs $vc"; head -4 "$WORK/$name.vivacity.err"; status=1; return
   fi
@@ -102,6 +107,11 @@ run_lock() {
   grep -v '^$' "$WORK/$name.vivacity.err" > "$WORK/$name.vivacity.msg"
   if ! diff -q "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" >/dev/null; then
     echo "FAIL $name : sortie différente"; diff "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" | head -6; status=1; return
+  fi
+  # stdout : rien, ou l'annotation de GitHub Actions (`Application::doRun`)
+  # quand GITHUB_ACTIONS est posé sans COMPOSER_TESTS_ARE_RUNNING.
+  if ! diff -q "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" >/dev/null; then
+    echo "FAIL $name : stdout différente"; diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" | head -4; status=1; return
   fi
   local written
   for side in ref viv; do
@@ -117,6 +127,12 @@ run_lock() {
 # en-tête, puis `Locker::getLockedRepository(true)` lève (avant « Verifying… »).
 run_lock lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts
 run_lock lock-null-packages-dev '.["packages-dev"]=null' install --dry-run --no-plugins --no-scripts
+# Sous GitHub Actions, le message de l'exception annoté sur stdout.
+(unset COMPOSER_TESTS_ARE_RUNNING; export GITHUB_ACTIONS=true
+ run_lock gha-lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts
+ run gha-self-require '.name="laravel/framework"' install
+ exit $status) || status=1
+[ -s "$WORK/gha-self-require.composer.out" ] || { echo "FAIL gha-self-require : pas d'annotation chez Composer (cas mal choisi)"; status=1; }
 
 for cmd_label in "dump-autoload:dump-autoload" "install:install" "update:update --no-install" \
                  "remove:remove psr/log" "require:require psr/log"; do

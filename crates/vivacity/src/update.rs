@@ -224,6 +224,9 @@ fn print_session_error(e: &vivacity_resolver::session::SessionError) {
     for (level, text) in &e.parts {
         vivacity_core::say_at!(*level, "{text}");
     }
+    if let Some(annotation) = &e.annotation {
+        vivacity_core::io::github_action_error(annotation);
+    }
 }
 
 /// How [`run_update_resolved`] ended: the exit code, and whether the whole

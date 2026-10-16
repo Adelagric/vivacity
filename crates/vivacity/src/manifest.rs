@@ -269,6 +269,8 @@ pub(crate) fn refuse_missing_manifest(project: &std::path::Path) -> Option<i32> 
 pub(crate) fn refuse_invalid_root(manifest: &serde_json::Value) -> Option<i32> {
     let err = vivacity_resolver::root::manifest_error(manifest)?;
     vivacity_core::say_always!("{err}");
+    // `Application::doRun` annotates the exception's message.
+    vivacity_core::io::github_action_error(&err.to_string());
     Some(1)
 }
 

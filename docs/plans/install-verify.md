@@ -392,7 +392,9 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    2026-10-16** (`install-defects.md`, point 4 : vrai au sens de PHP, pour
    `install` et `dump-autoload`).
 4. `GithubActionError::emit` (`::error` sur stdout sous GitHub Actions) n'est
-   porté nulle part.
+   porté nulle part — **corrigé le 2026-10-16** (`install-defects.md`,
+   point 6 : les trois points du solveur et les exceptions dont vivacity a
+   le texte).
 5. `config.lock: false` : Composer ignore le lock et résout ; vivacity
    l'installe.
 6. Les dépôts apportés par composer-merge-plugin ne sont pas lus par le filtre

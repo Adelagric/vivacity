@@ -3599,3 +3599,33 @@ de la fixture sortent identiques. Rouge sur db349c1 : `@require:acme/phpext=*`
 verrouillait 2.0.0 (Composer 1.0.0) ; `^2.0` réussissait (Composer : code 2,
 « found acme/phpext[2.0.0] but these were not loaded »).
 
+## 2026-10-16 — Les annotations de GitHub Actions, là où vivacity a le texte de Composer
+
+Contexte : `install-verify.md`, défaut 4 ; `install-defects.md`, point 6.
+`GithubActionError::emit` (src/Composer/Console/GithubActionError.php) écrit
+sur stdout, niveau normal, `::error ::` et le message échappé
+(`%`, `\r`, `\n`) quand `GITHUB_ACTIONS` est vrai et
+`COMPOSER_TESTS_ARE_RUNNING` faux (`Platform::getEnv`, vérité PHP).
+Appelants : `Installer::doUpdate` (l. 554), `extractDevPackages` (l. 735),
+`doInstall` (l. 829) — `$err."\n".$prettyProblem`, sans l'avertissement
+`--no-dev` ni les deux lignes d'aide de l'extraction —, et
+`Application::doRun` pour le message de toute exception (l. 482 ; l. 307
+pour une `ParsingException` du manifeste, avec `file=`/`line=`).
+
+Décision : `vivacity_core::io::github_action_error`, appelée aux trois
+points du solveur (`SessionError::annotation` porte le texte exact pour
+`update` et l'extraction dev) et pour les exceptions dont vivacity
+reproduit le message à l'identique (refus de `RootPackageLoader::load`, lock
+sans `packages-dev`). Écarté : annoter les `Error: …` de vivacity — leur
+texte n'est pas celui de Composer, l'annotation serait fausse elle aussi ;
+le JSON invalide (`ParsingException`, `file=`/`line=`) a son propre texte
+chez vivacity.
+
+Effet sur les harnais : ceux qui comparent stdout côté vivacity sans poser
+`COMPOSER_TESTS_ARE_RUNNING` des deux côtés n'ont pas de cas d'erreur
+(steps.sh jette stdout, verbosity.sh pose la variable pour les deux) ;
+`root-manifest.sh` compare désormais stdout, vérifié sous
+`GITHUB_ACTIONS=true` sans la variable (39 cas, le régime du runner).
+Rouge sur db349c1 : les trois cas `GITHUB_ACTIONS=true` de verbosity.sh
+(normal et `-v`) et `gha-self-require`, `gha-lock-no-packages-dev`.
+

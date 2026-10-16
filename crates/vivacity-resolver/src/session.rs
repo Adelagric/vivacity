@@ -39,6 +39,11 @@ pub struct SessionError {
     /// the `--no-dev` warning, the default level for the problems). Empty
     /// when the whole message has one level, the caller's.
     pub parts: Vec<(vivacity_core::io::Verbosity, String)>,
+    /// What Composer hands to `GithubActionError::emit` for this error,
+    /// when it is not the message itself: the headline and the problems of
+    /// an unsolvable set (`$err."\n".$prettyProblem`), without the
+    /// `--no-dev` warning or the dev extraction's two hint lines.
+    pub annotation: Option<String>,
 }
 
 /// What Composer does with the error: an unsolvable set
@@ -65,6 +70,7 @@ impl SessionError {
             kind: SessionErrorKind::Other,
             stdout: None,
             parts: Vec::new(),
+            annotation: None,
         }
     }
 }
@@ -81,6 +87,7 @@ impl From<PoolError> for SessionError {
             },
             stdout: None,
             parts: Vec::new(),
+            annotation: None,
         }
     }
 }
@@ -116,6 +123,7 @@ impl From<crate::pool_filters::FilterError> for SessionError {
             message: e.0,
             stdout: None,
             parts: Vec::new(),
+            annotation: None,
         }
     }
 }
@@ -136,6 +144,7 @@ impl From<crate::repository::RepoError> for SessionError {
             },
             stdout: None,
             parts: Vec::new(),
+            annotation: None,
         }
     }
 }
@@ -409,6 +418,7 @@ fn temporary_constraints(
         kind: SessionErrorKind::Printed(1),
         stdout,
         parts: Vec::new(),
+        annotation: None,
     };
     let mut out: BTreeMap<String, crate::pool::TemporaryConstraint> = BTreeMap::new();
     for (name, text) in &pairs {
@@ -732,6 +742,7 @@ impl UpdateSession {
                     vivacity_core::io::Verbosity::Quiet,
                     "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.".to_owned(),
                 )],
+                annotation: None,
             });
         }
         let mut request = Request::new(locked.clone());
@@ -955,6 +966,8 @@ impl UpdateSession {
                         (vivacity_core::io::Verbosity::Quiet, head.to_owned()),
                         (vivacity_core::io::Verbosity::Normal, rest),
                     ],
+                    // `$ghe->emit($err."\n".$prettyProblem)` (Installer.php:735).
+                    annotation: Some(format!("{head}\n{pretty}")),
                 });
             }
             Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),
@@ -1071,6 +1084,8 @@ impl UpdateSession {
                 let pretty = self.pretty_problems(&pool, &problems, false);
                 let head =
                     "Your requirements could not be resolved to an installable set of packages.";
+                // `$ghe->emit($err."\n".$prettyProblem)` (Installer.php:554).
+                let annotation = Some(format!("{head}\n{pretty}"));
                 let mut parts = vec![
                     (vivacity_core::io::Verbosity::Quiet, head.to_owned()),
                     (vivacity_core::io::Verbosity::Normal, pretty),
@@ -1088,6 +1103,7 @@ impl UpdateSession {
                     kind: SessionErrorKind::Unsolvable,
                     stdout: None,
                     parts,
+                    annotation,
                 });
             }
             Err(SolveError::Bug(b)) => {
