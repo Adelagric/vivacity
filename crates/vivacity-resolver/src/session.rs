@@ -1297,11 +1297,9 @@ fn resolution_completed(before: std::time::Instant) -> (vivacity_core::io::Verbo
     )
 }
 
-/// A held line, written at its level.
+/// A session event, written at its level.
 fn say_event((level, line): &(vivacity_core::io::Verbosity, String)) {
-    if vivacity_core::io::shows(*level) {
-        eprintln!("{line}");
-    }
+    vivacity_core::say_at!(*level, "{line}");
 }
 
 /// The held lines, in order — on the error paths, where the command never

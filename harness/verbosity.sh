@@ -41,6 +41,13 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-p
 #             rien des plugins)
 #   @levels:… les niveaux joués pour ce cas (par défaut normal, -q, -v),
 #             séparés par des virgules ; `-vv` rend la commande à Composer
+#   @unset:NOM  la variable retirée de l'environnement des deux commandes
+#             (dans leur sous-shell : l'export global reste pour les autres
+#             cas) — `@unset:COMPOSER_ROOT_VERSION` laisse Composer deviner
+#             la version de la racine
+#   @rootwarn:N  la sortie d'erreur de Composer doit contenir N fois
+#             l'avertissement « could not detect the root package » (0 sous
+#             -q) : un cas qui ne montre plus ce qu'il teste échoue
 CASES=(
   # install depuis le lock, sans rien écrire : durée de résolution, `Installs:`.
   "laravel|install --dry-run"
@@ -85,15 +92,54 @@ CASES=(
   # Versions dev avec référence (`dev-main abc1234`) dans `Installs:`.
   "path-repos|update --no-install @nolock"
   "path-repos|update --no-install"
+  # `RootPackageLoader::load` sans version devinable (copie hors de tout
+  # dépôt git, `COMPOSER_ROOT_VERSION` retirée) : « Composer could not detect
+  # the root package (…) version », sur stderr au niveau normal, avant toute
+  # autre ligne — et avant les avertissements de `BaseCommand::initialize`.
+  # laravel rendu bibliothèque (le type `project` coupe la ligne).
+  "laravel|install --dry-run @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  "laravel|install @vendor @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  "laravel|install --dry-run @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @env:COMPOSER_IGNORE_PLATFORM_REQS=1 @rootwarn:1"
+  "laravel|install --no-install @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  "laravel|update --dry-run --no-install @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  "laravel|dump-autoload @vendor @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  # `require` et `remove` recréent le Composer après « has been updated »
+  # (`resetComposer` + `requireComposer`) : une seconde ligne, avant
+  # « Running composer update » ; pas avec `--no-update`.
+  "laravel|require symfony/uid --dry-run --no-install @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:2"
+  "laravel|require symfony/uid --no-update @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  "laravel|remove laravel/tinker --dry-run --no-install @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:2"
+  # Pas de type du tout (`solver-conflict`) : la ligne, puis le conflit.
+  "solver-conflict|update --no-install @nolock @unset:COMPOSER_ROOT_VERSION @rootwarn:1"
+  # Rendu à Composer avant toute ligne : la sienne seule.
+  "laravel|install --dry-run @jq:.type=\"library\" @unset:COMPOSER_ROOT_VERSION @levels:-vv @rootwarn:1"
+  # Témoins sans ligne : type `project`, racine sans nom, version écrite.
+  "laravel|install --dry-run @unset:COMPOSER_ROOT_VERSION @rootwarn:0"
+  "laravel|install --dry-run @jq:del(.name)|.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:0"
+  "laravel|install --dry-run @jq:.version=\"1.0.0\"|.type=\"library\" @unset:COMPOSER_ROOT_VERSION @rootwarn:0"
+  # `Platform::getEnv` lu comme PHP : `0` et la chaîne vide ne comptent pas.
+  "laravel|install --dry-run @jq:.type=\"library\" @env:COMPOSER_ROOT_VERSION=0 @rootwarn:1"
+  "laravel|install --dry-run @jq:.type=\"library\" @env:COMPOSER_ROOT_VERSION= @rootwarn:1"
+  # Un dépôt git (path-repos, projet commité sur `develop`) : la version est
+  # devinée, pas de ligne.
+  "path-repos|update --no-install @unset:COMPOSER_ROOT_VERSION @rootwarn:0"
 )
 LEVELS=("" "-q" "-v")
 [ -x "$VIVACITY" ] || { echo "binaire absent : cargo build --release"; exit 1; }
 mkdir -p "$WORK"
 harness_git_env "$WORK"
-# `COMPOSER_ROOT_VERSION` : sans lui, Composer avertit qu'il ne devine pas la
-# version du projet racine (« Composer could not detect the root package… »),
-# une ligne que vivacity n'écrit pas encore — écart connu, hors verbosité.
+# `COMPOSER_ROOT_VERSION` : sans lui, une racine qui n'est pas de type
+# `project` hors dépôt git (solver-*) fait écrire à Composer « Composer
+# could not detect the root package… » ; les cas qui testent cette ligne la
+# retirent (`@unset:COMPOSER_ROOT_VERSION`), les autres restent sur la même
+# version des deux côtés.
 export CI=1 COMPOSER_TESTS_ARE_RUNNING=1 COMPOSER_ROOT_VERSION=1.0.0
+# Les variables `@unset:` du cas, retirées dans le sous-shell d'une commande.
+unset_case_vars() {
+  local u
+  for u in "${unsets[@]+"${unsets[@]}"}"; do unset "$u"; done
+  return 0
+}
 # normalize <fichier> <répertoire du projet> : durées, et chemin du projet
 # (physique et tel que donné) ramené à `<project>` — chaque côté a le sien.
 normalize() {
@@ -113,7 +159,7 @@ for fx in "${FIXTURES[@]}"; do
   for spec in "${CASES[@]}"; do
     [ "${spec%%|*}" = "$fx" ] || continue
     read -r -a sargs <<< "${spec#*|}"
-    preps=(); envs=()
+    preps=()
     while [ ${#sargs[@]} -gt 0 ]; do
       last=$(( ${#sargs[@]} - 1 ))
       case "${sargs[$last]}" in
@@ -121,17 +167,26 @@ for fx in "${FIXTURES[@]}"; do
         *) break ;;
       esac
     done
-    levels=("${LEVELS[@]}"); plugins=(--no-plugins)
+    levels=("${LEVELS[@]}"); plugins=(--no-plugins); unsets=(); rootwarn=""
     for prep in "${preps[@]+"${preps[@]}"}"; do
       case "$prep" in
         @levels:*) IFS=, read -r -a levels <<< "${prep#@levels:}" ;;
         @plugins) plugins=() ;;
+        @unset:*) unsets+=("${prep#@unset:}") ;;
+        @rootwarn:*) rootwarn="${prep#@rootwarn:}" ;;
       esac
     done
     for level in "${levels[@]}"; do
-      n=$((n + 1))
+      n=$((n + 1)); saved=()
       for prep in "${preps[@]+"${preps[@]}"}"; do
-        case "$prep" in @env:*) kv="${prep#@env:}"; export "${kv%%=*}=${kv#*=}"; envs+=("${kv%%=*}") ;; esac
+        case "$prep" in
+          @env:*)
+            kv="${prep#@env:}"; name="${kv%%=*}"
+            # La valeur d'avant est rétablie après le cas (une variable
+            # exportée pour tous, comme COMPOSER_ROOT_VERSION, le reste).
+            if [ -n "${!name+set}" ]; then saved+=("$name=${!name}"); else saved+=("$name"); fi
+            export "$name=${kv#*=}" ;;
+        esac
       done
       for prep in "${preps[@]+"${preps[@]}"}"; do
         if [ "$prep" = @warm ] && [ ! -f "$home/warmed" ]; then
@@ -143,7 +198,7 @@ for fx in "${FIXTURES[@]}"; do
         d="$WORK/$side-$fx-$n"; stage_project "$fx" "$d"
         for prep in "${preps[@]+"${preps[@]}"}"; do
           case "$prep" in
-            @env:*|@warm|@levels:*|@plugins) ;;
+            @env:*|@warm|@levels:*|@plugins|@unset:*|@rootwarn:*) ;;
             @vendor) (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q) ;;
             @nolock) rm -f "$d/composer.lock" ;;
             @nojson) rm -f "$d/composer.json" "$d/composer.lock" ;;
@@ -162,16 +217,25 @@ for fx in "${FIXTURES[@]}"; do
         dump-autoload) audit=(); progress=() ;;
       esac
       ref_code=0
-      (cd "$WORK/ref-$fx-$n" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" \
+      (cd "$WORK/ref-$fx-$n" && unset_case_vars && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" \
         composer "${sargs[@]}" "${audit[@]+"${audit[@]}"}" "${progress[@]+"${progress[@]}"}" --no-scripts "${plugins[@]+"${plugins[@]}"}" --no-interaction "${flags[@]+"${flags[@]}"}" \
         >"$WORK/$fx-$n.composer.out" 2>"$WORK/$fx-$n.composer.err") || ref_code=$?
       viv_code=0
-      (cd "$WORK/viv-$fx-$n" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" \
+      (cd "$WORK/viv-$fx-$n" && unset_case_vars && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" \
         "$VIVACITY" "${sargs[@]}" "${progress[@]+"${progress[@]}"}" "${plugins[@]+"${plugins[@]}"}" "${flags[@]+"${flags[@]}"}" \
         >"$WORK/$fx-$n.vivacity.out" 2>"$WORK/$fx-$n.vivacity.err") || viv_code=$?
-      for e in "${envs[@]+"${envs[@]}"}"; do unset "$e"; done; envs=()
+      for e in "${saved[@]+"${saved[@]}"}"; do
+        case "$e" in *=*) export "$e" ;; *) unset "$e" ;; esac
+      done; saved=()
       label="$fx ${sargs[*]} ${level:-(normal)}"; [ ${#preps[@]} -gt 0 ] && label="$label (${preps[*]})"
       ok=1
+      if [ -n "$rootwarn" ]; then
+        want="$rootwarn"; [ "$level" = -q ] && want=0
+        got=$(grep -c "^Composer could not detect the root package " "$WORK/$fx-$n.composer.err" || true)
+        if [ "$got" != "$want" ]; then
+          echo "FAIL $label : Composer écrit $got fois l'avertissement de version racine, attendu $want (cas mal choisi)"; ok=0
+        fi
+      fi
       if [ "$ref_code" != "$viv_code" ]; then
         echo "FAIL $label : code retour composer=$ref_code vivacity=$viv_code"; ok=0
       fi

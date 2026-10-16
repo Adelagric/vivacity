@@ -7,6 +7,27 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **Composer's root-version warning is printed.** Without a `version` in
+  composer.json, without `COMPOSER_ROOT_VERSION` and with nothing git can
+  tell (no repository, no commit, a HEAD detached *from* a commit with no
+  tag), Composer writes `Composer could not detect the root package
+  (vendor/name) version, defaulting to '1.0.0'. See
+  https://getcomposer.org/root-version` on stderr before anything else the
+  command prints — unless the root has no `name` or is of type `project`
+  (`RootPackageLoader::load`). vivacity never did; `install`, `update`,
+  `require`, `remove` and `dump-autoload` now print it at the same place,
+  at the normal level (not under `-q`), and `require`/`remove` print it a
+  second time between `has been updated` and `Running composer update`, as
+  Composer does when it reloads the root package. A command handed to
+  Composer before vivacity prints anything leaves the line to Composer, so
+  it comes out once; a hand-over decided later (the install scope, Flex
+  after the resolution, the install phase of an update) shows it twice, as
+  it already shows the lines before it. Deciding costs one `git branch` for
+  a named, unversioned non-project root (≈ 5 ms on a no-op install; a
+  `git describe` more when no branch gives a version), none otherwise. `harness/verbosity.sh` gains `@unset:` and `@rootwarn:` and 17
+  cases without `COMPOSER_ROOT_VERSION` (its `@env:` now restores the
+  previous value); `harness/fallback-args.sh` counts the line before each
+  kind of hand-over and checks it precedes `composer run-script`'s output.
 - **Events come out in Composer's order around an install.**
   bamarni/composer-bin-plugin's `COMMAND` lines are printed where the
   command dispatches the event: on `install`, before `pre-install-cmd`

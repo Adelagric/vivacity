@@ -123,12 +123,56 @@ pub fn git(dir: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `git branch -a --no-color --no-abbrev -v`, as `guessGitVersion` runs it.
+const BRANCH_ARGS: &[&str] = &["branch", "-a", "--no-color", "--no-abbrev", "-v"];
+
+/// The current line of `git branch -v` (`* <name> <sha> …`) when
+/// `guessGitVersion`'s regex takes it: its name and sha. `(no branch)`,
+/// `(detached from X)` and `(HEAD detached at X)` are the only parenthesised
+/// forms it knows; any other (`(HEAD detached from X)`) matches nothing. None
+/// for any other line.
+fn current_branch(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("* ")?.trim_start();
+    let (name, tail) = if rest.starts_with('(') {
+        let i = rest.find(')')?;
+        (&rest[..=i], rest[i + 1..].trim_start())
+    } else {
+        let i = rest.find(' ')?;
+        (&rest[..i], rest[i..].trim_start())
+    };
+    let sha = tail.split_whitespace().next().unwrap_or("");
+    if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    if name.starts_with('(')
+        && !(name == "(no branch)"
+            || name.starts_with("(detached from ")
+            || name.starts_with("(HEAD detached at "))
+    {
+        return None;
+    }
+    Some((name, sha))
+}
+
+/// Whether [`guess_version`] finds a version, with as few git calls as it
+/// takes to know: one when HEAD is on a branch or detached at a commit, a
+/// second (`describe`) otherwise. `RootPackageLoader::load` warns when it
+/// does not (`vivacity_resolver::root::undetected_version_warning`); the
+/// version itself is guessed later, by the command.
+pub fn version_guessable(project: &Path) -> bool {
+    let Some(output) = git(project, BRANCH_ARGS) else {
+        return false;
+    };
+    if output.lines().any(|l| current_branch(l).is_some()) {
+        return true;
+    }
+    git(project, &["describe", "--exact-match", "--tags"])
+        .is_some_and(|tag| normalize_pretty(tag.trim()).is_ok())
+}
+
 /// `VersionGuesser::guessVersion` (git only) + `postprocess`.
 pub fn guess_version(manifest: &Value, project: &Path) -> Option<GuessedVersion> {
-    let output = git(
-        project,
-        &["branch", "-a", "--no-color", "--no-abbrev", "-v"],
-    )?;
+    let output = git(project, BRANCH_ARGS)?;
     let mut version: Option<String> = None;
     let mut pretty: Option<String> = None;
     let mut commit: Option<String> = None;
@@ -142,34 +186,14 @@ pub fn guess_version(manifest: &Value, project: &Path) -> Option<GuessedVersion>
             continue;
         }
         // Current line: `* <name|(no branch)|(HEAD detached at X)> <sha> ...`
-        if let Some(rest) = line.strip_prefix("* ") {
-            let rest = rest.trim_start();
-            let (name, tail) = if rest.starts_with('(') {
-                match rest.find(')') {
-                    Some(i) => (&rest[..=i], rest[i + 1..].trim_start()),
-                    None => continue,
-                }
-            } else {
-                match rest.find(' ') {
-                    Some(i) => (&rest[..i], rest[i..].trim_start()),
-                    None => continue,
-                }
-            };
-            let sha = tail.split_whitespace().next().unwrap_or("");
-            if !is_hex(sha) {
+        if line.starts_with("* ") {
+            // A current line the regex does not take (`(HEAD detached from
+            // X)`) leaves the version unknown (tag lookup, then the
+            // caller's default), and is no candidate either.
+            let Some((name, sha)) = current_branch(line) else {
                 continue;
-            }
+            };
             if name.starts_with('(') {
-                // The regex only knows `(no branch)`, `(detached from X)` and
-                // `(HEAD detached at X)`: any other parenthesised form (`(HEAD
-                // detached from X)`) matches nothing, and the version stays
-                // unknown (tag lookup, then the caller's default).
-                if !(name == "(no branch)"
-                    || name.starts_with("(detached from ")
-                    || name.starts_with("(HEAD detached at "))
-                {
-                    continue;
-                }
                 version = Some(format!("dev-{sha}"));
                 pretty = version.clone();
                 is_feature = true;

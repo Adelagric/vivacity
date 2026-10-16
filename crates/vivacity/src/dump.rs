@@ -146,6 +146,8 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_missing_manifest(&project) {
         return Ok(code);
     }
+    // `BaseCommand::initialize`: the root-version warning first.
+    hold_root_version_warning(&project);
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join("composer.json"))
             .context("cannot read composer.json")?,

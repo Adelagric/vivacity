@@ -163,6 +163,32 @@ pub(crate) fn refuse_alternate_manifest() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `RootPackageLoader::load`'s root-version warning
+/// (`vivacity_resolver::root::undetected_version_warning`), held as the
+/// first line of the command: `BaseCommand::initialize` creates the
+/// `Composer` instance — and writes it — before the command prints anything
+/// (the `COMPOSER_IGNORE_PLATFORM_REQ(S)` warnings, the refusals of
+/// `execute`). Held rather than written, so that a command handed to
+/// Composer before vivacity writes anything leaves it to that Composer
+/// (`vivacity_core::io::hold`). Nothing when composer.json is missing or
+/// unreadable (Composer fails before loading the root package) or when
+/// `COMPOSER=` names another manifest (refused by vivacity). Returns the
+/// line: `require` and `remove` create a second `Composer`, and write it
+/// again (`RequireCommand::doUpdate`, `RemoveCommand::execute`).
+pub(crate) fn hold_root_version_warning(project: &std::path::Path) -> Option<String> {
+    // Under `-q` the line is never shown: git is not run for it.
+    if !vivacity_core::io::shows(vivacity_core::io::Verbosity::Normal)
+        || refuse_alternate_manifest().is_err()
+    {
+        return None;
+    }
+    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let line = vivacity_resolver::root::undetected_version_warning(&manifest, project)?;
+    vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, line.clone());
+    Some(line)
+}
+
 /// `Factory::createComposer` without a composer.json: Composer's two lines
 /// (`Factory.php:303`, `$fullLoad`), written by `Application::getComposer`
 /// at the default level — silent under `-q` — and exit 1. The directory is

@@ -9,6 +9,10 @@ use super::*;
 /// mode by default), composer.json restored if it fails.
 pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     use vivacity_resolver::config_source::{composer_file, JsonConfigSource};
+    // `BaseCommand::initialize`, before Symfony validates the arguments: the
+    // root-version warning comes first; written again below.
+    let root_version_warning =
+        hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
         anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
@@ -172,6 +176,11 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     vivacity_core::say!("{file_label} has been updated");
     if args.no_update {
         return Ok(0);
+    }
+    // `resetComposer` + `requireComposer` (RemoveCommand.php:216-222) load
+    // the root package again, warning included, before `COMMAND`.
+    if let Some(line) = &root_version_warning {
+        vivacity_core::say!("{line}");
     }
 
     // `allow-plugins`: the merged config (project then global); entries

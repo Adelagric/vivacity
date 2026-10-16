@@ -3352,3 +3352,67 @@ Vérifié : rouges sur `main` d'abord (`scripts.sh` 2, `bin-plugin.sh` 6,
 `main`, plus `funding_shown`), et les 30 passages de harnais contre
 Composer 2.10.3 sur le binaire final, tous à 0 (659 cas `OK`). Le job
 Windows n'a pas tourné ici.
+
+## 2026-10-16 — L'avertissement de version racine, tenu jusqu'à la première ligne
+
+Écart connu de `docs/plans/v0.21-verbosity.md`, que tous les harnais
+neutralisaient en posant `COMPOSER_ROOT_VERSION`. Plan, matrice mesurée,
+méta-analyse (sous-agent frais), revue indépendante et résultat :
+`docs/plans/root-version-warning.md`.
+
+**Mesuré d'abord** (Composer 2.10.3, projet sans réseau hors de tout dépôt
+git) : `RootPackageLoader::load` (`RootPackageLoader.php:91-117`) écrit
+« Composer could not detect the root package (…) version, defaulting to
+'1.0.0' » par `IOInterface::warning` — `writeError` au niveau `NORMAL`
+(`BaseIO.php:250-297`), stderr, muet sous `-q` — quand il n'y a ni
+`version`, ni `COMPOSER_ROOT_VERSION` (vraie au sens PHP : `0` et la chaîne
+vide ne comptent pas), ni version devinée par git, sauf pour une racine sans
+`name` ou de type `project` (comparaison exacte). `BaseCommand::initialize`
+crée le Composer (`:240`) avant les avertissements
+`COMPOSER_IGNORE_PLATFORM_REQ(S)` (`:280`, `:289`) et avant tout ce que la
+commande imprime (refus de `--no-install`, « Not enough arguments ») : la
+ligne vient en tête. `require` et `remove` recréent le Composer après « has
+been updated » (`RequireCommand.php:409-410`, `RemoveCommand.php:216-222`) :
+une seconde ligne, avant « Running composer update », pas sous
+`--no-update`. `dump-autoload` et `run-script` : une.
+
+**Fait.** Un tampon d'une ligne « retenue » dans `vivacity_core::io`
+(`hold`, `release_held`, `drop_held`) : chaque macro d'écriture l'écrit
+d'abord, quelle que soit la première ligne de la commande ; une délégation
+à Composer la jette avant de lancer le processus (première instruction de
+`hand_over`, et avant les raisons quand Composer prendra la main), puisque
+Composer écrit la sienne ; `composer run-script` la reçoit écrite avant sa
+sortie. Chaque commande la retient en premier
+(`hold_root_version_warning`), `require`/`remove` la réécrivent au point de
+la seconde création. Les trois `eprintln!` à niveau calculé passent par un
+nouveau `say_at!`. La décision est le port des conditions de `load`
+(`vivacity_resolver::root::undetected_version_warning`) avec un prédicat git
+dédié (`root_version::version_guessable`).
+
+**Écarté.** Imprimer la ligne directement en tête de chaque commande : chaque
+délégation précoce (plugin inconnu, plugin de fusion, `-vv`) l'aurait fait
+sortir deux fois, et avant les raisons du fallback. Décider la portée
+d'`install` avant l'en-tête pour supprimer le double des délégations
+tardives : change l'ordre des décisions, suite à part. Appeler
+`guess_version` pour décider : la méta a mesuré ≈ 60 ms sur une branche de
+fonctionnalité à sept branches parentes candidates (un `git rev-list` par
+candidate) ; le prédicat s'arrête à `git branch` dès qu'une ligne courante
+donne une version. Partager le résultat avec la détection de la version
+plus loin (cache de processus, ou version passée à `install`, à la session
+de résolution et à `dump`) : le coût restant est d'un appel git sur le seul
+cas d'une bibliothèque nommée sans version ni variable, mesuré à ≈ 5 ms sur
+un no-op (aucun scénario du banc, tous `project`, n'est touché) ; un cache
+qu'un embarqueur garderait d'une run à l'autre se tromperait si la branche
+change entre deux runs.
+
+**Écarts laissés** (non-objectifs du plan) : doublons des délégations
+tardives et de la phase d'installation rendue à `composer install` ; une
+ligne par `composer run-script` lancé sous `--run-scripts` ; trois lignes
+chez Composer pour un manifeste refusé après la ligne (auto-exigence, nom de
+lien) ; le composer.json global sans composer.json de projet ; ce que
+Composer peut imprimer avant la ligne (root/sudo, Xdebug, script qui
+masquerait une commande, `disable-tls`, « dubious ownership ») ; le schéma
+`LAX_SCHEMA` non porté (`type: "Project"`) ; hg/fossil/svn ; un
+`composer` trouvé mais impossible à lancer perd la ligne (jetée avant le
+lancement). Une `version: null` ne donne pas de ligne (revue) : Composer la
+refuse par son schéma, vivacity dans `load_with_version`.

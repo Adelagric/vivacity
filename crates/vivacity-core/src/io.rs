@@ -18,8 +18,18 @@
 //! shares it. A thread-local would miss lines printed from a worker thread
 //! (the lock verification of `install` runs on one). [`Scope`] sets it for one run
 //! and puts it back to `NORMAL` when dropped, panics included.
+//!
+//! One line can be *held* ([`hold`]): what Composer writes while it creates
+//! the command's `Composer` instance (`BaseCommand::initialize`), before
+//! anything the command prints — `RootPackageLoader::load`'s root-version
+//! warning. Every macro below writes the held line first
+//! ([`release_held`]), whatever the command's first line turns out to be;
+//! a command handed to Composer before vivacity wrote anything drops it
+//! ([`drop_held`]), since the Composer it runs writes its own. The traces
+//! of `VIVACITY_TRACE` (diagnostics, not Composer's output) bypass it.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Mutex;
 
 /// A run's verbosity, or the level of a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,8 +68,57 @@ impl Scope {
 
 impl Drop for Scope {
     fn drop(&mut self) {
+        drop_held();
         LEVEL.store(Verbosity::Normal as u8, Ordering::Relaxed);
     }
+}
+
+/// The held stderr line, and whether there is one (the common case —
+/// nothing held — takes no lock). One line: Composer writes one before the
+/// command's own output.
+static HELD: Mutex<Option<String>> = Mutex::new(None);
+static HOLDING: AtomicBool = AtomicBool::new(false);
+
+/// The held line's slot; a panic while it was locked left nothing to repair.
+fn held() -> std::sync::MutexGuard<'static, Option<String>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Holds a stderr line of level `level` until vivacity writes its next line
+/// ([`release_held`]); nothing when the run's verbosity hides it.
+pub fn hold(level: Verbosity, line: String) {
+    if !shows(level) {
+        return;
+    }
+    *held() = Some(line);
+    HOLDING.store(true, Ordering::Release);
+}
+
+/// Writes the held line on stderr, once. Called by every writing macro
+/// before its own line, and before vivacity starts a process whose output
+/// the user sees. The line is written under the lock: a line another thread
+/// writes at the same moment comes after it.
+pub fn release_held() {
+    if !HOLDING.load(Ordering::Acquire) {
+        return;
+    }
+    let mut slot = held();
+    if let Some(line) = slot.take() {
+        eprintln!("{line}");
+    }
+    HOLDING.store(false, Ordering::Release);
+}
+
+/// Forgets the held line: the command goes to Composer, which writes its
+/// own, or the run ends. Process-wide, like the level: an embedder running
+/// two commands at once in one process shares it.
+pub fn drop_held() {
+    if !HOLDING.load(Ordering::Acquire) {
+        return;
+    }
+    *held() = None;
+    HOLDING.store(false, Ordering::Release);
 }
 
 /// `Application::configureIO`'s verbosity, from the arguments (the command
@@ -152,9 +211,7 @@ fn php_int(s: &str) -> i64 {
 #[macro_export]
 macro_rules! say {
     ($($arg:tt)*) => {
-        if $crate::io::shows($crate::io::Verbosity::Normal) {
-            eprintln!($($arg)*);
-        }
+        $crate::say_at!($crate::io::Verbosity::Normal, $($arg)*)
     };
 }
 
@@ -162,7 +219,7 @@ macro_rules! say {
 #[macro_export]
 macro_rules! say_always {
     ($($arg:tt)*) => {
-        eprintln!($($arg)*);
+        $crate::say_at!($crate::io::Verbosity::Quiet, $($arg)*)
     };
 }
 
@@ -170,17 +227,28 @@ macro_rules! say_always {
 #[macro_export]
 macro_rules! say_verbose {
     ($($arg:tt)*) => {
-        if $crate::io::shows($crate::io::Verbosity::Verbose) {
+        $crate::say_at!($crate::io::Verbosity::Verbose, $($arg)*)
+    };
+}
+
+/// A line on stderr at a level known at run time (a held event, a problem's
+/// part), after the held line.
+#[macro_export]
+macro_rules! say_at {
+    ($level:expr, $($arg:tt)*) => {
+        if $crate::io::shows($level) {
+            $crate::io::release_held();
             eprintln!($($arg)*);
         }
     };
 }
 
-/// A `NORMAL` line on stdout (`$io->write($line)`).
+/// A `NORMAL` line on stdout (`$io->write($line)`), after the held line.
 #[macro_export]
 macro_rules! out {
     ($($arg:tt)*) => {
         if $crate::io::shows($crate::io::Verbosity::Normal) {
+            $crate::io::release_held();
             println!($($arg)*);
         }
     };

@@ -37,6 +37,14 @@ macro_rules! proceed {
 /// silence; it is joined before anything is printed or written past that
 /// point, after the missing requirements, in `doInstall`'s order.
 pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
+    // `BaseCommand::initialize` loads the root package first: its version
+    // warning precedes everything below. The install that follows an update
+    // runs in the update's `Composer`, which already wrote it.
+    if !args.after_update() {
+        if let Ok(project) = project_dir(args.working_dir.as_deref()) {
+            hold_root_version_warning(&project);
+        }
+    }
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
     let run = proceed!(merge_plugin(run)?);

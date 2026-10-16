@@ -26,7 +26,12 @@
 #   e. `-vv` : la délégation de verbosité, même modèle ;
 #   f. la commande entière rendue après la résolution (Flex verrouillé, pas
 #      installé) : Composer repart du composer.json d'origine, vivacity
-#      n'ajoute rien après lui.
+#      n'ajoute rien après lui ;
+#   g. l'avertissement de version racine (racine nommée, pas de type
+#      `project`, ni version ni dépôt git ni `COMPOSER_ROOT_VERSION`) : rendue
+#      avant que vivacity écrive quoi que ce soit, la commande laisse la ligne
+#      à Composer — aucune chez vivacity ; une délégation tardive l'a déjà
+#      vue sortir.
 #
 # Usage : harness/fallback-args.sh
 set -euo pipefail
@@ -58,6 +63,8 @@ cat > "$WORK/bin/composer" <<'SH'
   if [ -n "${FAKE_COMPOSER_MANIFEST:-}" ]; then echo "manifest=$(cksum < "$FAKE_COMPOSER_MANIFEST")"; fi
   for a in "$@"; do echo "arg=$a"; done
 } >> "$FAKE_COMPOSER_RECORD"
+# A marker on stderr, when the case watches where its output lands.
+if [ -n "${FAKE_COMPOSER_STDERR:-}" ]; then echo "$FAKE_COMPOSER_STDERR" >&2; fi
 exit "${FAKE_COMPOSER_EXIT:-0}"
 SH
 chmod +x "$WORK/bin/composer"
@@ -279,5 +286,79 @@ expect_call "$A" 1 1 install -vv --working-dir proj --no-scripts
 check e-install-vv "$A" 0 0 -- install -vv --working-dir proj --offline
 expect_call "$B" 1 '<unset>' rm psr/log -vv --working-dir proj --no-scripts
 check e-remove-alias-vv "$B" 0 0 -- rm psr/log --no-autoloader -vv --working-dir proj
+
+# --- g. l'avertissement de version racine et les délégations ----------------
+# `RootPackageLoader::load` sans version devinable écrit « Composer could not
+# detect the root package (acme/lib) version… » en tête de la commande. Le
+# faux composer n'écrit rien : on compte les lignes de vivacity seule. 0 avant
+# une délégation précoce (Composer écrit la sienne) ; 1 avant une délégation
+# tardive (écart connu : Composer en écrit une seconde), sous --no-fallback
+# (Composer jamais lancé) et en natif.
+unset COMPOSER_ROOT_VERSION
+export GIT_CEILING_DIRECTORIES="$WORK"
+expect_rootwarn() { # <nom du cas> <nombre attendu>
+  local got
+  got=$(grep -c "^Composer could not detect the root package (acme/lib) version, defaulting to '1.0.0'. See https://getcomposer.org/root-version$" "$WORK/$1.err" || true)
+  [ "$got" = "$2" ] || { fail "$1 : vivacity écrit $got fois l'avertissement de version racine, attendu $2"; cat "$WORK/$1.err"; }
+}
+# Précoces : un plugin inconnu installé (`resolution_fallback`), avant toute
+# ligne et avant l'édition de composer.json.
+GB="$WORK/gb"; mkdir -p "$GB"; cp -R "$B/proj" "$GB/proj"
+jq '.name = "acme/lib"' "$B/proj/composer.json" > "$GB/proj/composer.json"
+expect_call "$GB" 0 '<unset>' update --working-dir proj --no-scripts
+check g-update "$GB" 0 0 -- update --working-dir proj
+expect_rootwarn g-update 0
+expect_call "$GB" 0 '<unset>' require psr/log:^3.0 --working-dir proj --no-scripts
+check g-require "$GB" 0 0 -- require psr/log:^3.0 --working-dir proj
+expect_rootwarn g-require 0
+expect_call "$GB" 0 '<unset>' remove psr/log --working-dir proj --no-scripts
+check g-remove "$GB" 0 0 -- remove psr/log --working-dir proj
+expect_rootwarn g-remove 0
+check g-update-no-fallback "$GB" 3 0 -- update --no-fallback --working-dir proj
+expect_rootwarn g-update-no-fallback 1
+# Précoce : le plugin de fusion (fichier inclus absent), avant l'en-tête.
+GM="$WORK/gm"; mkdir -p "$GM"; cp -R "$M/proj" "$GM/proj"
+jq '.name = "acme/lib" | .type = "library" | del(.version)' "$M/proj/composer.json" > "$GM/proj/composer.json"
+expect_call "$GM" 0 1 install --dry-run --working-dir proj --no-scripts
+check g-merge-dry-run "$GM" 0 0 -- install --dry-run --working-dir proj --offline
+expect_rootwarn g-merge-dry-run 0
+# Précoce : -vv, rendu avant la lecture du projet.
+GA="$WORK/ga"; mkdir -p "$GA"; cp -R "$A/proj" "$GA/proj"
+jq '.name = "acme/lib" | .type = "library"' "$A/proj/composer.json" > "$GA/proj/composer.json"
+expect_call "$GA" 1 1 install -vv --working-dir proj --no-scripts
+check g-install-vv "$GA" 0 0 -- install -vv --working-dir proj --offline
+expect_rootwarn g-install-vv 0
+# Tardive : la portée d'`install` (`preferred-install: source`), décidée après
+# l'en-tête — la ligne de vivacity est déjà sortie.
+expect_call "$GA" 0 1 install --working-dir proj --no-plugins --ignore-platform-reqs --no-scripts
+check g-install-late "$GA" 0 0 -- install --working-dir proj --no-plugins --offline --ignore-platform-reqs
+expect_rootwarn g-install-late 1
+check g-install-no-fallback "$GA" 3 0 -- install --no-fallback --working-dir proj --no-plugins --offline --ignore-platform-reqs
+expect_rootwarn g-install-no-fallback 1
+# Natif : le dry run du même lock.
+check g-install-native "$GA" 0 0 -- install --dry-run --working-dir proj --no-plugins --offline --ignore-platform-reqs
+expect_rootwarn g-install-native 1
+# Une ligne de vivacity avant la délégation précoce la fait sortir (écart
+# connu : Composer en écrit une seconde) — l'avertissement d'une variable
+# d'environnement avant le plugin de fusion, `--no-suggest` avant le plugin
+# inconnu.
+expect_call "$GM" 0 1 install --dry-run --working-dir proj --no-scripts
+COMPOSER_IGNORE_PLATFORM_REQS=1 check g-merge-env "$GM" 0 0 -- install --dry-run --working-dir proj --offline
+expect_rootwarn g-merge-env 1
+expect_call "$GB" 0 '<unset>' require psr/log:^3.0 --no-suggest --working-dir proj --no-scripts
+check g-require-no-suggest "$GB" 0 0 -- require psr/log:^3.0 --no-suggest --working-dir proj
+expect_rootwarn g-require-no-suggest 1
+# `--run-scripts` : la ligne avant ce que `composer run-script` écrit
+# (`pre-install-cmd`, qui échoue ici : la commande s'arrête sur son code).
+GS="$WORK/gs"; mkdir -p "$GS"; cp -R "$A/proj" "$GS/proj"
+jq '.name = "acme/lib" | .type = "library" | del(.config["preferred-install"]) | .scripts = {"pre-install-cmd": "echo pre"}' "$A/proj/composer.json" > "$GS/proj/composer.json"
+expect_call "$GS" '<unset>' '<unset>' run-script --no-interaction -d "$GS/proj" pre-install-cmd
+FAKE_COMPOSER_STDERR="marker: run-script" check g-run-scripts "$GS" 9 9 -- install --run-scripts --working-dir proj --no-plugins --offline --ignore-platform-reqs
+expect_rootwarn g-run-scripts 1
+if [ "$(grep -e '^Composer could not detect' -e '^marker: run-script$' "$WORK/g-run-scripts.err" | awk '{printf "%s ", $1}')" != "Composer marker: " ]; then
+  fail "g-run-scripts : la ligne de version ne précède pas la sortie du script"; cat "$WORK/g-run-scripts.err"
+fi
+export COMPOSER_ROOT_VERSION=dev-main
+unset GIT_CEILING_DIRECTORIES
 
 exit $status

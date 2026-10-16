@@ -339,6 +339,10 @@ fn find_best_version_and_name(
 }
 
 pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
+    // `BaseCommand::initialize`: the root-version warning before anything
+    // `RequireCommand` prints; written again by `doUpdate`, below.
+    let root_version_warning =
+        crate::hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
         anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
@@ -592,7 +596,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         return Ok(0);
     }
 
-    // `doUpdate`.
+    // `doUpdate`: `resetComposer` + `requireComposer` load the root package
+    // again (RequireCommand.php:409-410), warning included.
+    if let Some(line) = &root_version_warning {
+        vivacity_core::say!("{line}");
+    }
     let transitive = if args.update_with_all_dependencies
         || args.with_all_dependencies
         || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES")

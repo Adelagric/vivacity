@@ -570,7 +570,12 @@ where
         }
     }
     match dispatch(cli) {
-        Ok(code) => code,
+        Ok(code) => {
+            // A command that wrote nothing else still writes the line it held
+            // (unless it went to Composer, which dropped it).
+            vivacity_core::io::release_held();
+            code
+        }
         Err(e) => {
             vivacity_core::say_always!("Error: {e:?}");
             exit_code_of(&e)

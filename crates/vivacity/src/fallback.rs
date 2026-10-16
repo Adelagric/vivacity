@@ -81,6 +81,10 @@ pub(crate) fn delegate_resolution(
     // QUIET when the run stops here, so that an exit 3 is never mute.
     let composer = which_composer();
     let stops = no_fallback || composer.is_none();
+    if !stops {
+        // Composer writes what vivacity held (the root-version warning).
+        vivacity_core::io::drop_held();
+    }
     let reason_line = |line: &str| {
         if stops {
             vivacity_core::say_always!("{line}");
@@ -163,6 +167,9 @@ pub(crate) fn hand_over(
     offline: bool,
     reason: Option<&str>,
 ) -> std::io::Result<i32> {
+    // The Composer started here writes its own root-version warning: what
+    // vivacity still holds is dropped, not written twice.
+    vivacity_core::io::drop_held();
     let line = args
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
@@ -253,6 +260,10 @@ pub(crate) fn fallback_or_fail(
 ) -> anyhow::Result<i32> {
     let composer = which_composer();
     let stops = args.no_fallback || args.check_scope || composer.is_none();
+    if !stops {
+        // Composer writes what vivacity held (the root-version warning).
+        vivacity_core::io::drop_held();
+    }
     let reason_line = |line: &str| {
         if stops {
             vivacity_core::say_always!("{line}");

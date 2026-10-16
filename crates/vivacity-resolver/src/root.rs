@@ -314,6 +314,50 @@ pub fn manifest_error(manifest: &Value) -> Option<String> {
 /// `array_keys(BasePackage::$supportedLinkTypes)`, in its order.
 const LINK_TYPES: &[&str] = &["require", "conflict", "provide", "replace", "require-dev"];
 
+/// The warning `RootPackageLoader::load` writes when it gives the root
+/// package the default version (`RootPackageLoader.php:91-117`): no
+/// `version` key in composer.json (a `null` one is refused by Composer's
+/// schema before `load`, and by `load_with_version` here), no
+/// `COMPOSER_ROOT_VERSION` (PHP-truthy), and nothing `guessVersion` can
+/// read from git — unless the root has no `name` (`__root__`) or is of type
+/// `project`. A `name` with a naming error throws before the version is
+/// looked at (`:85-89`): no warning then. Composer writes it through
+/// `IOInterface::warning`, a `NORMAL` line on stderr, each time it creates
+/// the command's `Composer` instance.
+///
+/// git runs only once the manifest has ruled nothing out, as in Composer,
+/// and only to know whether a version would be found
+/// (`root_version::version_guessable`: one call when HEAD is on a branch).
+pub fn undetected_version_warning(manifest: &Value, project_dir: &Path) -> Option<String> {
+    let env_version = vivacity_core::root_version::root_version_from_env().is_some();
+    undetected_version_warning_with(manifest, project_dir, env_version)
+}
+
+fn undetected_version_warning_with(
+    manifest: &Value,
+    project_dir: &Path,
+    env_version: bool,
+) -> Option<String> {
+    let config = manifest.as_object()?;
+    let name = config.get("name")?.as_str()?;
+    if crate::lockfile::package_naming_error(name, false).is_some() {
+        return None;
+    }
+    if config.contains_key("version") || env_version {
+        return None;
+    }
+    // `'project' !== ($config['type'] ?? '')`: exact, case included.
+    if config.get("type").and_then(Value::as_str) == Some("project") {
+        return None;
+    }
+    if vivacity_core::root_version::version_guessable(project_dir) {
+        return None;
+    }
+    Some(format!(
+        "Composer could not detect the root package ({name}) version, defaulting to '1.0.0'. See https://getcomposer.org/root-version"
+    ))
+}
+
 pub fn normalize_stability(s: &str) -> Result<String, RootError> {
     let lower = s.to_lowercase();
     match lower.as_str() {
@@ -521,6 +565,73 @@ pub fn root_constraint(pretty: &str) -> Result<crate::constraint::Constraint, Ve
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn undetected_version_warning_conditions() {
+        use super::undetected_version_warning_with as warning;
+        use serde_json::json;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let p = tmp.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git")
+        };
+        // A temporary directory inside some repository would give a version.
+        if git(&["rev-parse", "--git-dir"]).status.success() {
+            eprintln!("temporary directory inside a git repository: skipped");
+            return;
+        }
+        let lib = json!({"name": "acme/lib"});
+        let line = "Composer could not detect the root package (acme/lib) version, defaulting to '1.0.0'. See https://getcomposer.org/root-version";
+        assert_eq!(warning(&lib, p, false).as_deref(), Some(line));
+        assert_eq!(
+            warning(&json!({"name": "acme/lib", "type": "library"}), p, false).as_deref(),
+            Some(line)
+        );
+        // `version: null`: refused before the version is looked at (the
+        // schema in Composer, `load_with_version` here).
+        assert!(warning(&json!({"name": "acme/lib", "version": null}), p, false).is_none());
+        // Composer's `Project` is not `project` (its schema refuses it first).
+        assert!(warning(&json!({"name": "acme/lib", "type": "Project"}), p, false).is_some());
+        // No line: no name (`__root__`), a name Composer refuses first, a
+        // project, a version, `COMPOSER_ROOT_VERSION`.
+        assert!(warning(&json!({}), p, false).is_none());
+        assert!(warning(&json!({"name": null}), p, false).is_none());
+        assert!(warning(&json!({"name": "con/thing"}), p, false).is_none());
+        assert!(warning(&json!({"name": "acme/lib", "type": "project"}), p, false).is_none());
+        assert!(warning(&json!({"name": "acme/lib", "version": "2.0.0"}), p, false).is_none());
+        assert!(warning(&lib, p, true).is_none());
+        // A repository without a commit: nothing to guess.
+        assert!(git(&["init", "-q", "-b", "main"]).status.success());
+        assert!(warning(&lib, p, false).is_some());
+        // A branch: its version.
+        std::fs::write(p.join("a.txt"), "a").expect("write");
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-q", "-m", "one"]).status.success());
+        assert!(warning(&lib, p, false).is_none());
+        // `(HEAD detached at X)`: `dev-<sha>`.
+        assert!(git(&["checkout", "-q", "--detach", "HEAD"])
+            .status
+            .success());
+        assert!(warning(&lib, p, false).is_none());
+        // `(HEAD detached from X)` without a tag: nothing to guess.
+        std::fs::write(p.join("b.txt"), "b").expect("write");
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-q", "-m", "two"]).status.success());
+        assert!(warning(&lib, p, false).is_some());
+        // … with an exact tag: the tag.
+        assert!(git(&["tag", "v1.0.0"]).status.success());
+        assert!(warning(&lib, p, false).is_none());
+    }
+
     #[test]
     fn merge_plugin_flags_follow_the_plugin() {
         use super::merge_plugin_stability_flags as flags_of;
