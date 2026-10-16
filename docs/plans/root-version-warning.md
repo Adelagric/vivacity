@@ -448,6 +448,38 @@ côtés). Pas de bloquant ni de majeur. Ce qui en est fait :
 Vu en passant, hors périmètre : `dump-autoload` sans `vendor/` compte 1472
 classes chez vivacity (branche comme `main`) contre 1 chez Composer.
 
+La première relecture est finalement revenue après la fusion dans `main`
+(4b68941) : ni bloquant ni majeur, stderr identique à Composer sur ses
+essais (`install`, `update`, `require`, `remove`, `dump-autoload`, niveaux
+`-q`/`-v`, `--dry-run`, `--no-install`, `--no-update`). Ses constats, notés
+ici après coup :
+
+- **hg, svn, fossil** (mineur) : `VersionGuesser.php:84-104` les essaie
+  après git avant d'avertir ; vivacity ne regarde que git. Dans un tel
+  dépôt, Composer devine une version et se tait, vivacity avertit — et
+  prenait déjà `1.0.0+no-version-set` (HANDOVER, « Version du root
+  package »). L'écart devient visible sur stderr. Suite possible : rendre la
+  main quand un `.hg`, `.svn` ou `_FOSSIL_` est trouvé en remontant.
+- **Schéma LAX** (mineur) : `Factory` valide le manifeste avant
+  `RootPackageLoader::load` ; un manifeste refusé (`type: "Project"`) n'a
+  pas de ligne chez Composer, vivacity l'écrit puis refuse. Déjà dans les
+  non-objectifs (le schéma n'est pas porté).
+- **Erreurs d'usage** (nit) : `Application::doRun` crée le `Composer` avant
+  de valider la ligne de commande, la ligne précède l'encadré « option does
+  not exist » ; le rendu clap de vivacity divergeait déjà entièrement.
+- **git tourne deux fois** (nit) : `version_guessable` puis
+  `guess_version` — les ≈ 5 ms du Coût, déjà listées comme suite.
+- **Test `undetected_version_warning_conditions`** (nit) : panique sans
+  git au lieu de sauter, et `git init -b` exige git ≥ 2.28 — comme le test
+  existant de `root_version.rs`.
+- **Commentaire de `current_branch`** (nit) : il acceptait un peu plus que
+  la regex de `VersionGuesser.php:151` (hexadécimal majuscule, sha en fin
+  de ligne, formes que git n'émet pas) ; **adouci**.
+- **Hors diff, non comparé à `main`** : `require acme/b` sans contrainte sur
+  un dépôt `path` réussit chez Composer (« Using version ^1.0 ») et sort en
+  1 chez vivacity (« Could not find a matching version of package acme/b »).
+  À comparer avec `main`, lot suivant.
+
 ## Résultat (2026-10-16)
 
 **Rouges sur `main`** (binaire d'aa5f018) : `verbosity.sh laravel

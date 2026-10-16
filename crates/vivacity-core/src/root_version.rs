@@ -126,11 +126,12 @@ pub fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// `git branch -a --no-color --no-abbrev -v`, as `guessGitVersion` runs it.
 const BRANCH_ARGS: &[&str] = &["branch", "-a", "--no-color", "--no-abbrev", "-v"];
 
-/// The current line of `git branch -v` (`* <name> <sha> …`) when
-/// `guessGitVersion`'s regex takes it: its name and sha. `(no branch)`,
+/// The current line of `git branch -v` (`* <name> <sha> …`) as
+/// `guessGitVersion`'s regex reads it: its name and sha. `(no branch)`,
 /// `(detached from X)` and `(HEAD detached at X)` are the only parenthesised
 /// forms it knows; any other (`(HEAD detached from X)`) matches nothing. None
-/// for any other line.
+/// for any other line. Slightly wider than the regex on input git never
+/// prints (uppercase hex, a sha ending the line).
 fn current_branch(line: &str) -> Option<(&str, &str)> {
     let rest = line.strip_prefix("* ")?.trim_start();
     let (name, tail) = if rest.starts_with('(') {
