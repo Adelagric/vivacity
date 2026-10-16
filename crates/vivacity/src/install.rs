@@ -200,7 +200,7 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
     let lock = vivacity_core::lock::Lock::from_value(&lock_value);
     trace("read manifests", t0);
 
-    let with_dev = !args.no_dev && std::env::var("COMPOSER_NO_DEV").as_deref() != Ok("1");
+    let with_dev = !args.no_dev && !env_no_dev();
     Ok(Flow::Continue(Run {
         args,
         t0,

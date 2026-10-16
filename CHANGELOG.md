@@ -7,6 +7,12 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`COMPOSER_NO_DEV` is read as Composer reads it.** `BaseCommand::initialize`
+  takes any value PHP's `(bool)` calls true (everything but `""` and `"0"`)
+  as `--no-dev`; vivacity's `install` only took `1`, and `dump-autoload`
+  ignored the variable (its autoloader kept the dev packages). Three
+  `harness/verbosity.sh` cases (`yes`, `0`, and `dump-autoload` with
+  `autoload_static.php` compared).
 - **`COMPOSER_IGNORE_PLATFORM_REQ(S)` reach `dump-autoload`, and their
   warnings come first.** `BaseCommand::initialize` reads the two variables
   for every command that has the options, `dump-autoload` included, whose

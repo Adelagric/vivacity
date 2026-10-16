@@ -388,7 +388,9 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    `dump-autoload`, avertissements retenus avec la ligne de version racine
    et jetés par une délégation précoce ; une délégation tardive les répète
    encore).
-3. `COMPOSER_NO_DEV` n'est vrai pour `install` qu'à `1`.
+3. `COMPOSER_NO_DEV` n'est vrai pour `install` qu'à `1` — **corrigé le
+   2026-10-16** (`install-defects.md`, point 4 : vrai au sens de PHP, pour
+   `install` et `dump-autoload`).
 4. `GithubActionError::emit` (`::error` sur stdout sous GitHub Actions) n'est
    porté nulle part.
 5. `config.lock: false` : Composer ignore le lock et résout ; vivacity

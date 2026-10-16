@@ -3542,3 +3542,14 @@ ou `COMPOSER_IGNORE_PLATFORM_REQ=php` (avertissement absent,
 `platform_check.php` différent), `require`/`remove` (avertissement après
 « Running composer update »), et les trois assertions de `fallback-args.sh`.
 
+## 2026-10-16 — `COMPOSER_NO_DEV` vrai au sens de PHP, pour `install` et `dump-autoload`
+
+Contexte : `docs/plans/install-verify.md`, défaut 3 ; `install-defects.md`,
+point 4. `BaseCommand::initialize` (l. 255-274) pose `--no-dev` (ou
+`--update-no-dev`) quand `(bool) Platform::getEnv('COMPOSER_NO_DEV')` : toute
+chaîne sauf `""` et `"0"`. `update`, `require` et `remove` le lisaient déjà
+ainsi ; `install` n'acceptait que `1`, `dump-autoload` ne lisait rien. Une
+fonction (`env_no_dev`, manifest.rs) pour les deux. Rouge sur db349c1 :
+`install --dry-run` avec `yes` (109 paquets contre 76) et `dump-autoload`
+avec `true` (`autoload_static.php` différent).
+

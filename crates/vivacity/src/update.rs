@@ -437,8 +437,7 @@ pub(crate) fn resolve_and_lock(
     let manifest_path = project.join("composer.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
-    let installer_dev_mode =
-        !(args.no_dev || std::env::var("COMPOSER_NO_DEV").is_ok_and(|v| !v.is_empty() && v != "0"));
+    let installer_dev_mode = !(args.no_dev || env_no_dev());
     let mut options = options;
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
         // `RootPackage::load` refuses these too, but through the error path,

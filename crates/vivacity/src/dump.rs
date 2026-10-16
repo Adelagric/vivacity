@@ -183,7 +183,8 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
                 .collect()
         })
         .unwrap_or_default();
-    let dev_mode = !args.no_dev && installed_dev;
+    // `COMPOSER_NO_DEV` stands for `--no-dev` (`BaseCommand::initialize`).
+    let dev_mode = !(args.no_dev || env_no_dev()) && installed_dev;
     // The merge plugin's PRE_AUTOLOAD_DUMP merge, with the dump's dev mode.
     let manifest = match merge_plugin_root(&project, &lock, &manifest, dev_mode, !args.no_plugins) {
         Ok(Some(m)) => m.manifest,

@@ -72,6 +72,12 @@ CASES=(
   "laravel|require symfony/uid --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
   "laravel|remove laravel/tinker --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
   "laravel|require symfony/uid --dry-run --no-install --no-suggest"
+  # `COMPOSER_NO_DEV` vaut `--no-dev` dès qu'il est vrai au sens de PHP
+  # (`(bool)` d'une chaîne : tout sauf "" et "0"), pour `install` comme pour
+  # `dump-autoload`.
+  "laravel|install --dry-run @env:COMPOSER_NO_DEV=yes"
+  "laravel|install --dry-run @env:COMPOSER_NO_DEV=0"
+  "laravel|dump-autoload @vendor @env:COMPOSER_NO_DEV=true @files:vendor/composer/autoload_static.php"
   # Pas de composer.json : message au niveau normal (muet sous -q), exit 1.
   "laravel|install --dry-run @nojson"
   # Une vraie installation (cache chaud), puis un install sans opération.

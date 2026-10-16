@@ -189,6 +189,13 @@ pub(crate) fn hold_root_version_warning(project: &std::path::Path) -> Option<Str
     Some(line)
 }
 
+/// `BaseCommand::initialize` (BaseCommand.php:255-274): `COMPOSER_NO_DEV`
+/// sets `--no-dev` (`--update-no-dev` for `require`/`remove`) when it is
+/// true as PHP's `(bool)` reads a string — anything but `""` and `"0"`.
+pub(crate) fn env_no_dev() -> bool {
+    std::env::var("COMPOSER_NO_DEV").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// `BaseCommand::initialize` (BaseCommand.php:276-291), for a command that
 /// has the two options: `COMPOSER_IGNORE_PLATFORM_REQS` (truthy, as PHP's
 /// `(bool)` reads a string) stands for `--ignore-platform-reqs`, then — when
