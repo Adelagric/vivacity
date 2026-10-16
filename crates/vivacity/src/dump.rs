@@ -155,15 +155,8 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         return Ok(code);
     }
     let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
-    // bamarni/composer-bin-plugin's `COMMAND` listener.
-    if vivacity_core::scope::active_plugins(&project, &manifest, !args.no_plugins)
-        .iter()
-        .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
-    {
-        if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
-            vivacity_core::bamarni_bin::print_deprecations(&cfg);
-        }
-    }
+    // `PluginEvents::COMMAND` (DumpAutoloadCommand.php:59).
+    bamarni_command_event(&project, &manifest, !args.no_plugins);
     // Dev mode: that of the installed state (installed.json), like Composer.
     let installed_json =
         vivacity_core::jsonfile::read(&composer_dir_of(&project, &manifest).join("installed.json"));

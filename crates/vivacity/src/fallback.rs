@@ -246,8 +246,7 @@ pub(crate) fn with_verbosity(cmd: &mut std::process::Command) {
 /// [`forwarded_arguments`] — every option it was given, `--dry-run`
 /// included; the install phase of `update`/`require`/`remove`, whose line is
 /// not an install's, hands over the line [`after_update_line`] built
-/// (`args.fallback_line`). Either way a child process ([`hand_over`]), and
-/// `args.handed_over` records that Composer ran.
+/// (`args.fallback_line`). Either way a child process ([`hand_over`]).
 pub(crate) fn fallback_or_fail(
     args: &InstallArgs,
     scope: &vivacity_core::scope::ScopeReport,
@@ -283,7 +282,6 @@ pub(crate) fn fallback_or_fail(
     };
     let code =
         hand_over(&composer, &forwarded, args.offline, None).context("cannot run composer")?;
-    args.handed_over.set(true);
     Ok(code)
 }
 

@@ -12,7 +12,9 @@ use crate::lock::{DistKind, Lock, LockPackage};
 use serde_json::Value;
 use std::path::Path;
 
-/// Plugins emulated natively by vivacity (identical output, drift test).
+/// Plugins emulated natively by vivacity (identical files, drift test; the
+/// stdout lines of phpstan/rector's extension-installers and of
+/// dealerdirect's are not printed, docs/plans/install-order.md).
 /// composer/installers (see `layout`) is, under conditions checked before
 /// any write. drupal/core-composer-scaffold is deliberately absent: its
 /// source is GPL-2.0-or-later and cannot be ported here (NOTICE.md).

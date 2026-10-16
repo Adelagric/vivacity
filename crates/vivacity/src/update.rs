@@ -257,42 +257,33 @@ pub(crate) fn run_update_resolved(
     if resolved.status != 0 {
         return Ok(ended(resolved.status));
     }
-    let project = project_dir(args.working_dir.as_deref())?;
     if !args.no_install {
         let (virtual_lock, virtual_manifest) = if args.dry_run {
             (resolved.lock.clone(), Some(resolved.manifest.clone()))
         } else {
             (None, None)
         };
-        let phase = install_after_update(args, virtual_lock, virtual_manifest)?;
-        if phase.status != 0 {
-            return Ok(ended(phase.status));
-        }
-        if phase.handed_over {
-            return Ok(ended(0));
-        }
+        // The install phase prints the end of `Installer::run` itself, at
+        // Composer's points — or Composer does, when it was handed over.
+        let status = install_after_update(args, resolved.report(), virtual_lock, virtual_manifest)?;
+        return Ok(ended(status));
     }
-    print_post_update(&resolved, &project);
+    print_post_update(&resolved, &project_dir(args.working_dir.as_deref())?);
     Ok(ended(0))
 }
 
-/// What the install phase of a resolution command did: its status, and
-/// whether it went to Composer. Composer's `install` then printed its own
-/// end of `Installer::run` — the abandoned packages, the funding count —
-/// so the command does not print its post-update report over it (the
-/// suggestions, which only an update prints, are what is missing).
-pub(crate) struct InstallPhase {
-    pub(crate) status: i32,
-    pub(crate) handed_over: bool,
-}
-
 /// The install that follows the lock write (`Installer::run` with
-/// `setInstall(true)`).
+/// `setInstall(true)`): its status. It prints the end of `Installer::run`
+/// (`report`) at Composer's points — unless it goes to Composer, whose
+/// `install` then prints its own end (the abandoned packages, the funding
+/// count; the suggestions, which only an update prints, are what is
+/// missing).
 pub(crate) fn install_after_update(
     args: &UpdateArgs,
+    report: UpdateReport,
     virtual_lock: Option<serde_json::Value>,
     virtual_manifest: Option<serde_json::Value>,
-) -> anyhow::Result<InstallPhase> {
+) -> anyhow::Result<i32> {
     let install = InstallArgs {
         compat: GlobalCompatArgs::default(),
         prefer_source: args.prefer_source,
@@ -319,16 +310,11 @@ pub(crate) fn install_after_update(
         dry_run: args.dry_run,
         working_dir: args.working_dir.clone(),
         fallback_line: Some(after_update_line(args)),
-        handed_over: std::cell::Cell::new(false),
-        after_update: true,
         virtual_lock,
         virtual_manifest,
+        post_update: Some(Box::new(report)),
     };
-    let status = run_install(&install)?;
-    Ok(InstallPhase {
-        status,
-        handed_over: install.handed_over.get(),
-    })
+    run_install(&install)
 }
 
 /// Resolution and lock write: 0, or 2 on an unsolvable set.
@@ -338,14 +324,15 @@ pub(crate) fn install_after_update(
 pub(crate) struct Resolved {
     pub(crate) status: i32,
     pub(crate) lock: Option<serde_json::Value>,
-    /// What `Installer::run` prints after the install phase (suggestions,
-    /// abandoned packages), ready to print; the funding count is read
-    /// from installed.json at that time (`print_post_update`).
+    /// What `Installer::run` prints after `doUpdate` and before the dump
+    /// (suggestions, abandoned packages), ready to print; the funding count
+    /// is read from installed.json after the dump, by the install phase or
+    /// by [`print_post_update`].
     pub(crate) post: Vec<String>,
     /// The manifest as the (possibly patched) root package sees it.
     pub(crate) manifest: serde_json::Value,
     /// symfony/flex was active for this resolution: its `POST_UPDATE_CMD`
-    /// output follows the report (`print_post_update`).
+    /// output follows the funding count ([`UpdateReport`]).
     pub(crate) flex_active: bool,
     /// The install would perform at least one update operation, which arms
     /// Flex's `symfony/thanks` reminder (`enableThanksReminder` on
@@ -360,7 +347,29 @@ pub(crate) struct Resolved {
     pub(crate) hand_over: Option<vivacity_core::scope::ScopeIssue>,
 }
 
+/// What `Installer::run` prints around an update's install phase, handed
+/// to that phase ([`install_after_update`]): the suggestions and the
+/// abandoned packages before the dump (`Installer.php:343-373`), Flex's
+/// `POST_UPDATE_CMD` output after the funding (l. 412-442).
+#[derive(Debug)]
+pub(crate) struct UpdateReport {
+    pub(crate) lines: Vec<String>,
+    /// The manifest Flex reads (the patched root package).
+    pub(crate) manifest: serde_json::Value,
+    pub(crate) flex_active: bool,
+    pub(crate) thanks_reminder: bool,
+}
+
 impl Resolved {
+    pub(crate) fn report(&self) -> UpdateReport {
+        UpdateReport {
+            lines: self.post.clone(),
+            manifest: self.manifest.clone(),
+            flex_active: self.flex_active,
+            thanks_reminder: self.thanks_reminder,
+        }
+    }
+
     /// The command stops with `status` before anything is written.
     fn stopped(status: i32) -> Resolved {
         Resolved {
@@ -389,10 +398,10 @@ pub(crate) fn hand_resolution_over(
     delegate_resolution(std::slice::from_ref(issue), no_fallback)
 }
 
-/// Prints the post-update report of `Installer::run` once the install
-/// phase (if any) is done: the precomputed lines, then the funding count
-/// of the packages installed now — unless `dumpAutoloader` is off (dry
-/// run).
+/// Prints the post-update report of `Installer::run` when the update has
+/// no install phase (`--no-install`): the precomputed lines, the funding
+/// count, then Flex's `POST_UPDATE_CMD` output. With an install phase,
+/// that phase prints it (`run_install`).
 pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) {
     for line in &resolved.post {
         vivacity_core::say!("{line}");
@@ -466,6 +475,18 @@ pub(crate) fn resolve_and_lock(
                 vivacity_resolver::session::SessionErrorKind::Printed(_)
             ) =>
         {
+            // Exit 3 (`ERROR_NO_LOCK_FILE_FOR_PARTIAL_UPDATE`) is the partial
+            // update without a lock, which `Installer::doUpdate` refuses
+            // after `COMMAND` (Installer.php:508-510); the temporary
+            // constraints (exit 1) are refused before it
+            // (UpdateCommand.php:183-193).
+            if e.kind == vivacity_resolver::session::SessionErrorKind::Printed(3)
+                && !args.command_dispatched
+            {
+                if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+                    bamarni_command_event(&project, &m, !args.no_plugins);
+                }
+            }
             print_session_error(&e);
             if let Some(line) = &e.stdout {
                 vivacity_core::out!("{line}");
@@ -532,6 +553,15 @@ pub(crate) fn resolve_and_lock(
     } else {
         PlatformRequirementFilter::IgnoreNothing
     };
+    // `UpdateCommand::execute` dispatches `PluginEvents::COMMAND` after its
+    // own refusals (the temporary constraints, here in `prepare_update`) and
+    // before `Installer::run` (UpdateCommand.php:250); `require` and
+    // `remove` have dispatched theirs already.
+    if !args.command_dispatched {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            bamarni_command_event(&project, &m, !args.no_plugins);
+        }
+    }
     vivacity_core::say!("Loading composer repositories with package information");
     // (`Updating dependencies` is printed by the session once the pool is
     // built — Flex's notice comes before it.)
@@ -686,8 +716,8 @@ pub(crate) fn resolve_and_lock(
         }
     }
     trace("write lock", t0);
-    // `Installer::run` after `doUpdate` (and after the install phase): the
-    // suggestions of the newly installed packages (and of the root on a
+    // `Installer::run` after `doUpdate` (and its install), before the dump:
+    // the suggestions of the newly installed packages (and of the root on a
     // fresh install), the abandoned packages of the new lock.
     let manifest = patched_manifest(&session, &manifest_text);
     let fresh_install = !composer_dir_of(&project, &manifest)
@@ -744,8 +774,8 @@ pub(crate) fn patched_manifest(
 /// `SuggestedPackagesReporter::outputMinimalistic` (suggestions of the
 /// packages installed by this update, plus the root's own on a fresh
 /// install, minus the targets some other package provides), one warning
-/// per abandoned package of the new lock. The funding count is added by
-/// `print_post_update`.
+/// per abandoned package of the new lock. The install phase prints them
+/// before its dump; [`print_post_update`] without one.
 pub(crate) fn post_update_report(
     session: &vivacity_resolver::session::UpdateSession,
     ops: &[vivacity_resolver::transaction::Operation],

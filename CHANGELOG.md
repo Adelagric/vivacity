@@ -7,6 +7,27 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **Events come out in Composer's order around an install.**
+  bamarni/composer-bin-plugin's `COMMAND` lines are printed where the
+  command dispatches the event: on `install`, before `pre-install-cmd`
+  (they came after it under `--run-scripts`); on `update`, before
+  `Loading composer repositories…` (they came after `Writing lock file`,
+  and not at all under `--no-install`); on `require`, after `Running
+  composer update…`; on `remove`, before it. The funding count is printed
+  before the `POST_INSTALL_CMD` / `POST_UPDATE_CMD` listeners, as
+  `Installer::run` does: codeception/c3's `Copying c3.php…` / `c3.php is
+  already up-to-date` came before it, and before the `post-autoload-dump`
+  scripts; its `Deleting c3.php…`, when the plugin leaves, comes right
+  before `- Removing codeception/c3` (it came after `Generating autoload
+  files`). Both now happen under `--no-autoloader` too, as in Composer
+  (c3.php was neither copied nor deleted). An update's `N package suggestions were added…` and
+  abandoned packages are printed before `Generating autoload files`
+  (they came after the whole install phase), and `Generating autoload
+  files` before the `pre-autoload-dump` scripts. A numeric
+  `COMPOSER_FUND` is read as PHP's `intval`: `0.5` hides the funding line,
+  as in Composer. `harness/scripts.sh` and `harness/yii2-composer.sh` now compare stdout
+  and stderr merged, in order; `harness/bin-plugin.sh` plays `update`,
+  `require` and `remove`.
 - **A problem's text is no longer printed twice when it holds a `<` that
   opens no tag.** `strip_output_styles` (Symfony's `OutputFormatter` without
   decoration) copied the whole remaining text, prefix already written

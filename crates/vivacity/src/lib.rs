@@ -338,6 +338,12 @@ struct UpdateArgs {
     prefer_dist: bool,
     #[arg(skip)]
     prefer_install: Option<String>,
+    /// Internal: the command has dispatched Composer's `COMMAND` event
+    /// itself (`require` after its "Running composer update" line,
+    /// `remove` before it); `update` dispatches it in `resolve_and_lock`,
+    /// where `UpdateCommand::execute` does.
+    #[arg(skip)]
+    command_dispatched: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -467,15 +473,6 @@ struct InstallArgs {
     /// the command line, forwarded.
     #[arg(skip)]
     fallback_line: Option<Vec<std::ffi::OsString>>,
-    /// Internal: set once the fallback has run Composer, so that the
-    /// command around this install does not print over Composer's own
-    /// report (`InstallPhase`).
-    #[arg(skip)]
-    handed_over: std::cell::Cell<bool>,
-    /// Internal: install following a resolution (`doInstall` with
-    /// `alreadySolved`); the lock pool has already been filtered.
-    #[arg(skip)]
-    after_update: bool,
     /// Internal: the lock of a dry-run update, never written — the install
     /// phase reads it instead of composer.lock (`Locker::setLockData`
     /// keeps the data in memory; `mockLocalRepositories`).
@@ -486,6 +483,21 @@ struct InstallArgs {
     /// applied in memory).
     #[arg(skip)]
     virtual_manifest: Option<serde_json::Value>,
+    /// Internal: `Some` for the install following a resolution
+    /// (`doInstall` with `alreadySolved`: the lock pool has already been
+    /// filtered), with what `Installer::run` prints around it — the
+    /// suggestions and abandoned packages before the dump, Flex's
+    /// `POST_UPDATE_CMD` after the funding — which this phase prints at
+    /// Composer's points.
+    #[arg(skip)]
+    post_update: Option<Box<UpdateReport>>,
+}
+
+impl InstallArgs {
+    /// The install following a resolution (`update`, `require`, `remove`).
+    fn after_update(&self) -> bool {
+        self.post_update.is_some()
+    }
 }
 
 /// `VIVACITY_TRACE=1`: duration of each phase on stderr (perf diagnostics).

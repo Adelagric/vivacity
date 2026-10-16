@@ -10,8 +10,10 @@
 //! `getFullPrettyVersion()`. phpstan's adds the packages named `*phpstan*`
 //! that are not extensions (`NOT_INSTALLED`) and the compacted
 //! `phpstan/phpstan` constraint of the extensions
-//! (`Intervals::compactConstraint`, printed `>=a, <b`). phpstan's plugin
-//! listens to `post-autoload-dump`, rector's to `post-install-cmd`.
+//! (`Intervals::compactConstraint`, printed `>=a, <b`). Both plugins
+//! listen to `POST_INSTALL_CMD` and `POST_UPDATE_CMD`. Their stdout lines
+//! (`… Extensions installed`, `> name: installed`) are not printed
+//! (docs/plans/install-order.md).
 
 use anyhow::Result;
 use serde_json::Value;

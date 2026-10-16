@@ -3268,3 +3268,87 @@ cas dont les dix rouges sur `main`, verbosity 76. No-op laravel (Mac,
 binaires alternés, 60 passages, médianes) : `install --no-plugins` 114,6
 contre 113,4 ms en ligne, 48,2 contre 47,8 ms hors ligne, `--no-blocking`
 hors ligne 46,7 contre 46,0 ms — inchangé.
+
+## 2026-10-16 — Les événements d'`install` et d'`update` dans l'ordre de Composer
+
+Défauts 2 et 3 notés par le découpage de `run_install`, faits ici, avec ce
+que leur vérification a trouvé à côté. Plan, méta-analyse (sous-agent
+frais), revue indépendante et résultat : `docs/plans/install-order.md`. Les
+entrées plus haut qui les listent comme « laissés » restent telles quelles.
+
+**Mesuré d'abord** (binaire de `main`, sortie standard et sortie d'erreur
+fusionnées, contre Composer 2.10.3) :
+
+- le `COMMAND` de bamarni/composer-bin-plugin : `InstallCommand::execute`
+  le dispatche avant `Installer::run` (InstallCommand.php:111), donc avant
+  `pre-install-cmd` ; vivacity après. Sur `update`, `UpdateCommand.php:250`
+  le dispatche avant « Loading composer repositories » ; vivacity
+  l'imprimait au début de sa phase d'installation, après « Writing lock
+  file », et pas du tout sous `--no-install`. `require` le dispatche après
+  « Running composer update » (RequireCommand.php:461), `remove` avant
+  (RemoveCommand.php:239). Le refus d'une mise à jour partielle sans lock
+  vient après lui (`Installer::doUpdate`, l. 508-510) ;
+- `Installer::run` imprime le funding (l. 412-436) **avant** de dispatcher
+  `POST_INSTALL_CMD`/`POST_UPDATE_CMD` (l. 438-442), où les écouteurs des
+  plugins passent avant les scripts de composer.json
+  (`EventDispatcher::getListeners` les ajoute à la fin de la priorité 0).
+  codeception/c3 copiait c3.php avant le funding (et avant les scripts
+  `post-autoload-dump`) chez vivacity : visible sans `--run-scripts` sur la
+  fixture yii2-composer (17 paquets avec `funding`). Sa suppression, au
+  retrait du plugin, venait après le dump ; Composer la fait dans
+  `PluginInstaller::uninstall`, juste avant la ligne `- Removing
+  codeception/c3`. Sous `--no-autoloader`, vivacity ne faisait ni l'une ni
+  l'autre (elles étaient dans les plugins `post-autoload-dump`) ;
+- trouvé en vérifiant `update` : les suggestions et les abandonnés
+  (l. 343-373) sont imprimés avant « Generating autoload files » ; vivacity
+  les imprimait après toute la phase d'installation ;
+- trouvé par le nouveau cas de `scripts.sh` : « Generating autoload files »
+  (l. 377-381) précède `AutoloadGenerator::dump`, donc le script
+  `pre-autoload-dump` ; vivacity lançait le script d'abord.
+
+**Fait.** La fin d'`Installer::run` d'une mise à jour est imprimée par la
+phase d'installation elle-même, aux points de Composer : `InstallArgs`
+porte un `UpdateReport` (suggestions et abandonnés, manifeste et état de
+Flex), qui remplace `after_update` (méthode) et `handed_over` — une phase
+rendue à Composer n'atteint plus ces impressions, il n'y a plus rien à
+savoir après coup. `print_post_update` ne sert plus que sous
+`--no-install`. `bamarni_command_event` est appelé par chaque commande au
+point de la sienne (`install`, `update` dans `resolve_and_lock` après les
+avertissements de plateforme, `require`, `remove`, `dump-autoload`).
+`post_install` imprime le funding, puis les émulations (dealerdirect,
+extension-installers, copie c3, Flex), puis `post-install-cmd`. La
+suppression de c3 se fait juste avant sa ligne `- Removing`.
+`COMPOSER_FUND` est lu comme `intval` (`0.5`, `1e400` cachent la ligne,
+mesuré ; `inf` n'est pas numérique pour PHP).
+
+**Écarté.** Imprimer le `COMMAND` d'`update` juste après `prepare_update`
+(proposé par la méta) : les avertissements `COMPOSER_IGNORE_PLATFORM_REQ(S)`,
+que vivacity imprime après, viennent avant `COMMAND` chez Composer
+(`BaseCommand::initialize`). Un genre d'erreur dédié au refus « partial
+update without a lock » : le code 3 est la constante de Composer et le
+seul refus de ce code dans `prepare_update`.
+
+**Prémisse corrigée.** Le défaut 3 disait dealerdirect et les
+extension-installers muets hors échec. Faux : phpstan/extension-installer
+imprime « Extensions installed » à chaque `POST_*_CMD` (`Plugin.php:198`),
+rector et dealerdirect quand ils écrivent. vivacity n'imprime aucune de ces
+lignes — mesuré sur un projet phpstan/extension-installer 1.4.3 +
+phpstan-strict-rules 2.0.4 : deux lignes de stdout chez Composer, aucune
+chez vivacity. Laissé (ce sont des lignes à émuler, pas un ordre), avec les
+autres défauts vus : ordre des émulations entre elles (Composer :
+`PackageSorter`, un plugin installé par la commande en dernier), écouteurs
+rejoués par `composer run-script` sous `--run-scripts` (mesuré : c3
+« already up-to-date » en plus), `pre-install-cmd` lancé avant la décision
+de portée, écouteurs `POST_UPDATE_CMD` absents sous `update --no-install`
+(c3.php et les fichiers générés non écrits), `forward-command` sur `update`,
+avertissements de plateforme de `require`/`remove` après leurs premières
+lignes, manifeste non fusionné pour le `COMMAND` des commandes de
+résolution, doublon `[bamarni-bin]` sur une résolution rendue à Composer
+après coup.
+
+Vérifié : rouges sur `main` d'abord (`scripts.sh` 2, `bin-plugin.sh` 6,
+`yii2-composer.sh` 7 cas), verts ensuite ; `cargo fmt --check`, clippy
+`-D warnings` sur macOS et `x86_64-pc-windows-gnu`, 309 tests verts (308 sur
+`main`, plus `funding_shown`), et les 30 passages de harnais contre
+Composer 2.10.3 sur le binaire final, tous à 0 (659 cas `OK`). Le job
+Windows n'a pas tourné ici.

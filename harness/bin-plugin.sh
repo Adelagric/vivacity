@@ -7,6 +7,12 @@
 # installé et à POST_AUTOLOAD_DUMP quand il l'est à la fin). Étapes :
 # install (une ligne) ; no-op (deux) ; dump-autoload (deux) ; --no-dev (une,
 # le plugin part) ; puis `forward-command: true` → rendu à Composer.
+# Puis les commandes de résolution, le plugin installé (Packagist en ligne,
+# versions exactes, `--no-audit` des deux côtés) : `COMMAND` est dispatché
+# par la commande, avant `Installer::run` — avant « Loading composer
+# repositories » pour `update` (aussi `--no-install` et `--dry-run`), après
+# « Running composer update » pour `require`, avant pour `remove` ; et les
+# suggestions de `require` avant « Generating autoload files ».
 #
 # Usage : harness/bin-plugin.sh
 set -euo pipefail
@@ -57,6 +63,25 @@ step install 1 install --no-scripts -- install --no-scripts --no-fallback
 step no-op   2 install --no-scripts -- install --no-scripts --no-fallback
 step dump    2 dump-autoload -- dump-autoload
 step no-dev  1 install --no-scripts --no-dev -- install --no-scripts --no-dev --no-fallback
+# Les commandes de résolution, sur une copie neuve où le plugin est installé.
+# `--no-security-blocking` : un avis publié plus tard sur une version figée
+# ne doit pas changer le cas.
+ref="$WORK/ref-resolve"; viv="$WORK/viv-resolve"; stage "$ref" "."; stage "$viv" "."
+R=(--no-scripts --no-audit --no-security-blocking)
+step resolve-install 1 install --no-scripts -- install --no-scripts --no-fallback
+step update          2 update psr/log "${R[@]}" -- update psr/log "${R[@]}" --no-fallback
+step update-no-install 1 update --no-install "${R[@]}" -- update --no-install "${R[@]}" --no-fallback
+step update-dry-run  1 update --dry-run "${R[@]}" -- update --dry-run "${R[@]}" --no-fallback
+# Les suggestions de monolog (leur nombre dépend des extensions PHP de la
+# machine, les mêmes des deux côtés) : avant « Generating autoload files ».
+step require         2 require monolog/monolog:3.9.0 "${R[@]}" -- require monolog/monolog:3.9.0 "${R[@]}" --no-fallback
+grep -q 'package suggestions were added' "$WORK/require.composer.err" || { echo "FAIL require : Composer n'a imprimé aucune suggestion (cas mal construit)"; status=1; }
+step remove          2 remove monolog/monolog "${R[@]}" -- remove monolog/monolog "${R[@]}" --no-fallback
+# Mise à jour partielle sans lock : refusée par `Installer::doUpdate`, donc
+# après `COMMAND` (code 3).
+rm -f "$ref/composer.lock" "$viv/composer.lock"
+step partial-no-lock 1 update psr/log "${R[@]}" -- update psr/log "${R[@]}" --no-fallback
+grep -q 'Cannot update only a partial set of packages' "$WORK/partial-no-lock.composer.err" || { echo "FAIL partial-no-lock : Composer n'a pas refusé (cas mal construit)"; status=1; }
 # forward-command: true → les installs imbriqués de vendor-bin/, à Composer.
 viv="$WORK/viv-forward"; stage "$viv" '.extra["bamarni-bin"]["forward-command"]=true'
 v_code=0; (cd "$viv" && "$VIVACITY" install --no-scripts --no-fallback 2>"$WORK/forward.vivacity.err" >/dev/null) || v_code=$?

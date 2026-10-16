@@ -312,10 +312,17 @@ contre 116,4 ms (en ligne, σ 8-12 ms) ; `--no-plugins --offline` 47,3 contre
    Composer. Le commentaire de la jointure dit le contraire du code de
    référence.
 2. Le `COMMAND` de bamarni passe après `pre-install-cmd` (Composer : avant
-   `Installer::run`). Visible avec `--run-scripts`.
+   `Installer::run`). Visible avec `--run-scripts`. **Corrigé le
+   2026-10-16** (branche `install-order`, commit « Print install and
+   update events in Composer's order », `docs/plans/install-order.md`),
+   avec le même défaut, plus visible, sur `update`/`require`/`remove`.
 3. Funding avant `POST_INSTALL_CMD` chez Composer ; vivacity émule
    dealerdirect et les extension-installers avant le funding. Visible
-   seulement sur un échec de ces émulations.
+   seulement sur un échec de ces émulations. **Corrigé le 2026-10-16**
+   (même commit) ; la prémisse était fausse : ces plugins écrivent chez
+   Composer en cas nominal (phpstan à chaque install), vivacity n'imprime
+   pas leurs lignes du tout — et codeception/c3, lui, écrivait avant le
+   funding, ce qui rendait le défaut visible sans `--run-scripts`.
 4. La doc d'`installed_packages` est détachée au-dessus de celle
    d'`unchanged_local_repository` (depuis avant le découpage de `lib.rs`).
 5. Le commentaire « `Installer::doInstall`: "optimized" » attribue à

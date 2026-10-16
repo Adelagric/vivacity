@@ -180,6 +180,10 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
+    // `PluginEvents::COMMAND` (RemoveCommand.php:239), from the Composer
+    // re-created on the edited manifest: before the `allow-plugins` entries
+    // go and before "Running composer update".
+    crate::bamarni_command_event(&project, &updated, !args.no_plugins);
     if let (false, Some(serde_json::Value::Object(allow))) = (
         dry_run,
         vivacity_core::layout::merged_allow_plugins(
@@ -269,6 +273,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         prefer_source: false,
         prefer_dist: false,
         prefer_install: None,
+        command_dispatched: true,
     };
     // `remove` has no prefer-stable/lowest option: only the manifest
     // counts.

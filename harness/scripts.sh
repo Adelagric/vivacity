@@ -5,6 +5,10 @@
 # statiques avec l'API Composer), en dev puis --no-dev, puis
 # `dump-autoload -o` ; un script qui échoue (code 7) ; `--no-autoloader`
 # (aucun événement d'autoload). Journal, vendor/ et codes retour comparés.
+# Puis l'ordre des lignes (stdout et stderr fusionnées) : l'écouteur
+# `COMMAND` de bamarni/composer-bin-plugin avant pre-install-cmd,
+# « Generating autoload files » avant pre-autoload-dump, le funding avant
+# post-install-cmd.
 # Écart documenté : le drapeau `optimize` des événements d'autoload
 # (`run-script` ne transmet aucun drapeau) — le champ est neutralisé.
 set -euo pipefail
@@ -76,4 +80,57 @@ else status=1; fi
 stage "$WORK/viv-off" "."
 (cd "$WORK/viv-off" && "$VIVACITY" install --no-fallback >/dev/null 2>&1)
 [ -e "$WORK/viv-off/scripts.log" ] && { echo "FAIL off : des scripts ont tourné sans --run-scripts"; status=1; } || echo "OK   off : aucun script sans --run-scripts"
+# 5 et 6. L'ordre des lignes, sortie standard et sortie d'erreur fusionnées
+# (Composer écrit sans tampon, vivacity ligne à ligne : l'ordre entre les
+# deux flux est déterministe). Le résumé `vivacity: …` et les lignes
+# `  - Downloading` (cache froid de Composer) hors comparaison.
+merged_pair() { # nom, étape, répertoire ref, répertoire viv, args composer..., "--", args vivacity...
+  local name="$1" step="$2" ref="$3" viv="$4"; shift 4
+  local c=() v=(); while [ "$1" != "--" ]; do c+=("$1"); shift; done; shift; v=("$@")
+  local c_code=0 v_code=0
+  (cd "$ref" && composer "${c[@]}" --no-interaction --no-ansi >"$WORK/$name.$step.composer.all" 2>&1) || c_code=$?
+  (cd "$viv" && "$VIVACITY" "${v[@]}" >"$WORK/$name.$step.vivacity.all" 2>&1) || v_code=$?
+  if [ "$c_code" != "$v_code" ]; then echo "FAIL $name/$step : codes $c_code vs $v_code"; tail -3 "$WORK/$name.$step.vivacity.all"; return 1; fi
+  if ! diff <(grep -v '^  - Downloading ' "$WORK/$name.$step.composer.all") <(grep -v '^vivacity: ' "$WORK/$name.$step.vivacity.all") >"$WORK/$name.$step.orderdiff"; then
+    echo "FAIL $name/$step : ordre des lignes différent"; head -12 "$WORK/$name.$step.orderdiff"; return 1
+  fi
+  return 0
+}
+
+# 5. bamarni/composer-bin-plugin déjà installé : son écouteur `COMMAND`
+# (InstallCommand::execute, avant Installer::run) passe avant
+# pre-install-cmd. Le premier install pose le plugin (pas de `COMMAND` pour
+# lui) ; le no-op est le cas.
+BIN_SRC="$ROOT/fixtures/projects/bin-plugin"
+for d in "$WORK/ref-bamarni" "$WORK/viv-bamarni"; do
+  rm -rf "$d"; mkdir -p "$d"; cp "$BIN_SRC/composer.lock" "$d/"
+  jq '.scripts = {"pre-install-cmd": ["echo pre-install-cmd stdout", "echo pre-install-cmd stderr >&2"]}' "$BIN_SRC/composer.json" > "$d/composer.json"
+done
+ok=1
+merged_pair bamarni install "$WORK/ref-bamarni" "$WORK/viv-bamarni" install -- install --run-scripts --no-fallback || ok=0
+[ $ok = 1 ] && { merged_pair bamarni no-op "$WORK/ref-bamarni" "$WORK/viv-bamarni" install -- install --run-scripts --no-fallback || ok=0; }
+if [ $ok = 1 ] && grep -q '^\[bamarni-bin\]' "$WORK/bamarni.no-op.composer.all"; then
+  n=$(grep -c '^\[bamarni-bin\]' "$WORK/bamarni.no-op.vivacity.all" || true)
+  echo "OK   bamarni : COMMAND avant pre-install-cmd, ordre identique ($n ligne(s) [bamarni-bin] au no-op)"
+else
+  [ $ok = 1 ] && echo "FAIL bamarni : pas de ligne [bamarni-bin] chez Composer (cas mal construit)"; status=1
+fi
+
+# 6. Un paquet avec `funding` (ajouté au lock, recopié dans installed.json)
+# et un post-install-cmd qui écrit : le funding avant POST_INSTALL_CMD
+# (Installer::run), les scripts après les écouteurs des plugins.
+fund='(.packages[] | select(.name == "psr/log")) += {"funding": [{"type": "github", "url": "https://github.com/sponsors/x"}]}'
+for d in "$WORK/ref-funding" "$WORK/viv-funding"; do
+  stage "$d" '.scripts["post-install-cmd"] += ["echo post-install-cmd stdout", "echo post-install-cmd stderr >&2"]'
+  jq "$fund" "$SRC/composer.lock" > "$d/composer.lock"
+done
+ok=1
+merged_pair funding install "$WORK/ref-funding" "$WORK/viv-funding" install -- install --run-scripts --no-fallback || ok=0
+[ $ok = 1 ] && { merged_pair funding no-op "$WORK/ref-funding" "$WORK/viv-funding" install -- install --run-scripts --no-fallback || ok=0; }
+if [ $ok = 1 ] && grep -q 'looking for funding' "$WORK/funding.no-op.vivacity.all"; then
+  echo "OK   funding : « Generating » avant pre-autoload-dump, funding avant post-install-cmd, ordre identique (install, no-op)"
+else
+  [ $ok = 1 ] && echo "FAIL funding : pas de ligne de funding (cas mal construit)"; status=1
+fi
+
 exit $status

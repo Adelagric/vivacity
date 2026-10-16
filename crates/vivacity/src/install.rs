@@ -40,10 +40,14 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
     let run = proceed!(merge_plugin(run)?);
-    // `Installer::run` (bamarni's `COMMAND` listener comes before it in
-    // Composer, see docs/plans/split-run-install.md).
+    // `InstallCommand::execute` dispatches `PluginEvents::COMMAND` before
+    // `Installer::run` (InstallCommand.php:111); `update`, `require` and
+    // `remove` dispatch theirs before their resolution.
+    if !args.after_update() {
+        bamarni_command_event(&run.project, &run.manifest, !args.no_plugins);
+    }
+    // `Installer::run`.
     let run = proceed!(pre_install_cmd(run)?);
-    command_listeners(&run);
     // `Installer::doInstall`.
     let verify_start = headline(&run);
     let verification = spawn_verification(&run)?;
@@ -216,7 +220,7 @@ fn platform_requirement_options(args: &InstallArgs) -> (bool, Vec<String>) {
     let mut list = args.ignore_platform_req.clone();
     if !all && env_flag("COMPOSER_IGNORE_PLATFORM_REQS") {
         all = true;
-        if !args.after_update {
+        if !args.after_update() {
             vivacity_core::say!(
                 "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
             );
@@ -225,7 +229,7 @@ fn platform_requirement_options(args: &InstallArgs) -> (bool, Vec<String>) {
     if !all && list.is_empty() {
         if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
             if !env.is_empty() {
-                if !args.after_update {
+                if !args.after_update() {
                     vivacity_core::say!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
                 }
                 list = env.split(',').map(str::to_owned).collect();
@@ -268,8 +272,9 @@ fn merge_plugin(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
 }
 
 /// `--run-scripts`: the declared events go to `composer run-script` at
-/// Composer's own points; `pre-install-cmd` fires before anything
-/// (before the headline and the lock validation, Installer::run).
+/// Composer's own points; `pre-install-cmd` fires first in
+/// `Installer::run` (after the command's `COMMAND` event, before the
+/// headline and the lock validation).
 fn pre_install_cmd(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
     let args = run.args;
     let runner = if args.run_scripts && !args.no_scripts {
@@ -292,14 +297,20 @@ fn pre_install_cmd(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
     Ok(Flow::Continue(Run { runner, ..run }))
 }
 
-/// bamarni/composer-bin-plugin's `COMMAND` listener (the plugin
-/// already installed: loaded from installed.json before the command).
-fn command_listeners(run: &Run<'_>) {
-    if vivacity_core::scope::active_plugins(&run.project, &run.manifest, !run.args.no_plugins)
+/// bamarni/composer-bin-plugin's `COMMAND` listener: its deprecation
+/// lines, when the plugin is already installed and allowed (loaded from
+/// installed.json before the command). Every command that dispatches the
+/// event calls this at the point where Composer's command does.
+pub(crate) fn bamarni_command_event(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    plugins_enabled: bool,
+) {
+    if vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
         .iter()
         .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
     {
-        if let Ok(cfg) = vivacity_core::bamarni_bin::config(run.manifest.get("extra")) {
+        if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
             vivacity_core::bamarni_bin::print_deprecations(&cfg);
         }
     }
@@ -325,7 +336,7 @@ fn headline(run: &Run<'_>) -> std::time::Instant {
     // solve runs on the verification thread, alongside the local
     // repository's transaction.
     let verify_start = std::time::Instant::now();
-    if !run.args.after_update {
+    if !run.args.after_update() {
         vivacity_core::say!("Verifying lock file contents can be installed on current platform.");
         // Lock freshness: same behaviour as Composer, a warning.
         if let (Ok(actual), Some(expected)) = (
@@ -388,7 +399,7 @@ impl Drop for Verification {
 /// None after an update (`$alreadySolved`).
 fn spawn_verification(run: &Run<'_>) -> anyhow::Result<Option<Verification>> {
     let args = run.args;
-    if args.after_update {
+    if args.after_update() {
         return Ok(None);
     }
     let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -712,22 +723,36 @@ fn report_operations(tx: &LocalTransaction) {
 }
 
 /// A dry run stops after the operations: their lines in transaction order,
-/// then the abandoned packages and the funding count. Always 0.
+/// then (an update's suggestions and) the abandoned packages, and the
+/// funding count — no dump, and no `POST_*_CMD` (`runScripts` is off).
+/// Always 0.
 fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> i32 {
     for op in &tx.transaction.operations {
         if let Some(line) = op.show(&tx.arena, false) {
             vivacity_core::say!("  - {line}");
         }
     }
-    // `Installer::run` after `doInstall` (an update prints its own
-    // report after this phase).
-    if !run.args.after_update {
-        for line in abandoned_warnings(&run.lock_value) {
+    // `Installer::run` after `doInstall`.
+    report_before_dump(run);
+    print_funding(&run.project, &run.manifest);
+    0
+}
+
+/// `Installer::run` after `doInstall`/`doUpdate`, before the dump
+/// (Installer.php:343-373): an update's suggestions and the abandoned
+/// packages of its new lock, precomputed by the update, which knows the
+/// operations; for an install, the abandoned packages of the lock (dev
+/// included).
+fn report_before_dump(run: &Run<'_>) {
+    let say_all = |lines: &[String]| {
+        for line in lines {
             vivacity_core::say!("{line}");
         }
-        print_funding(&run.project, &run.manifest);
+    };
+    match &run.args.post_update {
+        Some(report) => say_all(&report.lines),
+        None => say_all(&abandoned_warnings(&run.lock_value)),
     }
-    0
 }
 
 /// Out of scope: Composer as fallback (default) or fail explicitly. In
@@ -773,8 +798,9 @@ struct Installed {
 }
 
 /// The operations: their lines decided on the state before the
-/// transaction, the transaction itself, then the lines; then, as
-/// `Installer::run` prints them before the dump, the abandoned packages.
+/// transaction, the transaction itself, then the lines (codeception/c3's
+/// `uninstall` before its own); then, as `Installer::run` prints them
+/// before the dump, an update's suggestions and the abandoned packages.
 fn execute_operations(
     run: &Run<'_>,
     tx: &LocalTransaction,
@@ -849,31 +875,40 @@ fn execute_operations(
     for line in &downloading {
         vivacity_core::say!("{line}");
     }
+    // codeception/c3's `uninstall` when this transaction removes the plugin:
+    // `PluginInstaller::uninstall` calls it before `LibraryInstaller`
+    // removes the code and prints the operation's line.
+    let c3_leaves = tx.transaction.operations.iter().any(|op| {
+        matches!(*op, vivacity_resolver::transaction::Operation::Uninstall(p)
+            if tx.arena[p].name == vivacity_core::c3_plugin::PLUGIN_NAME)
+    });
+    let c3_line = format!("  - Removing {} (", vivacity_core::c3_plugin::PLUGIN_NAME);
+    let mut c3_uninstalled = false;
     for line in &operation_lines {
+        if c3_leaves && !c3_uninstalled && line.starts_with(&c3_line) {
+            emulate_c3_uninstall(&run.project, &run.manifest, !args.no_plugins)?;
+            c3_uninstalled = true;
+        }
         vivacity_core::say!("{line}");
+    }
+    if c3_leaves && !c3_uninstalled {
+        emulate_c3_uninstall(&run.project, &run.manifest, !args.no_plugins)?;
     }
     // `BinaryInstaller` notices belong to the operations, before the dump.
     for m in &report.messages {
         vivacity_core::say!("{m}");
     }
-    // `Installer::run`: the abandoned packages of the lock (dev included)
-    // before the dump, the funding count after it; an install driven by
-    // `update` reports through it.
-    if !args.after_update {
-        for line in abandoned_warnings(&run.lock_value) {
-            vivacity_core::say!("{line}");
-        }
-    }
+    report_before_dump(run);
     Ok(Flow::Continue(Installed {
         report,
         _runtime: runtime,
     }))
 }
 
-/// `Installer::run`'s dump, after `doInstall`: pre-autoload-dump, the autoloader (the
-/// plan made during the network wait, or made now), the emulated
-/// post-autoload-dump plugins, post-autoload-dump. Returns the closing
-/// line's autoloader note.
+/// `Installer::run`'s dump, after `doInstall`: the "Generating autoload
+/// files" line, pre-autoload-dump, the autoloader (the plan made during the
+/// network wait, or made now), the emulated post-autoload-dump plugins,
+/// post-autoload-dump. Returns the closing line's autoloader note.
 fn dump_autoloader(
     run: &Run<'_>,
     tx: &LocalTransaction,
@@ -882,16 +917,11 @@ fn dump_autoloader(
     early_dump: Option<anyhow::Result<PlannedDump>>,
 ) -> anyhow::Result<Flow<String>> {
     let args = run.args;
-    if let Some(r) = &run.runner {
-        let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
-        if code != 0 {
-            return Ok(Flow::Break(code));
-        }
-    }
-    // `Installer::doInstall`: "optimized" as soon as the effective
-    // optimize flag is on — the option, `config.optimize-autoloader`,
-    // or class-map authoritative (which implies it), the same
-    // computation `dump_autoload_plan` makes.
+    // `Installer::run` (Installer.php:377-381), before
+    // `AutoloadGenerator::dump` dispatches PRE_AUTOLOAD_DUMP: "optimized"
+    // as soon as the effective optimize flag is on — the option,
+    // `config.optimize-autoloader`, or class-map authoritative (which
+    // implies it), the same computation `dump_autoload_plan` makes.
     vivacity_core::say!(
         "Generating{} autoload files",
         if effective_optimize(
@@ -904,6 +934,12 @@ fn dump_autoloader(
             ""
         }
     );
+    if let Some(r) = &run.runner {
+        let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
+        if code != 0 {
+            return Ok(Flow::Break(code));
+        }
+    }
     // `AutoloadGenerator::dump($localRepo)`: the local repository, not
     // the lock (they differ for an unchanged package whose lock entry
     // moved).
@@ -999,18 +1035,6 @@ fn post_autoload_dump_plugins(
         &touched,
         !args.no_plugins,
     )?;
-    // codeception/c3: its `uninstall` when the plugin leaves the
-    // vendor (during the transaction), its `POST_INSTALL_CMD` /
-    // `POST_UPDATE_CMD` copy afterwards.
-    emulate_c3(
-        &run.project,
-        local,
-        &run.manifest,
-        run.with_dev,
-        previous.contains(&vivacity_core::c3_plugin::PLUGIN_NAME),
-        args.after_update,
-        !args.no_plugins,
-    )?;
     emulate_bamarni_bin(local, &run.manifest, run.with_dev, !args.no_plugins);
     emulate_package_versions(
         &run.project,
@@ -1022,19 +1046,26 @@ fn post_autoload_dump_plugins(
     Ok(())
 }
 
-/// What runs after the transaction and the dump: the post-install-cmd
-/// listeners vivacity emulates (dealerdirect, the extension-installers),
-/// the funding count, Flex's listener, then post-install-cmd.
+/// The end of `Installer::run` (Installer.php:412-442): the funding count,
+/// then `POST_INSTALL_CMD` / `POST_UPDATE_CMD` — the plugins' listeners
+/// first (all at priority 0), then the scripts of composer.json, which
+/// `EventDispatcher::getListeners` appends after the plugins' priority-0
+/// listeners. Composer orders the plugins by activation
+/// (`PackageSorter::sortPackages`, a plugin installed by the command last);
+/// vivacity runs its emulations in a fixed order — dealerdirect, the
+/// extension-installers, codeception/c3, symfony/flex — of which only c3
+/// and Flex print (docs/plans/install-order.md). Runs without the dump too
+/// (`--no-autoloader`), as in Composer.
 fn post_install(
     run: &Run<'_>,
     layout: &vivacity_core::layout::Layout,
     report: &vivacity_core::installer::InstallReport,
 ) -> anyhow::Result<Flow> {
     let args = run.args;
-    // `dealerdirect/phpcodesniffer-composer-installer` listens to
-    // post-install-cmd: after the transaction and the dump, plugins on.
+    print_funding(&run.project, &run.manifest);
+    let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     if !args.no_plugins {
-        let local = report.local_repository.as_ref().unwrap_or(&run.lock);
+        // `dealerdirect/phpcodesniffer-composer-installer`.
         let installed: Vec<&vivacity_core::lock::LockPackage> =
             local.wanted_packages(run.with_dev).collect();
         let allowed = matches!(
@@ -1065,11 +1096,22 @@ fn post_install(
         )?;
         extension_installers::rector(layout, local, &run.manifest, run.with_dev, !args.no_plugins)?;
     }
-    if !args.after_update {
-        print_funding(&run.project, &run.manifest);
-        // symfony/flex's `POST_INSTALL_CMD` listener (after an update it is
-        // `POST_UPDATE_CMD` that fires, handled by the update path).
-        emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?;
+    emulate_c3(
+        &run.project,
+        local,
+        &run.manifest,
+        run.with_dev,
+        args.after_update(),
+        !args.no_plugins,
+    )?;
+    // symfony/flex: `install` on `POST_INSTALL_CMD`, `update` on
+    // `POST_UPDATE_CMD` (decided by the update, which saw the operations).
+    match &args.post_update {
+        None => emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?,
+        Some(update) if update.flex_active => {
+            print_flex_post_update(&update.manifest, update.thanks_reminder);
+        }
+        Some(_) => {}
     }
     if let Some(r) = &run.runner {
         let code = r.run(scripts::POST_INSTALL_CMD)?;
@@ -1199,16 +1241,35 @@ pub(crate) fn emulate_yii2_composer(
     Ok(())
 }
 
-/// `codeception/c3`, emulated: with plugins on, `c3.php` copied to the
-/// project root after the install (`copyC3V2`; `askForUpdateV2` after an
-/// update: no "up-to-date" line), or deleted when the plugin was
-/// uninstalled by this run. Messages on stdout, as `$io->write` prints.
+/// `codeception/c3`'s `uninstall`, emulated (the transaction removes the
+/// plugin): with plugins on and the plugin allowed, `c3.php` deleted from
+/// the project root. Message on stdout, as `$io->write` prints.
+pub(crate) fn emulate_c3_uninstall(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::c3_plugin as c3;
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, c3::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if plugins_enabled && allowed && c3::delete_c3(project)? {
+        vivacity_core::out!("[codeception/c3] Deleting c3.php from the root of your project...");
+    }
+    Ok(())
+}
+
+/// `codeception/c3`'s `POST_INSTALL_CMD` / `POST_UPDATE_CMD` listener,
+/// emulated: with plugins on and the plugin installed and allowed, `c3.php`
+/// copied to the project root (`copyC3V2`; `askForUpdateV2` after an
+/// update: no "up-to-date" line). Messages on stdout, as `$io->write`
+/// prints.
 pub(crate) fn emulate_c3(
     project: &std::path::Path,
     local: &vivacity_core::lock::Lock,
     manifest: &serde_json::Value,
     with_dev: bool,
-    previously_present: bool,
     after_update: bool,
     plugins_enabled: bool,
 ) -> anyhow::Result<()> {
@@ -1223,15 +1284,7 @@ pub(crate) fn emulate_c3(
     let wanted = local
         .wanted_packages(with_dev)
         .any(|p| p.name() == c3::PLUGIN_NAME);
-    if !wanted {
-        if previously_present && allowed && c3::delete_c3(project)? {
-            vivacity_core::out!(
-                "[codeception/c3] Deleting c3.php from the root of your project..."
-            );
-        }
-        return Ok(());
-    }
-    if !allowed {
+    if !wanted || !allowed {
         return Ok(());
     }
     let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
@@ -1628,17 +1681,13 @@ pub(crate) fn installed_packages(
 }
 
 /// `Installer::run`: the funding count of the local repository's packages
-/// (never an alias), unless `COMPOSER_FUND` is a number equal to 0. Printed
+/// (never an alias), unless `COMPOSER_FUND` is a number whose `intval` is 0
+/// ([`funding_shown`]). Printed
 /// in every mode, dry run included (`$localRepo` is then the mocked
 /// repository of the same packages).
 pub(crate) fn print_funding(project: &std::path::Path, manifest: &serde_json::Value) {
-    if let Ok(env) = std::env::var("COMPOSER_FUND") {
-        let t = env.trim();
-        if let Ok(n) = t.parse::<f64>() {
-            if n == 0.0 {
-                return;
-            }
-        }
+    if !funding_shown(std::env::var("COMPOSER_FUND").ok().as_deref()) {
+        return;
     }
     let funding = installed_packages(project, manifest)
         .iter()
@@ -1654,6 +1703,24 @@ pub(crate) fn print_funding(project: &std::path::Path, manifest: &serde_json::Va
             if funding == 1 { "" } else { "s" },
             if funding == 1 { "is" } else { "are" }
         );
+    }
+}
+
+/// `is_numeric($fundEnv)` then `intval($fundEnv) !== 0`: a numeric
+/// `COMPOSER_FUND` that truncates to 0 (`0`, `0.5`, `-0.9`) hides the line,
+/// and so does one that overflows to infinity (`intval(INF)` is 0). `inf`
+/// and `nan` are not numeric to PHP, whatever Rust parses.
+fn funding_shown(env: Option<&str>) -> bool {
+    let Some(t) = env.map(str::trim) else {
+        return true;
+    };
+    let lower = t.to_ascii_lowercase();
+    if lower.contains("inf") || lower.contains("nan") {
+        return true;
+    }
+    match t.parse::<f64>() {
+        Ok(n) => n.is_finite() && n.trunc() != 0.0,
+        Err(_) => true,
     }
 }
 
@@ -1694,6 +1761,26 @@ pub(crate) fn abandoned_warnings(lock: &serde_json::Value) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod funding_tests {
+    use super::funding_shown;
+
+    #[test]
+    fn funding_hidden_by_a_numeric_fund_that_truncates_to_zero() {
+        assert!(funding_shown(None));
+        assert!(funding_shown(Some("")));
+        assert!(funding_shown(Some("no")));
+        assert!(funding_shown(Some("1")));
+        assert!(funding_shown(Some(" 2.5 ")));
+        assert!(!funding_shown(Some("0")));
+        assert!(!funding_shown(Some("0.5")));
+        assert!(!funding_shown(Some("-0.9")));
+        assert!(!funding_shown(Some("1e400")));
+        assert!(funding_shown(Some("inf")));
+        assert!(funding_shown(Some("NaN")));
+    }
 }
 
 #[cfg(test)]

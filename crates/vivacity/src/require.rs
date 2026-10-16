@@ -615,6 +615,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     };
     let names: Vec<String> = requirements.iter().map(|(n, _)| n.clone()).collect();
     vivacity_core::say!("Running composer update {}{flags}", names.join(" "));
+    // `PluginEvents::COMMAND`, right after that line (RequireCommand.php:461).
+    crate::bamarni_command_event(&project, &manifest, !args.no_plugins);
     // `Locker::isLocked`: a readable lock with a non-null `packages` key;
     // an unreadable lock is a ParsingException in `doUpdate`, hence restore
     // and error.
@@ -703,6 +705,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         prefer_source: args.prefer_source,
         prefer_dist: args.prefer_dist,
         prefer_install: args.prefer_install.clone(),
+        command_dispatched: true,
     };
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
     let prefer_lowest = args.prefer_lowest || env_flag("COMPOSER_PREFER_LOWEST");
@@ -735,7 +738,6 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `$status = $install->run(); if ($status !== 0) revertComposerFile()`:
     // a failing install phase restores the files too (an EXCEPTION after
     // the resolution would not, `dependencyResolutionCompleted`).
-    let mut handed_over = false;
     if !args.no_install {
         let virtual_lock = if args.dry_run {
             resolved.lock.clone()
@@ -747,18 +749,24 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         } else {
             None
         };
-        let phase = install_after_update(&update_args, virtual_lock, virtual_manifest)?;
-        if phase.status != 0 {
+        let status = install_after_update(
+            &update_args,
+            resolved.report(),
+            virtual_lock,
+            virtual_manifest,
+        )?;
+        if status != 0 {
             files.revert()?;
             if args.dry_run && newly_created {
                 let _ = std::fs::remove_file(&json);
             }
-            return Ok(phase.status);
+            return Ok(status);
         }
-        handed_over = phase.handed_over;
     }
-    // Composer's `install` printed the end of its own report.
-    if !handed_over {
+    // Without an install phase, the end of `Installer::run` is printed
+    // here; the install phase prints it itself (or Composer's `install`
+    // does, when it was handed over).
+    if args.no_install {
         crate::print_post_update(&resolved, &project);
     }
     let status = if !to_guess.is_empty() {
