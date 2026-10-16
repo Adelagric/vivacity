@@ -7,6 +7,13 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`require` finds a package of a `path` repository without a constraint.**
+  `require acme/beta` (no version) picks the constraint from the best
+  candidate of every repository of the manifest (`PackageDiscoveryTrait::getRepos`),
+  `path` ones included: Composer writes `Using version ^2.0 for acme/beta`.
+  vivacity only searched `composer` repositories and failed with `Could not
+  find a matching version of package acme/beta` (exit 1). Two
+  `harness/steps.sh` cases on the `path-repos` fixture.
 - **A lock without `packages-dev` stops where Composer stops.** In dev mode,
   `Installer::doInstall` asks the locker for the dev packages right after
   its headline and fails with Composer's message (exit 1, before

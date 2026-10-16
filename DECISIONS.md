@@ -3567,3 +3567,16 @@ Console, comme les refus de `RootPackageLoader` (même déviation, déjà
 assumée). Pas après un `update` : son lock a toujours la clé. Rouge sur
 db349c1 (`root-manifest.sh`, `lock-no-packages-dev`, `lock-null-packages-dev`).
 
+## 2026-10-16 — `require` sans contrainte lit aussi les dépôts `path`
+
+Contexte : relecture tardive de `root-version-warning.md` ; `install-defects.md`,
+point 8. `PackageDiscoveryTrait::getRepos` (l. 44-55) compose la plateforme
+et `RepositoryFactory::defaultReposWithDefaultManager` — tous les dépôts du
+manifeste — que `VersionSelector::findBestCandidate` interroge par
+`RepositorySet::findPackages`. `UpdateSession::find_packages_for_require` ne
+lisait que les dépôts `composer` : sur la fixture path-repos, `require
+acme/beta` sortait en 1 (« Could not find a matching version ») sur `main`
+comme sur db349c1 — défaut réel, pas une régression. Les dépôts `path` sont
+lus comme des `ArrayRepository` (`array_repository_load_packages`, déjà
+celui du `PoolBuilder`), dans l'ordre du jeu.
+

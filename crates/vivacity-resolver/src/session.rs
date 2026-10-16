@@ -1189,19 +1189,36 @@ impl UpdateSession {
             &self.arena,
         );
         found.extend(ids);
+        // `PackageDiscoveryTrait::getRepos`: the platform, then the
+        // manifest's repositories in order — `path` ones included, read as
+        // the array repositories they are.
         for (i, repo) in self.set.repositories.iter().enumerate() {
-            if let Repository::Composer(repo) = repo {
-                let (_, ids) = repo
-                    .load_packages(
+            match repo {
+                Repository::Composer(repo) => {
+                    let (_, ids) = repo
+                        .load_packages(
+                            &map,
+                            &acceptable,
+                            &flags,
+                            &already,
+                            Origin::Repository(i),
+                            &mut self.arena,
+                        )
+                        .map_err(SessionError::from)?;
+                    found.extend(ids);
+                }
+                Repository::Path(repo) => {
+                    let (_, ids) = crate::pool::array_repository_load_packages(
+                        &repo.members,
                         &map,
                         &acceptable,
                         &flags,
                         &already,
-                        Origin::Repository(i),
-                        &mut self.arena,
-                    )
-                    .map_err(SessionError::from)?;
-                found.extend(ids);
+                        &self.arena,
+                    );
+                    found.extend(ids);
+                }
+                Repository::Root(_) | Repository::Platform(_) | Repository::Locked(_) => {}
             }
         }
         Ok(found)

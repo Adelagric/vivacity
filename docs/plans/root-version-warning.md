@@ -481,7 +481,10 @@ ici après coup :
 - **Hors diff, non comparé à `main`** : `require acme/b` sans contrainte sur
   un dépôt `path` réussit chez Composer (« Using version ^1.0 ») et sort en
   1 chez vivacity (« Could not find a matching version of package acme/b »).
-  À comparer avec `main`, lot suivant.
+  À comparer avec `main`, lot suivant. **Traité le 2026-10-16**
+  (`install-defects.md`, point 8) : même échec sur `main`, défaut réel —
+  `find_packages_for_require` sautait les dépôts `path` ; deux cas
+  `steps.sh` (`path-repos|require acme/beta`, `--dev`).
 
 ## Résultat (2026-10-16)
 

@@ -372,6 +372,10 @@ STEPS=(
   "path-repos|require acme/gamma:dev-main"
   "path-repos|require acme/gamma:dev-main --dry-run"
   "path-repos|require acme/nope:^1"
+  # Sans contrainte : `findBestCandidate` interroge tous les dépôts du
+  # manifeste, `path` compris (« Using version ^2.0 for acme/beta »).
+  "path-repos|require acme/beta"
+  "path-repos|require acme/beta --dev"
   "path-repos|remove acme/alpha"
   "path-repos|remove acme/alpha --dry-run @dry-install"
   "path-repos|remove acme/zeta"
