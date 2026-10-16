@@ -7,6 +7,14 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **A lock without `packages-dev` stops where Composer stops.** In dev mode,
+  `Installer::doInstall` asks the locker for the dev packages right after
+  its headline and fails with Composer's message (exit 1, before
+  `Verifying lock file contents…`). vivacity got as far as building the
+  local transaction and failed after `Verifying…` with a
+  `composer.lock:` prefix. `harness/root-manifest.sh` gains `run_lock`:
+  the lines before Composer's error box, then the box, compared with
+  vivacity's stderr (key missing, key `null`).
 - **`COMPOSER_NO_DEV` is read as Composer reads it.** `BaseCommand::initialize`
   takes any value PHP's `(bool)` calls true (everything but `""` and `"0"`)
   as `--no-dev`; vivacity's `install` only took `1`, and `dump-autoload`

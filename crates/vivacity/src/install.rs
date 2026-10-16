@@ -57,7 +57,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `Installer::run`.
     let run = proceed!(pre_install_cmd(run)?);
     // `Installer::doInstall`.
-    let verify_start = headline(&run);
+    let verify_start = proceed!(headline(&run)?);
     let verification = spawn_verification(&run)?;
     let root = verification.as_ref().map(|v| root_package(&run, v));
     let tx = local_repository_transaction(&run, root.as_ref())?;
@@ -305,11 +305,12 @@ pub(crate) fn bamarni_command_event(
     }
 }
 
-/// `Installer::doInstall`: the headline, then the platform verification
-/// notice (the lock is solved against the platform when not coming
-/// straight from an update), then the freshness warning. Returns when the
-/// verification started, for the resolution line.
-fn headline(run: &Run<'_>) -> std::time::Instant {
+/// `Installer::doInstall`: the headline, the locked repository (which a lock
+/// without `packages-dev` refuses in dev mode), then the platform
+/// verification notice (the lock is solved against the platform when not
+/// coming straight from an update), then the freshness warning. Returns
+/// when the verification started, for the resolution line.
+fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
     let config_lock = config_lock_enabled(&run.manifest_text);
     if config_lock {
         vivacity_core::say!(
@@ -320,6 +321,22 @@ fn headline(run: &Run<'_>) -> std::time::Instant {
                 ""
             }
         );
+    }
+    // `$this->locker->getLockedRepository($this->devMode)` (Locker.php:157-165):
+    // `isset($lockData['packages-dev'])`, else a RuntimeException — exit 1,
+    // its message shown even under `-q`, before "Verifying…". Printed
+    // without Symfony Console's box, like `RootPackageLoader`'s refusals.
+    // An update's lock always has the key.
+    if run.with_dev
+        && !run.args.after_update()
+        && run
+            .lock_value
+            .get("packages-dev")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        let message = "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.";
+        vivacity_core::say_always!("{message}");
+        return Ok(Flow::Break(1));
     }
     // The resolution line `-v` shows measures from here to the join: the
     // solve runs on the verification thread, alongside the local
@@ -340,7 +357,7 @@ fn headline(run: &Run<'_>) -> std::time::Instant {
             }
         }
     }
-    verify_start
+    Ok(Flow::Continue(verify_start))
 }
 
 /// The lock verification running on its own thread, and the channel the

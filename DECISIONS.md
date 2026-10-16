@@ -3553,3 +3553,17 @@ fonction (`env_no_dev`, manifest.rs) pour les deux. Rouge sur db349c1 :
 `install --dry-run` avec `yes` (109 paquets contre 76) et `dump-autoload`
 avec `true` (`autoload_static.php` différent).
 
+## 2026-10-16 — Un lock sans `packages-dev` refusé après l'en-tête
+
+Contexte : `install-verify.md`, défaut 7 ; `install-defects.md`, point 5.
+`Installer::doInstall` (Installer.php:753-757) écrit l'en-tête puis appelle
+`Locker::getLockedRepository($this->devMode)`, qui lève une
+`RuntimeException` quand `isset($lockData['packages-dev'])` est faux
+(Locker.php:157-165) : code 1, message même sous `-q`, avant « Verifying… ».
+vivacity le découvrait en construisant la transaction locale, après
+« Verifying… », sous `Error: composer.lock: …`. Le test est dans `headline`,
+juste après l'en-tête ; le message est imprimé sans l'encadré de Symfony
+Console, comme les refus de `RootPackageLoader` (même déviation, déjà
+assumée). Pas après un `update` : son lock a toujours la clé. Rouge sur
+db349c1 (`root-manifest.sh`, `lock-no-packages-dev`, `lock-null-packages-dev`).
+

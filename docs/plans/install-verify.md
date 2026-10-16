@@ -399,7 +399,9 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    de liste ; le fallback du même plugin peut tourner pendant l'attente réseau
    du fil (deux processus sur le cache de dépôt).
 7. Un lock sans `packages-dev` en mode dev échoue après « Verifying… », avec le
-   préfixe `composer.lock:` (Composer : juste après l'en-tête, son texte).
+   préfixe `composer.lock:` (Composer : juste après l'en-tête, son texte) —
+   **corrigé le 2026-10-16** (`install-defects.md`, point 5 ; cas
+   `run_lock` de `root-manifest.sh`).
 8. Le `PoolBuilder` de vivacity n'a pas les `ignoredTypes` par défaut
    d'`Installer` (`php-ext`, `php-ext-zend`) : sans effet sur `install` (tout
    est fixé), pas sur `update`.

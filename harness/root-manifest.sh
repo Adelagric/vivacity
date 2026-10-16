@@ -71,6 +71,53 @@ run() { # nom, expression jq, commande...
   echo "OK   $name : code $rc, message identique, rien d'écrit des deux côtés"
 }
 
+# Les lignes que Composer écrit avant l'encadré, puis l'encadré : ce que
+# vivacity doit écrire, dans cet ordre.
+lines_then_box() {
+  sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/q;p' "$1" | grep -v '^$'
+  box_text "$1"
+}
+
+# run_lock <nom> <expression jq sur composer.lock> <commande...> : une
+# exception levée après des lignes ordinaires (`Locker::getLockedRepository`
+# après l'en-tête d'`install`), même code, mêmes lignes, même message.
+run_lock() {
+  local name="$1" expr="$2"; shift 2
+  local d="$WORK/$name"
+  for side in ref viv; do
+    rm -rf "$d-$side"; cp -R "$WORK/base" "$d-$side"
+    jq --indent 4 "$expr" "$d-$side/composer.lock" > "$d-$side/l.tmp" && mv "$d-$side/l.tmp" "$d-$side/composer.lock"
+  done
+  local rc=0 vc=0
+  touch "$WORK/$name.marker"
+  (cd "$d-ref" && COLUMNS=400 COMPOSER_NO_INTERACTION=1 composer "$@" --no-ansi >/dev/null 2>"$WORK/$name.composer.err") || rc=$?
+  (cd "$d-viv" && "$VIVACITY" "$@" >/dev/null 2>"$WORK/$name.vivacity.err") || vc=$?
+  if [ "$rc" != "$vc" ]; then
+    echo "FAIL $name : codes $rc vs $vc"; head -4 "$WORK/$name.vivacity.err"; status=1; return
+  fi
+  if ! grep -q '^In [A-Za-z0-9_]*\.php line [0-9]*:$' "$WORK/$name.composer.err"; then
+    echo "FAIL $name : pas d'encadré dans la sortie de Composer (cas mal choisi)"; status=1; return
+  fi
+  lines_then_box "$WORK/$name.composer.err" > "$WORK/$name.composer.msg"
+  grep -v '^$' "$WORK/$name.vivacity.err" > "$WORK/$name.vivacity.msg"
+  if ! diff -q "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" >/dev/null; then
+    echo "FAIL $name : sortie différente"; diff "$WORK/$name.composer.msg" "$WORK/$name.vivacity.msg" | head -6; status=1; return
+  fi
+  local written
+  for side in ref viv; do
+    written=$(cd "$d-$side" && find . -newer "$WORK/$name.marker" ! -name . | head -5)
+    if [ -n "$written" ]; then
+      echo "FAIL $name : $side a écrit malgré le refus : $(echo "$written" | tr '\n' ' ')"; status=1; return
+    fi
+  done
+  echo "OK   $name : code $rc, lignes et message identiques, rien d'écrit des deux côtés"
+}
+
+# Un lock sans `packages-dev` en mode dev : `Installer::doInstall` écrit son
+# en-tête, puis `Locker::getLockedRepository(true)` lève (avant « Verifying… »).
+run_lock lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts
+run_lock lock-null-packages-dev '.["packages-dev"]=null' install --dry-run --no-plugins --no-scripts
+
 for cmd_label in "dump-autoload:dump-autoload" "install:install" "update:update --no-install" \
                  "remove:remove psr/log" "require:require psr/log"; do
   label="${cmd_label%%:*}"; cmdline="${cmd_label#*:}"
