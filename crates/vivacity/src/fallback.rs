@@ -420,13 +420,14 @@ pub(crate) fn active_plugin(project: &std::path::Path, plugins_enabled: bool) ->
     names.into_iter().next()
 }
 
-/// The whole command handed to Composer because of its verbosity, before
-/// anything is read or written: `tokens` is the command line after the
-/// program name, forwarded through [`forwarded_arguments`] and
-/// [`hand_over`]. `--no-fallback` stops with exit 3 instead.
+/// The whole command handed to Composer before anything is read or written
+/// — its verbosity, or a root version only Composer can guess: `tokens` is
+/// the command line after the program name, forwarded through
+/// [`forwarded_arguments`] and [`hand_over`]. `--no-fallback` stops with
+/// exit 3 instead (and `--check-scope`, for the reasons it reports).
 pub(crate) fn delegate_for_verbosity(tokens: &[std::ffi::OsString], reason: &str) -> i32 {
     let command = command_of(tokens);
-    if has_option(tokens, "--no-fallback") {
+    if has_option(tokens, "--no-fallback") || has_option(tokens, "--check-scope") {
         vivacity_core::say_always!(
             "vivacity: `{command}` with {reason} is outside what vivacity reproduces."
         );

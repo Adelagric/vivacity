@@ -25,6 +25,9 @@ pub struct RepoError(pub String, pub RepoErrorKind);
 pub enum RepoErrorKind {
     Transport,
     Data,
+    /// Something Composer reads that vivacity does not (a `path` package
+    /// versioned by hg, fossil or svn): the command goes to Composer.
+    Unsupported,
 }
 
 impl RepoError {
@@ -33,6 +36,9 @@ impl RepoError {
     }
     pub fn transport(message: impl Into<String>) -> RepoError {
         RepoError(message.into(), RepoErrorKind::Transport)
+    }
+    pub fn unsupported(message: impl Into<String>) -> RepoError {
+        RepoError(message.into(), RepoErrorKind::Unsupported)
     }
     pub fn is_transport(&self) -> bool {
         self.1 == RepoErrorKind::Transport

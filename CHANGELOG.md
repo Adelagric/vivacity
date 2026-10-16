@@ -7,6 +7,18 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **Roots and path packages versioned by Mercurial, Fossil or Subversion go
+  to Composer.** When git gives no version, `VersionGuesser` runs `hg
+  branch`, `fossil branch list`/`tag list` and `svn info --xml`; vivacity
+  reads git only, so in such a working copy it fell back to
+  `1.0.0+no-version-set` (and printed the root-version warning) where
+  Composer guessed `dev-default`. When a working copy of one of them is
+  found above the project and its command answers, the whole command is now
+  handed to Composer before anything is read (exit 3 under
+  `--no-fallback`/`--check-scope`), as is a resolution reaching an
+  unversioned `path` package in one. No working copy: a few `stat` calls,
+  no process; the tool missing or failing: native, as Composer then falls
+  back too. `harness/fallback-args.sh` gains eight cases with a fake `hg`.
 - **`config.lock: false`, and `install` without a lock.** With the lock
   disabled, Composer's locker reads `/dev/null`: every command warns
   `./composer.lock is present but ignored as the "lock" config option is

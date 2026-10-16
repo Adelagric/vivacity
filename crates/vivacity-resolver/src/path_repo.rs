@@ -222,6 +222,14 @@ pub fn open(
                     package.insert("version".into(), Value::String(g.pretty_version));
                 }
                 _ => {
+                    // `VersionGuesser::guessVersion` goes on with hg, fossil
+                    // and svn, which vivacity does not read.
+                    if let Some(vcs) = root_version::foreign_vcs_version(&dir) {
+                        return Err(RepoError::unsupported(format!(
+                            "the version of the path package in {} comes from {vcs}, which vivacity does not read",
+                            dir.display()
+                        )));
+                    }
                     package.insert("version".into(), Value::String("dev-main".into()));
                 }
             }

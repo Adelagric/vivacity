@@ -463,6 +463,10 @@ ici après coup :
   prenait déjà `1.0.0+no-version-set` (HANDOVER, « Version du root
   package »). L'écart devient visible sur stderr. Suite possible : rendre la
   main quand un `.hg`, `.svn` ou `_FOSSIL_` est trouvé en remontant.
+  **Traité le 2026-10-16** (`install-defects.md`, point 9) : copie de
+  travail trouvée et commande de Composer qui répond → la commande va à
+  Composer avant toute lecture (racine de tout type, paquets `path` à la
+  résolution) ; outil absent ou en échec → natif, comme Composer.
 - **Schéma LAX** (mineur) : `Factory` valide le manifeste avant
   `RootPackageLoader::load` ; un manifeste refusé (`type: "Project"`) n'a
   pas de ligne chez Composer, vivacity l'écrit puis refuse. Déjà dans les

@@ -540,6 +540,15 @@ pub(crate) fn resolve_and_lock(
             };
             return Ok(Resolved::stopped(code));
         }
+        // A repository vivacity cannot read as Composer does (a `path`
+        // package versioned by hg, fossil or svn): the command goes to
+        // Composer, before anything is written.
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            return Ok(Resolved {
+                hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(e.message)),
+                ..Resolved::stopped(0)
+            });
+        }
         Err(e) => return Err(session_error(e)),
     };
     trace("prepare", t0);

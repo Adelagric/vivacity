@@ -4,7 +4,8 @@
 //! else `COMPOSER_ROOT_VERSION`, else git (current branch; detached HEAD ->
 //! `dev-<sha>` then exact tag; feature branch -> closest parent branch by
 //! `git rev-list`), else `1.0.0+no-version-set`.
-//! hg/fossil/svn are not ported (fallback to the default, as without a VCS).
+//! hg/fossil/svn are not ported: where one of them would give Composer a
+//! version ([`foreign_vcs_version`]), the command goes to Composer.
 //!
 //! `guess_version` is the `VersionGuesser::guessVersion` used for the root
 //! and for the packages of a `path` repository: git is run in the directory
@@ -391,6 +392,68 @@ fn strnatcasecmp(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
     (ab.len() - i).cmp(&(bb.len() - j))
+}
+
+/// `VersionGuesser::guessVersion` after git (VersionGuesser.php:84-104):
+/// `hg branch`, then `fossil branch list` / `fossil tag list`, then `svn info
+/// --xml`, each run in `dir` — a zero exit gives Composer a version (always
+/// for hg; for fossil and svn, nearly always). vivacity reads none of them:
+/// `Some(what)` when one of them would answer, so that the caller hands the
+/// command to Composer; `None` otherwise — and then without running anything
+/// unless a working copy is found walking up from `dir` (`.hg`, `_FOSSIL_` /
+/// `.fslckout`, `.svn`), where each tool looks for it. A missing binary
+/// fails as it does for Composer, which then defaults like vivacity.
+/// Called only once git has given no version.
+pub fn foreign_vcs_version(dir: &Path) -> Option<&'static str> {
+    let mut hg = false;
+    let mut fossil = false;
+    let mut svn = false;
+    for d in dir.ancestors() {
+        hg |= d.join(".hg").is_dir();
+        fossil |= d.join("_FOSSIL_").is_file() || d.join(".fslckout").is_file();
+        svn |= d.join(".svn").is_dir();
+    }
+    let answers = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if hg && answers("hg", &["branch"]) {
+        return Some("Mercurial (`hg branch`)");
+    }
+    if fossil && (answers("fossil", &["branch", "list"]) || answers("fossil", &["tag", "list"])) {
+        return Some("Fossil (`fossil branch list`)");
+    }
+    if svn && answers("svn", &["info", "--xml"]) {
+        return Some("Subversion (`svn info --xml`)");
+    }
+    None
+}
+
+/// `RootPackageLoader::load` guesses the root's version — no `version` in
+/// composer.json, no `COMPOSER_ROOT_VERSION` — and git gives none, but
+/// hg, fossil or svn would ([`foreign_vcs_version`]): the reason to hand the
+/// command to Composer. Free when no working copy of those is found above
+/// the project: git runs only when one is.
+pub fn root_version_from_foreign_vcs(manifest: &Value, project: &Path) -> Option<&'static str> {
+    if manifest.get("version").is_some_and(|v| !v.is_null()) || root_version_from_env().is_some() {
+        return None;
+    }
+    let marked = project.ancestors().any(|d| {
+        d.join(".hg").is_dir()
+            || d.join(".svn").is_dir()
+            || d.join("_FOSSIL_").is_file()
+            || d.join(".fslckout").is_file()
+    });
+    if !marked || version_guessable(project) {
+        return None;
+    }
+    foreign_vcs_version(project)
 }
 
 /// `VersionGuesser::getRootVersionFromEnv`: `COMPOSER_ROOT_VERSION` when

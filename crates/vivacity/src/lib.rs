@@ -577,6 +577,17 @@ where
             }
         }
     }
+    // `RootPackageLoader::load` guesses the root's version with git, then
+    // hg, fossil and svn (`VersionGuesser::guessVersion`); vivacity reads git
+    // only. Where one of the others would answer, the command is Composer's,
+    // whole, before anything is read or written — at every level, for every
+    // type of root (the version reaches installed.php). No working copy of
+    // them above the project (the common case): a few `stat`s, no process.
+    if let Ok(project) = project_dir(cli.working_dir()) {
+        if let Some(vcs) = foreign_vcs_root(&project) {
+            return delegate_for_verbosity(tail, &format!("a root version from {vcs}"));
+        }
+    }
     match dispatch(cli) {
         Ok(code) => {
             // A command that wrote nothing else still writes the line it held
@@ -597,6 +608,18 @@ where
             exit_code_of(&e)
         }
     }
+}
+
+/// [`vivacity_core::root_version::root_version_from_foreign_vcs`] on the
+/// project's composer.json, when there is one vivacity would read (no
+/// `COMPOSER=` alternate, valid JSON).
+fn foreign_vcs_root(project: &std::path::Path) -> Option<&'static str> {
+    if refuse_alternate_manifest().is_err() {
+        return None;
+    }
+    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    vivacity_core::root_version::root_version_from_foreign_vcs(&manifest, project)
 }
 
 /// A session error on its way to the CLI: a transport failure keeps its nature

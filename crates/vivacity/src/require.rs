@@ -454,6 +454,17 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     );
     let mut session = match session {
         Ok(s) => s,
+        // A repository vivacity cannot read as Composer does: the command
+        // goes to Composer, nothing edited yet.
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            if newly_created {
+                let _ = std::fs::remove_file(&json);
+            }
+            return crate::delegate_resolution(
+                &[vivacity_core::scope::ScopeIssue::Layout(e.message)],
+                args.no_fallback,
+            );
+        }
         Err(e) => {
             if newly_created {
                 files.revert()?;

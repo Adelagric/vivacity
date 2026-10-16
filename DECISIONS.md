@@ -3728,3 +3728,38 @@ dépôt local) et, sans `vendor/autoload.php`, tire son suffixe du lock ; une
 délégation tardive de la phase d'installation rend un `composer install`
 qui, lock désactivé, résout à nouveau.
 
+## 2026-10-16 — hg, fossil et svn : rendre la main là où Composer devinerait
+
+Contexte : relecture tardive de `root-version-warning.md` ; `install-defects.md`,
+point 9 et la méta-analyse (majeur : la décision doit vivre à côté de la
+détection de version, pas de l'avertissement). `VersionGuesser::guessVersion`
+(VersionGuesser.php:84-104) essaie après git `hg branch` (l. 239),
+`fossil branch list` puis `fossil tag list` (l. 377, 384), `svn info --xml`
+(l. 405), dans le répertoire du projet ; un code 0 donne une version. Binaire
+absent : `ProcessExecutor` rend un code non nul, la version reste nulle.
+Mesuré : laravel rendu bibliothèque hors git, un `.hg`, un faux `hg` qui
+répond `default` — Composer exécute `hg branch`, `hg branches`, `hg bookmarks`
+et se tait ; vivacity avertissait et prenait `1.0.0+no-version-set`. Sans
+`hg` : les deux avertissent.
+
+Décision : porter hg, fossil et svn serait porter trois pilotes ; la
+version vient de Composer. `root_version::foreign_vcs_version` : une copie
+de travail cherchée en remontant (`.hg`, `_FOSSIL_`/`.fslckout`, `.svn`, là
+où chaque outil la cherche), puis la commande de Composer, sortie jetée ; un
+code 0 → la raison. `root_version_from_foreign_vcs` (racine sans `version`
+ni `COMPOSER_ROOT_VERSION`, git sans version) est appelée par `run`, avant
+`dispatch`, pour les cinq commandes, tout type de racine (la version atteint
+installed.php) et tout niveau (l'avertissement n'est pas la question) : la
+délégation précoce de `-vv` (`delegate_for_verbosity`, qui sort aussi en 3
+sous `--check-scope`). Les paquets `path` sans version (`path_repo.rs`,
+même devinette) : `RepoErrorKind::Unsupported` → `SessionErrorKind::Unsupported`
+→ `Resolved::hand_over` (avant toute ligne d'`update`, édition défaite pour
+`require`/`remove`) ou `delegate_resolution` pour la session de choix de
+version de `require`. Coût hors de ces cas : quelques `stat` par ancêtre,
+aucun processus.
+
+Rouge sur db349c1 : `fallback-args.sh` section h (`h-hg-library`,
+`h-hg-no-fallback`, `h-hg-project`, `h-hg-path`) ; témoins verts des deux
+côtés : `h-hg-fails` (faux `hg` en échec), `h-hg-env`
+(`COMPOSER_ROOT_VERSION`), `h-hg-path-fails` (`dev-main`).
+

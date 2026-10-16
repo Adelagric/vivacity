@@ -56,6 +56,10 @@ pub enum SessionErrorKind {
     /// Composer would carry this as a `TransportException`, whose code it
     /// rewrites to 100 (`Application.php:502-506`, `Installer.php:92`).
     Transport,
+    /// What vivacity does not reproduce (a `path` package versioned by hg,
+    /// fossil or svn): the message is the reason, and the command goes to
+    /// Composer.
+    Unsupported,
     /// The command prints the message itself and returns a code, with no
     /// `Error:` prefix and nothing written: `UpdateCommand`'s temporary
     /// constraint refusal (1), `Installer::run`'s partial update without a
@@ -134,14 +138,13 @@ impl From<crate::pool_filters::FilterError> for SessionError {
 /// something does not exit like a failure to understand it.
 impl From<crate::repository::RepoError> for SessionError {
     fn from(e: crate::repository::RepoError) -> SessionError {
-        let transport = e.is_transport();
         SessionError {
-            message: e.0,
-            kind: if transport {
-                SessionErrorKind::Transport
-            } else {
-                SessionErrorKind::Other
+            kind: match e.1 {
+                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
+                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
+                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
             },
+            message: e.0,
             stdout: None,
             parts: Vec::new(),
             annotation: None,

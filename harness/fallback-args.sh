@@ -374,6 +374,52 @@ expect_rootwarn g-run-scripts 1
 if [ "$(grep -e '^Composer could not detect' -e '^marker: run-script$' "$WORK/g-run-scripts.err" | awk '{printf "%s ", $1}')" != "Composer marker: " ]; then
   fail "g-run-scripts : la ligne de version ne précède pas la sortie du script"; cat "$WORK/g-run-scripts.err"
 fi
+
+# --- h. hg, fossil, svn : la version que Composer devine après git ----------
+# `VersionGuesser::guessVersion` lance `hg branch` (puis fossil, svn) quand git
+# ne donne rien ; vivacity ne lit que git. Un faux `hg` répond `default` sous
+# un `.hg` (FAKE_HG_FAIL=1 : il échoue, comme sans binaire) : la commande
+# entière va à Composer avant toute lecture — racine bibliothèque comme
+# projet, puisque la version atteint installed.php — et vivacity n'écrit
+# aucune ligne de version racine ; sans réponse de `hg`, natif.
+cat > "$WORK/bin/hg" <<'SH'
+#!/usr/bin/env bash
+[ -n "${FAKE_HG_FAIL:-}" ] && { echo "abort: no repository found" >&2; exit 255; }
+d=$(pwd); while [ "$d" != / ] && [ ! -d "$d/.hg" ]; do d=$(dirname "$d"); done
+[ -d "$d/.hg" ] || { echo "abort: no repository found" >&2; exit 255; }
+case "$1" in branch) echo default ;; esac
+exit 0
+SH
+chmod +x "$WORK/bin/hg"
+GH="$WORK/gh"; mkdir -p "$GH"; cp -R "$GA/proj" "$GH/proj"; mkdir "$GH/proj/.hg"
+expect_call "$GH" 0 1 install --dry-run --working-dir proj --no-scripts
+check h-hg-library "$GH" 0 0 -- install --dry-run --working-dir proj --offline
+expect_rootwarn h-hg-library 0
+grep -q 'delegating to `composer install --dry-run --working-dir proj --no-scripts` (a root version from Mercurial' "$WORK/h-hg-library.err" \
+  || { fail "h-hg-library : la raison de la délégation manque"; cat "$WORK/h-hg-library.err"; }
+check h-hg-no-fallback "$GH" 3 0 -- install --dry-run --no-fallback --working-dir proj --offline
+grep -q 'with a root version from Mercurial (`hg branch`) is outside what vivacity reproduces' "$WORK/h-hg-no-fallback.err" \
+  || { fail "h-hg-no-fallback : la raison manque"; cat "$WORK/h-hg-no-fallback.err"; }
+FAKE_HG_FAIL=1 check h-hg-fails "$GH" 0 0 -- install --dry-run --working-dir proj --no-plugins --offline --ignore-platform-reqs
+expect_rootwarn h-hg-fails 1
+jq '.type = "project"' "$GA/proj/composer.json" > "$GH/proj/composer.json"
+expect_call "$GH" 0 '<unset>' dump-autoload --working-dir proj --no-scripts
+check h-hg-project "$GH" 0 0 -- dump-autoload --working-dir proj
+# La version écrite dans composer.json, ou COMPOSER_ROOT_VERSION : rien à deviner.
+COMPOSER_ROOT_VERSION=1.0.0 check h-hg-env "$GH" 0 0 -- install --dry-run --working-dir proj --no-plugins --offline --ignore-platform-reqs
+# Un paquet `path` sans version, sous le même `.hg` : la racine a la sienne,
+# c'est la résolution qui rend la main (avant toute ligne d'`update`).
+GP="$WORK/gp"; mkdir -p "$GP/proj/pkg" "$GP/proj/.hg"
+printf '{"name": "acme/root", "version": "1.0.0", "repositories": [{"type": "path", "url": "pkg"}, {"packagist.org": false}], "require": {"acme/pkg": "*"}, "minimum-stability": "dev"}\n' > "$GP/proj/composer.json"
+printf '{"name": "acme/pkg"}\n' > "$GP/proj/pkg/composer.json"
+expect_call "$GP" 0 '<unset>' update --no-install --working-dir proj --no-scripts
+check h-hg-path "$GP" 0 0 -- update --no-install --working-dir proj
+grep -q 'the version of the path package in .*pkg comes from Mercurial' "$WORK/h-hg-path.err" \
+  || { fail "h-hg-path : la raison manque"; cat "$WORK/h-hg-path.err"; }
+[ ! -f "$GP/proj/composer.lock" ] || fail "h-hg-path : vivacity a écrit composer.lock avant de rendre la main"
+FAKE_HG_FAIL=1 check h-hg-path-fails "$GP" 0 0 -- update --no-install --working-dir proj
+grep -q '"version": "dev-main"' "$GP/proj/composer.lock" || fail "h-hg-path-fails : le paquet path devait rester en dev-main"
+
 export COMPOSER_ROOT_VERSION=dev-main
 unset GIT_CEILING_DIRECTORIES
 
