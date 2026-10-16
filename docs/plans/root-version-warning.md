@@ -476,6 +476,8 @@ ici après coup :
   not exist » ; le rendu clap de vivacity divergeait déjà entièrement.
 - **git tourne deux fois** (nit) : `version_guessable` puis
   `guess_version` — les ≈ 5 ms du Coût, déjà listées comme suite.
+  **Traité le 2026-10-16** (`install-defects.md`, point 10) : trois fois en
+  fait ; réponses de git gardées le temps d'une exécution.
 - **Test `undetected_version_warning_conditions`** (nit) : panique sans
   git au lieu de sauter, et `git init -b` exige git ≥ 2.28 — comme le test
   existant de `root_version.rs`.

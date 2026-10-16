@@ -103,10 +103,54 @@ fn is_feature_branch(manifest: &Value, branch: &str) -> bool {
     }
 }
 
+/// What git answered during a run, per (directory, arguments): every call
+/// here only reads the repository, and a run reads it several times (the
+/// root-version warning, the version itself, installed.php). Kept only
+/// between [`remember_git_answers`] and [`forget_git_answers`], which
+/// `vivacity::run` calls around each run — the repository may change
+/// between two runs of a program that embeds vivacity, and outside a run
+/// (a test that commits between two guesses) git always runs.
+type GitAnswers = std::collections::HashMap<(std::path::PathBuf, Vec<String>), Option<String>>;
+static GIT_ANSWERS: std::sync::Mutex<Option<GitAnswers>> = std::sync::Mutex::new(None);
+
+/// Starts keeping git's answers ([`git`]), empty.
+pub fn remember_git_answers() {
+    if let Ok(mut answers) = GIT_ANSWERS.lock() {
+        *answers = Some(GitAnswers::new());
+    }
+}
+
+/// Forgets git's answers and stops keeping them.
+pub fn forget_git_answers() {
+    if let Ok(mut answers) = GIT_ANSWERS.lock() {
+        *answers = None;
+    }
+}
+
 /// Runs git in `dir` like `ProcessExecutor` after `GitUtil::cleanEnv`: no
 /// `GIT_DIR`/`GIT_WORK_TREE` (git finds the repository by walking up),
-/// English output, never an interactive prompt. None when git fails.
+/// English output, never an interactive prompt. None when git fails. Asked
+/// twice the same thing in one run, git runs once ([`remember_git_answers`]).
 pub fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let key = (
+        dir.to_path_buf(),
+        args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(),
+    );
+    if let Ok(answers) = GIT_ANSWERS.lock() {
+        if let Some(answer) = answers.as_ref().and_then(|a| a.get(&key)) {
+            return answer.clone();
+        }
+    }
+    let answer = run_git(dir, args);
+    if let Ok(mut answers) = GIT_ANSWERS.lock() {
+        if let Some(answers) = answers.as_mut() {
+            answers.insert(key, answer.clone());
+        }
+    }
+    answer
+}
+
+fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)

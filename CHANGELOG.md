@@ -7,6 +7,13 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **git runs once per question in a run.** The root-version warning, the
+  version itself and installed.php each asked git the same thing: a no-op
+  `install` of an unversioned library ran `git branch -a -v` three times
+  (and, on a feature branch, each `git rev-list` twice). git's answers are
+  now kept for the run (`vivacity::run` starts and drops them; outside a run
+  git always runs). Measured with hyperfine, 40 runs: 57.3 → 47.0 ms on a
+  feature branch, 50.9 → 45.1 ms on `main`.
 - **Roots and path packages versioned by Mercurial, Fossil or Subversion go
   to Composer.** When git gives no version, `VersionGuesser` runs `hg
   branch`, `fossil branch list`/`tag list` and `svn info --xml`; vivacity

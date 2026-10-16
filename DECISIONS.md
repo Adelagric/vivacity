@@ -3763,3 +3763,28 @@ Rouge sur db349c1 : `fallback-args.sh` section h (`h-hg-library`,
 côtés : `h-hg-fails` (faux `hg` en échec), `h-hg-env`
 (`COMPOSER_ROOT_VERSION`), `h-hg-path-fails` (`dev-main`).
 
+## 2026-10-16 — Les réponses de git gardées le temps d'une exécution
+
+Contexte : relecture tardive de `root-version-warning.md` (« git tourne deux
+fois ») ; `install-defects.md`, point 10. Mesuré par la méta-analyse puis
+ici (une enveloppe de git qui compte) : un `install` sans opération d'une
+bibliothèque sans version lance `git branch -a --no-color --no-abbrev -v`
+trois fois (avertissement, version pour la vérification, installed.php) et,
+sur une branche de fonctionnalité, chaque `git rev-list main..feature-x`
+deux fois.
+
+Décision : `root_version::git` garde ses réponses par (répertoire,
+arguments) — pas la version calculée, qui dépend du manifeste
+(`non-feature-branches`) —, toutes en lecture seule. Le cache n'existe
+qu'entre `remember_git_answers` et `forget_git_answers`, que `vivacity::run`
+appelle autour de chaque exécution : un programme qui embarque vivacity voit
+le dépôt changer entre deux exécutions, et hors d'une exécution (tests qui
+committent entre deux devinettes) git tourne toujours. Deux exécutions
+simultanées dans un même processus partagent le cache (comme le niveau de
+verbosité), sans conséquence : clés par répertoire.
+
+Mesuré (hyperfine `-N`, 40 passages, `install --no-plugins --offline
+--no-blocking` sans opération, laravel rendu bibliothèque) : branche de
+fonctionnalité 57,3 → 47,0 ms ; `main` 50,9 → 45,1 ms. Un appel de chaque
+commande au lieu de trois et deux.
+

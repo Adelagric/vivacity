@@ -528,6 +528,15 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    // What git answered belongs to one run.
+    vivacity_core::root_version::remember_git_answers();
+    let code = run_once(argv);
+    vivacity_core::root_version::forget_git_answers();
+    code
+}
+
+/// [`run`], between the two moments git's answers are forgotten.
+fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // Kept for the resolution fallback, which re-runs the whole command
     // under Composer with the same arguments.
     if let Ok(mut a) = ARGV.lock() {
