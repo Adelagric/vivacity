@@ -168,13 +168,14 @@ pub(crate) fn temporary_requirements(
 /// written if its data changes, then `install`.
 pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     refuse_alternate_manifest()?;
+    // `BaseCommand::initialize`: the root-version warning before anything
+    // `UpdateCommand` prints, then the platform options' environment —
+    // before `execute` finds no composer.json.
+    hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     if let Some(code) = refuse_missing_manifest(&project_dir(args.working_dir.as_deref())?) {
         return Ok(code);
     }
-    // `BaseCommand::initialize`: the root-version warning before anything
-    // `UpdateCommand` prints, then the platform options' environment.
-    hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
-    platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     for p in &args.packages {

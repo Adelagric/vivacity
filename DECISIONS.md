@@ -3537,6 +3537,11 @@ une ligne de vivacity avant la délégation ; zéro maintenant). Les
 délégations tardives gardent les leurs (portée d'`install` décidée après
 l'en-tête : hors de ce lot).
 
+Après la méta-analyse : sans composer.json, l'avertissement sort aussi chez
+Composer avant « Composer could not find a composer.json file »
+(`initialize` avant `execute`) — `dump-autoload` et `update` le lisaient
+après leur refus ; ramené avant (trois cas `@nojson`, deux rouges).
+
 Mesuré rouge sur db349c1 : `dump-autoload` avec `COMPOSER_IGNORE_PLATFORM_REQS=1`
 ou `COMPOSER_IGNORE_PLATFORM_REQ=php` (avertissement absent,
 `platform_check.php` différent), `require`/`remove` (avertissement après

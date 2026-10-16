@@ -71,7 +71,9 @@ byte-identical-output promise are the public API.
   vivacity's first line, dropped when the command is handed to Composer
   before that line — Composer prints its own, so they no longer come out
   twice on an early hand-over (the merge plugin's on `install`, an unknown
-  plugin's on `update`/`require`/`remove`). `harness/verbosity.sh` gains
+  plugin's on `update`/`require`/`remove`). They also precede `Composer
+  could not find a composer.json file` on `dump-autoload` and `update`, as
+  `initialize` runs before `execute` finds no manifest. `harness/verbosity.sh` gains
   `@files:` (files compared after the command) and `@lockjq:`, and five
   cases; `harness/fallback-args.sh` counts the held lines before each kind
   of hand-over.

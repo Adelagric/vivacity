@@ -72,6 +72,10 @@ CASES=(
   "laravel|require symfony/uid --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
   "laravel|remove laravel/tinker --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
   "laravel|require symfony/uid --dry-run --no-install --no-suggest"
+  # … avant que la commande ne découvre l'absence de composer.json.
+  "laravel|dump-autoload @nojson @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
+  "laravel|update --dry-run --no-install @nojson @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
+  "laravel|install --dry-run @nojson @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
   # `COMPOSER_NO_DEV` vaut `--no-dev` dès qu'il est vrai au sens de PHP
   # (`(bool)` d'une chaîne : tout sauf "" et "0"), pour `install` comme pour
   # `dump-autoload`.
