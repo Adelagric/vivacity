@@ -134,6 +134,13 @@ harness_git_env "$WORK"
 # retirent (`@unset:COMPOSER_ROOT_VERSION`), les autres restent sur la même
 # version des deux côtés.
 export CI=1 COMPOSER_TESTS_ARE_RUNNING=1 COMPOSER_ROOT_VERSION=1.0.0
+# `COMPOSER_TEST_SUITE` : sans lui, `Cache::gcIsNecessary` tire au sort (une
+# fois sur 51) un ramasse-miettes du cache, et `FileDownloader` écrit
+# « Running cache garbage collection » au niveau `-vv` — d'un seul côté des
+# cas `-vv`, où les deux sorties sont celles de Composer. Vu une fois sur
+# `laravel install --dry-run -vv`. C'est la seule lecture de la variable
+# dans Composer 2.10.3 (Cache.php:245).
+export COMPOSER_TEST_SUITE=1
 # Les variables `@unset:` du cas, retirées dans le sous-shell d'une commande.
 unset_case_vars() {
   local u
