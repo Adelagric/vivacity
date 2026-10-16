@@ -396,14 +396,18 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    point 6 : les trois points du solveur et les exceptions dont vivacity a
    le texte).
 5. `config.lock: false` : Composer ignore le lock et résout ; vivacity
-   l'installe.
+   l'installe — **corrigé le 2026-10-16** (`install-defects.md`, point 1 :
+   ligne de `Factory`, lock ignoré par la résolution, installation du lock
+   résolu, `install` sans lock qui met à jour).
 6. Les dépôts apportés par composer-merge-plugin ne sont pas lus par le filtre
    de liste ; le fallback du même plugin peut tourner pendant l'attente réseau
    du fil (deux processus sur le cache de dépôt).
 7. Un lock sans `packages-dev` en mode dev échoue après « Verifying… », avec le
    préfixe `composer.lock:` (Composer : juste après l'en-tête, son texte) —
    **corrigé le 2026-10-16** (`install-defects.md`, point 5 ; cas
-   `run_lock` de `root-manifest.sh`).
+   `run_lock` de `root-manifest.sh`), complété après la méta-analyse :
+   `install --no-dev` (échec après les opérations), `update`, `require`,
+   `remove`.
 8. Le `PoolBuilder` de vivacity n'a pas les `ignoredTypes` par défaut
    d'`Installer` (`php-ext`, `php-ext-zend`) : sans effet sur `install` (tout
    est fixé), pas sur `update` — **corrigé le 2026-10-16**

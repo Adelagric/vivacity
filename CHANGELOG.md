@@ -7,6 +7,27 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`config.lock: false`, and `install` without a lock.** With the lock
+  disabled, Composer's locker reads `/dev/null`: every command warns
+  `./composer.lock is present but ignored as the "lock" config option is
+  disabled.` (twice for `require`/`remove`), the update resolves without
+  the lock's packages (a full update for `require`/`remove`; `remove
+  --unused` and `update a/b` refuse), nothing is written and the install
+  phase installs what was resolved. vivacity read the lock anyway and then
+  installed the one on disk (`laravel/pint` v1.32.0 where Composer
+  installed v1.32.1), printed no warning and refused `require` without
+  `--no-install`. `install` without a usable lock (disabled, missing, or
+  without `packages`) prints `Lockfile creation is disabled in config.` or
+  `No composer.lock file present.` and updates, as `Installer::run` does;
+  vivacity stopped with `no composer.lock`. `--check-scope` and
+  `--run-scripts` stop or hand the command to Composer.
+- **A lock without `packages-dev` fails everywhere Composer's locker does.**
+  `install --no-dev` lays the packages out then fails when `Installer::run`
+  lists the abandoned packages (no autoloader); `update`, `require` and
+  `remove` fail before the repositories load, `require` reverting its files
+  first. vivacity installed with `--no-dev` and exited 0, and printed the
+  others with an `Error: ` prefix; `require` even failed before editing.
+  The message is now printed alone, like the `install` refusal above.
 - **`--offline` says what Composer says without a network.** The fallback
   hands `--offline` to Composer as `COMPOSER_DISABLE_NETWORK=1`, under which
   `HttpDownloader` answers a conditional request with a 304 (the cache

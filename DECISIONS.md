@@ -3673,3 +3673,58 @@ du cache échoue chez vivacity par « missing cache for … in offline mode »,
 chez Composer par « Network disabled, request canceled: <url> » ; le POST
 de l'API des avis suit la règle (pas de 304 possible).
 
+## 2026-10-16 — `config.lock: false` et `install` sans lock : la résolution de Composer, rien d'écrit
+
+Contexte : `install-verify.md`, défaut 5 ; `install-defects.md`, point 1 et
+la méta-analyse (deux bloquants). `Factory::createComposer`
+(Factory.php:423-429) : `config.lock` faux et un composer.lock présent → la
+ligne « ./composer.lock is present but ignored… », et un `Locker` sur
+`/dev/null`, donc `isLocked()` faux partout. `Installer::run` (l. 277-285) :
+une install sans lock dit qu'elle met à jour et passe en `doUpdate($localRepo,
+true)` ; `writeLock` faux, `setLockData(..., false)` garde le lock en mémoire
+et `doInstall` l'installe ; pas d'en-tête « Installing dependencies from lock
+file » ni de « Lock file operations » (l. 609, 753). `RequireCommand.php:492`,
+`RemoveCommand.php:295` : liste d'autorisation seulement si `isLocked()` ;
+`RemoveCommand.php:99` : `--unused` exige un lock.
+
+Décisions :
+- la ligne de `Factory` est retenue après celle de version racine
+  (`hold_ignored_lock_warning`), réécrite par `require`/`remove` avec elle ;
+- `UpdateOptions::ignore_lock` : la session n'ouvre pas composer.lock ;
+  `require` et `remove` décident la mise à jour partielle sur `isLocked()`
+  (lock activé) ; le refus de `require` sans `--no-install` tombe ;
+- `Resolved::virtual_lock` : l'installation qui suit une résolution non
+  écrite lit le lock résolu (comme un `--dry-run`), pour `update`, `remove`
+  et `require` ;
+- `install` sans lock utilisable : `install_without_lock` construit des
+  `UpdateArgs` avec les seules options d'`install` (les variables
+  `COMPOSER_PREFER_*`, `COMPOSER_WITH_*`, `COMPOSER_MINIMAL_CHANGES` que lit
+  `run_update` ne s'appliquent pas à `InstallCommand`) et entre par
+  `resolution_fallback` puis `run_update_resolved` ; la ligne d'`Installer::run`
+  sort après l'événement `COMMAND`, avant « Loading composer repositories ».
+  `--check-scope` (ni réseau ni écriture promis) et `--run-scripts` (les
+  scripts d'`update`, que l'`update` de vivacity ne joue pas) : 3 avec la
+  raison, ou Composer. Flex n'arme pas son rappel `symfony/thanks` (commande
+  `install`, Flex.php:177). Un lock illisible reste l'erreur de Composer
+  (`ParsingException`).
+
+Lock sans `packages-dev` (méta, majeur, suite du point 5) : `install
+--no-dev` passe `doInstall` puis lève à la liste des abandonnés
+(Installer.php:356, `getLockedRepository(true)`), paquets posés, sans
+autoloader, code 1 ; `update`/`require`/`remove` lèvent dans `doUpdate`
+(l. 496), `require` rétablissant d'abord ses fichiers. Une erreur typée
+`ComposerException` (lib.rs) porte les messages de Composer reproduits mot
+pour mot : imprimés seuls (pas de préfixe `Error: `) et annotés sous GitHub
+Actions. La première session de `require` (choix de version) n'ouvre plus le
+lock, que Composer ne lit qu'à la mise à jour.
+
+Mesuré rouge sur db349c1 (`verbosity.sh` : onze cas dont trois vraies
+installations comparées sur composer.lock et installed.json ; `steps.sh` :
+`remove --unused` 1 contre 0, `update a/b` 3 contre 0, `install @badlock`
+0 contre 1 ; `root-manifest.sh` : quatre cas `run_lock`).
+
+Laissé : `dump-autoload` lit composer.lock pour sa disposition (Composer : le
+dépôt local) et, sans `vendor/autoload.php`, tire son suffixe du lock ; une
+délégation tardive de la phase d'installation rend un `composer install`
+qui, lock désactivé, résout à nouveau.
+

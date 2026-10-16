@@ -148,6 +148,7 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     // (`DumpAutoloadCommand` has them: `platform_check.php` follows them) —
     // before `execute` finds no composer.json.
     hold_root_version_warning(&project);
+    hold_ignored_lock_warning(&project);
     let (ignore_platform_reqs, ignore_platform_req) =
         platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     if let Some(code) = refuse_missing_manifest(&project) {

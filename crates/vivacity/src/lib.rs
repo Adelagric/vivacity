@@ -345,6 +345,13 @@ struct UpdateArgs {
     /// where `UpdateCommand::execute` does.
     #[arg(skip)]
     command_dispatched: bool,
+    /// Internal: an `install` that found no usable lock (`config.lock:
+    /// false`, no composer.lock, no `packages` key) and runs as an update —
+    /// `Installer::run`'s line saying so, printed after `COMMAND`, before
+    /// the repositories load. Its command is still `install` (no Flex
+    /// `symfony/thanks` reminder).
+    #[arg(skip)]
+    lockless_install: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -578,6 +585,14 @@ where
             code
         }
         Err(e) => {
+            if let Some(ComposerException(message)) = e
+                .chain()
+                .find_map(|c| c.downcast_ref::<ComposerException>())
+            {
+                vivacity_core::say_always!("{message}");
+                vivacity_core::io::github_action_error(message);
+                return 1;
+            }
             vivacity_core::say_always!("Error: {e:?}");
             exit_code_of(&e)
         }
@@ -589,10 +604,27 @@ where
 fn session_error(e: vivacity_resolver::session::SessionError) -> anyhow::Error {
     if e.kind == vivacity_resolver::session::SessionErrorKind::Transport {
         anyhow::Error::new(TransportFailure(e.message))
+    } else if e.message == vivacity_resolver::repository::LOCK_WITHOUT_DEV {
+        anyhow::Error::new(ComposerException(e.message))
     } else {
         anyhow::anyhow!("{}", e.message)
     }
 }
+
+/// An exception whose message is Composer's word for word: printed as
+/// vivacity prints `RootPackageLoader`'s refusals — the message alone at
+/// QUIET, without Symfony Console's box or vivacity's `Error:` prefix — and
+/// annotated under GitHub Actions (`Application::doRun`). Exit 1.
+#[derive(Debug)]
+pub(crate) struct ComposerException(pub(crate) String);
+
+impl std::fmt::Display for ComposerException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ComposerException {}
 
 /// A failure to fetch, carried as a typed error so `exit_code_of` finds it in
 /// the chain. It exists because the resolver flattens its own errors to text

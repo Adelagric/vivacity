@@ -157,6 +157,16 @@ STEPS=(
   "laravel|require symfony/uid --fixed @notype @nostderr"
   "laravel|require symfony/uid @nolock @lockfalse @nostderr"
   "laravel|require laravel/pint @lockfalse @nostderr"
+  # `config.lock: false` : `isLocked()` faux, donc mise à jour complète pour
+  # `remove` (RemoveCommand.php:295), `--unused` refusé (l. 99, code 1),
+  # `update a/b` refusé (code 3) ; `install` sans lock utilisable résout
+  # (`@badlock` : pas de clé `packages`), un lock illisible reste une erreur.
+  # La stderr est comparée par verbosity.sh (aucune ancre ici).
+  "laravel|remove laravel/tinker @lockfalse @nostderr"
+  "laravel|remove --unused @lockfalse @nostderr"
+  "laravel|update laravel/tinker @lockfalse @nostderr"
+  "laravel|install @badlock @nostderr"
+  "laravel|install @corruptlock @nostderr"
   "laravel|require symfony/uid @indent2"
   "laravel|require symfony/uid @corruptlock @nostderr"
   "laravel|require ext-json @global-sort"

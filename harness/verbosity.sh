@@ -33,6 +33,8 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-p
 #   @nolock  @nojson  @require:a/b=^1  @jq:expr  @env:NAME=VALUE
 #   @vendor   vendor/ installé au préalable par Composer (`install
 #             --no-autoloader`), le même des deux côtés
+#   @warm:update  idem par un `update` jetable (les dists de la résolution
+#             fraîche : une install sans lock, `config.lock: false`)
 #   @warm     le cache de l'instantané rempli au préalable par un install
 #             Composer jetable : les deux côtés lisent les dists du cache
 #             (les lignes « Downloading » ne dépendent pas de l'ordre)
@@ -72,6 +74,23 @@ CASES=(
   "laravel|require symfony/uid --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
   "laravel|remove laravel/tinker --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
   "laravel|require symfony/uid --dry-run --no-install --no-suggest"
+  # `config.lock: false` (Factory : « ./composer.lock is present but
+  # ignored… », `Locker` sur /dev/null) et `install` sans lock
+  # (`Installer::run` passe en update) : la résolution sans dépôt verrouillé,
+  # aucun lock écrit avec `config.lock: false`, l'installation de la
+  # résolution (pas du lock sur le disque), la ligne de Factory deux fois
+  # pour `require`/`remove`.
+  "laravel|install --dry-run @jq:.config.lock=false"
+  "laravel|install --dry-run @nolock"
+  "laravel|update --dry-run --no-install @jq:.config.lock=false"
+  "laravel|dump-autoload @vendor @jq:.config.lock=false"
+  "laravel|require symfony/uid --dry-run --no-install @jq:.config.lock=false"
+  "laravel|remove laravel/tinker --dry-run --no-install @jq:.config.lock=false"
+  "laravel|require symfony/uid --dry-run @jq:.config.lock=false"
+  "laravel|install @warm:update @jq:.config.lock=false @files:composer.lock,vendor/composer/installed.json"
+  "laravel|install @warm:update @nolock @files:composer.lock,vendor/composer/installed.json"
+  "laravel|update @warm:update @jq:.config.lock=false @files:composer.lock,vendor/composer/installed.json"
+  "laravel|update --dry-run @env:COMPOSER_NO_DEV=yes"
   # … avant que la commande ne découvre l'absence de composer.json.
   "laravel|dump-autoload @nojson @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
   "laravel|update --dry-run --no-install @nojson @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
@@ -232,17 +251,25 @@ for fx in "${FIXTURES[@]}"; do
           w="$WORK/warm-$fx"; stage_project "$fx" "$w"
           (cd "$w" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q) && touch "$home/warmed"
         fi
+        if [ "$prep" = @warm:update ] && [ ! -f "$home/warmed-update" ]; then
+          w="$WORK/warm-update-$fx"; stage_project "$fx" "$w"
+          (cd "$w" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer update --no-scripts --no-plugins --no-autoloader --no-progress --no-audit -q) && touch "$home/warmed-update"
+        fi
       done
       for side in ref viv; do
         d="$WORK/$side-$fx-$n"; stage_project "$fx" "$d"
+        # `@vendor` d'abord : le lock de la fixture installé tel quel, avant
+        # que les autres préparations ne touchent au manifeste ou au lock ;
+        # dans l'environnement d'avant les `@env:` du cas — elles sont celles
+        # de la commande comparée, pas de l'installation qui la prépare.
+        for prep in "${preps[@]+"${preps[@]}"}"; do
+          [ "$prep" = @vendor ] || continue
+          (for e in "${saved[@]+"${saved[@]}"}"; do case "$e" in *=*) export "$e" ;; *) unset "$e" ;; esac; done
+            cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q)
+        done
         for prep in "${preps[@]+"${preps[@]}"}"; do
           case "$prep" in
-            @env:*|@warm|@levels:*|@plugins|@unset:*|@rootwarn:*|@files:*) ;;
-            # Dans l'environnement d'avant les `@env:` du cas : elles sont
-            # celles de la commande comparée, pas de l'installation qui la
-            # prépare.
-            @vendor) (for e in "${saved[@]+"${saved[@]}"}"; do case "$e" in *=*) export "$e" ;; *) unset "$e" ;; esac; done
-              cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q) ;;
+            @env:*|@warm|@warm:update|@vendor|@levels:*|@plugins|@unset:*|@rootwarn:*|@files:*) ;;
             @nolock) rm -f "$d/composer.lock" ;;
             @nojson) rm -f "$d/composer.json" "$d/composer.lock" ;;
             @require:*) kv="${prep#@require:}"; jq --arg p "${kv%%=*}" --arg c "${kv#*=}" '.require[$p] = $c' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;

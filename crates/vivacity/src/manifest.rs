@@ -240,6 +240,25 @@ pub(crate) fn platform_requirement_env(
     (all, list)
 }
 
+/// `Factory::createComposer`'s warning when `config.lock` is false and a
+/// composer.lock is there anyway (Factory.php:423-426), right after the root
+/// package is loaded — after the root-version warning — and held like it:
+/// `./composer.lock is present but ignored as the "lock" config option is
+/// disabled.` (`getLockFile('./composer.json')`; `COMPOSER=` is refused).
+/// Returns the line: `require` and `remove` create a second `Composer`,
+/// which writes it again.
+pub(crate) fn hold_ignored_lock_warning(project: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    if config_lock_enabled(&text) || !project.join("composer.lock").exists() {
+        return None;
+    }
+    let line = "./composer.lock is present but ignored as the \"lock\" config option is disabled."
+        .to_owned();
+    vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, line.clone());
+    Some(line)
+}
+
 /// `Factory::createComposer` without a composer.json: Composer's two lines
 /// (`Factory.php:303`, `$fullLoad`), written by `Application::getComposer`
 /// at the default level — silent under `-q` — and exit 1. The directory is

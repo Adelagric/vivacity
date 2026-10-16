@@ -1882,6 +1882,10 @@ impl ComposerRepository {
     }
 }
 
+/// `Locker::getLockedRepository(true)`'s `RuntimeException` (Locker.php:157-165)
+/// for a lock without `packages-dev`.
+pub const LOCK_WITHOUT_DEV: &str = "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.";
+
 /// `Locker::getLockedRepository(true)`: lock packages (+ dev) then the
 /// root aliases (`aliases`), each alias before its package.
 pub fn locked_repository(lock: &Value, arena: &mut Vec<Package>) -> Result<Vec<usize>, RepoError> {
@@ -1904,11 +1908,7 @@ pub fn locked_repository_with(
     if with_dev {
         match lock.get("packages-dev").and_then(Value::as_array) {
             Some(dev) => configs.extend(dev.iter()),
-            None => {
-                return Err(RepoError::data(
-                    "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.",
-                ))
-            }
+            None => return Err(RepoError::data(LOCK_WITHOUT_DEV)),
         }
     }
     if configs.is_empty() {

@@ -43,6 +43,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if !args.after_update() {
         if let Ok(project) = project_dir(args.working_dir.as_deref()) {
             hold_root_version_warning(&project);
+            hold_ignored_lock_warning(&project);
         }
     }
     // `InstallCommand` and `Factory::create`.
@@ -72,7 +73,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     report_operations(&tx);
     if args.dry_run {
-        return Ok(dry_run(&run, &tx));
+        return dry_run(&run, &tx);
     }
     let layout = proceed!(native_layout(&run, scope)?);
     let installed = proceed!(execute_operations(&run, &tx, &layout)?);
@@ -177,13 +178,24 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
         Ok(None) => {}
     }
     let manifest = manifest;
-    if args.virtual_lock.is_none() && !lock_path.is_file() {
-        anyhow::bail!(
-            "no composer.lock in {} — `install` needs one; run `vivacity update` \
-             to resolve and write it (Composer's `install` resolves instead, \
-             which vivacity does not do)",
-            project.display()
-        );
+    // `Installer::run`: without a lock to install (`isLocked()` false —
+    // `config.lock: false`, no file, no `packages`), the install updates.
+    // An unreadable lock stays an error below, Composer's ParsingException.
+    if args.virtual_lock.is_none() {
+        // The `Locker` reads `/dev/null` when `config.lock` is false.
+        let enabled = config_lock_enabled(&manifest_text);
+        let lock_text = std::fs::read_to_string(&lock_path).ok().filter(|_| enabled);
+        let locked = match lock_text
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+        {
+            None => false,
+            Some(Err(_)) => true,
+            Some(Ok(v)) => v.get("packages").is_some_and(|p| !p.is_null()),
+        };
+        if !locked {
+            return Ok(Flow::Break(install_without_lock(args, enabled)?));
+        }
     }
     // A dry-run update installs from its unwritten lock.
     let lock_text: String = match &args.virtual_lock {
@@ -215,6 +227,95 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
         ignore_platform_req,
         runner: None,
     }))
+}
+
+/// `Installer::run` (Installer.php:277-285) when there is no lock to
+/// install: it says so, then runs as `update` with install — the lock
+/// written unless `config.lock` is false, in which case the install phase
+/// reads it from memory. Entered with `install`'s own options only (none of
+/// the `COMPOSER_PREFER_*`/`COMPOSER_WITH_*` variables `update` reads).
+/// `--check-scope` (no network, no write) and `--run-scripts` (update's
+/// scripts, which vivacity's `update` does not run) stop or hand over.
+fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Result<i32> {
+    let line = format!(
+        "{} Updating dependencies to latest instead of installing from lock file. See https://getcomposer.org/install for more information.",
+        if lock_enabled {
+            "No composer.lock file present."
+        } else {
+            "Lockfile creation is disabled in config."
+        }
+    );
+    if args.check_scope || args.run_scripts {
+        let report = vivacity_core::scope::ScopeReport {
+            issues: vec![vivacity_core::scope::ScopeIssue::Layout(format!(
+                "no lock to install: Composer resolves instead ({})",
+                if lock_enabled {
+                    "no composer.lock"
+                } else {
+                    "config.lock is false"
+                }
+            ))],
+            ..Default::default()
+        };
+        return fallback_or_fail(args, &report);
+    }
+    let project = project_dir(args.working_dir.as_deref())?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join("composer.json"))?)
+            .context("invalid composer.json")?;
+    if let Some(code) = resolution_fallback(
+        &project,
+        &manifest,
+        vivacity_core::scope::ResolutionCommand::Update,
+        args.no_plugins,
+        args.no_fallback,
+        !args.dry_run,
+    )? {
+        return Ok(code);
+    }
+    let update_args = UpdateArgs {
+        compat: GlobalCompatArgs {
+            no_interaction: args.compat.no_interaction,
+            no_ansi: args.compat.no_ansi,
+            ..GlobalCompatArgs::default()
+        },
+        no_progress: args.no_progress,
+        packages: Vec::new(),
+        with: Vec::new(),
+        with_dependencies: false,
+        with_all_dependencies: false,
+        no_install: false,
+        dry_run: args.dry_run,
+        no_dev: args.no_dev,
+        no_autoloader: args.no_autoloader,
+        optimize_autoloader: args.optimize_autoloader,
+        classmap_authoritative: args.classmap_authoritative,
+        apcu_autoloader: args.apcu_autoloader,
+        apcu_autoloader_prefix: args.apcu_autoloader_prefix.clone(),
+        no_scripts: args.no_scripts,
+        no_plugins: args.no_plugins,
+        // `install` audits only on `--audit`.
+        no_audit: true,
+        no_blocking: args.no_blocking,
+        no_security_blocking: args.no_security_blocking,
+        prefer_stable: false,
+        prefer_lowest: false,
+        ignore_platform_reqs: args.ignore_platform_reqs,
+        ignore_platform_req: args.ignore_platform_req.clone(),
+        no_fallback: args.no_fallback,
+        offline: args.offline,
+        working_dir: args.working_dir.clone(),
+        prefer_source: args.prefer_source,
+        prefer_dist: args.prefer_dist,
+        prefer_install: args.prefer_install.clone(),
+        command_dispatched: false,
+        lockless_install: Some(line),
+    };
+    let options = vivacity_resolver::session::UpdateOptions {
+        no_blocking: args.no_blocking || args.no_security_blocking,
+        ..Default::default()
+    };
+    run_update_resolved(&update_args, options, false, false, &|| Ok(())).map(|e| e.status)
 }
 
 /// `BaseCommand::initialize`'s reading of the environment
@@ -327,18 +428,8 @@ fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
     // its message shown even under `-q`, before "Verifying…". Printed
     // without Symfony Console's box, like `RootPackageLoader`'s refusals.
     // An update's lock always has the key.
-    if run.with_dev
-        && !run.args.after_update()
-        && run
-            .lock_value
-            .get("packages-dev")
-            .is_none_or(serde_json::Value::is_null)
-    {
-        let message = "The lock file does not contain require-dev information, run install with the --no-dev option or delete it and run composer update to generate a new lock file.";
-        vivacity_core::say_always!("{message}");
-        // `Application::doRun` annotates the exception's message.
-        vivacity_core::io::github_action_error(message);
-        return Ok(Flow::Break(1));
+    if run.with_dev && !run.args.after_update() {
+        refuse_lock_without_dev(run)?;
     }
     // The resolution line `-v` shows measures from here to the join: the
     // solve runs on the verification thread, alongside the local
@@ -360,6 +451,21 @@ fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
         }
     }
     Ok(Flow::Continue(verify_start))
+}
+
+/// `Locker::getLockedRepository(true)` on a lock without `packages-dev`
+/// (`isset` false: the key absent or null): Composer's exception.
+fn refuse_lock_without_dev(run: &Run<'_>) -> anyhow::Result<()> {
+    if run
+        .lock_value
+        .get("packages-dev")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        return Err(anyhow::Error::new(ComposerException(
+            vivacity_resolver::repository::LOCK_WITHOUT_DEV.to_owned(),
+        )));
+    }
+    Ok(())
 }
 
 /// The lock verification running on its own thread, and the channel the
@@ -762,17 +868,17 @@ fn report_operations(tx: &LocalTransaction) {
 /// A dry run stops after the operations: their lines in transaction order,
 /// then (an update's suggestions and) the abandoned packages, and the
 /// funding count — no dump, and no `POST_*_CMD` (`runScripts` is off).
-/// Always 0.
-fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> i32 {
+/// 0, unless the lock has no `packages-dev` ([`report_before_dump`]).
+fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> anyhow::Result<i32> {
     for op in &tx.transaction.operations {
         if let Some(line) = op.show(&tx.arena, false) {
             vivacity_core::say!("  - {line}");
         }
     }
     // `Installer::run` after `doInstall`.
-    report_before_dump(run);
+    report_before_dump(run)?;
     print_funding(&run.project, &run.manifest);
-    0
+    Ok(0)
 }
 
 /// `Installer::run` after `doInstall`/`doUpdate`, before the dump
@@ -780,7 +886,7 @@ fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> i32 {
 /// packages of its new lock, precomputed by the update, which knows the
 /// operations; for an install, the abandoned packages of the lock (dev
 /// included).
-fn report_before_dump(run: &Run<'_>) {
+fn report_before_dump(run: &Run<'_>) -> anyhow::Result<()> {
     let say_all = |lines: &[String]| {
         for line in lines {
             vivacity_core::say!("{line}");
@@ -788,8 +894,16 @@ fn report_before_dump(run: &Run<'_>) {
     };
     match &run.args.post_update {
         Some(report) => say_all(&report.lines),
-        None => say_all(&abandoned_warnings(&run.lock_value)),
+        None => {
+            // `$this->locker->getLockedRepository(true)` (Installer.php:356),
+            // dev mode or not: a `--no-dev` install of a lock without
+            // `packages-dev` fails here, its packages laid out, before the
+            // autoloader.
+            refuse_lock_without_dev(run)?;
+            say_all(&abandoned_warnings(&run.lock_value));
+        }
     }
+    Ok(())
 }
 
 /// Out of scope: Composer as fallback (default) or fail explicitly. In
@@ -935,7 +1049,7 @@ fn execute_operations(
     for m in &report.messages {
         vivacity_core::say!("{m}");
     }
-    report_before_dump(run);
+    report_before_dump(run)?;
     Ok(Flow::Continue(Installed {
         report,
         _runtime: runtime,

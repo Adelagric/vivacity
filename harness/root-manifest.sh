@@ -114,12 +114,23 @@ run_lock() {
     echo "FAIL $name : stdout différente"; diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" | head -4; status=1; return
   fi
   local written
+  if [ "${LOCK_WRITES:-}" = 1 ]; then
+    # La commande édite composer.json avant l'exception (`remove`), ou le
+    # rétablit (`require`) : les deux côtés écrivent, les fichiers doivent
+    # finir identiques.
+    for f in composer.json composer.lock; do
+      if ! cmp -s "$d-ref/$f" "$d-viv/$f"; then
+        echo "FAIL $name : $f diffère"; status=1; return
+      fi
+    done
+  else
   for side in ref viv; do
     written=$(cd "$d-$side" && find . -newer "$WORK/$name.marker" ! -name . | head -5)
     if [ -n "$written" ]; then
       echo "FAIL $name : $side a écrit malgré le refus : $(echo "$written" | tr '\n' ' ')"; status=1; return
     fi
   done
+  fi
   echo "OK   $name : code $rc, lignes et message identiques, rien d'écrit des deux côtés"
 }
 
@@ -127,6 +138,15 @@ run_lock() {
 # en-tête, puis `Locker::getLockedRepository(true)` lève (avant « Verifying… »).
 run_lock lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts
 run_lock lock-null-packages-dev '.["packages-dev"]=null' install --dry-run --no-plugins --no-scripts
+# Sans dev, l'install passe : c'est la liste des abandonnés
+# (`Installer::run`, l. 356, `getLockedRepository(true)`) qui lève, après les
+# opérations. Les commandes de résolution lèvent dans `doUpdate` (l. 496),
+# avant « Loading composer repositories » ; `require` rétablit ses fichiers
+# d'abord (« Installation failed, reverting… »), `remove` garde son édition.
+run_lock lock-no-dev-no-packages-dev 'del(.["packages-dev"])' install --no-dev --dry-run --no-plugins --no-scripts
+run_lock update-no-packages-dev 'del(.["packages-dev"])' update --no-install --no-plugins --no-scripts
+LOCK_WRITES=1 run_lock require-no-packages-dev 'del(.["packages-dev"])' require psr/log --no-install --no-plugins --no-scripts
+LOCK_WRITES=1 run_lock remove-no-packages-dev 'del(.["packages-dev"])' remove laravel/tinker --no-install --no-plugins --no-scripts
 # Sous GitHub Actions, le message de l'exception annoté sur stdout.
 (unset COMPOSER_TESTS_ARE_RUNNING; export GITHUB_ACTIONS=true
  run_lock gha-lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts

@@ -343,6 +343,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `RequireCommand` prints; written again by `doUpdate`, below.
     let root_version_warning =
         crate::hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    let ignored_lock_warning =
+        crate::hold_ignored_lock_warning(&project_dir(args.working_dir.as_deref())?);
     crate::platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
@@ -433,7 +435,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     }
 
     // `requireComposer()` + the composite repository [platform, repos]: the
-    // resolution session provides both, on the current manifest.
+    // resolution session provides both, on the current manifest. The lock
+    // plays no part in choosing a version (`PackageDiscoveryTrait::getRepos`):
+    // it is first read by the update, after the edit.
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
     let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
@@ -443,7 +447,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         true,
         Some(http),
         Some(&cache_repo_dir),
-        &UpdateOptions::default(),
+        &UpdateOptions {
+            ignore_lock: true,
+            ..UpdateOptions::default()
+        },
     );
     let mut session = match session {
         Ok(s) => s,
@@ -600,7 +607,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
 
     // `doUpdate`: `resetComposer` + `requireComposer` load the root package
     // again (RequireCommand.php:409-410), warning included.
-    if let Some(line) = &root_version_warning {
+    for line in [&root_version_warning, &ignored_lock_warning]
+        .into_iter()
+        .flatten()
+    {
         vivacity_core::say!("{line}");
     }
     let transitive = if args.update_with_all_dependencies
@@ -629,9 +639,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     crate::bamarni_command_event(&project, &manifest, !args.no_plugins);
     // `Locker::isLocked`: a readable lock with a non-null `packages` key;
     // an unreadable lock is a ParsingException in `doUpdate`, hence restore
-    // and error.
-    let locked = match std::fs::read_to_string(&lock) {
-        Ok(t) => match serde_json::from_str::<Value>(&t) {
+    // and error. With `config.lock: false` the `Locker` reads `/dev/null`:
+    // never locked, whatever the file holds.
+    let lock_enabled = crate::config_lock_enabled(&files.composer_backup);
+    let locked = match std::fs::read_to_string(&lock).ok().filter(|_| lock_enabled) {
+        Some(t) => match serde_json::from_str::<Value>(&t) {
             Ok(v) => v.get("packages").is_some_and(|p| !p.is_null()),
             Err(e) => {
                 files.revert()?;
@@ -641,7 +653,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 );
             }
         },
-        Err(_) => false,
+        None => false,
     };
     // `getPreferredInstallOptions`, in `doUpdate` before the installer is
     // set up: an impossible preference throws before anything is resolved
@@ -658,12 +670,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         vivacity_core::say_always!("{message}");
         return Ok(1);
     }
-    // Without a written lock (`config.lock: false`), Composer installs and
-    // guesses from its virtual lock; vivacity only installs from the file.
-    let lock_enabled = crate::config_lock_enabled(&files.composer_backup);
-    if !lock_enabled && !args.no_install {
-        anyhow::bail!("config.lock is false: `vivacity require` can only install from a written composer.lock (use --no-install)");
-    }
+    // Without a written lock (`config.lock: false`), Composer installs from
+    // its virtual lock, as the install phase does (`Resolved::virtual_lock`),
+    // and the update is complete: `Locker::isLocked()` is false
+    // (RequireCommand.php:492).
     let mut options = if !first_require && locked {
         UpdateOptions::partial(
             &names,
@@ -716,6 +726,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         prefer_dist: args.prefer_dist,
         prefer_install: args.prefer_install.clone(),
         command_dispatched: true,
+        lockless_install: None,
     };
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
     let prefer_lowest = args.prefer_lowest || env_flag("COMPOSER_PREFER_LOWEST");
@@ -749,7 +760,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // a failing install phase restores the files too (an EXCEPTION after
     // the resolution would not, `dependencyResolutionCompleted`).
     if !args.no_install {
-        let virtual_lock = if args.dry_run {
+        // A dry run's lock, or one `config.lock: false` kept in memory.
+        let virtual_lock = if args.dry_run || resolved.virtual_lock {
             resolved.lock.clone()
         } else {
             None

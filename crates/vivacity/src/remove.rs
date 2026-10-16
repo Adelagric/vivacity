@@ -13,6 +13,8 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // root-version warning comes first; written again below.
     let root_version_warning =
         hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    let ignored_lock_warning =
+        hold_ignored_lock_warning(&project_dir(args.working_dir.as_deref())?);
     platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
@@ -58,12 +60,16 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     }
     let mut packages: Vec<String> = args.packages.iter().map(|p| p.to_lowercase()).collect();
 
-    // `Locker::isLocked`: a readable lock that has a `packages` key.
-    let locked_data: Option<serde_json::Value> =
+    // `Locker::isLocked`: `config.lock` on (the `Locker` reads `/dev/null`
+    // otherwise), and a readable lock that has a `packages` key.
+    let locked_data: Option<serde_json::Value> = if config_lock_enabled(&manifest_text) {
         std::fs::read_to_string(project.join("composer.lock"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .filter(|v: &serde_json::Value| v.get("packages").is_some());
+            .filter(|v: &serde_json::Value| v.get("packages").is_some())
+    } else {
+        None
+    };
     if args.unused {
         let lock = locked_data.clone().ok_or_else(|| {
             anyhow::anyhow!(
@@ -180,7 +186,10 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     }
     // `resetComposer` + `requireComposer` (RemoveCommand.php:216-222) load
     // the root package again, warning included, before `COMMAND`.
-    if let Some(line) = &root_version_warning {
+    for line in [&root_version_warning, &ignored_lock_warning]
+        .into_iter()
+        .flatten()
+    {
         vivacity_core::say!("{line}");
     }
 
@@ -284,6 +293,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         prefer_dist: false,
         prefer_install: None,
         command_dispatched: true,
+        lockless_install: None,
     };
     // `remove` has no prefer-stable/lowest option: only the manifest
     // counts.

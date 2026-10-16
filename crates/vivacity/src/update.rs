@@ -172,6 +172,7 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     // `UpdateCommand` prints, then the platform options' environment —
     // before `execute` finds no composer.json.
     hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    hold_ignored_lock_warning(&project_dir(args.working_dir.as_deref())?);
     platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     if let Some(code) = refuse_missing_manifest(&project_dir(args.working_dir.as_deref())?) {
         return Ok(code);
@@ -285,6 +286,8 @@ pub(crate) fn run_update_resolved(
     if !args.no_install {
         let (virtual_lock, virtual_manifest) = if args.dry_run {
             (resolved.lock.clone(), Some(resolved.manifest.clone()))
+        } else if resolved.virtual_lock {
+            (resolved.lock.clone(), None)
         } else {
             (None, None)
         };
@@ -348,6 +351,10 @@ pub(crate) fn install_after_update(
 /// without writing; Composer then keeps a "virtual" lock).
 pub(crate) struct Resolved {
     pub(crate) status: i32,
+    /// The lock was not written (`config.lock: false`): the install phase
+    /// installs it from memory (`Locker::setLockData(..., false)` keeps it,
+    /// `doInstall` reads it), never from the composer.lock on disk.
+    pub(crate) virtual_lock: bool,
     pub(crate) lock: Option<serde_json::Value>,
     /// What `Installer::run` prints after `doUpdate` and before the dump
     /// (suggestions, abandoned packages), ready to print; the funding count
@@ -404,6 +411,7 @@ impl Resolved {
     fn stopped(status: i32) -> Resolved {
         Resolved {
             status,
+            virtual_lock: false,
             lock: None,
             post: Vec::new(),
             manifest: serde_json::Value::Null,
@@ -463,6 +471,8 @@ pub(crate) fn resolve_and_lock(
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
     let installer_dev_mode = !(args.no_dev || env_no_dev());
     let mut options = options;
+    // `config.lock: false`: the update runs without the lock's packages.
+    options.ignore_lock = !config_lock_enabled(&manifest_text);
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
         // `RootPackage::load` refuses these too, but through the error path,
         // which prefixes the message; here it is worded as Composer words it.
@@ -583,6 +593,11 @@ pub(crate) fn resolve_and_lock(
             bamarni_command_event(&project, &m, !args.no_plugins);
         }
     }
+    // `Installer::run` (Installer.php:277-285): an install without a lock
+    // says it updates instead, before `PRE_UPDATE_CMD` and `doUpdate`.
+    if let Some(line) = &args.lockless_install {
+        vivacity_core::say!("{line}");
+    }
     vivacity_core::say!("Loading composer repositories with package information");
     // (`Updating dependencies` is printed by the session once the pool is
     // built — Flex's notice comes before it.)
@@ -696,22 +711,25 @@ pub(crate) fn resolve_and_lock(
     // install is about to replace. `class_exists(Thanks::class, false)` is
     // true exactly when Composer activated the symfony/thanks plugin — from
     // the project or from COMPOSER_HOME — since nothing autoloads it.
-    let thanks_reminder = flex_active && !args.dry_run && !args.no_install && {
-        let m: serde_json::Value =
-            serde_json::from_str(&manifest_text).unwrap_or(serde_json::Value::Null);
-        let loaded = vivacity_core::scope::active_plugins(&project, &m, !args.no_plugins)
-            .iter()
-            .any(|p| p == "symfony/thanks");
-        let installed = installed_packages(&project, &m);
-        !loaded
-            && vivacity_core::lock::Lock::from_value(&lock)
-                .wanted_packages(installer_dev_mode)
-                .any(|p| {
-                    installed.iter().any(|i| {
-                        i.get("name").and_then(serde_json::Value::as_str) == Some(p.name())
-                    }) && !installed_as_locked(&installed, p)
-                })
-    };
+    // Flex arms it for the `update` command only (`Flex::activate`): not for
+    // the `install` that updates without a lock.
+    let thanks_reminder =
+        flex_active && !args.dry_run && !args.no_install && args.lockless_install.is_none() && {
+            let m: serde_json::Value =
+                serde_json::from_str(&manifest_text).unwrap_or(serde_json::Value::Null);
+            let loaded = vivacity_core::scope::active_plugins(&project, &m, !args.no_plugins)
+                .iter()
+                .any(|p| p == "symfony/thanks");
+            let installed = installed_packages(&project, &m);
+            !loaded
+                && vivacity_core::lock::Lock::from_value(&lock)
+                    .wanted_packages(installer_dev_mode)
+                    .any(|p| {
+                        installed.iter().any(|i| {
+                            i.get("name").and_then(serde_json::Value::as_str) == Some(p.name())
+                        }) && !installed_as_locked(&installed, p)
+                    })
+        };
 
     let ops = &report.transaction.transaction.operations;
     // What `Installer::doUpdate` writes between the resolution and the lock
@@ -764,6 +782,7 @@ pub(crate) fn resolve_and_lock(
     let post = post_update_report(&session, ops, &lock, &manifest_text, fresh_install);
     Ok(Resolved {
         status: 0,
+        virtual_lock: !write_lock,
         lock: Some(lock),
         post,
         manifest,

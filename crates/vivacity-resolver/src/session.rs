@@ -363,6 +363,10 @@ pub struct UpdateOptions {
     /// written: name → constraint text, in command order. Parsed and
     /// checked against the root requirements by `prepare_update`.
     pub temporary_requirements: Vec<(String, String)>,
+    /// `config.lock: false`: `Factory` gives the `Locker` `/dev/null`, so
+    /// `isLocked()` is false and the update runs without a locked
+    /// repository, whatever composer.lock holds (Factory.php:423-429).
+    pub ignore_lock: bool,
 }
 
 impl UpdateOptions {
@@ -649,7 +653,7 @@ impl UpdateSession {
         // an unreadable lock is ignored for a full update (`doUpdate`
         // swallows the ParsingException), fatal for a partial one.
         let lock_path = project_dir.join("composer.lock");
-        let lock: Option<Value> = if lock_path.is_file() {
+        let lock: Option<Value> = if lock_path.is_file() && !options.ignore_lock {
             let text = std::fs::read_to_string(&lock_path)
                 .map_err(|e| SessionError::new(format!("{}: {e}", lock_path.display())))?;
             match serde_json::from_str::<Value>(&text) {
