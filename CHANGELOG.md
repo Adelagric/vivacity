@@ -79,8 +79,9 @@ byte-identical-output promise are the public API.
   solve, and the message of any exception. vivacity now writes it at the
   three solver points and for the exceptions whose text it reproduces
   (`RootPackageLoader`'s refusals, a lock without `packages-dev`); its own
-  `Error: …` lines, worded differently, have none. Four
-  `harness/verbosity.sh` cases (one with `GITHUB_ACTIONS=0`), two in
+  `Error: …` lines, worded differently, have none. Five
+  `harness/verbosity.sh` cases (`GITHUB_ACTIONS=0` stays silent, `false`
+  is a non-empty string, hence true, as for PHP), two in
   `harness/root-manifest.sh`, which now compares stdout too.
 - **`update` leaves `php-ext` and `php-ext-zend` packages out of its pool.**
   `Installer` hands its `ignoredTypes` to the pool builder, which skips a
