@@ -39,7 +39,7 @@ pub(crate) fn http_transport(
         let fetcher = fetcher.clone();
         Arc::new(move |url: &str, ims: Option<&str>| {
             if offline {
-                return Err(format!("offline: cannot fetch {url}"));
+                return network_disabled(url, ims);
             }
             runtime
                 .block_on(fetcher.metadata_fetch(url, ims))
@@ -55,7 +55,7 @@ pub(crate) fn http_transport(
             if offline {
                 return requests
                     .iter()
-                    .map(|(u, _)| Err(format!("offline: cannot fetch {u}")))
+                    .map(|(u, ims)| network_disabled(u, ims.as_deref()))
                     .collect();
             }
             let requests: Vec<(String, Option<String>)> = requests.to_vec();
@@ -86,7 +86,7 @@ pub(crate) fn http_transport(
         let fetcher = fetcher.clone();
         Arc::new(move |url: &str, body: &str| {
             if offline {
-                return Err(format!("offline: cannot fetch {url}"));
+                return network_disabled(url, None);
             }
             runtime
                 .block_on(fetcher.post_form(url, body))
@@ -95,6 +95,26 @@ pub(crate) fn http_transport(
         })
     };
     Ok((http, Some(http_many), Some(http_post)))
+}
+
+/// `--offline` answers metadata requests as Composer's `HttpDownloader`
+/// does under `COMPOSER_DISABLE_NETWORK` (HttpDownloader.php:328-338), the
+/// variable the fallback hands `--offline` over as: a conditional request
+/// (`If-Modified-Since`, a cached file with its `last-modified`) gets a 304,
+/// so the cache serves without a word; any other fails as a transport
+/// error, `Network disabled, request canceled: <url>` (`Url::sanitize`d).
+fn network_disabled(
+    url: &str,
+    if_modified_since: Option<&str>,
+) -> Result<vivacity_resolver::repository::Fetched, String> {
+    if if_modified_since.is_some() {
+        return Ok(vivacity_resolver::repository::Fetched::NotModified);
+    }
+    Err(format!(
+        "{}{}",
+        vivacity_resolver::repository::NETWORK_DISABLED,
+        vivacity_resolver::metacache::sanitize_url(url)
+    ))
 }
 
 /// `{\S+[ =:]\S+}`: a `packages` entry that carries a constraint. The

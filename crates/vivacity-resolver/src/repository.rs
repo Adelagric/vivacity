@@ -39,6 +39,11 @@ impl RepoError {
     }
 }
 
+/// The message of a request the network refused because it is disabled
+/// (`HttpDownloader` under `COMPOSER_DISABLE_NETWORK`, status 499; vivacity's
+/// `--offline`), followed by the URL. `asyncFetchFile` answers it like a 404.
+pub const NETWORK_DISABLED: &str = "Network disabled, request canceled: ";
+
 /// Fetching a URL: `Ok(None)` = 404 (unknown package, tolerated by
 /// Composer over HTTP).
 /// Result of a conditional fetch (`If-Modified-Since`).
@@ -665,7 +670,7 @@ impl ComposerRepository {
                     RepoError::transport(format!("{} not found", self.packages_json_url))
                 })?
         } else {
-            self.fetch_cached(&self.packages_json_url, "packages.json")?
+            self.fetch_cached(&self.packages_json_url, "packages.json", false)?
                 .ok_or_else(|| {
                     RepoError::transport(format!("{} not found", self.packages_json_url))
                 })?
@@ -858,7 +863,7 @@ impl ComposerRepository {
                     format!("{}/{}", self.base_url, url.trim_start_matches('/'))
                 };
                 let included = self
-                    .fetch_cached(&url, include)?
+                    .fetch_cached(&url, include, false)?
                     .ok_or_else(|| RepoError::transport(format!("{url} not found")))?;
                 out.extend(self.load_includes(&included)?);
             }
@@ -908,16 +913,30 @@ impl ComposerRepository {
         Some((v, lm))
     }
 
-    /// `asyncFetchFile` + `Cache`: after the response, what Composer keeps:
-    /// 304 -> the cache; 404 -> nothing (not written); 200 -> the JSON,
-    /// re-encoded with `last-modified` if the header is there, written as
-    /// is otherwise. A transport error with a stale cache -> degraded mode.
+    /// `fetchFile` / `fetchFileIfLastModified` / `asyncFetchFile` + `Cache`:
+    /// after the response, what Composer keeps: 304 -> the cache; 404 ->
+    /// nothing (not written); 200 -> the JSON, re-encoded with
+    /// `last-modified` if the header is there, written as is otherwise.
+    ///
+    /// A transport error degrades the repository — its warning once — the
+    /// way the flavour of the request does (`asynchronous`: the package
+    /// files and the filter summary, `asyncFetchFile`; otherwise
+    /// packages.json and its includes, `fetchFile`):
+    /// - `fetchFile`: any cached copy is used, with the warning; no copy,
+    ///   the error;
+    /// - `fetchFileIfLastModified` (a conditional request, so a cached copy
+    ///   with its `last-modified`): the warning and the copy;
+    /// - `asyncFetchFile`: the warning in any case, then the copy if the
+    ///   request was conditional; else a request the network refused
+    ///   ([`NETWORK_DISABLED`], Composer's status 499) answers like a 404;
+    ///   else the error.
     fn settle(
         &self,
         url: &str,
         cache_key: &str,
         cached: Option<(Value, Option<String>)>,
         result: Result<Fetched, RepoError>,
+        asynchronous: bool,
     ) -> Result<Option<Value>, RepoError> {
         // `fetchFile` (packages.json, includes) encodes with flags 0,
         // `asyncFetchFile` (package files) without escaping.
@@ -948,30 +967,51 @@ impl ComposerRepository {
                 Ok(Some(data))
             }
             Err(e) => {
-                if let Some((v, Some(_))) = cached {
+                let conditional = cached.as_ref().is_some_and(|(_, lm)| lm.is_some());
+                let degrade = |e: &RepoError| {
                     if !self.degraded.replace(true) {
                         let line = format!(
-                            "Warning: {} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
-                            self.url, e.0
+                            "{} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
+                            crate::metacache::sanitize_url(&self.url),
+                            e.0
                         );
                         match &self.held {
                             Some(held) => held.borrow_mut().push(line),
                             None => vivacity_core::say!("{line}"),
                         }
                     }
-                    return Ok(Some(v));
+                };
+                if !asynchronous {
+                    return match cached {
+                        Some((v, _)) => {
+                            degrade(&e);
+                            Ok(Some(v))
+                        }
+                        None => Err(e),
+                    };
                 }
-                Err(e)
+                degrade(&e);
+                match cached {
+                    Some((v, _)) if conditional => Ok(Some(v)),
+                    _ if e.0.starts_with(NETWORK_DISABLED) => Ok(None),
+                    _ => Err(e),
+                }
             }
         }
     }
 
-    /// A repository file, through the conditional cache.
-    fn fetch_cached(&self, url: &str, cache_key: &str) -> Result<Option<Value>, RepoError> {
+    /// A repository file, through the conditional cache; `asynchronous` as
+    /// in [`Self::settle`].
+    fn fetch_cached(
+        &self,
+        url: &str,
+        cache_key: &str,
+        asynchronous: bool,
+    ) -> Result<Option<Value>, RepoError> {
         let cached = self.cached(cache_key);
         let ims = cached.as_ref().and_then(|(_, lm)| lm.clone());
         let result = self.transport.fetch(url, ims.as_deref());
-        self.settle(url, cache_key, cached, result)
+        self.settle(url, cache_key, cached, result, asynchronous)
     }
 
     /// `startCachedAsyncDownload`: the JSON of a name's p2 file (with
@@ -990,7 +1030,7 @@ impl ComposerRepository {
         };
         let url = template.replace("%package%", &key);
         let cache_key = crate::metacache::MetadataCache::provider_key(&key);
-        let data = self.fetch_cached(&url, &cache_key)?;
+        let data = self.fetch_cached(&url, &cache_key, true)?;
         self.fresh_metadata.set(true);
         let value = Self::parse_provider(package_name, data);
         self.fetched.borrow_mut().insert(key, value.clone());
@@ -1355,7 +1395,7 @@ impl ComposerRepository {
         let Some(url) = root.filter.as_ref().and_then(|f| f.summary_url.clone()) else {
             return Ok(Vec::new());
         };
-        let data = self.fetch_cached(&url, "filter-summary.json")?;
+        let data = self.fetch_cached(&url, "filter-summary.json", true)?;
         let Some(filter) = data
             .as_ref()
             .and_then(|d| d.get("filter"))
@@ -1439,7 +1479,7 @@ impl ComposerRepository {
         let mut settled = Vec::with_capacity(todo.len());
         for (((key, package_name, url), c), result) in todo.into_iter().zip(cached).zip(results) {
             let cache_key = crate::metacache::MetadataCache::provider_key(&key);
-            let data = self.settle(&url, &cache_key, c, result)?;
+            let data = self.settle(&url, &cache_key, c, result, true)?;
             settled.push((key, Self::parse_provider(&package_name, data)));
         }
         let mut memo = self.fetched.borrow_mut();
@@ -2110,6 +2150,129 @@ mod cache_tests {
         assert_eq!(seen[0].1.as_deref(), Some("Sat, 12 Sep 2026 10:00:00 GMT"));
         assert_eq!(seen[1].0, "https://satis.example.org/p2/acme/lib.json");
         assert_eq!(seen[1].1.as_deref(), Some("Sun, 13 Sep 2026 09:00:00 GMT"));
+    }
+}
+
+#[cfg(test)]
+mod degraded_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Answers packages.json from a script, fails every other request with
+    /// `error`.
+    struct Failing {
+        root: RefCell<Vec<Result<Fetched, RepoError>>>,
+        error: String,
+    }
+
+    impl Transport for Failing {
+        fn fetch(&self, url: &str, _ims: Option<&str>) -> Result<Fetched, RepoError> {
+            if url.ends_with("/packages.json") {
+                let mut root = self.root.borrow_mut();
+                assert!(!root.is_empty(), "unexpected request: {url}");
+                return root.remove(0);
+            }
+            Err(RepoError::transport(self.error.clone()))
+        }
+    }
+
+    fn load(repo: &ComposerRepository) -> Result<Vec<String>, RepoError> {
+        let mut arena = Vec::new();
+        repo.load_packages(
+            &[("acme/lib".to_owned(), Constraint::MatchAll)],
+            &[("stable".to_owned(), 0)].into_iter().collect(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Origin::Repository(2),
+            &mut arena,
+        )
+        .map(|(found, _)| found)
+    }
+
+    fn repo(
+        dir: &std::path::Path,
+        root: Vec<Result<Fetched, RepoError>>,
+        error: &str,
+    ) -> ComposerRepository {
+        let t = Failing {
+            root: RefCell::new(root),
+            error: error.to_owned(),
+        };
+        let mut repo =
+            ComposerRepository::open("https://user:secret@satis.example.org", Box::new(t))
+                .expect("open");
+        repo.cache = Some(crate::metacache::MetadataCache::new(dir, &repo.url));
+        repo.hold_output();
+        repo
+    }
+
+    const ROOT: &str = r#"{"packages": [], "metadata-url": "/p2/%package%.json"}"#;
+    const WARNING: &str = "https://user:***@satis.example.org could not be fully loaded (Network disabled, request canceled: https://satis.example.org/p2/acme/lib.json), package information was loaded from the local cache and may be out of date";
+
+    #[test]
+    fn a_disabled_network_answers_a_package_file_like_a_404() {
+        // `asyncFetchFile`'s reject: the warning (no `Warning:` prefix, the
+        // URL sanitized), then status 499 read as a 404 — no package, no error.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let r = repo(
+            tmp.path(),
+            vec![Ok(Fetched::Body {
+                bytes: ROOT.as_bytes().to_vec(),
+                last_modified: None,
+            })],
+            "Network disabled, request canceled: https://satis.example.org/p2/acme/lib.json",
+        );
+        assert_eq!(load(&r).expect("load"), Vec::<String>::new());
+        assert_eq!(r.take_held(), vec![WARNING.to_owned()]);
+    }
+
+    #[test]
+    fn another_transport_error_on_a_package_file_warns_then_fails() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let r = repo(
+            tmp.path(),
+            vec![Ok(Fetched::Body {
+                bytes: ROOT.as_bytes().to_vec(),
+                last_modified: None,
+            })],
+            "connection refused",
+        );
+        assert!(load(&r).is_err());
+        assert_eq!(r.take_held().len(), 1);
+    }
+
+    #[test]
+    fn packages_json_falls_back_on_any_cached_copy() {
+        // `fetchFile`: a copy without `last-modified` still serves, with the
+        // warning; without a copy, the error.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let r = repo(
+            tmp.path(),
+            vec![Ok(Fetched::Body {
+                bytes: ROOT.as_bytes().to_vec(),
+                last_modified: None,
+            })],
+            "unused",
+        );
+        r.root_data().expect("first load");
+        let r = repo(
+            tmp.path(),
+            vec![Err(RepoError::transport("connection refused"))],
+            "unused",
+        );
+        r.root_data().expect("served from the cache");
+        assert_eq!(
+            r.take_held(),
+            vec!["https://user:***@satis.example.org could not be fully loaded (connection refused), package information was loaded from the local cache and may be out of date".to_owned()]
+        );
+        let empty = tempfile::tempdir().expect("tmp");
+        let r = repo(
+            empty.path(),
+            vec![Err(RepoError::transport("connection refused"))],
+            "unused",
+        );
+        assert!(r.root_data().is_err());
+        assert!(r.take_held().is_empty());
     }
 }
 

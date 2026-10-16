@@ -3629,3 +3629,42 @@ Effet sur les harnais : ceux qui comparent stdout côté vivacity sans poser
 Rouge sur db349c1 : les trois cas `GITHUB_ACTIONS=true` de verbosity.sh
 (normal et `-v`) et `gha-self-require`, `gha-lock-no-packages-dev`.
 
+## 2026-10-16 — `--offline` comme `COMPOSER_DISABLE_NETWORK`, et le mode dégradé selon la requête
+
+Contexte : `install-verify.md`, défaut 9 ; `install-defects.md`, point 7.
+Le fallback traduit `--offline` en `COMPOSER_DISABLE_NETWORK=1`. Sous cette
+variable, `HttpDownloader::startJob` (l. 328-338) répond 304 à une requête
+qui porte `If-Modified-Since` et rejette les autres
+(`TransportException('Network disabled, request canceled: '.Url::sanitize($url), 499)`) ;
+les `file://` passent par `RemoteFilesystem`, sans ce contrôle.
+
+Le transport hors ligne de vivacity (`network_disabled`, update.rs) fait de
+même. Ce que Composer fait ensuite de l'erreur dépend de la requête
+(`ComposerRepository`) : `fetchFile` (packages.json sans `last-modified`,
+inclusions) prend toute copie en cache, avec l'avertissement ;
+`fetchFileIfLastModified` l'avertissement et la copie ; `asyncFetchFile`
+(fichiers `p2`, résumé des listes) **écrit l'avertissement dans tous les
+cas**, rend la copie si la requête était conditionnelle, lit le 499 comme un
+404 (`['packages' => []]`, d'où « Filter summary URL … returned 404 » pour
+le résumé), et relance toute autre erreur. `settle` ne connaissait qu'un cas
+(copie avec `last-modified`) : il prend la saveur de la requête
+(`asynchronous`), et reconnaît le refus par son texte
+(`repository::NETWORK_DISABLED`, seul le transport hors ligne l'écrit).
+Effet en ligne aussi : un packages.json en cache sans `last-modified` sert
+maintenant en mode dégradé, comme chez Composer, au lieu d'échouer.
+L'avertissement perd le préfixe `Warning: ` (Composer écrit la balise
+`<warning>`, pas le mot) et son URL est assainie.
+
+Mesuré (Packagist réel, laravel, `install --dry-run`) : cache chaud, Composer
+muet, vivacity « Warning: https://repo.packagist.org could not be fully
+loaded (offline: …) » ; cache vide, « - offline: cannot fetch … » au lieu de
+« - Network disabled, request canceled: … ». Harnais : section 4 de
+`transport-exit.sh` (dépôt servi par `php -S` avec un routeur qui pose ou
+non `Last-Modified`), rouge sur db349c1 dans les trois états du cache.
+
+Laissé : `COMPOSER_DISABLE_NETWORK` posé par l'utilisateur ne met pas
+vivacity hors ligne (seul `--offline` le fait) ; hors ligne, un dist absent
+du cache échoue chez vivacity par « missing cache for … in offline mode »,
+chez Composer par « Network disabled, request canceled: <url> » ; le POST
+de l'API des avis suit la règle (pas de 304 possible).
+

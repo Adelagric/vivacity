@@ -356,6 +356,68 @@ commit.
 - **Annotations GitHub des autres erreurs de vivacity** : leurs textes ne sont
   pas ceux de Composer ; annoter un texte faux n'avance pas la parité.
 
+## Méta-analyse (sous-agent frais, sur le plan et le code, 2026-10-16) — et ce qui change
+
+Le relecteur a lu le plan, le code et les sources de Composer, et mesuré
+sur Composer 2.10.3 contre le binaire de `main` (scripts dans le scratchpad).
+L'exécution des points 3, 4, 5, 8 et 2 avait commencé pendant sa revue ; ce
+qui les touche s'applique au code déjà commité.
+
+- **Bloquant — `require`/`remove` avec `config.lock: false`.** Composer fait
+  une mise à jour **complète** (`RequireCommand.php:492`,
+  `RemoveCommand.php:295` : la liste d'autorisation seulement si
+  `isLocked()`) ; vivacity décide la mise à jour partielle sur le lock du
+  disque (`require.rs`, `remove.rs`) — ignorer le lock dans la session seule
+  aurait donné un code 3. Et `remove --unused` sans lock : exception
+  (`RemoveCommand.php:99`, code 1) là où vivacity répondait « No unused
+  packages ». **Adopté** : point 1, les deux commandes lisent `isLocked()`
+  comme Composer (lock activé, fichier présent, clé `packages`) ; le refus
+  de `require` sans `--no-install` disparaît avec l'install du lock virtuel.
+- **Bloquant — `install` sans lock par `run_update`.** `run_update` lit
+  `COMPOSER_PREFER_STABLE`/`_LOWEST`/`_WITH_(ALL_)DEPENDENCIES`/
+  `_MINIMAL_CHANGES`, options qu'`InstallCommand` n'a pas ; `--check-scope`
+  résoudrait et écrirait. **Adopté** : l'`install` entre par
+  `resolve_and_lock` avec des options explicites (aucune de ces variables) ;
+  `--check-scope` sort en 3 avec la raison, sans réseau ni écriture.
+- **Majeur — lock sans `packages-dev`, point incomplet.** `install --no-dev`
+  sur un tel lock **échoue après l'installation** chez Composer
+  (`Installer.php:356`, `getLockedRepository(true)` pour les abandonnés) :
+  paquets posés, installed.json écrit, pas d'autoloader, code 1 ;
+  `update`/`require`/`remove` lèvent avant « Loading composer
+  repositories » (`Installer.php:496`), vivacity avec le préfixe `Error: `,
+  et `require` sans sa ligne « Installation failed, reverting… ».
+  **Adopté** : complété (suite du point 5).
+- **Majeur — les cas `steps.sh` du point 1 ne prouvaient rien** (`install`
+  y reçoit `--dry-run`, un lock absent des deux côtés est égal).
+  **Adopté** : vraies installations dans `verbosity.sh`
+  (`@warm`, `@files:composer.lock,vendor/composer/installed.json`).
+- **Majeur — `update` avec `COMPOSER_NO_DEV=yes`** installait le dev
+  (`install_after_update` ne passe que `args.no_dev`) ; corrigé par ricochet
+  au point 4 (l'install relit la variable). **Adopté** : un cas `update`.
+- **Majeur — hg/svn/fossil au mauvais endroit.** L'avertissement ne
+  s'écrit ni sous `-q` ni pour un `project`, alors que la version compte
+  partout (`installed.php`) ; et les paquets des dépôts `path` sont devinés
+  par git seul (`path_repo.rs`). **Adopté** : la décision vit à côté de la
+  détection de version, pour toute racine et à tout niveau ; les dépôts
+  `path` sous hg/svn/fossil sont ajoutés au même garde.
+- **Majeur — `--offline`, cas « cache chaud » mal construit** (`getFilter`
+  lit aussi `summary.json` et les `p2`), POST et dists oubliés, URL réelle
+  dangereuse. **Adopté** : cache chaud construit par un premier passage de
+  Composer en ligne sur un dépôt servi en HTTP local, URL factice sinon ;
+  le POST suit la même règle ; les dists (« missing cache … in offline
+  mode ») notés.
+- **Mineurs adoptés** : l'ordre avec un manifeste absent (les variables
+  avant « could not find a composer.json » : `dump`, `update`, `install`) ;
+  git mis en cache par (répertoire, arguments), pas la version ; Flex
+  `thanks` hors du chemin install → update ; témoin `GITHUB_ACTIONS=false`
+  plutôt que `0` ; `@vendor` de `verbosity.sh` appliqué avant les `@jq:`.
+  **Notés** : délégation tardive avec `config.lock: false`
+  (`after_update_line` rend un `composer install` qui résout à nouveau) ;
+  joindre le fil avant le repli du plugin de fusion fait attendre le réseau
+  (6b : à peser) ; suffixe de l'autoloader sans lock ; `acme/phpext` sous
+  `acme/p*` — tous les cas `solver-problems` rejoués (portes).
+- **Vérifié sans objet** : le point 8 (un `CompositeRepository` unique).
+
 ## Vérification
 
 `cargo fmt --all -- --check` ; clippy `-D warnings` macOS et

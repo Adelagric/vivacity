@@ -411,6 +411,9 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
 9. `--offline` : Composer sans réseau (`COMPOSER_DISABLE_NETWORK`) écrit
    « Filter list data could not be fetched… (ignored per
    policy.ignore-unreachable) » là où vivacity écrit « could not be fully
-   loaded (offline…) » — vu en mesurant `transitions.sh`, hors périmètre.
+   loaded (offline…) » — vu en mesurant `transitions.sh`, hors périmètre —
+   **corrigé le 2026-10-16** (`install-defects.md`, point 7 : transport hors
+   ligne de Composer, mode dégradé selon la saveur de la requête ; section 4
+   de `transport-exit.sh`).
 10. Les avertissements gardés d'un dépôt dégradé sont perdus si un autre dépôt
     échoue ensuite.

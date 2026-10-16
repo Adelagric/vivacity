@@ -7,6 +7,21 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`--offline` says what Composer says without a network.** The fallback
+  hands `--offline` to Composer as `COMPOSER_DISABLE_NETWORK=1`, under which
+  `HttpDownloader` answers a conditional request with a 304 (the cache
+  serves, silently) and refuses any other with `Network disabled, request
+  canceled: <url>`. vivacity failed every metadata request with `offline:
+  cannot fetch …`: on a warm Packagist cache it printed a `could not be
+  fully loaded` warning Composer does not print, on a cold one another
+  reason under `Filter list data could not be fetched`. The repository's
+  degraded mode now follows the request's flavour: `fetchFile`
+  (packages.json, includes) serves any cached copy, `asyncFetchFile`
+  (package files, filter summary) warns, serves a conditional copy, and
+  reads a refused request as a 404. The degraded warning itself lost a
+  `Warning: ` prefix Composer does not write, and its URL is sanitized.
+  `harness/transport-exit.sh` gains three cases on a registry served over
+  local HTTP (warm cache with and without `Last-Modified`, cold cache).
 - **GitHub Actions annotations.** Under GitHub Actions (`GITHUB_ACTIONS`
   set, `COMPOSER_TESTS_ARE_RUNNING` not), Composer writes `::error ::` and
   the escaped error on stdout (`GithubActionError::emit`): for an

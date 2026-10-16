@@ -14,6 +14,9 @@
 # passage que le 404 n'est PAS réessayé — `CurlDownloader` ne réessaie que
 # 423/425/500/502/503/504/507/510 (et un 400 de codeload.github.com).
 #
+# Et, section 4, ce que `--offline` écrit : la même chose que Composer sous
+# `COMPOSER_DISABLE_NETWORK=1` (stderr entière, trois états du cache).
+#
 # Usage : harness/transport-exit.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -135,5 +138,74 @@ JSON
   echo "FAIL : Composer n'a pas écrit le lock du cas local"; exit 1; }
 cp "$WORK/local/ref/composer.json" "$WORK/local/ref/composer.lock" "$WORK/local/viv/"
 compare local install --no-scripts --no-fallback -- install --no-scripts
+
+# 4. Hors ligne : `--offline` de vivacity contre `COMPOSER_DISABLE_NETWORK=1`
+# (la variable que le fallback lui donne). `HttpDownloader` (l. 328-338)
+# répond 304 à une requête conditionnelle et rejette toute autre par
+# « Network disabled, request canceled: <url> ». Un dépôt `composer` servi en
+# HTTP local (l'instantané solver-policies : liste malware, `summary.json`),
+# avec ou sans `Last-Modified` ; cache rempli par un `install --dry-run` de
+# Composer en ligne (chaud), ou vide (froid). stderr comparée en entier.
+cat > "$WORK/router.php" <<'PHP'
+<?php
+// Static files of OFFLINE_ROOT, with a fixed Last-Modified (and a 304 on a
+// matching If-Modified-Since) when OFFLINE_LAST_MODIFIED is 1.
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$file = getenv('OFFLINE_ROOT') . $path;
+if (!is_file($file)) {
+    http_response_code(404);
+    return true;
+}
+if (getenv('OFFLINE_LAST_MODIFIED') === '1') {
+    $lm = 'Thu, 01 Jan 2026 00:00:00 GMT';
+    header('Last-Modified: ' . $lm);
+    if (($_SERVER['HTTP_IF_MODIFIED_SINCE'] ?? '') === $lm) {
+        http_response_code(304);
+        return true;
+    }
+}
+header('Content-Type: application/json');
+readfile($file);
+return true;
+PHP
+offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez Composer, ou "-" pour aucun « could not »>
+  local name="$1" lm="$2" warmth="$3" want="$4" reg="$WORK/off-$1" p rc=0 vc=0
+  mkdir -p "$reg"; tar -C "$reg" -xzf "$ROOT/fixtures/registry/solver-policies.tar.gz"
+  p=$(php -r '$s = stream_socket_server("tcp://127.0.0.1:0", $e, $m); $n = stream_socket_get_name($s, false); fclose($s); echo substr($n, strrpos($n, ":") + 1);')
+  printf '{"packages": [], "metadata-url": "http://127.0.0.1:%s/p2/%%package%%.json", "available-package-patterns": ["*"], "security-advisories": {"metadata": true, "api-url": null}, "filter": {"metadata": true, "lists": {"malware": {"enabled": true}}, "summary-url": "http://127.0.0.1:%s/summary.json"}}\n' "$p" "$p" > "$reg/packages.json"
+  [ -f "$reg/summary.json" ] || printf '{"filter": {"malware": {}}}\n' > "$reg/summary.json"
+  OFFLINE_ROOT="$reg" OFFLINE_LAST_MODIFIED="$lm" php -S "127.0.0.1:$p" "$WORK/router.php" >/dev/null 2>&1 &
+  local srv=$!
+  for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$p/packages.json" && break; sleep 0.1; done
+  mkdir -p "$WORK/off-home-$name" "$WORK/$name/ref" "$WORK/$name/viv"
+  printf '{"repositories": {"snap": {"type": "composer", "url": "http://127.0.0.1:%s"}, "packagist.org": false}, "config": {"secure-http": false}}\n' "$p" > "$WORK/off-home-$name/config.json"
+  for side in ref viv; do cp "$ROOT/fixtures/projects/solver-policies/composer.json" "$ROOT/fixtures/projects/solver-policies/composer.lock" "$WORK/$name/$side/"; done
+  if [ "$warmth" = chaud ]; then
+    (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name" COMPOSER_ROOT_VERSION=dev-main \
+      composer install --dry-run --no-plugins --no-scripts --no-interaction -q) || { echo "FAIL $name : le remplissage du cache a échoué"; status=1; kill $srv; return; }
+  fi
+  mkdir -p "$WORK/off-cache-$name"
+  cp -R "$WORK/off-cache-$name" "$WORK/off-cache-$name-ref"; cp -R "$WORK/off-cache-$name" "$WORK/off-cache-$name-viv"
+  (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name-ref" COMPOSER_ROOT_VERSION=dev-main COMPOSER_DISABLE_NETWORK=1 COMPOSER_TESTS_ARE_RUNNING=1 \
+    composer install --dry-run --no-plugins --no-scripts --no-interaction --no-ansi >/dev/null 2>"$WORK/$name.ref.err") || rc=$?
+  (cd "$WORK/$name/viv" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name-viv" COMPOSER_ROOT_VERSION=dev-main \
+    "$VIVACITY" install --dry-run --offline >/dev/null 2>"$WORK/$name.viv.err") || vc=$?
+  kill $srv 2>/dev/null; wait $srv 2>/dev/null
+  if [ "$want" = - ]; then
+    if grep -q "could not be" "$WORK/$name.ref.err"; then echo "FAIL $name : Composer n'est pas muet (cas mal choisi)"; status=1; return; fi
+  elif ! grep -q -- "$want" "$WORK/$name.ref.err"; then
+    echo "FAIL $name : Composer n'écrit pas « $want » (cas mal choisi)"; status=1; return
+  fi
+  if [ "$rc" != "$vc" ]; then echo "FAIL $name : codes $rc (composer) vs $vc (vivacity)"; tail -3 "$WORK/$name.viv.err"; status=1; return; fi
+  sed "s#127.0.0.1:$p#<server>#g" "$WORK/$name.ref.err" > "$WORK/$name.ref.n"
+  sed "s#127.0.0.1:$p#<server>#g" "$WORK/$name.viv.err" > "$WORK/$name.viv.n"
+  if ! diff -q "$WORK/$name.ref.n" "$WORK/$name.viv.n" >/dev/null; then
+    echo "FAIL $name : stderr diffère"; diff "$WORK/$name.ref.n" "$WORK/$name.viv.n" | head -8; status=1; return
+  fi
+  echo "OK   $name : code $rc, stderr identique ($(wc -l < "$WORK/$name.ref.err" | tr -d ' ') lignes)"
+}
+offline_case offline-warm-lm 1 chaud -
+offline_case offline-warm-nolm 0 chaud "could not be fully loaded (Network disabled, request canceled"
+offline_case offline-cold 1 froid "  - Network disabled, request canceled: http://"
 
 exit $status

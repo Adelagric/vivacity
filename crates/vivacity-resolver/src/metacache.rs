@@ -14,7 +14,7 @@ pub struct MetadataCache {
 
 /// `Url::sanitize` reduced to credentials in the URL (`user:pass@`) and the
 /// `access_token` parameter.
-fn sanitize_url(url: &str) -> String {
+pub fn sanitize_url(url: &str) -> String {
     static TOKEN: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
     static CREDS: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
     let token = crate::version::regex(&TOKEN, r"([&?]access_token=)[^&]+", false);
