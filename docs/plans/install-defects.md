@@ -425,3 +425,67 @@ qui les touche s'applique au code déjà commité.
 `x86_64-pc-windows-gnu` ; `cargo test --workspace` ; les 30 passages de
 `.github/workflows/ci.yml` et `harness/root-manifest.sh`, chacun à 0,
 répertoires de travail supprimés après chaque passe.
+
+## Revue indépendante (sous-agent frais, sur le diff, 2026-10-16) — et ce qui a changé
+
+Le relecteur a refait des comparaisons contre Composer 2.10.3 (install sans
+lock et `config.lock: false`, variables de plateforme, `update a/b` lock
+désactivé, annotations, faux `hg`) : identiques. Aucun bloquant.
+
+- **Majeur — `dump-autoload` sous `config.lock: false`** : disposition tirée
+  d'un lock que Composer ignore (autoloader faux si périmé, erreur si
+  absent). **Corrigé** : installed.json comme source sans lock à lire ;
+  deux cas `verbosity.sh`, rouges avant.
+- **Majeur — composer.lock lu et analysé deux fois par `install`** (~1,5 ms
+  sur sylius). **Corrigé** : une lecture, une analyse.
+- **Mineurs corrigés** : ligne de `Factory` devant un refus de
+  `RootPackageLoader` (cas `root-manifest.sh`) ; exception du `Locker` avant
+  `COMMAND` dans `update` (cas `bin-plugin.sh no-dev-info`) ; dépôts du
+  plugin de fusion interrogés sur vendor vierge (cas
+  `install-repos-filter-bare`, rouge sur 461f0bc) ; cache de git sans garde
+  de panique ; `--check-scope` nommé `--no-fallback` dans le refus hg ;
+  commentaire faux de `steps.sh` ; `ignore_lock` écrasé ; lecture du
+  manifeste avant les `stat` ; comptes et renvois des docs.
+- **Noté, laissé** : `install`/`update --no-suggest` refusés par clap (Composer
+  avertit), antérieur.
+
+## Résultat (2026-10-16)
+
+**Commits** (branche `install-defects`, depuis db349c1) : 3c9d43e (plan),
+536009e (point 3 : lignes retenues en file, variables sur `dump-autoload`),
+44bcb35 (point 4), e88f403 (point 5), cbe9554 (point 8), 3da117a (point 2),
+cbaab46 (point 6), 89893cd (point 7), 6b2bf17 (point 3, après la méta :
+manifeste absent), 77688eb (point 1 et suite du point 5 : `config.lock:
+false`, `install` sans lock, lock sans `packages-dev` partout), b3d8d8f
+(point 9), 560c11c (point 10), 461f0bc (point 11 : 6a, 6b, 10), 878df5c
+(témoin `GITHUB_ACTIONS=false`), c3bd2de (revue).
+
+**Rouges puis verts** : chaque cas a été vu rouge sur le binaire de db349c1
+(ou, pour les corrections de la revue, sur celui d'avant elles) puis vert ;
+détail par point dans DECISIONS.md.
+
+**Portes** (binaire final) : `cargo fmt --all -- --check` ; clippy `-D
+warnings` macOS et `x86_64-pc-windows-gnu` ; `cargo test --workspace` 330
+réussis, 0 échec (36 binaires ; 4 tests de plus que `main`). **Harnais**,
+chacun dans son répertoire, effacé après : diff-vendor 12, `--with-autoloader`
+12 et 12, update 19, steps 279, removal 3, transitions 13, path-repos 14,
+vendor-dir 6, merge-plugin 18, scripts 6, tar-dist 7, yii2-composer 11,
+bin-plugin 13, wp-core 5, custom-dirs 4, package-versions 7, flex-install 7,
+flex-update 26, flex-recipes 26, download-lines 2, artifact-repo 9,
+compare-selftest 11, two-stage 12, transport-exit 9, verbosity 212,
+fallback-args 50, root-scan 12, boot 6, drift-reference (129 fichiers
+identiques), root-manifest 44 — 31 passages à 0, 867 lignes `OK`, 0 `FAIL`.
+
+**Coût** (hyperfine `-N`, 40 passages, `install --no-plugins --offline`
+sans opération, laravel installé, `main` contre branche) : bibliothèque sur
+`main` 50,6 → 44,4 ms, sur une branche de fonctionnalité 57,5 → 46,3 ms,
+projet 53,6 → 45,0 ms — le cache des réponses de git ; le reste ne coûte
+rien de mesurable.
+
+**Vus, laissés** : délégation tardive avec `config.lock: false` (un
+`composer install` qui résout à nouveau) ; `COMPOSER_DISABLE_NETWORK` posé
+par l'utilisateur ne met pas vivacity hors ligne ; hors ligne, un dist absent
+du cache n'a pas le texte de Composer ; `Error: …` de vivacity sans
+annotation GitHub ; `install`/`update --no-suggest` refusés par clap ; les
+doublons des délégations tardives.
+
