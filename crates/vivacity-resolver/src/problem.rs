@@ -195,7 +195,7 @@ pub fn strip_output_styles(text: &str) -> String {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
         let Some(end) = after.find('>') else {
-            out.push_str(rest);
+            out.push_str(&rest[start..]);
             return out;
         };
         let tag = &after[..end];
@@ -1880,6 +1880,15 @@ mod tests {
             strip_output_styles("see <https://getcomposer.org/doc/04-schema.md#minimum-stability> for <info>x</info> <warning>y</warning> <href=https://a>PKSA-1</>"),
             "see <https://getcomposer.org/doc/04-schema.md#minimum-stability> for x y PKSA-1"
         );
+        // A `<` that opens no tag (no `>` after it) is printed once, as
+        // `OutputFormatter::format` leaves it: the text before it was
+        // copied already, and used to be copied again.
+        assert_eq!(
+            strip_output_styles("a <info>b</info> conflicts with rector/rector <2.0 (c"),
+            "a b conflicts with rector/rector <2.0 (c"
+        );
+        assert_eq!(strip_output_styles("<"), "<");
+        assert_eq!(strip_output_styles("x <2.0 > y <"), "x <2.0 > y <");
     }
 
     #[test]

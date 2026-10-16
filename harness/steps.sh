@@ -304,6 +304,12 @@ STEPS=(
   # (`unacceptableFixedOrLockedPackages`) mais présent : la résolution
   # réussit avec une désinstallation — « without changes », code 4.
   "rector|install @lockjq:.[\"minimum-stability\"]=\"stable\"|.[\"stability-flags\"]={}"
+  # Racine `1.0.0` (la version que Composer prend sans dépôt git ni
+  # COMPOSER_ROOT_VERSION ; ce banc fixe `dev-main` pour rector, la variable
+  # la remplace) : rector-src remplace rector/rector 1.0.0 et entre en
+  # conflit avec `rector/rector <2.0` — un texte de problème avec un `<` qui
+  # n'ouvre aucune balise, que `strip_output_styles` doublait.
+  "rector|install @env:COMPOSER_ROOT_VERSION=1.0.0"
   "solver-problems|update @nolock @stderr @require:acme/missing-dep=^1.0"
   "solver-problems|update @nolock @stderr @require:acme/unstable=^1.0 @jq:.[\"minimum-stability\"]=\"stable\""
   "solver-problems|update @nolock @stderr @require:acme/unstable=^1.0@beta @jq:.[\"minimum-stability\"]=\"stable\""

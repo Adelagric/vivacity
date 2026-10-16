@@ -377,7 +377,10 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    Trouvé par `boot.sh` sur rector sans version racine : le problème
    `conflicts with rector/rector <2.0 (…)` sort deux fois, le premier coupé
    au `<`. Touche aussi `update` (tout texte de problème avec `<` sans indice
-   à chevrons après lui). Correctif d'une ligne, hors périmètre.
+   à chevrons après lui). Correctif d'une ligne, hors périmètre —
+   **corrigé le 2026-10-16** dans la foulée (`out.push_str(&rest[start..])`,
+   cas `rector|install @env:COMPOSER_ROOT_VERSION=1.0.0` dans `steps.sh`,
+   rouge sur 4895cef puis vert).
 2. `COMPOSER_IGNORE_PLATFORM_REQ(S)` restent ignorées par `dump-autoload`
    (même `BaseCommand::initialize`) ; et sur un fallback, l'avertissement
    imprimé par vivacity l'est une seconde fois par Composer.

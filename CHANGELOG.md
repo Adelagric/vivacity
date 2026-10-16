@@ -7,6 +7,13 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **A problem's text is no longer printed twice when it holds a `<` that
+  opens no tag.** `strip_output_styles` (Symfony's `OutputFormatter` without
+  decoration) copied the whole remaining text, prefix already written
+  included, when a `<` had no `>` after it: `conflicts with rector/rector
+  <2.0 (…)` came out twice, the first time cut at the `<`, on `install` and
+  `update` alike. Found by `harness/boot.sh` on rector without a root
+  version; `harness/steps.sh` now plays that case.
 - **`install` verifies the lock the way `Installer::doInstall` does: one
   solve, one list of problems.** It used to check only the lock's
   `platform`/`platform-dev` sections, with a message of its own and exit 4,
