@@ -179,37 +179,38 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
         Ok(None) => {}
     }
     let manifest = manifest;
-    // `Installer::run`: without a lock to install (`isLocked()` false —
-    // `config.lock: false`, no file, no `packages`), the install updates.
-    // An unreadable lock stays an error below, Composer's ParsingException.
-    if args.virtual_lock.is_none() {
-        // The `Locker` reads `/dev/null` when `config.lock` is false.
-        let enabled = config_lock_enabled(&manifest_text);
-        let lock_text = std::fs::read_to_string(&lock_path).ok().filter(|_| enabled);
-        let locked = match lock_text
-            .as_deref()
-            .map(serde_json::from_str::<serde_json::Value>)
-        {
-            None => false,
-            Some(Err(_)) => true,
-            Some(Ok(v)) => v.get("packages").is_some_and(|p| !p.is_null()),
-        };
-        if !locked {
-            return Ok(Flow::Break(install_without_lock(args, enabled)?));
-        }
-    }
-    // A dry-run update installs from its unwritten lock.
-    let lock_text: String = match &args.virtual_lock {
-        Some(v) => {
-            vivacity_core::phpjson::php_json_encode_with(v, vivacity_core::phpjson::FLAGS_JSONFILE)?
-        }
-        None => std::fs::read_to_string(&lock_path)
-            .with_context(|| format!("cannot read {}", lock_path.display()))?,
-    };
     // Parsed once: the `Value` serves the transaction, the abandoned
     // warnings and the missing-requirement check; the `Lock` everything else.
-    let lock_value: serde_json::Value =
-        serde_json::from_str(&lock_text).context("invalid composer.lock")?;
+    let lock_value: serde_json::Value = match &args.virtual_lock {
+        // A dry-run update (or one that writes no lock) installs from its
+        // unwritten lock.
+        Some(v) => serde_json::from_str(&vivacity_core::phpjson::php_json_encode_with(
+            v,
+            vivacity_core::phpjson::FLAGS_JSONFILE,
+        )?)
+        .context("invalid composer.lock")?,
+        None => {
+            // `Installer::run`: without a lock to install (`isLocked()`
+            // false — `config.lock: false`, whose `Locker` reads
+            // `/dev/null`, no file, no `packages`), the install updates. An
+            // unreadable lock is Composer's ParsingException.
+            let enabled = config_lock_enabled(&manifest_text);
+            let text = match std::fs::read_to_string(&lock_path) {
+                Ok(text) if enabled => text,
+                Err(e) if enabled && e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("cannot read {}", lock_path.display())));
+                }
+                _ => return Ok(Flow::Break(install_without_lock(args, enabled)?)),
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&text).context("invalid composer.lock")?;
+            if !value.get("packages").is_some_and(|p| !p.is_null()) {
+                return Ok(Flow::Break(install_without_lock(args, enabled)?));
+            }
+            value
+        }
+    };
     let lock = vivacity_core::lock::Lock::from_value(&lock_value);
     trace("read manifests", t0);
 
@@ -546,9 +547,19 @@ fn spawn_verification(run: &Run<'_>) -> anyhow::Result<Option<Verification>> {
         no_blocking: args.no_blocking || args.no_security_blocking,
         ignore_platform_reqs: run.ignore_platform_reqs,
         ignore_platform_req: run.ignore_platform_req.clone(),
+        // `prependRepositories` runs when the plugin is activated: on a bare
+        // vendor it is not yet, and `doInstall`'s filter never sees them.
         prepended_repositories: run
             .merged
             .as_ref()
+            .filter(|_| {
+                installed_packages(&run.project, &run.manifest)
+                    .iter()
+                    .any(|p| {
+                        p.get("name").and_then(serde_json::Value::as_str)
+                            == Some(vivacity_resolver::merge_plugin::PLUGIN_NAME)
+                    })
+            })
             .map(|m| m.repository_definitions.clone())
             .unwrap_or_default(),
         abandoned: abandoned.clone(),

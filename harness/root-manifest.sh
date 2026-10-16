@@ -137,6 +137,9 @@ run_lock() {
 # Un lock sans `packages-dev` en mode dev : `Installer::doInstall` écrit son
 # en-tête, puis `Locker::getLockedRepository(true)` lève (avant « Verifying… »).
 run_lock lock-no-packages-dev 'del(.["packages-dev"])' install --dry-run --no-plugins --no-scripts
+# `config.lock: false` : `Factory` refuse la racine avant d'arriver à son
+# avertissement sur le lock ignoré — rien d'autre que le refus.
+run lockfalse-self-require '.name="laravel/framework" | .config.lock=false' install
 run_lock lock-null-packages-dev '.["packages-dev"]=null' install --dry-run --no-plugins --no-scripts
 # Sans dev, l'install passe : c'est la liste des abandonnés
 # (`Installer::run`, l. 356, `getLockedRepository(true)`) qui lève, après les

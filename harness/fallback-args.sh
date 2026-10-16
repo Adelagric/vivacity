@@ -400,6 +400,9 @@ grep -q 'delegating to `composer install --dry-run --working-dir proj --no-scrip
 check h-hg-no-fallback "$GH" 3 0 -- install --dry-run --no-fallback --working-dir proj --offline
 grep -q 'with a root version from Mercurial (`hg branch`) is outside what vivacity reproduces' "$WORK/h-hg-no-fallback.err" \
   || { fail "h-hg-no-fallback : la raison manque"; cat "$WORK/h-hg-no-fallback.err"; }
+check h-hg-check-scope "$GH" 3 0 -- install --check-scope --working-dir proj --offline
+grep -q -- '--check-scope given: stopping here' "$WORK/h-hg-check-scope.err" \
+  || { fail "h-hg-check-scope : l'option nommée n'est pas celle donnée"; cat "$WORK/h-hg-check-scope.err"; }
 FAKE_HG_FAIL=1 check h-hg-fails "$GH" 0 0 -- install --dry-run --working-dir proj --no-plugins --offline --ignore-platform-reqs
 expect_rootwarn h-hg-fails 1
 jq '.type = "project"' "$GA/proj/composer.json" > "$GH/proj/composer.json"

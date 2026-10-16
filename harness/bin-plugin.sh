@@ -77,6 +77,21 @@ step update-dry-run  1 update --dry-run "${R[@]}" -- update --dry-run "${R[@]}" 
 step require         2 require monolog/monolog:3.9.0 "${R[@]}" -- require monolog/monolog:3.9.0 "${R[@]}" --no-fallback
 grep -q 'package suggestions were added' "$WORK/require.composer.err" || { echo "FAIL require : Composer n'a imprimé aucune suggestion (cas mal construit)"; status=1; }
 step remove          2 remove monolog/monolog "${R[@]}" -- remove monolog/monolog "${R[@]}" --no-fallback
+# Un lock sans `packages-dev` : `Locker::getLockedRepository(true)` lève dans
+# `doUpdate`, donc après `COMMAND` — les lignes du plugin, puis l'exception
+# (encadré chez Composer, le message seul chez vivacity), code 1.
+for d in "$ref" "$viv"; do jq 'del(.["packages-dev"])' "$d/composer.lock" > "$d/l.tmp" && mv "$d/l.tmp" "$d/composer.lock"; done
+c_code=0; v_code=0
+(cd "$ref" && COLUMNS=400 composer update --no-install "${R[@]}" --no-interaction --no-ansi >/dev/null 2>"$WORK/no-dev-info.composer.err") || c_code=$?
+(cd "$viv" && "$VIVACITY" update --no-install "${R[@]}" --no-fallback >/dev/null 2>"$WORK/no-dev-info.vivacity.err") || v_code=$?
+c_lines=$( { sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/q;p' "$WORK/no-dev-info.composer.err" | grep -v '^$'
+  sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/,/^$/p' "$WORK/no-dev-info.composer.err" | sed 's/^ *//; s/ *$//' | grep -v '^$' | grep -vE '^In [A-Za-z0-9_]*\.php line'; } )
+v_lines=$(grep -v '^$' "$WORK/no-dev-info.vivacity.err")
+if [ "$c_code" = 1 ] && [ "$v_code" = 1 ] && [ "$c_lines" = "$v_lines" ] && grep -q '^\[bamarni-bin\]' "$WORK/no-dev-info.vivacity.err"; then
+  echo "OK   no-dev-info : lignes de COMMAND puis l'exception du Locker, code 1"
+else
+  echo "FAIL no-dev-info : codes $c_code vs $v_code"; diff <(echo "$c_lines") <(echo "$v_lines") | head -8; status=1
+fi
 # Mise à jour partielle sans lock : refusée par `Installer::doUpdate`, donc
 # après `COMMAND` (code 3).
 rm -f "$ref/composer.lock" "$viv/composer.lock"

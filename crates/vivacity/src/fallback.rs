@@ -425,18 +425,30 @@ pub(crate) fn active_plugin(project: &std::path::Path, plugins_enabled: bool) ->
 /// the command line after the program name, forwarded through
 /// [`forwarded_arguments`] and [`hand_over`]. `--no-fallback` stops with
 /// exit 3 instead (and `--check-scope`, for the reasons it reports).
-pub(crate) fn delegate_for_verbosity(tokens: &[std::ffi::OsString], reason: &str) -> i32 {
+/// `remedy` completes "install Composer or …" when there is none.
+pub(crate) fn delegate_for_verbosity(
+    tokens: &[std::ffi::OsString],
+    reason: &str,
+    remedy: &str,
+) -> i32 {
     let command = command_of(tokens);
-    if has_option(tokens, "--no-fallback") || has_option(tokens, "--check-scope") {
+    let stop = if has_option(tokens, "--no-fallback") {
+        Some("--no-fallback")
+    } else if has_option(tokens, "--check-scope") {
+        Some("--check-scope")
+    } else {
+        None
+    };
+    if let Some(option) = stop {
         vivacity_core::say_always!(
             "vivacity: `{command}` with {reason} is outside what vivacity reproduces."
         );
-        vivacity_core::say_always!("--no-fallback given: stopping here (nothing was written).");
+        vivacity_core::say_always!("{option} given: stopping here (nothing was written).");
         return 3;
     }
     let Some(composer) = which_composer() else {
         vivacity_core::say_always!(
-            "composer not found for the fallback — install Composer or drop {reason}."
+            "composer not found for the fallback — install Composer or {remedy}."
         );
         return 3;
     };

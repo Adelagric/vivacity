@@ -472,7 +472,7 @@ pub(crate) fn resolve_and_lock(
     let installer_dev_mode = !(args.no_dev || env_no_dev());
     let mut options = options;
     // `config.lock: false`: the update runs without the lock's packages.
-    options.ignore_lock = !config_lock_enabled(&manifest_text);
+    options.ignore_lock |= !config_lock_enabled(&manifest_text);
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
         // `RootPackage::load` refuses these too, but through the error path,
         // which prefixes the message; here it is worded as Composer words it.
@@ -549,7 +549,18 @@ pub(crate) fn resolve_and_lock(
                 ..Resolved::stopped(0)
             });
         }
-        Err(e) => return Err(session_error(e)),
+        Err(e) => {
+            // `Locker::getLockedRepository(true)` throws in `doUpdate`, after
+            // `UpdateCommand` dispatched `COMMAND` (bamarni's lines first).
+            if e.message == vivacity_resolver::repository::LOCK_WITHOUT_DEV
+                && !args.command_dispatched
+            {
+                if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+                    bamarni_command_event(&project, &m, !args.no_plugins);
+                }
+            }
+            return Err(session_error(e));
+        }
     };
     trace("prepare", t0);
     // symfony/flex active (installed, allowed, `extra.symfony.require` or

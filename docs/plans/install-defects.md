@@ -85,9 +85,10 @@ une vraie installation `update` + `config.lock: false` comparée sur
 `vendor/composer/installed.json` (nouveau prep `@files:` de verbosity.sh,
 voir point 3).
 
-**Laissé** : `dump-autoload` lit composer.lock pour sa disposition (Composer :
-le dépôt local) — avec `config.lock: false` il lit un lock que Composer
-ignore. Préexistant, noté.
+**Laissé** (premier jet) : `dump-autoload` lit composer.lock pour sa
+disposition (Composer : le dépôt local) — avec `config.lock: false` il lit
+un lock que Composer ignore. Corrigé après la revue (installed.json comme
+source quand il n'y a pas de lock à lire).
 
 ## 2. `ignoredTypes` du `PoolBuilder` (défaut 8)
 

@@ -3630,7 +3630,8 @@ Effet sur les harnais : ceux qui comparent stdout côté vivacity sans poser
 `COMPOSER_TESTS_ARE_RUNNING` des deux côtés n'ont pas de cas d'erreur
 (steps.sh jette stdout, verbosity.sh pose la variable pour les deux) ;
 `root-manifest.sh` compare désormais stdout, vérifié sous
-`GITHUB_ACTIONS=true` sans la variable (39 cas, le régime du runner).
+`GITHUB_ACTIONS=true` sans la variable (le régime du runner : tous les cas,
+43 à la fin de la branche).
 Rouge sur db349c1 : les trois cas `GITHUB_ACTIONS=true` de verbosity.sh
 (normal et `-v`) et `gha-self-require`, `gha-lock-no-packages-dev`.
 
@@ -3723,10 +3724,10 @@ installations comparées sur composer.lock et installed.json ; `steps.sh` :
 `remove --unused` 1 contre 0, `update a/b` 3 contre 0, `install @badlock`
 0 contre 1 ; `root-manifest.sh` : quatre cas `run_lock`).
 
-Laissé : `dump-autoload` lit composer.lock pour sa disposition (Composer : le
-dépôt local) et, sans `vendor/autoload.php`, tire son suffixe du lock ; une
-délégation tardive de la phase d'installation rend un `composer install`
-qui, lock désactivé, résout à nouveau.
+Laissé : une délégation tardive de la phase d'installation rend un
+`composer install` qui, lock désactivé, résout à nouveau. (`dump-autoload`
+lisait composer.lock pour sa disposition : corrigé après la revue, entrée
+suivante.)
 
 ## 2026-10-16 — hg, fossil et svn : rendre la main là où Composer devinerait
 
@@ -3777,11 +3778,13 @@ Décision : `root_version::git` garde ses réponses par (répertoire,
 arguments) — pas la version calculée, qui dépend du manifeste
 (`non-feature-branches`) —, toutes en lecture seule. Le cache n'existe
 qu'entre `remember_git_answers` et `forget_git_answers`, que `vivacity::run`
-appelle autour de chaque exécution : un programme qui embarque vivacity voit
-le dépôt changer entre deux exécutions, et hors d'une exécution (tests qui
-committent entre deux devinettes) git tourne toujours. Deux exécutions
-simultanées dans un même processus partagent le cache (comme le niveau de
-verbosité), sans conséquence : clés par répertoire.
+appelle autour de chaque exécution (un garde, levé même sur une panique) :
+un programme qui embarque vivacity voit le dépôt changer entre deux
+exécutions, et hors d'une exécution (tests qui committent entre deux
+devinettes) git tourne toujours. Deux exécutions simultanées dans un même
+processus partagent le cache (comme le niveau de verbosité) : l'une peut le
+vider ou l'éteindre pour l'autre, qui relance alors git — plus lent, jamais
+faux (clés par répertoire et arguments).
 
 Mesuré (hyperfine `-N`, 40 passages, `install --no-plugins --offline
 --no-blocking` sans opération, laravel rendu bibliothèque) : branche de
@@ -3814,4 +3817,35 @@ point 11.
   (`abandon_and_wait`) avant de lancer Composer : jamais deux processus sur
   le cache de dépôt. Coût (méta) : l'attente réseau du fil, sur un chemin
   qui rend la main de toute façon.
+
+## 2026-10-16 — Ce que la revue indépendante a changé (branche `install-defects`)
+
+La revue (sous-agent frais, sur le diff de `main`) n'a trouvé aucun
+bloquant ; ses deux majeurs se reproduisaient contre Composer.
+
+- **`dump-autoload` sous `config.lock: false`** construisait sa disposition
+  depuis composer.lock — périmé (autoloader faux, code 0) ou absent
+  (`Error: failed to read`). `AutoloadGenerator::dump` lit le dépôt local :
+  sans lock à lire (désactivé ou absent), installed.json devient la source
+  (`local_repository_as_lock`, paquets répartis par `dev-package-names`).
+  Deux cas `verbosity.sh` (lock périmé par `@lockjq:`, lock absent),
+  rouges avant.
+- **`install` lisait et analysait composer.lock deux fois** (le test
+  « lock utilisable ? » puis la lecture) : une seule lecture, une seule
+  analyse ; un lock présent mais illisible reste une erreur.
+- **Mineurs corrigés** : la ligne de `Factory` sur le lock ignoré ne sort
+  plus devant un refus de `RootPackageLoader` (cas `root-manifest.sh`) ;
+  l'exception du `Locker` dans `update` vient après l'événement `COMMAND`
+  (cas `bin-plugin.sh no-dev-info`) ; les dépôts du plugin de fusion ne
+  sont interrogés que si le plugin est installé (`prependRepositories`
+  suit l'activation ; cas `install-repos-filter-bare`) ; le cache de git
+  est levé par un garde, panique comprise ; `--check-scope` se nomme
+  lui-même dans le refus de la délégation hg/fossil/svn, et le remède sans
+  composer y est `COMPOSER_ROOT_VERSION` ; `ignore_lock` n'écrase plus la
+  valeur de l'appelant ; les `stat` avant la lecture de composer.json.
+- **Comptes et renvois** de CHANGELOG/DECISIONS/HANDOVER corrigés ;
+  commentaire de `steps.sh` rectifié (la stderr des refus n'est pas
+  comparée).
+- **Noté, laissé** : `install`/`update --no-suggest` refusés par clap
+  (Composer avertit) — antérieur.
 

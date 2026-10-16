@@ -84,6 +84,11 @@ CASES=(
   "laravel|install --dry-run @nolock"
   "laravel|update --dry-run --no-install @jq:.config.lock=false"
   "laravel|dump-autoload @vendor @jq:.config.lock=false"
+  # … dont `AutoloadGenerator::dump` lit le dépôt local : un lock périmé ou
+  # absent n'y change rien (autoload_static.php porte un suffixe aléatoire
+  # sans lock ni autoload.php : comparés, les fichiers sans suffixe).
+  "laravel|dump-autoload @vendor @jq:.config.lock=false @lockjq:.packages|=map(select(.name!=\"laravel/tinker\")) @files:vendor/composer/autoload_psr4.php,vendor/composer/autoload_classmap.php"
+  "laravel|dump-autoload @vendor @jq:.config.lock=false @nolock @files:vendor/composer/autoload_psr4.php,vendor/composer/autoload_classmap.php"
   "laravel|require symfony/uid --dry-run --no-install @jq:.config.lock=false"
   "laravel|remove laravel/tinker --dry-run --no-install @jq:.config.lock=false"
   "laravel|require symfony/uid --dry-run @jq:.config.lock=false"

@@ -113,10 +113,22 @@ fn is_feature_branch(manifest: &Value, branch: &str) -> bool {
 type GitAnswers = std::collections::HashMap<(std::path::PathBuf, Vec<String>), Option<String>>;
 static GIT_ANSWERS: std::sync::Mutex<Option<GitAnswers>> = std::sync::Mutex::new(None);
 
-/// Starts keeping git's answers ([`git`]), empty.
-pub fn remember_git_answers() {
+/// Starts keeping git's answers ([`git`]), empty, until the returned guard
+/// is dropped (panics included).
+#[must_use = "git's answers are forgotten when the guard is dropped"]
+pub fn remember_git_answers() -> GitAnswersScope {
     if let Ok(mut answers) = GIT_ANSWERS.lock() {
         *answers = Some(GitAnswers::new());
+    }
+    GitAnswersScope(())
+}
+
+/// Keeps git's answers while alive ([`remember_git_answers`]).
+pub struct GitAnswersScope(());
+
+impl Drop for GitAnswersScope {
+    fn drop(&mut self) {
+        forget_git_answers();
     }
 }
 
@@ -488,16 +500,21 @@ pub fn root_version_from_foreign_vcs(manifest: &Value, project: &Path) -> Option
     if manifest.get("version").is_some_and(|v| !v.is_null()) || root_version_from_env().is_some() {
         return None;
     }
-    let marked = project.ancestors().any(|d| {
+    if !foreign_vcs_marked(project) || version_guessable(project) {
+        return None;
+    }
+    foreign_vcs_version(project)
+}
+
+/// A working copy of hg, fossil or svn above `dir` (`stat`s only): the
+/// condition for [`foreign_vcs_version`] to run anything.
+pub fn foreign_vcs_marked(dir: &Path) -> bool {
+    dir.ancestors().any(|d| {
         d.join(".hg").is_dir()
             || d.join(".svn").is_dir()
             || d.join("_FOSSIL_").is_file()
             || d.join(".fslckout").is_file()
-    });
-    if !marked || version_guessable(project) {
-        return None;
-    }
-    foreign_vcs_version(project)
+    })
 }
 
 /// `VersionGuesser::getRootVersionFromEnv`: `COMPOSER_ROOT_VERSION` when

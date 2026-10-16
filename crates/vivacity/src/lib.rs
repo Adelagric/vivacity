@@ -528,11 +528,10 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
-    // What git answered belongs to one run.
-    vivacity_core::root_version::remember_git_answers();
-    let code = run_once(argv);
-    vivacity_core::root_version::forget_git_answers();
-    code
+    // What git answered belongs to one run (forgotten when the guard
+    // drops, panics included).
+    let _git_answers = vivacity_core::root_version::remember_git_answers();
+    run_once(argv)
 }
 
 /// [`run`], between the two moments git's answers are forgotten.
@@ -574,15 +573,14 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     let tail = &argv[1..];
     let check_scope = tail.iter().any(|t| t == "--check-scope");
     if requested >= 3 && !check_scope {
-        return delegate_for_verbosity(tail, "-vv/-vvv, Composer's debug output");
+        let reason = "-vv/-vvv, Composer's debug output";
+        return delegate_for_verbosity(tail, reason, &format!("drop {reason}"));
     }
     if requested == 2 && !check_scope {
         if let Ok(project) = project_dir(cli.working_dir()) {
             if let Some(plugin) = active_plugin(&project, cli.plugins_enabled()) {
-                return delegate_for_verbosity(
-                    tail,
-                    &format!("-v while {plugin} is active (its listeners' lines)"),
-                );
+                let reason = format!("-v while {plugin} is active (its listeners' lines)");
+                return delegate_for_verbosity(tail, &reason, &format!("drop {reason}"));
             }
         }
     }
@@ -594,7 +592,11 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // them above the project (the common case): a few `stat`s, no process.
     if let Ok(project) = project_dir(cli.working_dir()) {
         if let Some(vcs) = foreign_vcs_root(&project) {
-            return delegate_for_verbosity(tail, &format!("a root version from {vcs}"));
+            return delegate_for_verbosity(
+                tail,
+                &format!("a root version from {vcs}"),
+                "set COMPOSER_ROOT_VERSION",
+            );
         }
     }
     match dispatch(cli) {
@@ -623,7 +625,9 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
 /// project's composer.json, when there is one vivacity would read (no
 /// `COMPOSER=` alternate, valid JSON).
 fn foreign_vcs_root(project: &std::path::Path) -> Option<&'static str> {
-    if refuse_alternate_manifest().is_err() {
+    if refuse_alternate_manifest().is_err()
+        || !vivacity_core::root_version::foreign_vcs_marked(project)
+    {
         return None;
     }
     let text = std::fs::read_to_string(project.join("composer.json")).ok()?;

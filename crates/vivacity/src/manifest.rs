@@ -249,8 +249,13 @@ pub(crate) fn platform_requirement_env(
 /// which writes it again.
 pub(crate) fn hold_ignored_lock_warning(project: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
-    serde_json::from_str::<serde_json::Value>(&text).ok()?;
-    if config_lock_enabled(&text) || !project.join("composer.lock").exists() {
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // `RootPackageLoader::load` refuses the manifest before `Factory` gets
+    // to the lock.
+    if config_lock_enabled(&text)
+        || !project.join("composer.lock").exists()
+        || vivacity_resolver::root::manifest_error(&manifest).is_some()
+    {
         return None;
     }
     let line = "./composer.lock is present but ignored as the \"lock\" config option is disabled."

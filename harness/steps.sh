@@ -161,7 +161,10 @@ STEPS=(
   # `remove` (RemoveCommand.php:295), `--unused` refusé (l. 99, code 1),
   # `update a/b` refusé (code 3) ; `install` sans lock utilisable résout
   # (`@badlock` : pas de clé `packages`), un lock illisible reste une erreur.
-  # La stderr est comparée par verbosity.sh (aucune ancre ici).
+  # Codes, manifeste et lock seulement (aucune ancre ici) ; la stderr de
+  # `config.lock: false` et d'`install` sans lock est comparée par
+  # verbosity.sh, pas celle de ces refus (encadré chez Composer, `Error: …`
+  # chez vivacity).
   "laravel|remove laravel/tinker @lockfalse @nostderr"
   "laravel|remove --unused @lockfalse @nostderr"
   "laravel|update laravel/tinker @lockfalse @nostderr"

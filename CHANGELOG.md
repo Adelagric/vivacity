@@ -35,7 +35,7 @@ byte-identical-output promise are the public API.
   `--no-fallback`/`--check-scope`), as is a resolution reaching an
   unversioned `path` package in one. No working copy: a few `stat` calls,
   no process; the tool missing or failing: native, as Composer then falls
-  back too. `harness/fallback-args.sh` gains eight cases with a fake `hg`.
+  back too. `harness/fallback-args.sh` gains seven cases with a fake `hg`.
 - **`config.lock: false`, and `install` without a lock.** With the lock
   disabled, Composer's locker reads `/dev/null`: every command warns
   `./composer.lock is present but ignored as the "lock" config option is
@@ -49,14 +49,18 @@ byte-identical-output promise are the public API.
   without `packages`) prints `Lockfile creation is disabled in config.` or
   `No composer.lock file present.` and updates, as `Installer::run` does;
   vivacity stopped with `no composer.lock`. `--check-scope` and
-  `--run-scripts` stop or hand the command to Composer.
+  `--run-scripts` stop or hand the command to Composer. `dump-autoload`
+  without a lock to read (disabled or missing) lays the autoloader out
+  from installed.json, the local repository Composer dumps, instead of a
+  stale lock or an error.
 - **A lock without `packages-dev` fails everywhere Composer's locker does.**
   `install --no-dev` lays the packages out then fails when `Installer::run`
   lists the abandoned packages (no autoloader); `update`, `require` and
   `remove` fail before the repositories load, `require` reverting its files
   first. vivacity installed with `--no-dev` and exited 0, and printed the
   others with an `Error: ` prefix; `require` even failed before editing.
-  The message is now printed alone, like the `install` refusal above.
+  The message is now printed alone, like the headline refusal of `install`
+  (its own entry, below).
 - **`--offline` says what Composer says without a network.** The fallback
   hands `--offline` to Composer as `COMPOSER_DISABLE_NETWORK=1`, under which
   `HttpDownloader` answers a conditional request with a 304 (the cache
@@ -108,9 +112,10 @@ byte-identical-output promise are the public API.
 - **`COMPOSER_NO_DEV` is read as Composer reads it.** `BaseCommand::initialize`
   takes any value PHP's `(bool)` calls true (everything but `""` and `"0"`)
   as `--no-dev`; vivacity's `install` only took `1`, and `dump-autoload`
-  ignored the variable (its autoloader kept the dev packages). Three
-  `harness/verbosity.sh` cases (`yes`, `0`, and `dump-autoload` with
-  `autoload_static.php` compared).
+  ignored the variable (its autoloader kept the dev packages); `update`'s
+  install phase, which only passed the option on, installed the dev
+  packages too. Four `harness/verbosity.sh` cases (`yes`, `0`,
+  `dump-autoload` with `autoload_static.php` compared, `update --dry-run`).
 - **`COMPOSER_IGNORE_PLATFORM_REQ(S)` reach `dump-autoload`, and their
   warnings come first.** `BaseCommand::initialize` reads the two variables
   for every command that has the options, `dump-autoload` included, whose

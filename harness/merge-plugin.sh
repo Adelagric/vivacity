@@ -241,5 +241,21 @@ if [ ${#ONLY[@]} -eq 0 ] || printf '%s\n' "${ONLY[@]}" | grep -qx install-repos-
   else
     echo "OK   install-repos-filter : psr/log bloqué par la liste du dépôt fusionné, code 2 et lignes identiques"
   fi
+  # Vendor vierge : le plugin n'est pas encore activé quand `doInstall`
+  # filtre (prependRepositories vient avec l'activation) — le dépôt fusionné
+  # n'est pas interrogé, rien n'est bloqué.
+  ref="$WORK/ref-repos-filter-bare"; viv="$WORK/viv-repos-filter-bare"
+  stage "$ref" "."; stage "$viv" "."
+  for d in "$ref" "$viv"; do
+    jq --arg u "file://$lr" '.repositories=[{"type":"composer","url":$u}]' "$d/modules/beta/composer.json" > "$d/b.json" && mv "$d/b.json" "$d/modules/beta/composer.json"
+  done
+  c_code=0; v_code=0
+  (cd "$ref" && composer install --dry-run --no-scripts --no-interaction --no-ansi 2>"$WORK/repos-filter-bare.composer.err" >/dev/null) || c_code=$?
+  (cd "$viv" && "$VIVACITY" install --dry-run --no-scripts --no-fallback 2>"$WORK/repos-filter-bare.vivacity.err" >/dev/null) || v_code=$?
+  if [ "$c_code" = 0 ] && [ "$v_code" = 0 ] && ! grep -q malware "$WORK/repos-filter-bare.vivacity.err"; then
+    echo "OK   install-repos-filter-bare : plugin pas encore actif, dépôt fusionné ignoré des deux côtés (code 0)"
+  else
+    echo "FAIL install-repos-filter-bare : composer $c_code, vivacity $v_code"; tail -4 "$WORK/repos-filter-bare.vivacity.err"; status=1
+  fi
 fi
 exit $status

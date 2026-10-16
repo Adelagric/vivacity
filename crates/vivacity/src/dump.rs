@@ -139,6 +139,30 @@ pub(crate) fn dump_autoload(
     .finish(project, manifest, layout)
 }
 
+/// installed.json as a lock: its packages, those named in
+/// `dev-package-names` under `packages-dev`, in their order.
+fn local_repository_as_lock(installed: Option<&serde_json::Value>) -> vivacity_core::lock::Lock {
+    let packages = installed
+        .and_then(|v| v.get("packages"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let dev: Vec<&str> = installed
+        .and_then(|v| v.get("dev-package-names"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    let (packages_dev, packages): (Vec<serde_json::Value>, Vec<serde_json::Value>) =
+        packages.into_iter().partition(|p| {
+            p.get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|n| dev.contains(&n))
+        });
+    vivacity_core::lock::Lock::from_value(
+        &serde_json::json!({"packages": packages, "packages-dev": packages_dev}),
+    )
+}
+
 pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     let t0 = std::time::Instant::now();
     let project = project_dir(args.working_dir.as_deref())?;
@@ -154,20 +178,29 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_missing_manifest(&project) {
         return Ok(code);
     }
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join("composer.json"))
-            .context("cannot read composer.json")?,
-    )
-    .context("invalid composer.json")?;
+    let manifest_text = std::fs::read_to_string(project.join("composer.json"))
+        .context("cannot read composer.json")?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).context("invalid composer.json")?;
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }
-    let lock = vivacity_core::lock::Lock::read(&project.join("composer.lock"))?;
     // `PluginEvents::COMMAND` (DumpAutoloadCommand.php:59).
     bamarni_command_event(&project, &manifest, !args.no_plugins);
     // Dev mode: that of the installed state (installed.json), like Composer.
     let installed_json =
         vivacity_core::jsonfile::read(&composer_dir_of(&project, &manifest).join("installed.json"));
+    // The packages laid out: the lock's, which matches the local repository
+    // an install left — but `AutoloadGenerator::dump` reads the local
+    // repository, so without a lock to read (`config.lock: false`, whose
+    // lock may be stale or absent, or no composer.lock) installed.json is
+    // the source, split by its `dev-package-names`.
+    let lock_path = project.join("composer.lock");
+    let lock = if config_lock_enabled(&manifest_text) && lock_path.exists() {
+        vivacity_core::lock::Lock::read(&lock_path)?
+    } else {
+        local_repository_as_lock(installed_json.as_deref())
+    };
     let installed_dev = installed_json
         .as_ref()
         .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
