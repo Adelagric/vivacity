@@ -363,7 +363,10 @@ ne montre plus ce qu'il teste échoue).
 - Les traces `VIVACITY_TRACE` contournent le mécanisme (diagnostic).
 - Les avertissements `COMPOSER_IGNORE_PLATFORM_REQ(S)` d'`update`,
   `require` et `remove`, imprimés tard par vivacity (suite déjà notée) :
-  la ligne de version reste avant eux.
+  la ligne de version reste avant eux. **Traité le 2026-10-16**
+  (`docs/plans/install-defects.md`, point 3) : retenus juste après elle,
+  avec la dépréciation `--no-suggest` — plus de doublon sur une délégation
+  précoce (`g-merge-env`, `g-require-no-suggest` à 0).
 
 ## Méta-analyse (sous-agent frais, sur le code, 2026-10-16) — et ce qui change
 

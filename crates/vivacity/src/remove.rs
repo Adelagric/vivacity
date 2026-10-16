@@ -13,6 +13,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // root-version warning comes first; written again below.
     let root_version_warning =
         hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
         anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");

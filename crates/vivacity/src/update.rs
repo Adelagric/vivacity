@@ -152,8 +152,9 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
         return Ok(code);
     }
     // `BaseCommand::initialize`: the root-version warning before anything
-    // `UpdateCommand` prints.
+    // `UpdateCommand` prints, then the platform options' environment.
     hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     for p in &args.packages {
@@ -537,25 +538,12 @@ pub(crate) fn resolve_and_lock(
     session.prefer_stable = prefer_stable;
     session.prefer_lowest = prefer_lowest;
     session.installer_dev_mode = installer_dev_mode;
-    // BaseCommand: COMPOSER_IGNORE_PLATFORM_REQS counts as the option,
-    // COMPOSER_IGNORE_PLATFORM_REQ (comma-separated list) counts as the
-    // list when it is empty.
-    let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
-    let ignore_all = args.ignore_platform_reqs || env_flag("COMPOSER_IGNORE_PLATFORM_REQS");
-    let mut ignore_list = args.ignore_platform_req.clone();
-    if !ignore_all && ignore_list.is_empty() {
-        if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
-            if !env.is_empty() {
-                vivacity_core::say!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
-                ignore_list = env.split(',').map(str::to_owned).collect();
-            }
-        }
-    }
-    if ignore_all && env_flag("COMPOSER_IGNORE_PLATFORM_REQS") && !args.ignore_platform_reqs {
-        vivacity_core::say!(
-            "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
-        );
-    }
+    // `BaseCommand::initialize`: the environment fills the options left
+    // empty. Its warnings were held by the command (`update`, `require`,
+    // `remove`, or the `install` that resolves without a lock), at the
+    // point Composer writes them.
+    let (ignore_all, ignore_list) =
+        platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, false);
     let filter = if ignore_all {
         PlatformRequirementFilter::IgnoreAll
     } else if !ignore_list.is_empty() {

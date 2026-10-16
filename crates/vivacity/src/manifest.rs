@@ -189,6 +189,50 @@ pub(crate) fn hold_root_version_warning(project: &std::path::Path) -> Option<Str
     Some(line)
 }
 
+/// `BaseCommand::initialize` (BaseCommand.php:276-291), for a command that
+/// has the two options: `COMPOSER_IGNORE_PLATFORM_REQS` (truthy, as PHP's
+/// `(bool)` reads a string) stands for `--ignore-platform-reqs`, then — when
+/// that is still off — `COMPOSER_IGNORE_PLATFORM_REQ` (any non-empty string,
+/// comma-separated) for an empty `--ignore-platform-req` list, each with its
+/// warning. The warnings are held (`vivacity_core::io::hold`): Composer
+/// writes them before anything `execute` prints, and a command handed to
+/// Composer before vivacity writes a line of its own leaves them to it.
+/// `warn` false reads them in silence (the install phase of an update, whose
+/// command already warned). Returns the effective options.
+pub(crate) fn platform_requirement_env(
+    all: bool,
+    list: &[String],
+    warn: bool,
+) -> (bool, Vec<String>) {
+    let mut all = all;
+    let mut list = list.to_vec();
+    let hold = |line: String| {
+        if warn {
+            vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, line);
+        }
+    };
+    if !all
+        && std::env::var("COMPOSER_IGNORE_PLATFORM_REQS").is_ok_and(|v| !v.is_empty() && v != "0")
+    {
+        all = true;
+        hold(
+            "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
+                .to_owned(),
+        );
+    }
+    if !all && list.is_empty() {
+        if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
+            if !env.is_empty() {
+                hold(format!(
+                    "COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors."
+                ));
+                list = env.split(',').map(str::to_owned).collect();
+            }
+        }
+    }
+    (all, list)
+}
+
 /// `Factory::createComposer` without a composer.json: Composer's two lines
 /// (`Factory.php:303`, `$fullLoad`), written by `Application::getComposer`
 /// at the default level — silent under `-q` — and exit 1. The directory is

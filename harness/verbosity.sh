@@ -48,6 +48,10 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-p
 #   @rootwarn:N  la sortie d'erreur de Composer doit contenir N fois
 #             l'avertissement « could not detect the root package » (0 sous
 #             -q) : un cas qui ne montre plus ce qu'il teste échoue
+#   @lockjq:expr  l'expression jq appliquée à composer.lock
+#   @files:a[,b]  ces fichiers du projet comparés à l'octet après la commande
+#             (absents des deux côtés : égaux ; d'un seul : différents) —
+#             ce que la commande écrit sans le dire
 CASES=(
   # install depuis le lock, sans rien écrire : durée de résolution, `Installs:`.
   "laravel|install --dry-run"
@@ -60,6 +64,14 @@ CASES=(
   # … que les variables d'environnement font ignorer, avec leur avertissement.
   "laravel|install --dry-run @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
   "laravel|install --dry-run @require:ext-nope=* @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope,ext-other"
+  # `BaseCommand::initialize` lit ces variables pour toute commande qui a les
+  # options : `dump-autoload` aussi (son `platform_check.php` les suit), et
+  # leur avertissement précède ce que `require`/`remove` impriment.
+  "laravel|dump-autoload @vendor @env:COMPOSER_IGNORE_PLATFORM_REQS=1 @files:vendor/composer/platform_check.php"
+  "laravel|dump-autoload @vendor @env:COMPOSER_IGNORE_PLATFORM_REQ=php @files:vendor/composer/platform_check.php"
+  "laravel|require symfony/uid --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQS=1"
+  "laravel|remove laravel/tinker --dry-run --no-install @env:COMPOSER_IGNORE_PLATFORM_REQ=ext-nope"
+  "laravel|require symfony/uid --dry-run --no-install --no-suggest"
   # Pas de composer.json : message au niveau normal (muet sous -q), exit 1.
   "laravel|install --dry-run @nojson"
   # Une vraie installation (cache chaud), puis un install sans opération.
@@ -174,13 +186,14 @@ for fx in "${FIXTURES[@]}"; do
         *) break ;;
       esac
     done
-    levels=("${LEVELS[@]}"); plugins=(--no-plugins); unsets=(); rootwarn=""
+    levels=("${LEVELS[@]}"); plugins=(--no-plugins); unsets=(); rootwarn=""; files=()
     for prep in "${preps[@]+"${preps[@]}"}"; do
       case "$prep" in
         @levels:*) IFS=, read -r -a levels <<< "${prep#@levels:}" ;;
         @plugins) plugins=() ;;
         @unset:*) unsets+=("${prep#@unset:}") ;;
         @rootwarn:*) rootwarn="${prep#@rootwarn:}" ;;
+        @files:*) IFS=, read -r -a files <<< "${prep#@files:}" ;;
       esac
     done
     for level in "${levels[@]}"; do
@@ -205,12 +218,17 @@ for fx in "${FIXTURES[@]}"; do
         d="$WORK/$side-$fx-$n"; stage_project "$fx" "$d"
         for prep in "${preps[@]+"${preps[@]}"}"; do
           case "$prep" in
-            @env:*|@warm|@levels:*|@plugins|@unset:*|@rootwarn:*) ;;
-            @vendor) (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q) ;;
+            @env:*|@warm|@levels:*|@plugins|@unset:*|@rootwarn:*|@files:*) ;;
+            # Dans l'environnement d'avant les `@env:` du cas : elles sont
+            # celles de la commande comparée, pas de l'installation qui la
+            # prépare.
+            @vendor) (for e in "${saved[@]+"${saved[@]}"}"; do case "$e" in *=*) export "$e" ;; *) unset "$e" ;; esac; done
+              cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" composer install --no-scripts --no-plugins --no-autoloader --no-progress -q) ;;
             @nolock) rm -f "$d/composer.lock" ;;
             @nojson) rm -f "$d/composer.json" "$d/composer.lock" ;;
             @require:*) kv="${prep#@require:}"; jq --arg p "${kv%%=*}" --arg c "${kv#*=}" '.require[$p] = $c' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;
             @jq:*) jq "${prep#@jq:}" "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;
+            @lockjq:*) jq "${prep#@lockjq:}" "$d/composer.lock" > "$d/l.tmp" && mv "$d/l.tmp" "$d/composer.lock" ;;
             *) echo "prep inconnu : $prep"; exit 1 ;;
           esac
         done
@@ -259,6 +277,15 @@ for fx in "${FIXTURES[@]}"; do
         if ! diff -q "$WORK/$fx-$n.composer.$stream.n" "$WORK/$fx-$n.vivacity.$stream.n" >/dev/null; then
           echo "FAIL $label : std$stream diffère"
           diff "$WORK/$fx-$n.composer.$stream.n" "$WORK/$fx-$n.vivacity.$stream.n" | head -12 || true; ok=0
+        fi
+      done
+      for f in "${files[@]+"${files[@]}"}"; do
+        r="$WORK/ref-$fx-$n/$f"; v="$WORK/viv-$fx-$n/$f"
+        if [ -e "$r" ] || [ -e "$v" ]; then
+          if ! { [ -e "$r" ] && [ -e "$v" ] && cmp -s "$r" "$v"; }; then
+            echo "FAIL $label : $f diffère"
+            diff "$r" "$v" 2>&1 | head -8 || true; ok=0
+          fi
         fi
       done
       if [ "$ok" = 1 ]; then

@@ -343,6 +343,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `RequireCommand` prints; written again by `doUpdate`, below.
     let root_version_warning =
         crate::hold_root_version_warning(&project_dir(args.working_dir.as_deref())?);
+    crate::platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
         anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
@@ -353,8 +354,13 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             anyhow::bail!("COMPOSER={f}: an alternate manifest is not supported yet");
         }
     }
+    // `RequireCommand::execute`'s first line: held like the lines of
+    // `initialize`, so that an early hand-over leaves it to Composer.
     if args.no_suggest {
-        vivacity_core::say!("You are using the deprecated option \"--no-suggest\". It has no effect and will break in Composer 3.");
+        vivacity_core::io::hold(
+            vivacity_core::io::Verbosity::Normal,
+            "You are using the deprecated option \"--no-suggest\". It has no effect and will break in Composer 3.".to_owned(),
+        );
     }
     let project = project_dir(args.working_dir.as_deref())?;
     let json = project.join("composer.json");
@@ -454,15 +460,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     } else {
         session.root.minimum_stability.clone()
     };
-    let ignore_all = args.ignore_platform_reqs || env_flag("COMPOSER_IGNORE_PLATFORM_REQS");
-    let mut ignore_list = args.ignore_platform_req.clone();
-    if !ignore_all && ignore_list.is_empty() {
-        if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
-            if !env.is_empty() {
-                ignore_list = env.split(',').map(str::to_owned).collect();
-            }
-        }
-    }
+    let (ignore_all, ignore_list) = crate::platform_requirement_env(
+        args.ignore_platform_reqs,
+        &args.ignore_platform_req,
+        false,
+    );
     let filter = if ignore_all {
         PlatformRequirementFilter::IgnoreAll
     } else if !ignore_list.is_empty() {

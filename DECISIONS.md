@@ -3510,3 +3510,35 @@ symfony/framework-bundle s'arrête à 7.4 (la recette 8.1 copie un fichier
 qu'on ne reproduit pas ici) — PROVENANCE. `harness/flex-recipes.sh`
 affirme que l'oracle applique bien des recettes (« Symfony operations »,
 fichier attendu créé ou modifié) avant de comparer.
+
+## 2026-10-16 — Les lignes d'avant la commande, retenues ensemble ; `dump-autoload` lit les variables de plateforme
+
+Contexte : `docs/plans/install-verify.md`, défaut 2 ; `docs/plans/install-defects.md`,
+point 3. `BaseCommand::initialize` (BaseCommand.php:276-291) lit
+`COMPOSER_IGNORE_PLATFORM_REQS` (`(bool)` PHP) puis, l'option toujours
+fausse, `COMPOSER_IGNORE_PLATFORM_REQ` (toute chaîne non vide) pour toute
+commande qui a les deux options — `DumpAutoloadCommand` les a (l. 40-41) et
+passe le filtre à `AutoloadGenerator` (l. 114). L'avertissement de chacune
+sort après la création du `Composer` et avant `execute`.
+
+Décision : une fonction (`platform_requirement_env`, manifest.rs) pour les
+cinq commandes, appelée là où `initialize` tourne — après la ligne de
+version racine — et qui **retient** ses avertissements. `vivacity_core::io`
+ne retenait qu'une ligne ; il en retient une file, écrite dans l'ordre à la
+première ligne propre de vivacity, jetée par une délégation précoce. La
+dépréciation `--no-suggest` de `require` (première ligne de
+`RequireCommand::execute`) y entre aussi : sur une délégation précoce,
+Composer l'écrit lui-même. `resolve_and_lock` (update, require, remove)
+lit toujours les variables, sans plus rien écrire.
+
+Écarté : imprimer ces lignes directement — c'est ce qui faisait le doublon
+(`g-merge-env`, `g-require-no-suggest` de `fallback-args.sh`, qui comptaient
+une ligne de vivacity avant la délégation ; zéro maintenant). Les
+délégations tardives gardent les leurs (portée d'`install` décidée après
+l'en-tête : hors de ce lot).
+
+Mesuré rouge sur db349c1 : `dump-autoload` avec `COMPOSER_IGNORE_PLATFORM_REQS=1`
+ou `COMPOSER_IGNORE_PLATFORM_REQ=php` (avertissement absent,
+`platform_check.php` différent), `require`/`remove` (avertissement après
+« Running composer update »), et les trois assertions de `fallback-args.sh`.
+

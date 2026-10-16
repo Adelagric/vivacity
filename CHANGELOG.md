@@ -7,6 +7,21 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`COMPOSER_IGNORE_PLATFORM_REQ(S)` reach `dump-autoload`, and their
+  warnings come first.** `BaseCommand::initialize` reads the two variables
+  for every command that has the options, `dump-autoload` included, whose
+  `platform_check.php` follows them; vivacity's `dump-autoload` ignored
+  them. `require` and `remove` printed the warning after `Running composer
+  update`; Composer prints it before anything the command says. The
+  warnings, and `require --no-suggest`'s deprecation line, are now held
+  with the root-version warning: printed in Composer's order before
+  vivacity's first line, dropped when the command is handed to Composer
+  before that line — Composer prints its own, so they no longer come out
+  twice on an early hand-over (the merge plugin's on `install`, an unknown
+  plugin's on `update`/`require`/`remove`). `harness/verbosity.sh` gains
+  `@files:` (files compared after the command) and `@lockjq:`, and five
+  cases; `harness/fallback-args.sh` counts the held lines before each kind
+  of hand-over.
 - **`update --no-plugins` installs a `symfony-pack` Flex had laid out.**
   Flex's pack installer writes the pack to installed.json with no install
   path; without the plugin, Composer's `LibraryInstaller` finds no

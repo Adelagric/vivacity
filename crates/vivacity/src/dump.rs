@@ -146,8 +146,12 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_missing_manifest(&project) {
         return Ok(code);
     }
-    // `BaseCommand::initialize`: the root-version warning first.
+    // `BaseCommand::initialize`: the root-version warning first, then what
+    // the environment sets for the two platform options
+    // (`DumpAutoloadCommand` has them: `platform_check.php` follows them).
     hold_root_version_warning(&project);
+    let (ignore_platform_reqs, ignore_platform_req) =
+        platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let manifest: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join("composer.json"))
             .context("cannot read composer.json")?,
@@ -278,8 +282,8 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         dev_mode,
         args.optimize || args.classmap_authoritative,
         args.classmap_authoritative,
-        args.ignore_platform_reqs,
-        &args.ignore_platform_req,
+        ignore_platform_reqs,
+        &ignore_platform_req,
         (args.apcu_autoloader, args.apcu_autoloader_prefix.as_deref()),
         !args.no_plugins,
         installed_dev_package_names,

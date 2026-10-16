@@ -19,14 +19,17 @@
 //! (the lock verification of `install` runs on one). [`Scope`] sets it for one run
 //! and puts it back to `NORMAL` when dropped, panics included.
 //!
-//! One line can be *held* ([`hold`]): what Composer writes while it creates
-//! the command's `Composer` instance (`BaseCommand::initialize`), before
-//! anything the command prints — `RootPackageLoader::load`'s root-version
-//! warning. Every macro below writes the held line first
-//! ([`release_held`]), whatever the command's first line turns out to be;
-//! a command handed to Composer before vivacity wrote anything drops it
-//! ([`drop_held`]), since the Composer it runs writes its own. The traces
-//! of `VIVACITY_TRACE` (diagnostics, not Composer's output) bypass it.
+//! Lines can be *held* ([`hold`]): what Composer writes before anything the
+//! command itself prints — while it creates the command's `Composer`
+//! instance (`RootPackageLoader::load`'s root-version warning, `Factory`'s
+//! ignored-lock warning), in `BaseCommand::initialize` (the
+//! `COMPOSER_IGNORE_PLATFORM_REQ(S)` warnings) and at the top of `execute`
+//! (`--no-suggest`'s deprecation). Every macro below writes the held lines
+//! first, in order ([`release_held`]), whatever the command's first line of
+//! its own turns out to be; a command handed to Composer before vivacity
+//! wrote anything drops them ([`drop_held`]), since the Composer it runs
+//! writes its own. The traces of `VIVACITY_TRACE` (diagnostics, not
+//! Composer's output) bypass them.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -73,51 +76,51 @@ impl Drop for Scope {
     }
 }
 
-/// The held stderr line, and whether there is one (the common case —
-/// nothing held — takes no lock). One line: Composer writes one before the
-/// command's own output.
-static HELD: Mutex<Option<String>> = Mutex::new(None);
+/// The held stderr lines, in the order they were held, and whether there
+/// are any (the common case — nothing held — takes no lock).
+static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static HOLDING: AtomicBool = AtomicBool::new(false);
 
-/// The held line's slot; a panic while it was locked left nothing to repair.
-fn held() -> std::sync::MutexGuard<'static, Option<String>> {
+/// The held lines; a panic while they were locked left nothing to repair.
+fn held() -> std::sync::MutexGuard<'static, Vec<String>> {
     HELD.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Holds a stderr line of level `level` until vivacity writes its next line
-/// ([`release_held`]); nothing when the run's verbosity hides it.
+/// Holds a stderr line of level `level`, after those already held, until
+/// vivacity writes its next line ([`release_held`]); nothing when the run's
+/// verbosity hides it.
 pub fn hold(level: Verbosity, line: String) {
     if !shows(level) {
         return;
     }
-    *held() = Some(line);
+    held().push(line);
     HOLDING.store(true, Ordering::Release);
 }
 
-/// Writes the held line on stderr, once. Called by every writing macro
-/// before its own line, and before vivacity starts a process whose output
-/// the user sees. The line is written under the lock: a line another thread
-/// writes at the same moment comes after it.
+/// Writes the held lines on stderr, once, in order. Called by every writing
+/// macro before its own line, and before vivacity starts a process whose
+/// output the user sees. The lines are written under the lock: a line
+/// another thread writes at the same moment comes after them.
 pub fn release_held() {
     if !HOLDING.load(Ordering::Acquire) {
         return;
     }
     let mut slot = held();
-    if let Some(line) = slot.take() {
+    for line in slot.drain(..) {
         eprintln!("{line}");
     }
     HOLDING.store(false, Ordering::Release);
 }
 
-/// Forgets the held line: the command goes to Composer, which writes its
+/// Forgets the held lines: the command goes to Composer, which writes its
 /// own, or the run ends. Process-wide, like the level: an embedder running
 /// two commands at once in one process shares it.
 pub fn drop_held() {
     if !HOLDING.load(Ordering::Acquire) {
         return;
     }
-    *held() = None;
+    held().clear();
     HOLDING.store(false, Ordering::Release);
 }
 
@@ -232,7 +235,7 @@ macro_rules! say_verbose {
 }
 
 /// A line on stderr at a level known at run time (a held event, a problem's
-/// part), after the held line.
+/// part), after the held lines.
 #[macro_export]
 macro_rules! say_at {
     ($level:expr, $($arg:tt)*) => {
@@ -243,7 +246,7 @@ macro_rules! say_at {
     };
 }
 
-/// A `NORMAL` line on stdout (`$io->write($line)`), after the held line.
+/// A `NORMAL` line on stdout (`$io->write($line)`), after the held lines.
 #[macro_export]
 macro_rules! out {
     ($($arg:tt)*) => {

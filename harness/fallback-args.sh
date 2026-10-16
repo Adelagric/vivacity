@@ -338,16 +338,32 @@ expect_rootwarn g-install-no-fallback 1
 # Natif : le dry run du même lock.
 check g-install-native "$GA" 0 0 -- install --dry-run --working-dir proj --no-plugins --offline --ignore-platform-reqs
 expect_rootwarn g-install-native 1
-# Une ligne de vivacity avant la délégation précoce la fait sortir (écart
-# connu : Composer en écrit une seconde) — l'avertissement d'une variable
-# d'environnement avant le plugin de fusion, `--no-suggest` avant le plugin
-# inconnu.
+# Ce que Composer écrit lui aussi avant la commande — l'avertissement d'une
+# variable d'environnement (`BaseCommand::initialize`), `--no-suggest`
+# (`RequireCommand::execute`) — est retenu avec la ligne de version : une
+# délégation précoce les laisse tous au Composer lancé (le plugin de fusion,
+# le plugin inconnu).
+expect_line() { # <nom du cas> <motif> <nombre attendu>
+  local got
+  got=$(grep -c -- "$2" "$WORK/$1.err" || true)
+  [ "$got" = "$3" ] || { fail "$1 : vivacity écrit $got fois « $2 », attendu $3"; cat "$WORK/$1.err"; }
+}
 expect_call "$GM" 0 1 install --dry-run --working-dir proj --no-scripts
 COMPOSER_IGNORE_PLATFORM_REQS=1 check g-merge-env "$GM" 0 0 -- install --dry-run --working-dir proj --offline
-expect_rootwarn g-merge-env 1
+expect_rootwarn g-merge-env 0
+expect_line g-merge-env '^COMPOSER_IGNORE_PLATFORM_REQS is set' 0
 expect_call "$GB" 0 '<unset>' require psr/log:^3.0 --no-suggest --working-dir proj --no-scripts
 check g-require-no-suggest "$GB" 0 0 -- require psr/log:^3.0 --no-suggest --working-dir proj
-expect_rootwarn g-require-no-suggest 1
+expect_rootwarn g-require-no-suggest 0
+expect_line g-require-no-suggest 'deprecated option "--no-suggest"' 0
+# Sous --no-fallback (Composer jamais lancé), c'est vivacity qui parle : les
+# lignes retenues sortent, dans l'ordre de Composer, avant ses raisons.
+COMPOSER_IGNORE_PLATFORM_REQS=1 check g-update-env-no-fallback "$GB" 3 0 -- update --no-fallback --working-dir proj
+expect_rootwarn g-update-env-no-fallback 1
+expect_line g-update-env-no-fallback '^COMPOSER_IGNORE_PLATFORM_REQS is set' 1
+if [ "$(grep -e '^Composer could not detect' -e '^COMPOSER_IGNORE_PLATFORM_REQS is set' -e '^vivacity: ' "$WORK/g-update-env-no-fallback.err" | head -3 | awk '{printf "%s ", $1}')" != "Composer COMPOSER_IGNORE_PLATFORM_REQS vivacity: " ]; then
+  fail "g-update-env-no-fallback : ordre version racine → variable → raisons non tenu"; cat "$WORK/g-update-env-no-fallback.err"
+fi
 # `--run-scripts` : la ligne avant ce que `composer run-script` écrit
 # (`pre-install-cmd`, qui échoue ici : la commande s'arrête sur son code).
 GS="$WORK/gs"; mkdir -p "$GS"; cp -R "$A/proj" "$GS/proj"

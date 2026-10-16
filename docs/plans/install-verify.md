@@ -383,7 +383,11 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    rouge sur 4895cef puis vert).
 2. `COMPOSER_IGNORE_PLATFORM_REQ(S)` restent ignorées par `dump-autoload`
    (même `BaseCommand::initialize`) ; et sur un fallback, l'avertissement
-   imprimé par vivacity l'est une seconde fois par Composer.
+   imprimé par vivacity l'est une seconde fois par Composer — **corrigé le
+   2026-10-16** (`docs/plans/install-defects.md`, point 3 : lues par
+   `dump-autoload`, avertissements retenus avec la ligne de version racine
+   et jetés par une délégation précoce ; une délégation tardive les répète
+   encore).
 3. `COMPOSER_NO_DEV` n'est vrai pour `install` qu'à `1`.
 4. `GithubActionError::emit` (`::error` sur stdout sous GitHub Actions) n'est
    porté nulle part.

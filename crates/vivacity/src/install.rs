@@ -217,34 +217,15 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
     }))
 }
 
-/// `BaseCommand::initialize`: `COMPOSER_IGNORE_PLATFORM_REQS` (truthy)
-/// stands for `--ignore-platform-reqs`, then `COMPOSER_IGNORE_PLATFORM_REQ`
-/// (comma-separated) for an empty `--ignore-platform-req` list, each with
-/// its warning, before the command prints anything. The install that
-/// follows an update reads them without printing: the update already did.
+/// `BaseCommand::initialize`'s reading of the environment
+/// ([`platform_requirement_env`]). The install that follows an update reads
+/// it without warning: the update already did.
 fn platform_requirement_options(args: &InstallArgs) -> (bool, Vec<String>) {
-    let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
-    let mut all = args.ignore_platform_reqs;
-    let mut list = args.ignore_platform_req.clone();
-    if !all && env_flag("COMPOSER_IGNORE_PLATFORM_REQS") {
-        all = true;
-        if !args.after_update() {
-            vivacity_core::say!(
-                "COMPOSER_IGNORE_PLATFORM_REQS is set. You may experience unexpected errors."
-            );
-        }
-    }
-    if !all && list.is_empty() {
-        if let Ok(env) = std::env::var("COMPOSER_IGNORE_PLATFORM_REQ") {
-            if !env.is_empty() {
-                if !args.after_update() {
-                    vivacity_core::say!("COMPOSER_IGNORE_PLATFORM_REQ is set to ignore {env}. You may experience unexpected errors.");
-                }
-                list = env.split(',').map(str::to_owned).collect();
-            }
-        }
-    }
-    (all, list)
+    platform_requirement_env(
+        args.ignore_platform_reqs,
+        &args.ignore_platform_req,
+        !args.after_update(),
+    )
 }
 
 /// `wikimedia/composer-merge-plugin`: the root package Composer works
