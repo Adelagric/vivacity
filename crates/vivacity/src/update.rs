@@ -268,7 +268,7 @@ pub(crate) fn run_update_resolved(
         let status = install_after_update(args, resolved.report(), virtual_lock, virtual_manifest)?;
         return Ok(ended(status));
     }
-    print_post_update(&resolved, &project_dir(args.working_dir.as_deref())?);
+    print_post_update(&resolved, &project_dir(args.working_dir.as_deref())?)?;
     Ok(ended(0))
 }
 
@@ -339,6 +339,9 @@ pub(crate) struct Resolved {
     /// `POST_PACKAGE_UPDATE`); computed before the install, since it needs
     /// the state the install replaces.
     pub(crate) thanks_reminder: bool,
+    /// The recipes Flex applies at `POST_UPDATE_CMD`, reproduced
+    /// (`flex_recipes`): printed and written by the install phase.
+    pub(crate) flex_plan: Option<std::sync::Arc<crate::flex_recipes::FlexPlan>>,
     /// The solved lock shows a Flex behaviour vivacity does not emulate:
     /// nothing is written, and the whole command goes to Composer — run by
     /// the caller ([`hand_resolution_over`]), which first undoes its own
@@ -358,6 +361,7 @@ pub(crate) struct UpdateReport {
     pub(crate) manifest: serde_json::Value,
     pub(crate) flex_active: bool,
     pub(crate) thanks_reminder: bool,
+    pub(crate) flex_plan: Option<std::sync::Arc<crate::flex_recipes::FlexPlan>>,
 }
 
 impl Resolved {
@@ -367,6 +371,7 @@ impl Resolved {
             manifest: self.manifest.clone(),
             flex_active: self.flex_active,
             thanks_reminder: self.thanks_reminder,
+            flex_plan: self.flex_plan.clone(),
         }
     }
 
@@ -379,6 +384,7 @@ impl Resolved {
             manifest: serde_json::Value::Null,
             flex_active: false,
             thanks_reminder: false,
+            flex_plan: None,
             hand_over: None,
         }
     }
@@ -402,14 +408,18 @@ pub(crate) fn hand_resolution_over(
 /// no install phase (`--no-install`): the precomputed lines, the funding
 /// count, then Flex's `POST_UPDATE_CMD` output. With an install phase,
 /// that phase prints it (`run_install`).
-pub(crate) fn print_post_update(resolved: &Resolved, project: &std::path::Path) {
+pub(crate) fn print_post_update(
+    resolved: &Resolved,
+    project: &std::path::Path,
+) -> anyhow::Result<()> {
     for line in &resolved.post {
         vivacity_core::say!("{line}");
     }
     print_funding(project, &resolved.manifest);
     if resolved.flex_active {
-        print_flex_post_update(&resolved.manifest, resolved.thanks_reminder);
+        print_flex_post_update(&resolved.manifest, resolved.thanks_reminder, None)?;
     }
+    Ok(())
 }
 
 pub(crate) fn resolve_and_lock(
@@ -600,21 +610,64 @@ pub(crate) fn resolve_and_lock(
             }
         }
     }
+    let lock_path = project.join("composer.lock");
+    let mut text = vivacity_core::phpjson::php_json_encode_with(
+        &lock,
+        vivacity_core::phpjson::FLAGS_JSONFILE,
+    )?;
+    // `JsonFile::read` remembers the existing lock's indentation, `write`
+    // reuses it.
+    let old_text = std::fs::read_to_string(&lock_path).ok();
+    if let Some(old) = &old_text {
+        let indent = vivacity_resolver::json_manipulator::detect_indenting(old)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if indent != "    " {
+            text = vivacity_resolver::config_source::reindent(&text, &indent);
+        }
+    }
+    text.push('\n');
+    // `JsonFile::write` goes through `filePutContentsIfModified`: the file
+    // is only rewritten if its bytes change. (`Locker::setLockData` also
+    // compares the decoded data, but `{}` versus `[]` makes that comparison
+    // always false for an ordinary lock; the bytes are the observable
+    // criterion.)
+    let unchanged = old_text.as_deref() == Some(text.as_str());
+    // `config.lock: false`: Composer resolves without writing a lock.
+    let write_lock = config_lock_enabled(&manifest_text);
+    // With recipes, Flex's plan: computed now, applied at
+    // `POST_UPDATE_CMD` by the install phase.
+    let mut flex_plan: Option<std::sync::Arc<crate::flex_recipes::FlexPlan>> = None;
     if flex_active && !args.dry_run {
         if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
             let reason = if args.no_install {
                 None
             } else {
-                flex_install_reason(
+                match flex_install_decision(
                     &project,
                     &m,
+                    &manifest_text,
                     &lock,
+                    write_lock.then_some(text.as_str()),
                     installer_dev_mode,
                     args.offline,
                     !args.no_plugins,
-                )?
-            }
-            .or_else(|| flex_sync_reason(&project, &m, &lock));
+                )? {
+                    FlexDecision::HandOver(reason) => Some(reason),
+                    FlexDecision::Native(plan) => {
+                        flex_plan = plan.map(std::sync::Arc::new);
+                        None
+                    }
+                }
+            };
+            // With a plan, the synchronisation was decided on the files the
+            // recipes leave.
+            let reason = reason.or_else(|| {
+                if flex_plan.is_some() {
+                    None
+                } else {
+                    flex_sync_reason(&project, &m, &lock)
+                }
+            });
             if let Some(reason) = reason {
                 return Ok(Resolved {
                     hand_over: Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
@@ -649,30 +702,6 @@ pub(crate) fn resolve_and_lock(
                 })
     };
 
-    let lock_path = project.join("composer.lock");
-    let mut text = vivacity_core::phpjson::php_json_encode_with(
-        &lock,
-        vivacity_core::phpjson::FLAGS_JSONFILE,
-    )?;
-    // `JsonFile::read` remembers the existing lock's indentation, `write`
-    // reuses it.
-    let old_text = std::fs::read_to_string(&lock_path).ok();
-    if let Some(old) = &old_text {
-        let indent = vivacity_resolver::json_manipulator::detect_indenting(old)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if indent != "    " {
-            text = vivacity_resolver::config_source::reindent(&text, &indent);
-        }
-    }
-    text.push('\n');
-    // `JsonFile::write` goes through `filePutContentsIfModified`: the file
-    // is only rewritten if its bytes change. (`Locker::setLockData` also
-    // compares the decoded data, but `{}` versus `[]` makes that comparison
-    // always false for an ordinary lock; the bytes are the observable
-    // criterion.)
-    let unchanged = old_text.as_deref() == Some(text.as_str());
-    // `config.lock: false`: Composer resolves without writing a lock.
-    let write_lock = config_lock_enabled(&manifest_text);
     let ops = &report.transaction.transaction.operations;
     // What `Installer::doUpdate` writes between the resolution and the lock
     // operations (the resolution lines, `Nothing to modify in lock file`),
@@ -732,6 +761,7 @@ pub(crate) fn resolve_and_lock(
         // recipes hint. `--no-install` does dispatch it.
         flex_active: flex_active && !args.dry_run,
         thanks_reminder,
+        flex_plan,
         hand_over: None,
     })
 }

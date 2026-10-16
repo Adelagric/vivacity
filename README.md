@@ -304,8 +304,8 @@ root and then runs the plugin's implicit update (refused with the
 reason).
 
 `symfony/flex`'s pool filter is emulated for `update` and `remove` with
-`--no-install`, and `update` **with** install is emulated too when Flex
-would apply no recipe. What Flex records is not the install's transaction:
+`--no-install`, and `update` **with** install is emulated too — including
+when Flex applies recipes. What Flex records is not the install's transaction:
 `recordOperations` builds a synthetic one between the packages
 `symfony.lock` names and the whole resolved set, and keeps only the
 installs of names that file does not hold. Each of those is answered on its
@@ -313,7 +313,29 @@ own — a recipe in the endpoints' index, or a bundle class in the content
 the install would lay out (read out of the dist for a package it changes,
 out of vendor/ for one it leaves alone, and nowhere for one an installer
 puts outside `<vendor-dir>/<name>`, which is the only place Flex looks).
-Anything unanswerable before writing, a removal, or `symfony/flex` being
+The recipes are then fetched from the endpoints like Flex's `Downloader`
+does (the `recipe-conflicts` of the index and a recipe's own `conflict`
+evaluated against the lock) and applied in Flex's order at the point
+Composer dispatches `POST_UPDATE_CMD`: `Symfony operations: N recipes`,
+`  - Configuring …`, the files, `symfony.lock` with its new entries. The
+configurators reproduced are `bundles` (and the auto-generated recipe of a
+bundle without one: `config/bundles.php`, recognised only in the exact form
+Flex writes it), `copy-from-recipe` (executable bit included, existing files
+left alone), `env` and `dotenv` (`.env*` and the PHPUnit files),
+`gitignore`, `add-lines`, `composer-scripts` (composer.json, then the
+lock Flex rewrites through `updateComposerLock`), and the two Docker
+configurators when `extra.symfony.docker` is false. Everything is decided
+on a virtual copy of the project before the lock is written; what is not
+reproduced hands the command over with its reason: the `container`,
+`makefile`, `composer-commands` and `copy-from-package` configurators,
+Docker configuration that is enabled or not decided (Flex asks), a contrib
+recipe without `allow-contrib`, a `%generate(secret)%` value that would be
+written, a recipe conflict that matches, a non-default `root-dir`, a
+recipe that would look at a path the install itself writes (`bin-dir`,
+packages laid out outside vendor/), an endpoint on the GitHub API, and
+`--offline` with a recipe to download (`docs/plans/flex-configurators.md`).
+Anything unanswerable before writing, a removal of a package
+`symfony.lock` holds (Flex unconfigures it), or `symfony/flex` being
 installed by the run itself — Flex then runs a whole second installer —
 hands over before the lock is written: the index of its endpoints (`extra.symfony.endpoint`,
 `SYMFONY_ENDPOINT`, the two recipe indexes by default; cached in Flex's
@@ -323,8 +345,9 @@ own format under Composer's cache) prunes the pool against
 in "symfony/symfony" to …`), with `COMPOSER_PREFER_DEV_OVER_PRERELEASE`
 as Flex sets it; the lock is Composer's with Flex active (checked by
 `harness/update.sh` on the Symfony demo and Sylius). What Flex writes
-besides the lock stays Composer's: with install (recipes, `symfony.lock`),
-on `require` (aliases), a `.env.dist` to copy, a `symfony-pack` to unpack.
+besides the lock and the recipes stays Composer's: on `require` (aliases,
+version guessing) and `remove` with install (unconfiguring), a `.env.dist`
+to copy, a `symfony-pack` to unpack.
 
 The `package.json` / `importmap.php` synchronisation is emulated by
 answering what it would write rather than by its trigger. Flex runs it on

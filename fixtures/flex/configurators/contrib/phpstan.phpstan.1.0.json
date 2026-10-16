@@ -1,0 +1,37 @@
+{
+    "manifests": {
+        "phpstan/phpstan": {
+            "manifest": {
+                "copy-from-recipe": {
+                    "phpstan.dist.neon": "phpstan.dist.neon"
+                },
+                "gitignore": [
+                    "phpstan.neon"
+                ],
+                "post-install-output": [
+                    "  * Edit the <comment>phpstan.dist.neon</comment> file to configure PHPStan.",
+                    "",
+                    "  * For the full options, see",
+                    "    <comment>https://phpstan.org/user-guide/getting-started</comment>"
+                ]
+            },
+            "files": {
+                "phpstan.dist.neon": {
+                    "contents": [
+                        "parameters:",
+                        "    level: 6",
+                        "    paths:",
+                        "        - bin/",
+                        "        - config/",
+                        "        - public/",
+                        "        - src/",
+                        "        - tests/",
+                        ""
+                    ],
+                    "executable": false
+                }
+            },
+            "ref": "5e490cc197fb6bb1ae22e5abbc531ddc633b6767"
+        }
+    }
+}

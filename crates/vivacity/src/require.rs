@@ -775,7 +775,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // here; the install phase prints it itself (or Composer's `install`
     // does, when it was handed over).
     if args.no_install {
-        crate::print_post_update(&resolved, &project);
+        crate::print_post_update(&resolved, &project)?;
     }
     let status = if !to_guess.is_empty() {
         update_requirements_after_resolution(

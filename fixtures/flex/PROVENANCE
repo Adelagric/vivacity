@@ -13,8 +13,48 @@ https://raw.githubusercontent.com/symfony/recipes/flex/main/index.json on
 2026-09-23) and nothing else — enough for a harness to exercise both
 directions of `Downloader::getRecipes`' version selection without carrying
 the 255-package map. `_links` is kept as captured (Flex reads it the moment a recipe matches),
-but no harness case lets a recipe match on the Composer side, so no recipe
-is ever downloaded. `recipe-conflicts` is deliberately absent: vivacity
-ignores it (it only ever removes entries, so ignoring it can only cause a
-needless hand-over), and a harness that fed it would not tell the two
-apart.
+but no recipe file is served next to it: a case where a recipe matches
+there (flex-update.sh's `recipe-in-index`) hands over on the download.
+`recipe-conflicts` is absent from this file. vivacity evaluates the
+conflicts of an index since the configurators slice (a version a conflict
+removes changes the recipe applied); configurators/ below carries the real
+ones.
+
+configurators/ (harness/flex-recipes.sh, harness/flex-update.sh does not
+read it): the recipes Flex APPLIES, served by `flex_index_serve` at the
+paths `Downloader::getRecipes` builds (`recipe_template_relative` resolved
+against each index's own URL, so every recipe file sits next to its index).
+
+- configurators/recipes/index.json: from the `flex/main` branch of
+  https://github.com/symfony/recipes at commit
+  6850558e1c100a8a6ee0f6b0240689c0586f8ed5 (2026-09-22T18:31:33Z, the last
+  one on or before the 2026-09-23 capture of index-recipes.json, whose
+  `versions` and three `recipes` entries it matches). Kept as published:
+  `_links`, `branch`, `is_contrib`, `versions`. Reduced to the packages the
+  cases use: `recipes` and `recipe-conflicts` (the real entries of those
+  packages). Re-serialized with 4-space indentation. One deliberate
+  change: the version list of symfony/framework-bundle stops at 7.4 — the
+  8.1 recipe file (the one the published index selects for the fixture's
+  v8.1.0) copies a file whose name this repository does not carry, so it
+  is not reproduced here, and 8.2 is above v8.1.0 anyway. Both tools read
+  the same served index: the `framework` case compares them on the 7.4
+  recipe.
+- configurators/contrib/index.json: the same, from the `flex/main` branch
+  of https://github.com/symfony/recipes-contrib at commit
+  65c08e04f23d2dc626f0d871d7394541416c47e5 (2026-09-22T21:13:09Z).
+- configurators/{recipes,contrib}/<package_dotted>.<version>.json: the
+  recipe files, byte for byte (`git show <commit>:<file>`), only the
+  version each case selects: symfony/console 5.3, symfony/framework-bundle
+  7.4, symfony/twig-bundle 6.4, symfony/routing 7.4, symfony/mailer 4.3,
+  symfony/asset-mapper 6.4, friendsofphp/php-cs-fixer 3.39,
+  phpunit/phpunit 11.1, doctrine/doctrine-bundle 3.0 (recipes) and
+  phpstan/phpstan 1.0 (contrib). A version a tool would select by mistake
+  is a 404, which hands the command over (vivacity) or prints « Failed to
+  download recipe » (Composer): the harness sees it.
+- configurators/LICENSE.symfony-recipes: the MIT license of both
+  repositories (identical text, `LICENSE` of their `main` branches —
+  symfony/recipes at 2019ffd36f570513b1ebd7b97dc93b187e81dea0,
+  symfony/recipes-contrib at a3429ebe689f7f6440a22048ace2822c61848363,
+  both read on 2026-10-16; the `flex/main` branches carry none). Copyright (c) 2017-present Fabien
+  Potencier. The recipes are test data served to Composer and vivacity;
+  nothing of them is compiled into vivacity.

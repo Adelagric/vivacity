@@ -30,7 +30,13 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     // At install: `POST_INSTALL_CMD` copies `.env` from its `.dist` and
     // prints, `symfony-pack` packages are laid out as metapackages, and
     // nothing else fires (`fetchRecipes` is POST_UPDATE_CMD only). The
-    // resolution commands have their own rules (`resolution_effect`).
+    // resolution commands have their own rules (`resolution_effect`); on
+    // `update` with install, the recipes Flex applies at `POST_UPDATE_CMD`
+    // are reproduced for the `bundles` (and auto-generated),
+    // `copy-from-recipe`, `env`, `dotenv`, `gitignore`, `add-lines` and
+    // `composer-scripts` configurators, and the Docker ones when
+    // `extra.symfony.docker` is false (`vivacity::flex_recipes`); any other
+    // configurator hands the command over, named.
     "symfony/flex",
     "yiisoft/yii2-composer",
     "codeception/c3",
@@ -187,8 +193,9 @@ pub fn resolution_effect(
                 "applies recipes to the packages it installs (not emulated; --no-install resolves natively)".to_owned()
             } else {
                 // `update` with install is decided once the lock is solved
-                // (`flex_install_reason`): what Flex would do depends on the
-                // packages the install lays out.
+                // (`flex_install_decision`): the recipes Flex would apply
+                // depend on the packages the install lays out, and are
+                // either reproduced or handed over with their reason.
                 return None;
             }
         }

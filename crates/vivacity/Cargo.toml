@@ -26,6 +26,9 @@ clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 md-5.workspace = true
+# Recipe files carry base64 contents (`Downloader::getRecipes`); already in
+# the graph through vivacity-core.
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

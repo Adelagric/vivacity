@@ -3416,3 +3416,97 @@ masquerait une commande, `disable-tls`, « dubious ownership ») ; le schéma
 `composer` trouvé mais impossible à lancer perd la ligne (jetée avant le
 lancement). Une `version: null` ne donne pas de ligne (revue) : Composer la
 refuse par son schéma, vivacity dans `load_with_version`.
+
+## 2026-10-16 — Les recettes de symfony/flex appliquées nativement : une simulation, puis un plan
+
+**Contexte.** Depuis la tranche C, `update` avec install sur un projet Flex
+n'était natif que si aucune recette ne s'appliquait ; chaque `update` qui
+faisait entrer un paquet à recette (ou à classe de bundle) partait chez
+Composer. Mesure sur les recettes que les fixtures emploient (83, index
+fixé du 2026-09-22) : `copy-from-recipe` 74, `bundles` 50 (+ 11 recettes
+auto-générées), `conflict` 24, `add-lines` 15, `gitignore` 14, `env` 12,
+`docker-compose` 4, `dockerfile` 3, `dotenv` 3, `composer-scripts` 3,
+`container` 1, les trois autres 0 (`docs/plans/flex-configurators.md`).
+
+**Fait.** `Flex::install` avec recettes est reproduit pour `bundles` (et la
+recette auto-générée), `copy-from-recipe`, `env`, `dotenv`, `gitignore`,
+`add-lines`, `composer-scripts`, et les deux configurateurs Docker quand
+`extra.symfony.docker` est faux (`crates/vivacity/src/flex_recipes.rs`,
+`flex_install::flex_install_decision`, `flex::RecipeIndex`). Les opérations
+dans l'ordre de `recordOperations` (le port de `Transaction`, présent = les
+noms de `symfony.lock`) ; l'index complet par endpoint (`_links`, `branch`,
+`is_contrib`) ; les `recipe-conflicts` ÉVALUÉS (`findPackage` sur
+`getLockedRepository(true)`, alias compris) — ignorés jusqu'ici parce qu'ils
+ne pouvaient que provoquer un repli inutile, ce qui n'est plus vrai dès
+qu'on applique ; le fichier de recette récupéré comme `Downloader::get`
+(URL relative à l'endpoint, cache Flex partagé, écrit seulement avec
+`last-modified` comme `parseJson`) ; le `conflict` du manifeste évalué.
+
+**Pourquoi une simulation puis un plan.** La décision doit précéder
+l'écriture du lock (contrat), mais Flex agit à `POST_UPDATE_CMD`, après
+l'install. Tous les configurateurs tournent donc d'abord sur un système de
+fichiers virtuel (disque + écritures du plan), qui produit les lignes et
+l'état final de chaque fichier avec l'état qu'il avait ; à l'événement, le
+plan vérifie ces états puis écrit en place (inode et mode gardés, comme
+`file_put_contents`). Le système virtuel note chaque chemin regardé : un
+chemin dans une zone que l'install écrit avant l'événement (vendor-dir,
+bin-dir, paquets hors vendor/, `c3.php`) rend la main à la décision — la
+vérification à l'application n'est plus qu'une assertion interne.
+Recalculer à l'événement aurait ouvert une seconde porte de repli après
+l'écriture du lock.
+
+**`config/bundles.php` reconnu, pas évalué.** Flex le `require` ; vivacity
+l'analyse strictement dans la forme de `buildContents` et exige que le rendu
+redonne les mêmes octets, sinon repli. Un fichier tenu par Flex passe, un
+fichier édité à la main (commentaire, `\Foo::class`) part chez Composer.
+
+**`updateComposerLock` reproduit.** `composer-scripts` réécrit composer.json
+sans condition ; si ses octets changent, Flex relit composer.lock en
+tableaux PHP et le réécrit : `scripts` n'entre pas dans le content-hash,
+l'effet visible est le réencodage (`"stability-flags": {}` → `[]`),
+reproduit par `phpjson` (cas `framework`, octet pour octet).
+
+**Laissé en repli, nommé.** `container`, `makefile`, `composer-commands`,
+`copy-from-package` ; Docker activé ou non décidé (Flex pose une question,
+vivacity est non interactif) ; une recette contrib sans `allow-contrib`
+(`SYMFONY_ALLOW_CONTRIB` prioritaire) ; `%generate(secret)%` qui serait
+réellement écrit ; un conflit de recette qui correspond ; `root-dir` autre
+que `.` ; un endpoint `api.github.com` (en-tête `Accept` de Flex non porté
+— Sylius) ou `file://` (Flex ne le lit pas) ; `--offline` avec une recette
+à télécharger ; une désinstallation dont l'index liste le paquet ;
+`SYMFONY_LOCKFILE` ; une version de `symfony.lock` que `normalize` refuse ;
+un message `add-lines` de niveau normal que le formateur de la console
+pourrait transformer. `require` (alias et versions devinées,
+`PackageResolver`) et `remove` avec install (`Unconfiguring`) inchangés.
+
+**Corrigé en chemin.** `strip_version` ne faisait qu'une substitution là
+où `preg_replace('/^dev-|^v|\.x-dev$|-dev$/', '', …)` est globale
+(`v1.x-dev` → `1`) ; la comparaison de versions remplissait de zéros
+(`5.3` = `5.3.0`) là où `version_compare` dit `<`. Sans effet visible
+avant (une comparaison ratée rendait la main), décisif dès qu'on applique.
+
+**Délégation tardive.** Si la phase d'installation rend encore la main à
+`composer install` après l'écriture du lock (plugin de fusion, portée,
+émulation refusée), Composer exécute Flex à `POST_INSTALL_CMD` — sans
+recette. Le plan est alors appliqué après ce `composer install` réussi
+(revue indépendante, défaut 1) : le projet finit comme après l'`update` de
+Composer ; la stderr d'une délégation tardive diffère déjà (écart
+documenté).
+
+**Corrigé aussi (cas `no-plugins`).** Sous `--no-plugins`, un
+`symfony-pack` posé par Flex (sans `install-path`) est installé par
+Composer comme une bibliothèque : `loadInstalledPlugins` précède
+`purgePackages`, et sans Flex l'installateur est `LibraryInstaller`.
+vivacity le tenait pour installé (stderr seule fausse).
+
+**Dépendance.** `base64` ajouté au crate `vivacity` (contenu de fichier de
+recette encodé) : déjà dans le graphe par `vivacity-core`, rien de nouveau
+à compiler.
+
+**Oracle.** `fixtures/flex/configurators/` : les index réels de
+`symfony/recipes` et `recipes-contrib` (commits du 2026-09-22) réduits aux
+paquets des cas, et leurs fichiers de recette tels quels ; la liste de
+symfony/framework-bundle s'arrête à 7.4 (la recette 8.1 copie un fichier
+qu'on ne reproduit pas ici) — PROVENANCE. `harness/flex-recipes.sh`
+affirme que l'oracle applique bien des recettes (« Symfony operations »,
+fichier attendu créé ou modifié) avant de comparer.

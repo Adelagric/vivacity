@@ -18,13 +18,18 @@ pub(crate) fn flex_synchronize_enabled(manifest: &serde_json::Value) -> bool {
     }
 }
 
-/// `Flex::install` on `POST_UPDATE_CMD` after a resolution that installed
-/// nothing (no operations, hence no recipes): an empty line, then
-/// `finish()` — `synchronizePackageJson`'s notices, the synchronisation
-/// itself decided by `flex_sync_reason` on the solved lock, `symfony.lock`
-/// unchanged — then the recipes hint when the downloader is enabled
-/// (symfony/flex required by the root).
-pub(crate) fn print_flex_post_update(manifest: &serde_json::Value, thanks_reminder: bool) {
+/// `Flex::install` on `POST_UPDATE_CMD`. Without recipes (`plan` `None`):
+/// an empty line, then `finish()` — `synchronizePackageJson`'s notices, the
+/// synchronisation itself decided by `flex_sync_reason` on the solved lock,
+/// `symfony.lock` unchanged — then the recipes hint when the downloader is
+/// enabled (symfony/flex required by the root). With recipes: the empty
+/// line, the plan's lines (`Symfony operations…`, `  - Configuring …`) and
+/// its files, then `finish()`'s notice — and no hint.
+pub(crate) fn print_flex_post_update(
+    manifest: &serde_json::Value,
+    thanks_reminder: bool,
+    plan: Option<&crate::flex_recipes::FlexPlan>,
+) -> anyhow::Result<()> {
     let sync = flex_synchronize_enabled(manifest);
     let enabled = flex_downloader_enabled(manifest);
     // `fetchRecipes` writes this one before `install`'s blank line.
@@ -51,6 +56,15 @@ pub(crate) fn print_flex_post_update(manifest: &serde_json::Value, thanks_remind
         );
     }
     vivacity_core::say!();
+    if let Some(plan) = plan {
+        plan.print_and_apply()?;
+        // `finish` → `synchronizePackageJson`; the downloader is enabled
+        // (there are recipes), so only the opt-out notice can show.
+        if !sync {
+            vivacity_core::say!("Skip synchronizing package.json with PHP packages");
+        }
+        return Ok(());
+    }
     if !sync {
         vivacity_core::say!("Skip synchronizing package.json with PHP packages");
     } else if !enabled {
@@ -62,6 +76,7 @@ pub(crate) fn print_flex_post_update(manifest: &serde_json::Value, thanks_remind
         );
         vivacity_core::say!();
     }
+    Ok(())
 }
 
 /// `Flex::initOptions`: `array_merge([… 'root-dir' => extra.symfony.root-dir
@@ -159,8 +174,17 @@ pub(crate) fn flex_reinstall_reason(
         })
 }
 
-/// Why `symfony/flex` has to handle this `update` itself, or `None` when
-/// it would write nothing but what vivacity already reproduces.
+/// What symfony/flex's `POST_UPDATE_CMD` does to this `update`, decided on
+/// the solved lock before anything is written.
+pub(crate) enum FlexDecision {
+    /// Something vivacity does not reproduce: the reason, for the hand-over.
+    HandOver(String),
+    /// Native: no recipe to apply (`None`), or the recipes' plan.
+    Native(Option<crate::flex_recipes::FlexPlan>),
+}
+
+/// Why `symfony/flex` has to handle this `update` itself, or the plan of
+/// what it writes when vivacity reproduces it.
 ///
 /// Flex's operations are not the update transaction's: `recordOperations`
 /// (`PRE_OPERATIONS_EXEC`) builds a synthetic `Transaction` between the
@@ -169,23 +193,34 @@ pub(crate) fn flex_reinstall_reason(
 /// `symfony.lock` does not hold — an `UpdateOperation` falls through and
 /// returns false, an `UninstallOperation` is dropped by the caller. So the
 /// recorded set depends on `symfony.lock` against the new lock, and not on
-/// what the install lays out.
+/// what the install lays out; its ORDER is that transaction's, and it is
+/// the order of the recipes (`fetchRecipes`).
 ///
 /// For each recorded package Flex looks for a recipe in the endpoints'
-/// index and, failing that, for a bundle class — either one means files
-/// written into the project. The bundle class is read from
-/// `<vendor-dir>/<name>/…` as it stands at `POST_UPDATE_CMD`, i.e. at the
-/// version the install has just laid out: from the dist for a package the
-/// install changes, from vendor/ for one it leaves alone, and nowhere at
-/// all for one an installer puts outside `<vendor-dir>/<name>`.
-pub(crate) fn flex_install_reason(
+/// index (`Downloader::getRecipes`) and, failing that, for a bundle class —
+/// read from `<vendor-dir>/<name>/…` as it stands at `POST_UPDATE_CMD`,
+/// i.e. at the version the install has just laid out: from the dist for a
+/// package the install changes, from vendor/ for one it leaves alone, and
+/// nowhere at all for one an installer puts outside `<vendor-dir>/<name>`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flex_install_decision(
     project: &std::path::Path,
     manifest: &serde_json::Value,
+    manifest_text: &str,
     lock_value: &serde_json::Value,
+    lock_text: Option<&str>,
     with_dev: bool,
     offline: bool,
     plugins_enabled: bool,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<FlexDecision> {
+    use serde_json::Value;
+    let hand_over = |r: String| Ok(FlexDecision::HandOver(r));
+    // `fetchRecipes` with the downloader disabled (symfony/flex not a root
+    // requirement): the warning, and `[]` — no recipe, no auto-generated
+    // one, no unconfiguring. The warning is `print_flex_post_update`'s.
+    if !flex_downloader_enabled(manifest) {
+        return Ok(FlexDecision::Native(None));
+    }
     let lock = vivacity_core::lock::Lock::from_value(lock_value);
     let installed = installed_packages(project, manifest);
     let locked = flex::lock_names(project);
@@ -202,136 +237,557 @@ pub(crate) fn flex_install_reason(
         lock.wanted_packages(with_dev).map(|p| p.name()).collect();
     let dev_names: std::collections::BTreeSet<&str> = lock_value
         .get("packages-dev")
-        .and_then(serde_json::Value::as_array)
+        .and_then(Value::as_array)
         .map(|a| {
             a.iter()
-                .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+                .filter_map(|p| p.get("name").and_then(Value::as_str))
                 .collect()
         })
         .unwrap_or_default();
+    // The uninstalls Flex records but `fetchRecipes` skips (a name
+    // `symfony.lock` does not hold): `getRecipes` still looks them up.
+    let mut uninstalled: Vec<String> = Vec::new();
     for entry in &installed {
-        let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+        let Some(name) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
-        if wanted.contains(name) || !locked.contains(name) {
+        if wanted.contains(name) {
             continue;
         }
         if !with_dev && dev_names.contains(name) {
             continue;
         }
-        return Ok(Some(format!(
-            "would unconfigure {name} and drop it from symfony.lock (not emulated)"
-        )));
-    }
-    let recorded: Vec<&vivacity_core::lock::LockPackage> = lock
-        .wanted_packages(with_dev)
-        .filter(|p| !locked.contains(p.name()))
-        .collect();
-    if recorded.is_empty() {
-        return Ok(None);
-    }
-    let index = flex::recipe_index(project, manifest, offline)?;
-    for p in &recorded {
-        if index.applies_to(p.name(), p.version(), p.raw.get("extra")) {
-            return Ok(Some(format!(
-                "would apply the recipe of {} (not emulated)",
-                p.name()
-            )));
+        if !locked.contains(name) {
+            uninstalled.push(name.to_owned());
+            continue;
         }
+        return hand_over(format!(
+            "would unconfigure {name} and drop it from symfony.lock (not emulated)"
+        ));
+    }
+    if let Some(reason) = flex::unreadable_lock_entry(project) {
+        return hand_over(reason);
+    }
+    let recorded = match recorded_operations(lock_value, &locked, with_dev) {
+        Ok(r) => r,
+        Err(e) => return hand_over(e),
+    };
+    if recorded.is_empty() && uninstalled.is_empty() {
+        return Ok(FlexDecision::Native(None));
+    }
+    let by_name = |name: &str| lock.wanted_packages(with_dev).find(|p| p.name() == name);
+    let mut index = flex::recipe_index(project, manifest, offline)?;
+    // An uninstalled package the index lists: Flex downloads its recipe
+    // (or prints `Skipping recipe…`), and a failure or a warning shows.
+    for name in &uninstalled {
+        if index.lists(name) {
+            return hand_over(format!(
+                "would look up the recipe of the removed {name} (not emulated)"
+            ));
+        }
+    }
+    if recorded.is_empty() {
+        return Ok(FlexDecision::Native(None));
+    }
+    // `getLockedRepository(true)`: what `recipe-conflicts` and a manifest's
+    // `conflict` are checked against.
+    let locked_repo = match repository_versions(lock_value, true) {
+        Ok(r) => r,
+        Err(e) => return hand_over(e),
+    };
+    let find = |name: &str, constraint: &str| -> Result<bool, String> {
+        let parsed = vivacity_resolver::constraint::parse_constraints(constraint)
+            .map_err(|e| format!("cannot parse the constraint {constraint:?}: {e}"))?;
+        let name = name.to_lowercase();
+        Ok(locked_repo
+            .iter()
+            .any(|(n, v)| *n == name && parsed.constraint.matches_version(v)))
+    };
+    if let Err(e) = index.apply_conflicts(&find) {
+        return hand_over(e);
     }
     let dirs = vivacity_core::dirs::Dirs::resolve(manifest).unwrap_or_default();
     let vendor = dirs.vendor_dir(project);
     let vendor_rel = dirs.vendor_rel().to_owned();
     // `Layout::resolve` places every package: an installer plugin can put
     // one outside `<vendor-dir>/<name>`, where Flex's read finds nothing.
-    let layout =
-        vivacity_core::layout::Layout::resolve(project, &lock, manifest, with_dev, plugins_enabled)
-            .ok();
-    enum Where {
-        Elsewhere,
-        LaidOut,
-        Dist,
-    }
-    let placed: Vec<(&vivacity_core::lock::LockPackage, Where)> = recorded
-        .iter()
-        .map(|p| {
-            let at_vendor = layout.as_ref().is_none_or(|l| {
-                l.rel(p.name())
-                    .is_none_or(|rel| rel == format!("{vendor_rel}/{}", p.name()))
-            });
-            // No candidate class file at all — the commonest case, and the
-            // one `getClassNames` answers without opening anything. Asked
-            // first, so a package with no dist to fetch (a metapackage) is
-            // not handed over for a read it would never do.
-            let has_candidate =
-                !flex::bundle_candidate_paths(&serde_json::Value::Object(p.raw.clone())).is_empty();
-            let w = if !at_vendor || !has_candidate {
-                Where::Elsewhere
-            } else if installed_as_locked(&installed, p) {
-                Where::LaidOut
-            } else {
-                Where::Dist
-            };
-            (*p, w)
-        })
-        .collect();
-    let reader = if placed.iter().any(|(_, w)| matches!(w, Where::Dist)) {
-        Some(flex::DistReader::new(project)?)
-    } else {
-        None
+    let layout = match vivacity_core::layout::Layout::resolve(
+        project,
+        &lock,
+        manifest,
+        with_dev,
+        plugins_enabled,
+    ) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            return hand_over(format!(
+                "cannot place the packages to answer Flex ({})",
+                e.join("; ")
+            ))
+        }
     };
-    for (p, w) in &placed {
-        let raw = serde_json::Value::Object(p.raw.clone());
-        let answer = match w {
-            // Flex reads `<vendor-dir>/<name>`, where nothing will stand.
-            Where::Elsewhere => flex::has_bundle_class_from(&raw, &flex::ClassSource::Elsewhere),
-            Where::LaidOut => {
-                let root = vendor.join(p.name());
-                flex::has_bundle_class_from(&raw, &flex::ClassSource::LaidOut(&root))
+    let mut reader: Option<flex::DistReader> = None;
+    // `fetchRecipes`: a recipe from the index, or the auto-generated one.
+    let mut recipes: Vec<(crate::flex_recipes::Recipe, Value)> = Vec::new();
+    for name in &recorded {
+        let Some(p) = by_name(name) else {
+            return hand_over(format!("{name} is recorded but not in the lock"));
+        };
+        let raw = Value::Object(p.raw.clone());
+        match index.select(p.name(), p.version(), p.raw.get("extra")) {
+            flex::Selection::Unsure(r) => return hand_over(r),
+            flex::Selection::AllConflicted => {
+                return hand_over(format!(
+                "would skip the recipe of {name}, every version of which conflicts (not emulated)"
+            ))
             }
-            Where::Dist => {
-                let Some(reader) = reader.as_ref() else {
-                    return Ok(Some(format!(
-                        "cannot read {}'s dist before writing (no reader)",
-                        p.name()
-                    )));
+            flex::Selection::Recipe {
+                version,
+                endpoint,
+                lock_version,
+            } => {
+                let Some((url, config)) = index.endpoints.get(endpoint) else {
+                    return hand_over(format!("{name}'s recipe endpoint is unknown"));
                 };
-                match reader.dist_bytes(p, offline) {
-                    Ok((bytes, kind)) => flex::has_bundle_class_from(
-                        &raw,
-                        &flex::ClassSource::Dist {
-                            bytes: &bytes,
-                            kind,
-                        },
-                    ),
-                    // Unanswerable before writing — hand over rather than
-                    // guess: guessing wrong loses a bundle registration.
-                    Err(e) => {
-                        return Ok(Some(format!(
-                            "cannot tell whether {} registers a bundle before writing ({e})",
-                            p.name()
-                        )))
-                    }
+                if offline {
+                    // Without the network, Flex falls back to its cache in
+                    // "degraded mode", with two warnings, or fails.
+                    return hand_over(format!("would download the recipe of {name} (--offline)"));
+                }
+                match fetch_recipe(project, url, config, p, &version, &lock_version, offline) {
+                    Ok(r) => recipes.push(r),
+                    Err(e) => return hand_over(e),
                 }
             }
-        };
-        match answer {
-            Ok(true) => {
-                return Ok(Some(format!(
-                    "would register {}'s bundle in config/bundles.php (not emulated)",
-                    p.name()
-                )))
-            }
-            Ok(false) => {}
-            Err(e) => {
-                return Ok(Some(format!(
-                    "cannot tell whether {} registers a bundle before writing ({e})",
-                    p.name()
-                )))
+            flex::Selection::None => {
+                let classes = match bundle_classes(
+                    project,
+                    p,
+                    &raw,
+                    &installed,
+                    &vendor,
+                    &vendor_rel,
+                    layout.as_ref(),
+                    &mut reader,
+                    offline,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return hand_over(e),
+                };
+                if classes.is_empty() {
+                    continue;
+                }
+                let envs = if dev_names.contains(p.name()) {
+                    vec![Value::String("dev".into()), Value::String("test".into())]
+                } else {
+                    vec![Value::String("all".into())]
+                };
+                let mut bundles = serde_json::Map::new();
+                for class in classes {
+                    bundles
+                        .entry(class)
+                        .or_insert_with(|| Value::Array(envs.clone()));
+                }
+                let mut manifest_map = serde_json::Map::new();
+                manifest_map.insert("bundles".into(), Value::Object(bundles));
+                recipes.push((
+                    crate::flex_recipes::Recipe {
+                        name: p.name().to_owned(),
+                        origin: format!("{}:{}@auto-generated recipe", p.name(), p.version()),
+                        manifest: manifest_map,
+                        files: Vec::new(),
+                        is_contrib: false,
+                        package_type: p.package_type().to_owned(),
+                    },
+                    serde_json::json!({ "version": p.version() }),
+                ));
             }
         }
     }
-    Ok(None)
+    if recipes.is_empty() {
+        return Ok(FlexDecision::Native(None));
+    }
+    // `doesRecipeConflict`: a manifest whose `conflict` matches the lock
+    // sends Flex looking for an older recipe — not reproduced.
+    for (recipe, _) in &recipes {
+        let Some(conflict) = recipe.manifest.get("conflict") else {
+            continue;
+        };
+        if !crate::manifest::php_truthy(conflict) {
+            continue;
+        }
+        let Value::Object(conflict) = conflict else {
+            return hand_over(format!(
+                "{}'s recipe conflict is not an object",
+                recipe.name
+            ));
+        };
+        for (other, constraint) in conflict {
+            let Some(constraint) = constraint.as_str() else {
+                return hand_over(format!(
+                    "{}'s recipe conflict on {other} is not a string",
+                    recipe.name
+                ));
+            };
+            match find(other, constraint) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return hand_over(format!(
+                        "would look for an older recipe of {}, whose recipe conflicts with {other} {constraint} (not emulated)",
+                        recipe.name
+                    ))
+                }
+                Err(e) => return hand_over(e),
+            }
+        }
+    }
+    // composer-merge-plugin can merge `extra` into the root Flex reads its
+    // options from (`merge-extra`); the recipes are decided on the manifest.
+    if vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+        .iter()
+        .any(|p| p == vivacity_resolver::merge_plugin::PLUGIN_NAME)
+    {
+        return hand_over(
+            "composer-merge-plugin is active, and Flex reads its options from the merged root (not combined with recipes)"
+                .to_owned(),
+        );
+    }
+    if std::env::var_os("SYMFONY_LOCKFILE").is_some_and(|v| !v.is_empty()) {
+        return hand_over("SYMFONY_LOCKFILE is set (not emulated with recipes)".to_owned());
+    }
+    // `fetchRecipes`' return: symfony/flex, the symfony-packs, the
+    // metapackages, then symfony/framework-bundle ahead of the rest.
+    let rank = |r: &crate::flex_recipes::Recipe| -> u8 {
+        if r.package_type == "symfony-pack" {
+            1
+        } else if r.package_type == "metapackage" {
+            2
+        } else if r.name == "symfony/flex" {
+            0
+        } else if r.name == "symfony/framework-bundle" {
+            3
+        } else {
+            4
+        }
+    };
+    recipes.sort_by_key(|(r, _)| rank(r));
+    // Local repository after the install (`isPackageInstalled`).
+    let local = match repository_versions(lock_value, with_dev) {
+        Ok(r) => r,
+        Err(e) => return hand_over(e),
+    };
+    let mut ctx =
+        match crate::flex_recipes::Ctx::new(project, manifest, "symfony.lock", &local, lock_text) {
+            Ok(c) => c,
+            Err(e) => return hand_over(e),
+        };
+    for (recipe, entry) in &recipes {
+        ctx.lock.set(&recipe.name, entry.clone());
+    }
+    let list: Vec<crate::flex_recipes::Recipe> = recipes.into_iter().map(|(r, _)| r).collect();
+    if let Err(e) = crate::flex_recipes::run_recipes(&mut ctx, &list, manifest, manifest_text) {
+        return hand_over(e);
+    }
+    // `finish` synchronises package.json / importmap.php after the recipes,
+    // on the files they leave.
+    if let Some(reason) = flex_sync_reason_in(project, manifest, lock_value, Some(&ctx.files)) {
+        return hand_over(reason);
+    }
+    // The decision is taken on the project as it stands now; the install
+    // writes some of it before the event (bin proxies, packages laid out —
+    // or removed — outside vendor/, c3.php). A path Flex would look at
+    // there is not decided here.
+    let areas = install_areas(&dirs, layout.as_ref(), &lock, with_dev);
+    for seen in ctx.files.observed() {
+        if let Some(area) = areas.iter().find(|a| {
+            seen == **a || seen.starts_with(&format!("{a}/")) || a.starts_with(&format!("{seen}/"))
+        }) {
+            return hand_over(format!(
+                "a recipe reads or writes {seen}, which the install itself writes ({area})"
+            ));
+        }
+    }
+    Ok(FlexDecision::Native(Some(crate::flex_recipes::into_plan(
+        ctx,
+    ))))
+}
+
+/// The project paths the install writes before `POST_UPDATE_CMD`: the
+/// vendor and bin directories, every package laid out outside the vendor
+/// directory, codeception/c3's `c3.php`.
+fn install_areas(
+    dirs: &vivacity_core::dirs::Dirs,
+    layout: Option<&vivacity_core::layout::Layout>,
+    lock: &vivacity_core::lock::Lock,
+    with_dev: bool,
+) -> Vec<String> {
+    let mut areas = vec![
+        dirs.vendor_rel().trim_end_matches('/').to_owned(),
+        dirs.bin_rel().trim_end_matches('/').to_owned(),
+        "c3.php".to_owned(),
+    ];
+    if let Some(layout) = layout {
+        for p in lock.wanted_packages(with_dev) {
+            if let Some(rel) = layout.rel(p.name()) {
+                if !rel.starts_with(&format!("{}/", dirs.vendor_rel())) {
+                    areas.push(rel.trim_end_matches('/').to_owned());
+                }
+            }
+        }
+        // What the install removes: installed.json's packages it drops,
+        // where they were laid out.
+        let root = layout.root().to_path_buf();
+        for (_, dir) in layout.removals() {
+            if let Ok(rel) = dir.strip_prefix(&root) {
+                areas.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    areas.retain(|a| !a.is_empty() && !a.starts_with("..") && !a.starts_with('/'));
+    areas
+}
+
+/// `recordOperations`: the names of the install operations of a
+/// `Transaction` from `symfony.lock`'s packages to the lock's (at the
+/// install's dev mode), in that transaction's order, minus the names
+/// `symfony.lock` holds.
+fn recorded_operations(
+    lock_value: &serde_json::Value,
+    locked: &std::collections::BTreeSet<String>,
+    with_dev: bool,
+) -> Result<Vec<String>, String> {
+    use vivacity_resolver::package::{Origin, Package};
+    use vivacity_resolver::transaction::{Operation, Transaction};
+    let mut arena: Vec<Package> = Vec::new();
+    // Only the names matter: a present package never yields an install.
+    let mut present = Vec::new();
+    for name in locked {
+        arena.push(Package::new(name, "1.0.0.0", "1.0.0", Origin::Locked));
+        present.push(arena.len() - 1);
+    }
+    let result =
+        vivacity_resolver::repository::locked_repository_with(lock_value, &mut arena, with_dev)
+            .map_err(|e| format!("composer.lock: {}", e.0))?;
+    let tx = Transaction::new(&arena, &present, &result);
+    Ok(tx
+        .operations
+        .iter()
+        .filter_map(|op| match op {
+            Operation::Install(i) => Some(arena[*i].name.clone()),
+            _ => None,
+        })
+        .filter(|n| !locked.contains(n))
+        .collect())
+}
+
+/// The packages of the lock as a repository (`getLockedRepository`, aliases
+/// included): name and normalized version, for `findPackage`.
+fn repository_versions(
+    lock_value: &serde_json::Value,
+    with_dev: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut arena = Vec::new();
+    let ids =
+        vivacity_resolver::repository::locked_repository_with(lock_value, &mut arena, with_dev)
+            .map_err(|e| format!("composer.lock: {}", e.0))?;
+    Ok(ids
+        .into_iter()
+        .map(|i| (arena[i].name.clone(), arena[i].version.clone()))
+        .collect())
+}
+
+/// One recipe from the index, fetched and decoded as `getRecipes` does:
+/// the `Recipe` and the `symfony.lock` entry `fetchRecipes` sets for it.
+#[allow(clippy::too_many_arguments)]
+fn fetch_recipe(
+    project: &std::path::Path,
+    endpoint_url: &str,
+    endpoint: &serde_json::Value,
+    p: &vivacity_core::lock::LockPackage,
+    version: &str,
+    lock_version: &str,
+    offline: bool,
+) -> Result<(crate::flex_recipes::Recipe, serde_json::Value), String> {
+    use serde_json::Value;
+    let name = p.name();
+    if endpoint_url.starts_with("file://") {
+        // HttpDownloader gives no status line for a local file, so Flex
+        // never reads such an endpoint at all.
+        return Err(format!(
+            "{name}'s recipe comes from {endpoint_url}, an endpoint Flex does not read"
+        ));
+    }
+    let links = endpoint.get("_links").cloned().unwrap_or(Value::Null);
+    let url = flex::recipe_url(endpoint_url, &links, name, version)?;
+    // `Downloader::get` sends its own `Accept` header to the GitHub API
+    // (`preg_match('{^https?://api\.github\.com/}', $url)`).
+    if url.starts_with("https://api.github.com/") || url.starts_with("http://api.github.com/") {
+        return Err(format!(
+            "{name}'s recipe comes from the GitHub API ({url}), which Flex reads with its own Accept header (not emulated)"
+        ));
+    }
+    let body = flex::fetch_recipe(project, &url, offline)
+        .map_err(|e| format!("cannot download the recipe of {name} ({e:#})"))?;
+    for key in ["warning", "info"] {
+        if body.get(key).is_some_and(crate::manifest::php_truthy) {
+            return Err(format!(
+                "the recipe of {name} carries a {key} message (not emulated)"
+            ));
+        }
+    }
+    let Some(Value::Object(data)) = body.get("manifests").and_then(|m| m.get(name)) else {
+        return Err(format!("{url} has no manifest for {name}"));
+    };
+    let field = |v: Option<&Value>, what: &str| -> Result<Value, String> {
+        v.cloned()
+            .ok_or_else(|| format!("{name}'s recipe endpoint lacks {what}"))
+    };
+    let repository = field(links.get("repository"), "_links.repository")?;
+    let branch = field(endpoint.get("branch"), "branch")?;
+    let reference = field(data.get("ref"), "a ref")?;
+    let origin_template = links
+        .get("origin_template")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{name}'s recipe endpoint lacks _links.origin_template"))?;
+    let mut files: Vec<(String, crate::flex_recipes::RecipeFile)> = Vec::new();
+    match data.get("files") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) => {
+            for (path, file) in map {
+                let contents = match file.get("contents") {
+                    Some(Value::Array(lines)) => {
+                        let lines: Vec<&str> = lines
+                            .iter()
+                            .map(|l| {
+                                l.as_str().ok_or_else(|| {
+                                    format!("{name}'s recipe file {path} has a non-string line")
+                                })
+                            })
+                            .collect::<Result<_, _>>()?;
+                        lines.join("\n").into_bytes()
+                    }
+                    Some(Value::String(b64)) => {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .map_err(|e| format!("{name}'s recipe file {path}: {e}"))?
+                    }
+                    _ => return Err(format!("{name}'s recipe file {path} has no contents")),
+                };
+                let executable = file.get("executable").and_then(Value::as_bool);
+                files.push((
+                    path.clone(),
+                    crate::flex_recipes::RecipeFile {
+                        contents,
+                        executable,
+                    },
+                ));
+            }
+        }
+        Some(_) => return Err(format!("{name}'s recipe files are not an object")),
+    }
+    // `$manifest + [...]`: the recipe's own keys win.
+    // An `origin` key the recipe sets itself wins, even null
+    // (`getOrigin()`: `?? ''`).
+    let origin = match data.get("origin") {
+        Some(Value::String(o)) => o.clone(),
+        Some(Value::Null) => String::new(),
+        Some(other) => return Err(format!("{name}'s recipe origin is {other}")),
+        None => origin_template
+            .replace("{package}", name)
+            .replace("{version}", version),
+    };
+    let is_contrib = match data.get("is_contrib") {
+        Some(v) => crate::manifest::php_truthy(v),
+        None => endpoint
+            .get("is_contrib")
+            .is_some_and(crate::manifest::php_truthy),
+    };
+    let Some(Value::Object(manifest)) = data.get("manifest") else {
+        return Err(format!("{name}'s recipe has no manifest"));
+    };
+    let entry = serde_json::json!({
+        "version": lock_version,
+        "recipe": {
+            "repo": repository,
+            "branch": branch,
+            "version": version,
+            "ref": reference,
+        },
+    });
+    Ok((
+        crate::flex_recipes::Recipe {
+            name: name.to_owned(),
+            origin,
+            manifest: manifest.clone(),
+            files,
+            is_contrib,
+            package_type: p.package_type().to_owned(),
+        },
+        entry,
+    ))
+}
+
+/// `SymfonyBundle::getClassNames` for a recorded package, from where the
+/// class file stands at `POST_UPDATE_CMD`.
+#[allow(clippy::too_many_arguments)]
+fn bundle_classes(
+    project: &std::path::Path,
+    p: &vivacity_core::lock::LockPackage,
+    raw: &serde_json::Value,
+    installed: &[serde_json::Value],
+    vendor: &std::path::Path,
+    vendor_rel: &str,
+    layout: Option<&vivacity_core::layout::Layout>,
+    reader: &mut Option<flex::DistReader>,
+    offline: bool,
+) -> Result<Vec<String>, String> {
+    // No candidate class file at all — the commonest case, and the one
+    // `getClassNames` answers without opening anything. Asked first, so a
+    // package with no dist to fetch (a metapackage) is not handed over for
+    // a read it would never do.
+    if flex::bundle_candidate_paths(raw).is_empty() {
+        return Ok(Vec::new());
+    }
+    let at_vendor = layout.is_none_or(|l| {
+        l.rel(p.name())
+            .is_none_or(|rel| rel == format!("{vendor_rel}/{}", p.name()))
+    });
+    let unanswerable = |e: String| {
+        format!(
+            "cannot tell whether {} registers a bundle before writing ({e})",
+            p.name()
+        )
+    };
+    if !at_vendor {
+        // Flex reads `<vendor-dir>/<name>`, where nothing will stand.
+        return flex::bundle_classes_from(raw, &flex::ClassSource::Elsewhere)
+            .map_err(|e| unanswerable(format!("{e:#}")));
+    }
+    if installed_as_locked(installed, p) {
+        let root = vendor.join(p.name());
+        return flex::bundle_classes_from(raw, &flex::ClassSource::LaidOut(&root))
+            .map_err(|e| unanswerable(format!("{e:#}")));
+    }
+    if reader.is_none() {
+        *reader = Some(flex::DistReader::new(project).map_err(|e| unanswerable(format!("{e:#}")))?);
+    }
+    let Some(r) = reader.as_ref() else {
+        return Err(unanswerable("no reader".to_owned()));
+    };
+    // Unanswerable before writing — hand over rather than guess: guessing
+    // wrong loses a bundle registration.
+    let (bytes, kind) = r
+        .dist_bytes(p, offline)
+        .map_err(|e| unanswerable(format!("{e:#}")))?;
+    flex::bundle_classes_from(
+        raw,
+        &flex::ClassSource::Dist {
+            bytes: &bytes,
+            kind,
+        },
+    )
+    .map_err(|e| unanswerable(format!("{e:#}")))
 }
 
 /// `Flex::finish` → `synchronizePackageJson`: why it has to run, or
@@ -356,20 +812,38 @@ pub(crate) fn flex_sync_reason(
     manifest: &serde_json::Value,
     lock_value: &serde_json::Value,
 ) -> Option<String> {
+    flex_sync_reason_in(project, manifest, lock_value, None)
+}
+
+/// [`flex_sync_reason`] on the project as the recipes leave it: `finish`
+/// synchronises AFTER them, so a recipe that creates `importmap.php`,
+/// `package.json` or `assets/controllers.json` changes the answer. With
+/// recipes, `root-dir` is `.` (anything else was refused).
+pub(crate) fn flex_sync_reason_in(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock_value: &serde_json::Value,
+    files: Option<&crate::flex_recipes::Vfs>,
+) -> Option<String> {
     // Both cases print a notice instead of synchronising, and
     // `print_flex_post_update` prints it.
     if !flex_synchronize_enabled(manifest) || !flex_downloader_enabled(manifest) {
         return None;
     }
     let root_dir = flex_root_dir(project, manifest);
-    let importmap = root_dir.join("importmap.php");
+    let exists = |rel: &str| match files {
+        // An unreadable state counts as present: more checks, never fewer.
+        Some(f) => f.exists(rel).unwrap_or(true),
+        None => root_dir.join(rel).exists(),
+    };
+    let importmap = exists("importmap.php");
     let package_json = root_dir.join("package.json");
-    if !importmap.exists() && !package_json.exists() {
+    if !importmap && !exists("package.json") {
         return None;
     }
     let ux = flex_ux_package(lock_value);
-    let controllers = root_dir.join("assets").join("controllers.json").exists();
-    if importmap.exists() {
+    let controllers = exists("assets/controllers.json");
+    if importmap {
         if let Some(name) = ux {
             return Some(format!(
                 "would add the symfony-ux assets of {name} to importmap.php (not emulated)"
@@ -380,7 +854,15 @@ pub(crate) fn flex_sync_reason(
         }
         return None;
     }
-    let text = match std::fs::read_to_string(&package_json) {
+    let read = match files {
+        Some(f) => f
+            .read("package.json")
+            .map_err(|e| e.to_string())
+            .and_then(|b| b.ok_or_else(|| "no file".to_owned()))
+            .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string())),
+        None => std::fs::read_to_string(&package_json).map_err(|e| e.to_string()),
+    };
+    let text = match read {
         Ok(t) => t,
         Err(e) => {
             return Some(format!(

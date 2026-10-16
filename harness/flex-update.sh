@@ -10,9 +10,11 @@
 # vraies entrées `recipes`.
 # Cas : tout dans symfony.lock (rien d'enregistré) ; un paquet sans recette
 # ni bundle manquant (natif) ; symfony/console manquant (recette dans
-# l'index → repli) ; symfony/twig-bundle manquant (pas de recette dans cet
-# index, mais une classe de bundle → repli) ; un paquet retiré de vendor/
-# (l'install poserait quelque chose → repli).
+# l'index, fichier de recette non servi → repli) ; symfony/twig-bundle
+# manquant (pas de recette dans cet index, mais une classe de bundle : la
+# recette auto-générée, native depuis le chantier des configurateurs —
+# harness/flex-recipes.sh couvre les recettes appliquées) ; un paquet
+# retiré de vendor/ (l'install poserait quelque chose).
 #
 # Tranche C, item 1 — `synchronizePackageJson` : `shouldSynchronize()` est
 # `package.json || importmap.php`, mais ce qui s'écrit est bien plus étroit.
@@ -275,7 +277,10 @@ run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
   # `Warning: Accessing 127.0.0.1 over http…` : artefact du banc (l'index
   # est servi en http local avec `secure-http: false`), pas du produit —
   # les endpoints réels sont en https. `  - Downloading …` : cache froid.
-  if ! diff <(grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ' "$WORK/$name.composer.err") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.err") >"$WORK/$name.err.diff"; then
+  # La session de « Symfony operations: … (<32 hex>) » est aléatoire
+  # (`Downloader::$sess`) : normalisée des deux côtés.
+  local sess='s/^(Symfony operations: [0-9]+ recipes?) \([0-9a-f]{32}\)$/\1 (<session>)/'
+  if ! diff <(grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ' "$WORK/$name.composer.err" | sed -E "$sess") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.err" | sed -E "$sess") >"$WORK/$name.err.diff"; then
     echo "FAIL $name : stderr différente"; head -8 "$WORK/$name.err.diff"; status=1; return
   fi
   if compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -290,20 +295,27 @@ prepare all-locked      - && run all-locked native
 # donc Flex n'écrit rien ET n'affiche rien — pas même la ligne des recettes.
 prepare dry-run         - && run dry-run   native "" --dry-run
 prepare no-recipe       - symfony/polyfill-ctype && run no-recipe native
-prepare recipe-in-index - symfony/console        && run recipe-in-index   fallback "would apply the recipe of symfony/console"
-prepare bundle-class    - symfony/twig-bundle    && run bundle-class      fallback "would register symfony/twig-bundle's bundle"
+# La recette de symfony/console est dans cet index, mais son fichier n'est
+# pas servi à côté : Composer échouerait à la télécharger (« Failed to
+# download recipe ») — vivacity rend la main avant (les recettes servies
+# sont celles de harness/flex-recipes.sh).
+prepare recipe-in-index - symfony/console        && run recipe-in-index   fallback "cannot download the recipe of symfony/console"
+# Pas de recette pour symfony/twig-bundle dans cet index, mais une classe
+# de bundle : la recette auto-générée, émulée depuis le chantier des
+# configurateurs (config/bundles.php créé, symfony.lock complété).
+prepare bundle-class    - symfony/twig-bundle    && run bundle-class      native
 # L'install pose quelque chose, mais `symfony.lock` couvre le paquet : rien
 # n'est enregistré, donc Flex n'écrit rien — natif depuis la tranche C.
 prepare relays-package shape_forget_log - && run relays-package native
 # Enregistré ET posé par l'install : la classe de bundle ne peut venir que
 # du dist, vendor/ ne l'a pas encore.
 prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bundle native
-prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    fallback "would register symfony/twig-bundle's bundle"
+prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    native
 # Une opération d'update arme le rappel `symfony/thanks`.
 prepare thanks         shape_downgrade_log - && run thanks    native
 prepare thanks-src-ref shape_source_ref    - && run thanks-src-ref native
 prepare real-symfony-lock shape_real_lock     - && run real-symfony-lock native
-prepare real-lock-gap     shape_real_lock_gap - && run real-lock-gap     fallback "would register symfony/twig-bundle's bundle"
+prepare real-lock-gap     shape_real_lock_gap - && run real-lock-gap     native
 # Une suppression : `record` l'enregistre, `fetchRecipes` retire le nom de
 # `symfony.lock` et désinstalle le bundle.
 prepare remove-package shape_remove_expr - && run remove-package fallback "would unconfigure symfony/expression-language"

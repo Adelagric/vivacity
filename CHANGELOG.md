@@ -7,6 +7,13 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`update --no-plugins` installs a `symfony-pack` Flex had laid out.**
+  Flex's pack installer writes the pack to installed.json with no install
+  path; without the plugin, Composer's `LibraryInstaller` finds no
+  `vendor/<name>` and installs it (`Package operations: 1 install`,
+  `Extracting archive`). vivacity counted it as installed and printed
+  `Nothing to install, update or remove` (vendor/ was right). Found by
+  `harness/flex-recipes.sh`'s `no-plugins` case.
 - **Composer's root-version warning is printed.** Without a `version` in
   composer.json, without `COMPOSER_ROOT_VERSION` and with nothing git can
   tell (no repository, no commit, a HEAD detached *from* a commit with no
@@ -130,6 +137,37 @@ byte-identical-output promise are the public API.
   same order, same exit codes, same trace points, same suite and harnesses.
 
 ### Added
+- **symfony/flex recipes are applied natively on `update`.** An update
+  that brings in a package `symfony.lock` does not hold, with a recipe in
+  the endpoints' index (or a bundle class and no recipe: the
+  auto-generated recipe), used to go to Composer. vivacity now fetches the
+  recipe like Flex's `Downloader` (relative to its index, through Flex's
+  cache; the index's `recipe-conflicts` and the recipe's own `conflict`
+  evaluated against the lock, which the version choice depends on) and
+  applies it at `POST_UPDATE_CMD`, in Flex's order: `Symfony operations: N
+  recipes`, `  - Configuring …`, then the files — `config/bundles.php`
+  (only in the exact form Flex writes it; any other shape hands over),
+  files copied from the recipe (executable bit, `%VAR%` expansion,
+  existing files left alone), `.env*` and PHPUnit env lines, `.gitignore`,
+  `add-lines` patches (after every recipe, with `requires` checked against
+  the installed packages), `scripts.auto-scripts` in composer.json with
+  the composer.lock rewrite Flex's `updateComposerLock` performs — and
+  `symfony.lock` with its new entries. Everything is decided on a virtual
+  copy of the project before the lock is written; what is not reproduced
+  hands the command over with its reason (the `container`, `makefile`,
+  `composer-commands` and `copy-from-package` configurators, Docker
+  configuration unless `extra.symfony.docker` is false, a contrib recipe
+  without `allow-contrib`, a `%generate(secret)%` value, a matching recipe
+  conflict, a recipe that would look at a path the install writes, a
+  GitHub API endpoint, `--offline`). Should the install phase still go to
+  `composer install` (which runs Flex without recipes), the recipes are
+  applied after it. `harness/flex-recipes.sh` (in CI):
+  the real `symfony/recipes` and `recipes-contrib` recipes served offline,
+  26 cases, each asserting that Composer does apply the recipes before
+  comparing project, `composer.lock`, `symfony.lock` and stderr byte for
+  byte. Fixed on the way: Flex's version strip is a global
+  `preg_replace` (`v1.x-dev` is `1`), and `version_compare('5.3',
+  '5.3.0')` is `-1`, not `0`.
 - `harness/fallback-args.sh` (in CI): a fake `composer` first on the `PATH`
   records each call — argv, directory, `SHELL_VERBOSITY`,
   `COMPOSER_DISABLE_NETWORK`, the manifest it starts from — and every case

@@ -293,6 +293,20 @@ pub(crate) fn fallback_or_fail(
     };
     let code =
         hand_over(&composer, &forwarded, args.offline, None).context("cannot run composer")?;
+    // The install phase of an `update` whose Flex recipes vivacity had
+    // decided to apply: Composer's `install` runs Flex at
+    // `POST_INSTALL_CMD`, which applies no recipe (`fetchRecipes` is
+    // `POST_UPDATE_CMD` only). The lock is written already, so the
+    // recipes are applied here, after it, as the update would have.
+    if code == 0 {
+        if let Some(plan) = args
+            .post_update
+            .as_ref()
+            .and_then(|u| u.flex_plan.as_deref())
+        {
+            plan.print_and_apply()?;
+        }
+    }
     Ok(code)
 }
 

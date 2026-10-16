@@ -475,7 +475,33 @@ fn local_repository_transaction(
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
     // The local repository: installed.json purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
-    let installed_now = installed_packages(&run.project, &run.manifest);
+    let mut installed_now = installed_packages(&run.project, &run.manifest);
+    // A `symfony-pack` laid out by Flex's pack installer has no install
+    // path in installed.json (`MetapackageInstaller`), which the purge above
+    // reads as "always installed". `Factory::createComposer` loads the
+    // installed plugins (`loadInstalledPlugins`) before `purgePackages`:
+    // without Flex among them (`--no-plugins`, Flex not installed or not
+    // allowed), the pack's installer is `LibraryInstaller`, whose
+    // `isInstalled` asks for `<vendor-dir>/<name>` (`Filesystem::isReadable`:
+    // a file would do, a dangling link would not) — absent, the pack is not
+    // installed and the run installs it.
+    if !vivacity_core::scope::active_plugins(&run.project, &run.manifest, !run.args.no_plugins)
+        .iter()
+        .any(|p| p == "symfony/flex")
+    {
+        let vendor = vivacity_core::dirs::Dirs::resolve(&run.manifest)
+            .unwrap_or_default()
+            .vendor_dir(&run.project);
+        installed_now.retain(|p| {
+            let pack = p.get("type").and_then(serde_json::Value::as_str) == Some("symfony-pack");
+            let no_path = p.get("install-path").is_none_or(serde_json::Value::is_null);
+            let name = p
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            !(pack && no_path && !vendor.join(name).exists())
+        });
+    }
     trace("installed.json", run.t0);
     // Nothing to do at all (the commonest install): proved on the raw
     // entries, so the two repositories are not loaded into the arena —
@@ -1117,7 +1143,11 @@ fn post_install(
     match &args.post_update {
         None => emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?,
         Some(update) if update.flex_active => {
-            print_flex_post_update(&update.manifest, update.thanks_reminder);
+            print_flex_post_update(
+                &update.manifest,
+                update.thanks_reminder,
+                update.flex_plan.as_deref(),
+            )?;
         }
         Some(_) => {}
     }

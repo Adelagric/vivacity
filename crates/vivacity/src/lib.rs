@@ -23,6 +23,7 @@ use dump::*;
 mod remove;
 use remove::*;
 mod flex;
+mod flex_recipes;
 mod require;
 mod scripts;
 
