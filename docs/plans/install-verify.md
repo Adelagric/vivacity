@@ -404,7 +404,8 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    `run_lock` de `root-manifest.sh`).
 8. Le `PoolBuilder` de vivacity n'a pas les `ignoredTypes` par défaut
    d'`Installer` (`php-ext`, `php-ext-zend`) : sans effet sur `install` (tout
-   est fixé), pas sur `update`.
+   est fixé), pas sur `update` — **corrigé le 2026-10-16**
+   (`install-defects.md`, point 2 ; `acme/phpext` dans `solver-problems`).
 9. `--offline` : Composer sans réseau (`COMPOSER_DISABLE_NETWORK`) écrit
    « Filter list data could not be fetched… (ignored per
    policy.ignore-unreachable) » là où vivacity écrit « could not be fully

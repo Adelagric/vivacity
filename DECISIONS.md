@@ -3580,3 +3580,22 @@ comme sur db349c1 — défaut réel, pas une régression. Les dépôts `path` so
 lus comme des `ArrayRepository` (`array_repository_load_packages`, déjà
 celui du `PoolBuilder`), dans l'ordre du jeu.
 
+## 2026-10-16 — Les `ignoredTypes` d'`Installer` dans les pools d'`update` et d'`install`
+
+Contexte : `install-verify.md`, défaut 8 ; `install-defects.md`, point 2.
+`Installer::$ignoredTypes = ['php-ext', 'php-ext-zend']` (Installer.php:196)
+est passé à `createPool` par `doUpdate` (l. 534) et `doInstall` (l. 808) ;
+`PoolBuilder::loadPackagesMarkedForLoading` (resolver/PoolBuilder.php:461)
+saute un paquet chargé de ces types (pas les paquets fixés ou verrouillés).
+`RepositorySet::createPool` les prend vides par défaut : `create_pool` reçoit
+la liste en paramètre, ses deux appelants (la session d'`update`, la
+vérification d'`install`) passent `INSTALLER_IGNORED_TYPES`.
+`createPoolWithAllPackages` (extraction dev) n'est pas concerné.
+
+Oracle : aucune fixture n'avait de paquet de ces types ; le registre
+synthétique `solver-problems` gagne `acme/phpext` (1.0.0 `library`, 2.0.0
+`php-ext`), régénéré par `fixtures/make-solver-problems.py` — les deux locks
+de la fixture sortent identiques. Rouge sur db349c1 : `@require:acme/phpext=*`
+verrouillait 2.0.0 (Composer 1.0.0) ; `^2.0` réussissait (Composer : code 2,
+« found acme/phpext[2.0.0] but these were not loaded »).
+

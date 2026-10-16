@@ -103,6 +103,9 @@ PACKAGES = {
     # requires php ^99 through a dependency
     "acme/needs-php": [pkg("acme/needs-php", "1.0.0", require={"php": "^99"})],
     "acme/needs-ext": [pkg("acme/needs-ext", "1.0.0", require={"ext-nope": "*"})],
+    # `Installer::$ignoredTypes`: a `php-ext` release never enters the pool of
+    # an update (`PoolBuilder::loadPackagesMarkedForLoading`)
+    "acme/phpext": [pkg("acme/phpext", "1.0.0"), pkg("acme/phpext", "2.0.0", type="php-ext")],
 }
 # Names that are required somewhere but do not exist: empty metadata, so the
 # repository answers "no versions" instead of a fatal transport error.

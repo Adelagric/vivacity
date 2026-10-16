@@ -812,9 +812,12 @@ impl UpdateSession {
                 versions: f.versions.clone(),
             }
         });
-        Ok(self
-            .set
-            .create_pool(&mut self.request, &mut self.arena, pre_pool.as_ref())?)
+        Ok(self.set.create_pool(
+            &mut self.request,
+            &mut self.arena,
+            pre_pool.as_ref(),
+            crate::pool::INSTALLER_IGNORED_TYPES,
+        )?)
     }
 
     /// `Installer::createPolicy(true, ...)` without `--minimal-changes`.
@@ -1626,7 +1629,12 @@ impl LockedPool<'_> {
             self.lock,
             self.dev_mode,
         )?;
-        let pool = set.create_pool(&mut request, arena, None)?;
+        let pool = set.create_pool(
+            &mut request,
+            arena,
+            None,
+            crate::pool::INSTALLER_IGNORED_TYPES,
+        )?;
         Ok((set, request, pool))
     }
 

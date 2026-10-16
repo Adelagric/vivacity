@@ -7,6 +7,13 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`update` leaves `php-ext` and `php-ext-zend` packages out of its pool.**
+  `Installer` hands its `ignoredTypes` to the pool builder, which skips a
+  loaded package of those types: `require acme/phpext *` locks the
+  `library` 1.0.0 rather than the `php-ext` 2.0.0, and `^2.0` is a problem
+  (`found acme/phpext[2.0.0] but these were not loaded`). vivacity loaded
+  them. The synthetic `solver-problems` registry gains `acme/phpext`
+  (its locks are unchanged); two `harness/steps.sh` cases.
 - **`require` finds a package of a `path` repository without a constraint.**
   `require acme/beta` (no version) picks the constraint from the best
   candidate of every repository of the manifest (`PackageDiscoveryTrait::getRepos`),

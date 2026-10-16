@@ -334,6 +334,10 @@ STEPS=(
   "solver-problems|update @nolock @stderr @require:acme/needs-ext=^1.0 @jq:.config.platform[\"ext-nope\"]=false"
   "solver-problems|update @nolock @stderr @require:acme/needs-php=^1.0 @platform:php=7.4.0"
   "solver-problems|update --ignore-platform-req=ext-nope @nolock @stderr @require:ext-nope=* @require:acme/needs-php=^1.0"
+  # `Installer::$ignoredTypes` (php-ext, php-ext-zend) : ces versions ne
+  # sont jamais chargées dans le pool d'une mise à jour.
+  "solver-problems|update @nolock @stderr @require:acme/phpext=*"
+  "solver-problems|update @nolock @stderr @require:acme/phpext=^2.0"
   "solver-problems|update @nolock @stderr @require:acme/top=^1.0"
   "solver-problems|update @nolock @stderr @require:acme/top=^1.0 @require:acme/leaf=^1.0"
   "solver-problems|update acme/removed @stderr @lockfile:composer.lock.removed @require:acme/removed=^1.0"

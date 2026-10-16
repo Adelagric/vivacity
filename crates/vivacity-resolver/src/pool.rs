@@ -229,6 +229,12 @@ pub enum Repository {
     Locked(Vec<usize>),
 }
 
+/// `Installer::$ignoredTypes` (Installer.php:196): the package types
+/// `doUpdate` and `doInstall` keep out of their pools — a loaded package of
+/// one of them is skipped (`PoolBuilder::loadPackagesMarkedForLoading`);
+/// fixed and locked packages do not go through that check.
+pub const INSTALLER_IGNORED_TYPES: &[&str] = &["php-ext", "php-ext-zend"];
+
 /// `Composer\Repository\RepositorySet`.
 pub struct RepositorySet {
     /// name -> version -> (alias, alias_normalized) (`getRootAliasesPerPackage`).
@@ -286,14 +292,18 @@ impl RepositorySet {
         self.repositories.push(repo);
     }
 
-    /// `createPool` without optimizer or filters.
+    /// `createPool` without optimizer or filters; `ignored_types` is
+    /// `setIgnoredTypes` ([`INSTALLER_IGNORED_TYPES`] for the installer's
+    /// pools, empty by default in `RepositorySet::createPool`).
     pub fn create_pool(
         &self,
         request: &mut Request,
         arena: &mut Vec<Package>,
         pre_pool: Option<&PrePoolFilter>,
+        ignored_types: &[&str],
     ) -> Result<Pool, PoolError> {
         let mut builder = PoolBuilder::new(self);
+        builder.ignored_types = ignored_types.iter().map(|t| (*t).to_owned()).collect();
         builder.build_pool(&self.repositories, request, arena, pre_pool)
     }
 }
