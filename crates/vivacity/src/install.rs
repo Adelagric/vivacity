@@ -68,7 +68,8 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // pool exists, then the solve on the locked pool (exit 2, or 4). None
     // of it after an update, which installs the lock it just solved.
     if let Some(verification) = verification {
-        proceed!(report_missing(&run, &tx.missing, &verification)?);
+        let mut verification = verification;
+        proceed!(report_missing(&run, &tx.missing, &mut verification)?);
         proceed!(join_verification(&run, verification, verify_start)?);
     }
     report_operations(&tx);
@@ -474,7 +475,12 @@ fn refuse_lock_without_dev(run: &Run<'_>) -> anyhow::Result<()> {
 /// wait.
 struct Verification {
     handle: Option<
-        std::thread::JoinHandle<anyhow::Result<vivacity_resolver::session::InstallVerification>>,
+        std::thread::JoinHandle<
+            Result<
+                vivacity_resolver::session::InstallVerification,
+                vivacity_resolver::session::SessionError,
+            >,
+        >,
     >,
     root_version: Option<std::sync::mpsc::Sender<vivacity_core::root_version::RootVersion>>,
     abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -492,6 +498,18 @@ impl Verification {
     fn abandon(&self) {
         self.abandoned
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Abandons the thread and waits for it, its result dropped: before a
+    /// Composer process is started, so that the two never write the
+    /// repository cache at the same time (the thread may be in its network
+    /// wait, about to write `packages.json` or the filter summary).
+    fn abandon_and_wait(&mut self) {
+        self.abandon();
+        drop(self.root_version.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -528,12 +546,16 @@ fn spawn_verification(run: &Run<'_>) -> anyhow::Result<Option<Verification>> {
         no_blocking: args.no_blocking || args.no_security_blocking,
         ignore_platform_reqs: run.ignore_platform_reqs,
         ignore_platform_req: run.ignore_platform_req.clone(),
+        prepended_repositories: run
+            .merged
+            .as_ref()
+            .map(|m| m.repository_definitions.clone())
+            .unwrap_or_default(),
         abandoned: abandoned.clone(),
     };
     let (root_version, received) = std::sync::mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        vivacity_resolver::session::verify_install(input, received).map_err(session_error)
-    });
+    let handle =
+        std::thread::spawn(move || vivacity_resolver::session::verify_install(input, received));
     Ok(Some(Verification {
         handle: Some(handle),
         root_version: Some(root_version),
@@ -751,9 +773,19 @@ fn join_verification(
     // Sent before the join already; dropped so that a thread still waiting
     // could never wait forever.
     drop(verification.root_version.take());
-    let verified = handle
+    let verified = match handle
         .join()
-        .map_err(|_| anyhow::anyhow!("the lock verification thread panicked"))??;
+        .map_err(|_| anyhow::anyhow!("the lock verification thread panicked"))?
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // Written by Composer before it threw (a degraded repository).
+            for line in &e.preface {
+                vivacity_core::say!("{line}");
+            }
+            return Err(session_error(e));
+        }
+    };
     trace("lock verification", run.t0);
     for w in &verified.warnings {
         vivacity_core::say!("{w}");
@@ -791,7 +823,7 @@ fn join_verification(
 fn report_missing(
     run: &Run<'_>,
     missing: &[String],
-    verification: &Verification,
+    verification: &mut Verification,
 ) -> anyhow::Result<Flow> {
     if !missing.is_empty() {
         // On a bare vendor the plugin is not active yet in Composer's run:
@@ -815,7 +847,7 @@ fn report_missing(
                     ))],
                     ..Default::default()
                 };
-                verification.abandon();
+                verification.abandon_and_wait();
                 return Ok(Flow::Break(fallback_or_fail(run.args, &report)?));
             }
         }

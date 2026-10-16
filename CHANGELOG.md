@@ -7,6 +7,16 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Fixed
+- **`install`'s list filter asks composer-merge-plugin's repositories too.**
+  The plugin prepends the repositories its merged files declare
+  (`prependRepositories`); `doInstall`'s list filter queries them, so a
+  locked package one of their malware lists flags blocks the install.
+  vivacity only asked the manifest's. A degraded repository's warning is
+  no longer lost when another repository then fails the filter (Composer
+  printed it before the exception), and the merge plugin's late hand-over
+  waits for the verification thread first, so two processes never write
+  the repository cache at once. One `harness/merge-plugin.sh` case, one
+  `harness/transport-exit.sh` case.
 - **git runs once per question in a run.** The root-version warning, the
   version itself and installed.php each asked git the same thing: a no-op
   `install` of an unversioned library ran `git branch -a -v` three times

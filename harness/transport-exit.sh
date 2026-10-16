@@ -168,8 +168,8 @@ header('Content-Type: application/json');
 readfile($file);
 return true;
 PHP
-offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez Composer, ou "-" pour aucun « could not »>
-  local name="$1" lm="$2" warmth="$3" want="$4" reg="$WORK/off-$1" p rc=0 vc=0
+offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez Composer, ou "-" pour aucun « could not »> [jq sur composer.json]
+  local name="$1" lm="$2" warmth="$3" want="$4" edit="${5:-.}" reg="$WORK/off-$1" p rc=0 vc=0
   mkdir -p "$reg"; tar -C "$reg" -xzf "$ROOT/fixtures/registry/solver-policies.tar.gz"
   p=$(php -r '$s = stream_socket_server("tcp://127.0.0.1:0", $e, $m); $n = stream_socket_get_name($s, false); fclose($s); echo substr($n, strrpos($n, ":") + 1);')
   printf '{"packages": [], "metadata-url": "http://127.0.0.1:%s/p2/%%package%%.json", "available-package-patterns": ["*"], "security-advisories": {"metadata": true, "api-url": null}, "filter": {"metadata": true, "lists": {"malware": {"enabled": true}}, "summary-url": "http://127.0.0.1:%s/summary.json"}}\n' "$p" "$p" > "$reg/packages.json"
@@ -179,14 +179,17 @@ offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez C
   for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$p/packages.json" && break; sleep 0.1; done
   mkdir -p "$WORK/off-home-$name" "$WORK/$name/ref" "$WORK/$name/viv"
   printf '{"repositories": {"snap": {"type": "composer", "url": "http://127.0.0.1:%s"}, "packagist.org": false}, "config": {"secure-http": false}}\n' "$p" > "$WORK/off-home-$name/config.json"
-  for side in ref viv; do cp "$ROOT/fixtures/projects/solver-policies/composer.json" "$ROOT/fixtures/projects/solver-policies/composer.lock" "$WORK/$name/$side/"; done
+  for side in ref viv; do
+    cp "$ROOT/fixtures/projects/solver-policies/composer.lock" "$WORK/$name/$side/"
+    jq "$edit" "$ROOT/fixtures/projects/solver-policies/composer.json" > "$WORK/$name/$side/composer.json"
+  done
   if [ "$warmth" = chaud ]; then
     (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name" COMPOSER_ROOT_VERSION=dev-main \
       composer install --dry-run --no-plugins --no-scripts --no-interaction -q) || { echo "FAIL $name : le remplissage du cache a échoué"; status=1; kill $srv; return; }
   fi
   mkdir -p "$WORK/off-cache-$name"
   cp -R "$WORK/off-cache-$name" "$WORK/off-cache-$name-ref"; cp -R "$WORK/off-cache-$name" "$WORK/off-cache-$name-viv"
-  (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name-ref" COMPOSER_ROOT_VERSION=dev-main COMPOSER_DISABLE_NETWORK=1 COMPOSER_TESTS_ARE_RUNNING=1 \
+  (cd "$WORK/$name/ref" && COLUMNS=400 COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name-ref" COMPOSER_ROOT_VERSION=dev-main COMPOSER_DISABLE_NETWORK=1 COMPOSER_TESTS_ARE_RUNNING=1 \
     composer install --dry-run --no-plugins --no-scripts --no-interaction --no-ansi >/dev/null 2>"$WORK/$name.ref.err") || rc=$?
   (cd "$WORK/$name/viv" && COMPOSER_HOME="$WORK/off-home-$name" COMPOSER_CACHE_DIR="$WORK/off-cache-$name-viv" COMPOSER_ROOT_VERSION=dev-main \
     "$VIVACITY" install --dry-run --offline >/dev/null 2>"$WORK/$name.viv.err") || vc=$?
@@ -199,6 +202,13 @@ offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez C
   if [ "$rc" != "$vc" ]; then echo "FAIL $name : codes $rc (composer) vs $vc (vivacity)"; tail -3 "$WORK/$name.viv.err"; status=1; return; fi
   sed "s#127.0.0.1:$p#<server>#g" "$WORK/$name.ref.err" > "$WORK/$name.ref.n"
   sed "s#127.0.0.1:$p#<server>#g" "$WORK/$name.viv.err" > "$WORK/$name.viv.n"
+  # Une exception : chez Composer les lignes d'avant puis l'encadré (sans le
+  # synopsis), chez vivacity les mêmes lignes puis `Error: <message>`.
+  if grep -q '^In [A-Za-z0-9_]*\.php line [0-9]*:$' "$WORK/$name.ref.n"; then
+    { sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/q;p' "$WORK/$name.ref.n" | grep -v '^$'
+      sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/,/^$/p' "$WORK/$name.ref.n" | sed 's/^ *//; s/ *$//' | grep -v '^$' | grep -vE '^In [A-Za-z0-9_]*\.php line [0-9]*:$' | sed 's/^/Error: /'
+    } > "$WORK/$name.ref.box"; mv "$WORK/$name.ref.box" "$WORK/$name.ref.n"
+  fi
   if ! diff -q "$WORK/$name.ref.n" "$WORK/$name.viv.n" >/dev/null; then
     echo "FAIL $name : stderr diffère"; diff "$WORK/$name.ref.n" "$WORK/$name.viv.n" | head -8; status=1; return
   fi
@@ -207,5 +217,8 @@ offline_case() { # <nom> <Last-Modified 0|1> <chaud|froid> <motif attendu chez C
 offline_case offline-warm-lm 1 chaud -
 offline_case offline-warm-nolm 0 chaud "could not be fully loaded (Network disabled, request canceled"
 offline_case offline-cold 1 froid "  - Network disabled, request canceled: http://"
+# `policy.ignore-unreachable` faux : le résumé refusé devient l'exception, après
+# l'avertissement du dépôt dégradé, que Composer a déjà écrit.
+offline_case offline-unreachable-fatal 0 chaud "could not be fully loaded (Network disabled, request canceled" '.config.policy["ignore-unreachable"]=false'
 
 exit $status

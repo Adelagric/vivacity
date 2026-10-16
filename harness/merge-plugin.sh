@@ -26,7 +26,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/fixture.sh"
 # shellcheck source=lib/compare.sh
 . "$ROOT/harness/lib/compare.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) if [ -x "${VIVACITY}.exe" ]; then VIVACITY="${VIVACITY}.exe"; fi ;;
 esac
@@ -211,6 +211,35 @@ if [ ${#ONLY[@]} -eq 0 ] || printf '%s\n' "${ONLY[@]}" | grep -qx update-repos; 
     echo "OK   update-repos : rendu à Composer avec la raison, lock intact"
   else
     echo "FAIL update-repos : code $v_code"; tail -4 "$WORK/update-repos.vivacity.err"; status=1
+  fi
+fi
+# `install` : les dépôts d'un fichier inclus (`prependRepositories`) sont en
+# tête du gestionnaire de dépôts, que le filtre de liste de `doInstall`
+# interroge. Un dépôt `composer` local dont la liste malware vise le
+# psr/log verrouillé : Composer refuse le lock (code 2, le paquet bloqué),
+# vivacity aussi, mêmes lignes.
+if [ ${#ONLY[@]} -eq 0 ] || printf '%s\n' "${ONLY[@]}" | grep -qx install-repos-filter; then
+  lr="$WORK/listrepo"; rm -rf "$lr"; mkdir -p "$lr/p2/psr"
+  v="$(jq -r '.packages[] | select(.name=="psr/log") | .version' "$SRC/composer.lock")"
+  printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["psr/*"], "filter": {"metadata": true, "lists": {"malware": {"enabled": true}}, "summary-url": "file://%s/summary.json"}}\n' "$lr" "$lr" > "$lr/packages.json"
+  printf '{"filter": {"malware": {"psr/log": "%s"}}}\n' "$v" > "$lr/summary.json"
+  printf '{"minified": "composer/2.0", "packages": {"psr/log": []}, "filter": {"malware": [{"constraint": "%s", "url": "https://example.invalid/lists/malware/psr-log", "reason": "malware", "id": "PKFE-merge-0001", "source": "testsource"}]}}\n' "$v" > "$lr/p2/psr/log.json"
+  printf '{"minified": "composer/2.0", "packages": {"psr/log": []}}\n' > "$lr/p2/psr/log~dev.json"
+  ref="$WORK/ref-repos-filter"; viv="$WORK/viv-repos-filter"
+  stage "$ref" "."; stage "$viv" "."
+  for d in "$ref" "$viv"; do
+    cp -R "$seed/vendor" "$d/vendor"; rm -f "$d/vendor/autoload.php"
+    jq --arg u "file://$lr" '.repositories=[{"type":"composer","url":$u}]' "$d/modules/beta/composer.json" > "$d/b.json" && mv "$d/b.json" "$d/modules/beta/composer.json"
+  done
+  c_code=0; v_code=0
+  (cd "$ref" && composer install --dry-run --no-scripts --no-interaction --no-ansi 2>"$WORK/repos-filter.composer.err" >/dev/null) || c_code=$?
+  (cd "$viv" && "$VIVACITY" install --dry-run --no-scripts --no-fallback 2>"$WORK/repos-filter.vivacity.err" >/dev/null) || v_code=$?
+  if [ "$c_code" != 2 ] || ! grep -q "psr/log" "$WORK/repos-filter.composer.err"; then
+    echo "FAIL install-repos-filter : Composer sort en $c_code sans bloquer psr/log (cas mal choisi)"; tail -5 "$WORK/repos-filter.composer.err"; status=1
+  elif [ "$v_code" != "$c_code" ] || ! diff <(tail_from_anchor "$WORK/repos-filter.composer.err") <(tail_from_anchor "$WORK/repos-filter.vivacity.err") >/dev/null; then
+    echo "FAIL install-repos-filter : composer $c_code, vivacity $v_code"; diff <(tail_from_anchor "$WORK/repos-filter.composer.err") <(tail_from_anchor "$WORK/repos-filter.vivacity.err") | head -10; status=1
+  else
+    echo "OK   install-repos-filter : psr/log bloqué par la liste du dépôt fusionné, code 2 et lignes identiques"
   fi
 fi
 exit $status

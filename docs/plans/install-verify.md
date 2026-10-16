@@ -401,7 +401,9 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    résolu, `install` sans lock qui met à jour).
 6. Les dépôts apportés par composer-merge-plugin ne sont pas lus par le filtre
    de liste ; le fallback du même plugin peut tourner pendant l'attente réseau
-   du fil (deux processus sur le cache de dépôt).
+   du fil (deux processus sur le cache de dépôt) — **corrigé le 2026-10-16**
+   (`install-defects.md`, point 11 : dépôts fusionnés en tête du filtre,
+   fil attendu avant le repli).
 7. Un lock sans `packages-dev` en mode dev échoue après « Verifying… », avec le
    préfixe `composer.lock:` (Composer : juste après l'en-tête, son texte) —
    **corrigé le 2026-10-16** (`install-defects.md`, point 5 ; cas
@@ -420,4 +422,5 @@ verdict `Invalid` (`validatePackage` sur un lock forgé) hors test.
    ligne de Composer, mode dégradé selon la saveur de la requête ; section 4
    de `transport-exit.sh`).
 10. Les avertissements gardés d'un dépôt dégradé sont perdus si un autre dépôt
-    échoue ensuite.
+    échoue ensuite — **corrigé le 2026-10-16** (`install-defects.md`,
+    point 11 : `SessionError::preface`).

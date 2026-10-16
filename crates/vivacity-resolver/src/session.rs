@@ -44,6 +44,11 @@ pub struct SessionError {
     /// an unsolvable set (`$err."\n".$prettyProblem`), without the
     /// `--no-dev` warning or the dev extraction's two hint lines.
     pub annotation: Option<String>,
+    /// Lines Composer has written before it throws, which the error must
+    /// not lose: the warnings a degraded repository held while the list
+    /// filter of `install`'s verification ran (`ComposerRepository` writes
+    /// them as it loads, before the exception of another fetch).
+    pub preface: Box<[String]>,
 }
 
 /// What Composer does with the error: an unsolvable set
@@ -75,6 +80,7 @@ impl SessionError {
             stdout: None,
             parts: Vec::new(),
             annotation: None,
+            preface: Box::default(),
         }
     }
 }
@@ -92,6 +98,7 @@ impl From<PoolError> for SessionError {
             stdout: None,
             parts: Vec::new(),
             annotation: None,
+            preface: Box::default(),
         }
     }
 }
@@ -128,6 +135,7 @@ impl From<crate::pool_filters::FilterError> for SessionError {
             stdout: None,
             parts: Vec::new(),
             annotation: None,
+            preface: Box::default(),
         }
     }
 }
@@ -148,6 +156,7 @@ impl From<crate::repository::RepoError> for SessionError {
             stdout: None,
             parts: Vec::new(),
             annotation: None,
+            preface: Box::default(),
         }
     }
 }
@@ -426,6 +435,7 @@ fn temporary_constraints(
         stdout,
         parts: Vec::new(),
         annotation: None,
+        preface: Box::default(),
     };
     let mut out: BTreeMap<String, crate::pool::TemporaryConstraint> = BTreeMap::new();
     for (name, text) in &pairs {
@@ -750,6 +760,7 @@ impl UpdateSession {
                     "Cannot update only a partial set of packages without a lock file present. Run `composer update` to generate a lock file.".to_owned(),
                 )],
                 annotation: None,
+                preface: Box::default(),
             });
         }
         let mut request = Request::new(locked.clone());
@@ -975,6 +986,7 @@ impl UpdateSession {
                     ],
                     // `$ghe->emit($err."\n".$prettyProblem)` (Installer.php:735).
                     annotation: Some(format!("{head}\n{pretty}")),
+                    preface: Box::default(),
                 });
             }
             Err(SolveError::Bug(b)) => return Err(SessionError::new(b)),
@@ -1111,6 +1123,7 @@ impl UpdateSession {
                     stdout: None,
                     parts,
                     annotation,
+                    preface: Box::default(),
                 });
             }
             Err(SolveError::Bug(b)) => {
@@ -1372,6 +1385,10 @@ pub struct InstallVerifyInput {
     pub ignore_platform_reqs: bool,
     /// `--ignore-platform-req`.
     pub ignore_platform_req: Vec<String>,
+    /// composer-merge-plugin's `prependRepositories`: the repositories its
+    /// merged files declare, at the head of the manager — the list filter
+    /// asks them too.
+    pub prepended_repositories: Vec<Value>,
     /// Set by `install` when it stops before the join (missing
     /// requirements, a hand-over): the thread then skips what is left after
     /// its network wait — in a program that embeds vivacity it would
@@ -1794,7 +1811,16 @@ pub fn verify_install(
         // Only `composer` repositories carry lists; the other types (which
         // `install` otherwise accepts) are left aside here.
         let mut repositories: Vec<Repository> = Vec::new();
-        for repo in &config.repositories {
+        let prepended: Vec<RepoConfig> = input
+            .prepended_repositories
+            .iter()
+            .enumerate()
+            .map(|(i, definition)| RepoConfig {
+                key: RepoKey::Indexed(i as u64),
+                definition: definition.clone(),
+            })
+            .collect();
+        for repo in prepended.iter().chain(&config.repositories) {
             if repo.definition.get("type").and_then(Value::as_str) != Some("composer") {
                 continue;
             }
@@ -1816,7 +1842,7 @@ pub fn verify_install(
         // (In `install` scope the filter does not read the request.)
         let request = Request::new(Some(locked.clone()));
         let mut filter_warnings = Vec::new();
-        let pool = crate::pool_filters::filter_list_filter(
+        let pool = match crate::pool_filters::filter_list_filter(
             pool,
             &arena,
             &repositories,
@@ -1824,8 +1850,23 @@ pub fn verify_install(
             &policy,
             "install",
             &mut filter_warnings,
-        )
-        .map_err(SessionError::from)?;
+        ) {
+            Ok(pool) => pool,
+            // What the repositories wrote while loading was written before
+            // the exception (a degraded repository, then another that
+            // fails): kept with the error.
+            Err(e) => {
+                let mut e = SessionError::from(e);
+                let mut preface = Vec::new();
+                for repo in &repositories {
+                    if let Repository::Composer(r) = repo {
+                        preface.extend(r.take_held());
+                    }
+                }
+                e.preface = preface.into_boxed_slice();
+                return Err(e);
+            }
+        };
         // What the repositories wrote while loading came first.
         for repo in &repositories {
             if let Repository::Composer(r) = repo {

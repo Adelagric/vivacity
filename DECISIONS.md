@@ -3788,3 +3788,30 @@ Mesuré (hyperfine `-N`, 40 passages, `install --no-plugins --offline
 fonctionnalité 57,3 → 47,0 ms ; `main` 50,9 → 45,1 ms. Un appel de chaque
 commande au lieu de trois et deux.
 
+## 2026-10-16 — Les restes du filtre de liste : dépôts du plugin de fusion, avertissements perdus, fil attendu
+
+Contexte : `install-verify.md`, défauts 6 et 10 ; `install-defects.md`,
+point 11.
+
+- **6a.** `ExtraPackage::prependRepositories` (plugins/composer-merge-plugin/ExtraPackage.php:217-245)
+  met en tête du `RepositoryManager` chaque dépôt (avec `type`) des fichiers
+  fusionnés, URL `path` préfixée par le répertoire du fichier
+  (`fixRelativePaths`), le dernier ajouté en premier ; le filtre de liste de
+  `doInstall` les interroge. `Merged::repository_definitions` les garde dans
+  cet ordre, `InstallVerifyInput::prepended_repositories` les met devant ceux
+  de la configuration. La résolution (`update`…) rend toujours la main pour
+  ces dépôts (inchangé). Cas : `merge-plugin.sh install-repos-filter` (un
+  dépôt `composer` local dont la liste malware vise le psr/log verrouillé :
+  Composer 2, deux problèmes ; vivacity 0 sur db349c1).
+- **10.** Les avertissements gardés d'un dépôt dégradé
+  (`ComposerRepository::hold_output`) partaient avec l'erreur du filtre :
+  `SessionError::preface` les porte, la jointure les écrit avant l'erreur.
+  Reproduit sans réseau par un seul dépôt (section 4 de `transport-exit.sh`,
+  `ignore-unreachable` faux, cache sans `Last-Modified`) : l'avertissement
+  du résumé refusé, puis l'exception « Filter summary URL … returned 404 ».
+- **6b.** Le repli du plugin de fusion décidé après le lancement du fil
+  (`report_missing`, vendor vierge) attend désormais le fil
+  (`abandon_and_wait`) avant de lancer Composer : jamais deux processus sur
+  le cache de dépôt. Coût (méta) : l'attente réseau du fil, sur un chemin
+  qui rend la main de toute façon.
+

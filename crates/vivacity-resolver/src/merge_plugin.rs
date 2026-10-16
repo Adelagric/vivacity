@@ -126,6 +126,12 @@ pub struct Merged {
     /// A merged file declares `repositories` (`prependRepositories`):
     /// not emulated at resolution.
     pub repositories: Vec<String>,
+    /// Those repositories, as `RepositoryManager::prependRepository` leaves
+    /// them at the head of the manager: each one with a `type` put first in
+    /// turn (the last prepended comes first), a `path` URL prefixed by the
+    /// included file's directory (`fixRelativePaths`). `install` reads them
+    /// for its list filter.
+    pub repository_definitions: Vec<Value>,
 }
 
 /// The raw requirement sections of one merged file.
@@ -154,6 +160,7 @@ struct Merger<'a> {
     files: Vec<String>,
     include_links: Vec<IncludeLinks>,
     repositories: Vec<String>,
+    repository_definitions: Vec<Value>,
 }
 
 /// `MergePlugin::onInit` + `onInstallUpdateOrDump` in one pass: the root
@@ -183,6 +190,7 @@ pub fn merge(
         files: Vec::new(),
         include_links: Vec::new(),
         repositories: Vec::new(),
+        repository_definitions: Vec::new(),
     };
     for key in ["require", "require-dev"] {
         let (map, order) = if key == "require" {
@@ -261,6 +269,7 @@ pub fn merge(
         files: m.files,
         include_links: m.include_links,
         repositories: m.repositories,
+        repository_definitions: m.repository_definitions,
     })
 }
 
@@ -339,6 +348,25 @@ impl Merger<'_> {
         });
         if json.get("repositories").is_some_and(|r| !php_empty(r)) {
             self.repositories.push(path.to_owned());
+        }
+        // `ExtraPackage::prependRepositories` (ExtraPackage.php:217-245).
+        let declared: Vec<&Value> = match json.get("repositories") {
+            Some(Value::Array(a)) => a.iter().collect(),
+            Some(Value::Object(o)) => o.values().collect(),
+            _ => Vec::new(),
+        };
+        for repo in declared {
+            let Some(kind) = repo.get("type").filter(|t| !t.is_null()) else {
+                continue;
+            };
+            let mut repo = repo.clone();
+            if kind == "path" {
+                if let Some(url) = repo.get("url").and_then(Value::as_str) {
+                    let fixed = format!("{base}{url}");
+                    repo["url"] = Value::String(fixed);
+                }
+            }
+            self.repository_definitions.insert(0, repo);
         }
 
         // mergeInto
