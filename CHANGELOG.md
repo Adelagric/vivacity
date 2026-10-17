@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-10-17
+
 ### Fixed
 - **`install`'s list filter asks composer-merge-plugin's repositories too.**
   The plugin prepends the repositories its merged files declare
