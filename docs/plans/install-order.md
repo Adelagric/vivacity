@@ -63,8 +63,7 @@ flux est donc déterministe des deux côtés).
 **Non-objectifs** (vus, mesurés quand c'est indiqué, laissés ; détail et
 suites proposées dans le résultat) :
 
-- **traité le 2026-10-21 (`docs/plans/plugin-lines.md`, branche
-  `plugin-lines`)** — les lignes stdout que vivacity n'imprime pas du tout : phpstan
+- **traité le 2026-10-21 (`docs/plans/plugin-lines.md`, commit e98601c)** — les lignes stdout que vivacity n'imprime pas du tout : phpstan
   (`Plugin.php:198`, « phpstan/extension-installer: Extensions installed »
   à chaque `POST_*_CMD`, puis `> nom: installed` quand le fichier change —
   **mesuré** : un projet phpstan/extension-installer 1.4.3 +
@@ -72,7 +71,7 @@ suites proposées dans le résultat) :
   vivacity), rector (`PluginInstaller.php:100-104`, quand le fichier
   change), dealerdirect (`Plugin.php:304-305`, « PHP CodeSniffer Config
   installed_paths set to … » quand il écrit) ;
-- **traité le 2026-10-21 (même plan)** — l'ordre de ces émulations entre elles : Composer suit l'activation des
+- **traité le 2026-10-21 (même plan, commit e98601c)** — l'ordre de ces émulations entre elles : Composer suit l'activation des
   plugins (`PackageSorter::sortPackages` sur le dépôt local, locaux avant
   globaux, un plugin installé pendant la commande réenregistré à ce
   moment, donc après les autres) ; vivacity garde dealerdirect, phpstan,

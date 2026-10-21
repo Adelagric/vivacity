@@ -445,7 +445,7 @@ binaire précédent) ; trois nits — commentaire de `resolution_issues`
 `Locker::getLockedRepository` **adopté**, `vendor-dir` de
 `COMPOSER_HOME/config.json` **noté**.
 
-## Résultat (2026-10-21)
+## Résultat (2026-10-21, commit e98601c, rebasé sur 82313ce)
 
 **Rouges** (`harness/plugin-lines.sh`, 46 cas) :
 
