@@ -88,8 +88,12 @@ scan_one() { # nom, mode
   # La colonne plateforme : ce que cette machine ne satisfait pas (version
   # de PHP, extension absente) — le double install ignorera `ext-*` et, si
   # une exigence `php` échoue ici, `php` aussi (noté).
+  # Depuis que `install` vérifie le lock en le résolvant (2026-10-16), la
+  # sortie est celle de Composer : « - a/b 1.0 requires php ^8.1 -> your php
+  # version (…) does not satisfy… », une ligne par paquet et par problème,
+  # ramenée ici à « php ^8.1 (a/b 1.0) », sans doublon.
   local platform_failures
-  platform_failures="$(cd "$d" && "$VIVACITY" install --check-scope "${flags[@]+"${flags[@]}"}" 2>&1 | grep -E '^  - .*: (Missing|Mismatch|Unsupported)' | sed 's/^  - //' | jq -Rs 'split("\n") | map(select(. != ""))')"
+  platform_failures="$(cd "$d" && "$VIVACITY" install --check-scope "${flags[@]+"${flags[@]}"}" 2>&1 | grep -E '^ +- .+ requires (php|ext-[^ ]+|lib-[^ ]+) .* -> ' | sed -E 's/^ +- (.+) requires ((php|ext-[^ ]+|lib-[^ ]+) .*) -> .*$/\2 (\1)/' | sort -u | jq -Rs 'split("\n") | map(select(. != ""))')" || true
   local bucket reasons benign
   reasons="$(grep -E '^  - ' "$d/scope.err" | sed 's/^  - //' | jq -Rs 'split("\n") | map(select(. != ""))')"
   benign="$(grep -E '^Note: plugin ' "$d/scope.err" | sed -E 's/^Note: plugin ([^ ]+) .*/\1/' | jq -Rs 'split("\n") | map(select(. != ""))')"

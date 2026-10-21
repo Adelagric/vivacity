@@ -206,7 +206,7 @@ def main():
     pf = collections.Counter()
     for r in dev_rows:
         for f in r.get("platform_failures", []):
-            pf[re.sub(r" \(required by [^)]*\)", "", f)] += 1
+            pf[re.sub(r" \((required by )?[^)]*\)$", "", f)] += 1
     if pf:
         for f, n in sorted(pf.items(), key=lambda kv: (-kv[1], kv[0])):
             p(f"- `{f}`: {n}")
