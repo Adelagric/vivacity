@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-10-21
+
 ### Fixed
 - **The plugin installers' lines are printed, in Composer's order.**
   `phpstan/extension-installer` ("Extensions installed" on every install,
