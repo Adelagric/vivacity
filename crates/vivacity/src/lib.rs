@@ -24,6 +24,7 @@ mod remove;
 use remove::*;
 mod flex;
 mod flex_recipes;
+mod plugin_order;
 mod require;
 mod scripts;
 
@@ -352,6 +353,14 @@ struct UpdateArgs {
     /// `symfony/thanks` reminder).
     #[arg(skip)]
     lockless_install: Option<String>,
+    /// Internal: the project's `allow-plugins` as `remove` found it, when it
+    /// then took entries out (RemoveCommand.php:242-252) — after its
+    /// `Composer` had loaded the plugins with these rules (:216-222), which
+    /// the `PluginManager` keeps for the run: a removed plugin's
+    /// `uninstall` hook runs (codeception/c3 deletes c3.php), its listeners
+    /// too while another package keeps it installed.
+    #[arg(skip)]
+    allow_plugins_at_load: Option<serde_json::Value>,
 }
 
 #[derive(clap::Args, Debug)]

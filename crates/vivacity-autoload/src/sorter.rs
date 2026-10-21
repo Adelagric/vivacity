@@ -1,6 +1,8 @@
 //! Port of `Composer\Util\PackageSorter::sortPackages`: each package gets a
 //! weight from its "users" (whoever requires it), recursively; the most
 //! required packages float to the top. Ties are broken by strnatcasecmp.
+//! `$weights` (`PluginManager::loadRepository` gives -10000 to the plugins
+//! that change install paths) seeds a package's own weight.
 
 use crate::natsort::strnatcasecmp;
 use std::collections::BTreeMap;
@@ -14,6 +16,15 @@ pub struct SortablePackage<'a> {
 
 /// Returns the package indices in sorted order.
 pub fn sort_packages(packages: &[SortablePackage<'_>]) -> Vec<usize> {
+    sort_packages_weighted(packages, &BTreeMap::new())
+}
+
+/// `sortPackages($packages, $weights)`: `$weights[$name] ?? 0` is where a
+/// package's weight starts, before its users are subtracted.
+pub fn sort_packages_weighted(
+    packages: &[SortablePackage<'_>],
+    weights: &BTreeMap<&str, i64>,
+) -> Vec<usize> {
     let mut usage: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for p in packages {
         for target in &p.requires {
@@ -23,6 +34,7 @@ pub fn sort_packages(packages: &[SortablePackage<'_>]) -> Vec<usize> {
 
     struct Ctx<'a> {
         usage: &'a BTreeMap<&'a str, Vec<&'a str>>,
+        weights: &'a BTreeMap<&'a str, i64>,
         computing: std::collections::BTreeSet<&'a str>,
         computed: BTreeMap<&'a str, i64>,
     }
@@ -34,7 +46,7 @@ pub fn sort_packages(packages: &[SortablePackage<'_>]) -> Vec<usize> {
             return 0;
         }
         ctx.computing.insert(name);
-        let mut weight: i64 = 0;
+        let mut weight: i64 = ctx.weights.get(name).copied().unwrap_or(0);
         if let Some(users) = ctx.usage.get(name) {
             let users = users.clone();
             for user in users {
@@ -48,6 +60,7 @@ pub fn sort_packages(packages: &[SortablePackage<'_>]) -> Vec<usize> {
 
     let mut ctx = Ctx {
         usage: &usage,
+        weights,
         computing: Default::default(),
         computed: Default::default(),
     };
@@ -90,5 +103,25 @@ mod tests {
         assert_eq!(&order[1..3], &["lib/a", "lib/b"]);
         // Weight 0: app/z, c9 before c10 (natural order).
         assert_eq!(&order[3..], &["app/z", "lib/c9", "lib/c10"]);
+    }
+
+    #[test]
+    fn a_seeded_weight_moves_the_package_and_its_requirements() {
+        let pk = |name, req: &[&'static str]| SortablePackage {
+            name,
+            requires: req.to_vec(),
+        };
+        let packages = vec![
+            pk("a/plugin", &[]),
+            pk("z/installers", &["z/dep"]),
+            pk("z/dep", &[]),
+        ];
+        let weights: BTreeMap<&str, i64> = [("z/installers", -10000)].into_iter().collect();
+        let order: Vec<&str> = sort_packages_weighted(&packages, &weights)
+            .into_iter()
+            .map(|i| packages[i].name)
+            .collect();
+        // z/dep is used by z/installers: -(1 - (-10000)) = -10001.
+        assert_eq!(order, ["z/dep", "z/installers", "a/plugin"]);
     }
 }

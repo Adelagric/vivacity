@@ -738,6 +738,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         prefer_install: args.prefer_install.clone(),
         command_dispatched: true,
         lockless_install: None,
+        allow_plugins_at_load: None,
     };
     let prefer_stable = args.prefer_stable || env_flag("COMPOSER_PREFER_STABLE");
     let prefer_lowest = args.prefer_lowest || env_flag("COMPOSER_PREFER_LOWEST");

@@ -12,11 +12,12 @@ use crate::lock::{DistKind, Lock, LockPackage};
 use serde_json::Value;
 use std::path::Path;
 
-/// Plugins emulated natively by vivacity (identical files, drift test; the
-/// stdout lines of phpstan/rector's extension-installers and of
-/// dealerdirect's are not printed, docs/plans/install-order.md).
-/// composer/installers (see `layout`) is, under conditions checked before
-/// any write. drupal/core-composer-scaffold is deliberately absent: its
+/// Plugins emulated natively by vivacity (identical files, drift test, and
+/// the lines their listeners write, in their activation order —
+/// docs/plans/plugin-lines.md). composer/installers (see `layout`) is,
+/// under conditions checked before any write; the extension-installers and
+/// dealerdirect in the versions whose source was read
+/// ([`EMULATED_VERSIONS`]). drupal/core-composer-scaffold is deliberately absent: its
 /// source is GPL-2.0-or-later and cannot be ported here (NOTICE.md).
 pub const EMULATED_PLUGINS: &[&str] = &[
     "symfony/runtime",
@@ -44,6 +45,117 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "roots/wordpress-core-installer",
     "mnsami/composer-custom-directory-installer",
 ];
+
+/// The versions of the listeners vivacity reproduces whose code changed
+/// across the plugin's history, read one by one (docs/plans/plugin-lines.md):
+/// another version — older, newer, a dev branch — goes to Composer, named,
+/// before anything is written. Normalized versions, and why the others
+/// differ.
+pub const EMULATED_VERSIONS: &[(&str, &[&str], &str)] = &[
+    (
+        "phpstan/extension-installer",
+        &["1.4.0.0", "1.4.1.0", "1.4.2.0", "1.4.3.0"],
+        "1.3.x writes no PHPSTAN_VERSION_CONSTRAINT",
+    ),
+    (
+        "rector/extension-installer",
+        &["0.11.0.0", "0.11.1.0", "0.11.2.0", "1.0.0.0"],
+        "0.10.x writes another template",
+    ),
+    (
+        "dealerdirect/phpcodesniffer-composer-installer",
+        &["1.0.0.0", "1.1.1.0", "1.1.2.0", "1.2.0.0", "1.2.1.0"],
+        "0.x also searches the whole project for rulesets, v1.1.0 asks InstalledVersions where phpcs is",
+    ),
+    (
+        "composer/package-versions-deprecated",
+        &["1.11.99.4", "1.11.99.5"],
+        "earlier versions generate another Versions.php",
+    ),
+];
+
+/// The [`EMULATED_VERSIONS`] issue of one plugin version, if any.
+fn emulated_version_issue(name: &str, version: &str) -> Option<ScopeIssue> {
+    let (name, read, why) = EMULATED_VERSIONS.iter().find(|(n, _, _)| *n == name)?;
+    let normalized = crate::version::normalize_pretty(version).unwrap_or_default();
+    if read.contains(&normalized.as_str()) {
+        return None;
+    }
+    Some(ScopeIssue::Layout(format!(
+        "plugin {name} {version} is not emulated in this version (versions read: {}; {why})",
+        read.iter()
+            .map(|v| v.strip_suffix(".0").unwrap_or(v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+/// phpstan/extension-installer and rector/extension-installer write each
+/// listed package's `getFullPrettyVersion()` from the *last* entry of that
+/// name in the local repository (`$data[$name] = …`), and an alias is an
+/// entry. Measured (docs/plans/plugin-lines.md): an inline alias of the lock
+/// is re-added after the loaded package on every run (`MarkAliasInstalled`),
+/// so a no-op writes the alias's version where a fresh install wrote the
+/// package's — a file and lines vivacity does not reproduce; a `path`
+/// package is laid out synchronously, before its alias, the other way
+/// round. A default-branch alias of an archive is not (the rector
+/// fixture). Such a listed package goes to Composer, named.
+fn aliased_listing_issue(lock: &Lock, root_manifest: &Value, with_dev: bool) -> Option<ScopeIssue> {
+    let active = |plugin: &str| {
+        lock.wanted_packages(with_dev).any(|p| p.name() == plugin)
+            && matches!(
+                crate::layout::plugin_allowed(root_manifest, plugin),
+                crate::layout::PluginVerdict::Allowed
+            )
+    };
+    let phpstan = active("phpstan/extension-installer");
+    let rector = active("rector/extension-installer");
+    if !phpstan && !rector {
+        return None;
+    }
+    for p in lock.wanted_packages(with_dev) {
+        let extra = p.raw.get("extra");
+        let listed = (phpstan
+            && (p.package_type() == "phpstan-extension"
+                || extra.and_then(|e| e.get("phpstan")).is_some()
+                || (p.name().contains("phpstan")
+                    && ![
+                        "phpstan/phpstan",
+                        "phpstan/phpstan-shim",
+                        "phpstan/phpdoc-parser",
+                        "phpstan/extension-installer",
+                    ]
+                    .contains(&p.name()))))
+            || (rector
+                && (p.package_type() == "rector-extension"
+                    || extra.and_then(|e| e.get("rector")).is_some()));
+        if !listed {
+            continue;
+        }
+        // `Locker::getLockedRepository` attaches a lock alias by name.
+        let inline = lock
+            .aliases
+            .iter()
+            .any(|a| a.get("package").and_then(Value::as_str) == Some(p.name()));
+        let branch = crate::root_version::branch_alias_of(
+            p.version(),
+            extra,
+            p.raw.get("default-branch") == Some(&Value::Bool(true)),
+        );
+        let default_branch_archive = branch
+            .as_ref()
+            .is_some_and(|(alias, _)| alias == crate::root_version::DEFAULT_BRANCH_ALIAS)
+            && p.dist_kind() != crate::lock::DistKind::Path;
+        if inline || (branch.is_some() && !default_branch_archive) {
+            return Some(ScopeIssue::Layout(format!(
+                "package {} {} is aliased: the version the extension installers write for it depends on Composer's repository order (not reproduced)",
+                p.name(),
+                p.version()
+            )));
+        }
+    }
+    None
+}
 
 /// Plugins proven to write nothing at install time under a Composer whose
 /// plugins are active (the corpus baseline, docs/corpus/): installed as
@@ -78,11 +190,79 @@ pub fn license_check_configured(root_manifest: &Value) -> bool {
     })
 }
 
+/// `drupal/core-project-message` prints at `POST_INSTALL_CMD`
+/// (`MessagePlugin::displayPostCreateMessage`) what `Message::getText`
+/// returns for `post-install-cmd`: the `extra` message, else the lines of
+/// `post-install-cmd-message.txt` (or the configured `-file`), plus the
+/// root's `include-keys`. Not emulated (GPL-2.0-or-later, NOTICE.md): an
+/// `install` where it would print goes to Composer
+/// (docs/plans/plugin-lines.md). `update` dispatches `POST_UPDATE_CMD`,
+/// which it does not listen to.
+pub const CORE_PROJECT_MESSAGE: &str = "drupal/core-project-message";
+
+/// The `install` issue of [`CORE_PROJECT_MESSAGE`], when it would print.
+pub fn core_project_message_issue(
+    project_dir: &Path,
+    lock: &Lock,
+    root_manifest: &Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> Option<ScopeIssue> {
+    if !plugins_enabled
+        || !lock
+            .wanted_packages(with_dev)
+            .any(|p| p.name() == CORE_PROJECT_MESSAGE)
+        || !matches!(
+            crate::layout::plugin_allowed(root_manifest, CORE_PROJECT_MESSAGE),
+            crate::layout::PluginVerdict::Allowed
+        )
+    {
+        return None;
+    }
+    // PHP's truthiness of a decoded JSON value.
+    let truthy = |v: Option<&Value>| match v {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.is_empty() && s != "0",
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+        Some(Value::Bool(true)) => true,
+    };
+    let config = root_manifest
+        .get("extra")
+        .and_then(|e| e.get("drupal-core-project-message"));
+    let get = |key: &str| config.and_then(|c| c.get(key));
+    let file = get("post-install-cmd-file")
+        .filter(|v| truthy(Some(v)))
+        .and_then(Value::as_str)
+        .unwrap_or("post-install-cmd-message.txt");
+    let from_file = std::fs::read(project_dir.join(file)).is_ok_and(|b| !b.is_empty());
+    // `include-keys`: a line per key the root has a value for (`getName`
+    // is never empty: `__root__` without a name).
+    let include_keys = get("include-keys")
+        .and_then(Value::as_array)
+        .is_some_and(|keys| {
+            keys.iter().filter_map(Value::as_str).any(|k| match k {
+                "name" => true,
+                "description" | "homepage" | "support" => truthy(root_manifest.get(k)),
+                _ => false,
+            })
+        });
+    if truthy(get("post-install-cmd-message")) || from_file || include_keys {
+        return Some(ScopeIssue::Layout(format!(
+            "plugin {CORE_PROJECT_MESSAGE} would print its post-install-cmd message (not emulated)"
+        )));
+    }
+    None
+}
+
 pub const BENIGN_PLUGINS: &[&str] = &[
     "php-http/discovery",
     // Only listens to POST_CREATE_PROJECT_CMD / POST_INSTALL_CMD to print a
-    // message (MessagePlugin::getSubscribedEvents): no disk effect.
-    "drupal/core-project-message",
+    // message (MessagePlugin::getSubscribedEvents): no disk effect — and no
+    // line when no message is configured; an `install` where it would print
+    // goes to Composer ([`core_project_message_issue`]).
+    CORE_PROJECT_MESSAGE,
     // Only listens to POST_UPDATE_CMD / POST_CREATE_PROJECT_CMD, and only acts
     // in a `require` context (Plugin::getSubscribedEvents): inert at install.
     "drupal/core-recipe-unpack",
@@ -259,6 +439,27 @@ pub fn resolution_issues(
             issues.push(ScopeIssue::ResolutionPlugin(name, effect));
         }
     }
+    // An installed plugin whose listeners are emulated in other versions
+    // only: the install phase would hand `composer install` over after the
+    // lock is written (`POST_INSTALL_CMD` instead of `POST_UPDATE_CMD`); the
+    // whole command goes now instead — whatever the command does with the
+    // plugin (an update to a version read, its removal: conservative).
+    if plugins_enabled && with_install {
+        for p in crate::layout::installed_packages_of(project_dir, root_manifest) {
+            let (Some(name), Some(version)) = (
+                p.get("name").and_then(Value::as_str),
+                p.get("version").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if matches!(
+                crate::layout::plugin_allowed(root_manifest, name),
+                crate::layout::PluginVerdict::Allowed
+            ) {
+                issues.extend(emulated_version_issue(name, version));
+            }
+        }
+    }
     issues
 }
 
@@ -313,7 +514,9 @@ pub enum ScopeIssue {
     /// Plugin known to change the layout (patches, installers-extender...).
     LayoutPlugin(String),
     /// Non-reproducible layout (composer/installers: version not ported,
-    /// framework with custom logic, refused target...).
+    /// framework with custom logic, refused target...), or a plugin
+    /// listener vivacity does not reproduce for this project (a plugin
+    /// version not read, an aliased extension, a message to print).
     Layout(String),
     /// Package without a usable zip dist (source-only, exotic dist).
     NoUsableDist(String),
@@ -441,6 +644,23 @@ pub fn analyze(
                 "extra.bamarni-bin ({msg})"
             ))),
         }
+    }
+    // The plugins whose listeners are emulated version by version, and
+    // the extension installers' aliased packages.
+    if plugins_enabled {
+        for p in lock.wanted_packages(with_dev) {
+            if matches!(
+                crate::layout::plugin_allowed(root_manifest, p.name()),
+                crate::layout::PluginVerdict::Allowed
+            ) {
+                report
+                    .issues
+                    .extend(emulated_version_issue(p.name(), p.version()));
+            }
+        }
+        report
+            .issues
+            .extend(aliased_listing_issue(lock, root_manifest, with_dev));
     }
     report.issues.extend(
         config_issues(root_manifest, lock, with_dev)
@@ -1013,5 +1233,120 @@ mod tests {
         .expect("lock");
         assert!(analyze(&proj(), &lock, &json!({}), false, true).is_native_ok());
         assert!(!analyze(&proj(), &lock, &json!({}), true, true).is_native_ok());
+    }
+
+    #[test]
+    fn listener_plugins_outside_the_versions_read_are_handed_over() {
+        let manifest = json!({"config": {"allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true,
+            "phpstan/extension-installer": true}}});
+        let lock = |dd: &str, phpstan: &str| {
+            lock_with(json!([
+                {"name": "dealerdirect/phpcodesniffer-composer-installer", "version": dd,
+                 "type": "composer-plugin", "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}},
+                {"name": "phpstan/extension-installer", "version": phpstan,
+                 "type": "composer-plugin", "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}},
+            ]))
+        };
+        let issues = |l: &Lock, plugins: bool| -> Vec<String> {
+            analyze(&proj(), l, &manifest, true, plugins)
+                .issues
+                .iter()
+                .map(ToString::to_string)
+                .filter(|i| i.contains("in this version"))
+                .collect()
+        };
+        assert!(issues(&lock("v1.2.1", "1.4.3"), true).is_empty());
+        assert!(issues(&lock("v1.0.0", "1.4.0"), true).is_empty());
+        let found = issues(&lock("v0.7.2", "1.3.1"), true);
+        assert_eq!(found.len(), 2);
+        assert!(found[0].starts_with(
+            "plugin dealerdirect/phpcodesniffer-composer-installer v0.7.2 is not emulated in this version (versions read: 1.0.0, 1.1.1, 1.1.2, 1.2.0, 1.2.1;"
+        ));
+        assert!(found[1].contains("1.3.x writes no PHPSTAN_VERSION_CONSTRAINT"));
+        // v1.1.0, a dev branch, a version not released yet.
+        assert_eq!(issues(&lock("v1.1.0", "dev-main"), true).len(), 2);
+        assert_eq!(issues(&lock("v1.3.0", "1.5.0"), true).len(), 2);
+        // Not loaded: --no-plugins, or not allowed.
+        assert!(issues(&lock("v0.7.2", "1.3.1"), false).is_empty());
+        let refused = json!({"config": {"allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": false,
+            "phpstan/extension-installer": false}}});
+        assert!(
+            analyze(&proj(), &lock("v0.7.2", "1.3.1"), &refused, true, true)
+                .issues
+                .iter()
+                .all(|i| !i.to_string().contains("in this version"))
+        );
+    }
+
+    #[test]
+    fn core_project_message_hands_over_an_install_it_would_print_on() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lock = lock_with(json!([zip_pkg(CORE_PROJECT_MESSAGE, "composer-plugin")]));
+        let allowed = |extra: Value| json!({"config": {"allow-plugins": {CORE_PROJECT_MESSAGE: true}}, "extra": extra});
+        let issue = |m: &Value| core_project_message_issue(tmp.path(), &lock, m, true, true);
+        assert!(issue(&allowed(json!({}))).is_none());
+        // Only post-create-project-cmd configured: silent at install.
+        let create_only = allowed(json!({"drupal-core-project-message": {
+            "post-create-project-cmd-message": ["hello"]}}));
+        assert!(issue(&create_only).is_none());
+        for extra in [
+            json!({"drupal-core-project-message": {"post-install-cmd-message": ["hi"]}}),
+            json!({"drupal-core-project-message": {"include-keys": ["name"]}}),
+        ] {
+            assert!(issue(&allowed(extra)).is_some());
+        }
+        // `include-keys`: a line only for a key the root has a value for.
+        let homepage =
+            allowed(json!({"drupal-core-project-message": {"include-keys": ["homepage"]}}));
+        assert!(issue(&homepage).is_none());
+        let mut with_homepage = homepage.clone();
+        with_homepage["homepage"] = json!("https://example.org");
+        assert!(issue(&with_homepage).is_some());
+        std::fs::write(tmp.path().join("post-install-cmd-message.txt"), "hi\n").expect("write");
+        assert!(issue(&create_only).is_some());
+        // Not loaded: refused, or --no-plugins.
+        let refused = json!({"config": {"allow-plugins": {CORE_PROJECT_MESSAGE: false}}});
+        assert!(issue(&refused).is_none());
+        assert!(core_project_message_issue(tmp.path(), &lock, &create_only, true, false).is_none());
+    }
+
+    #[test]
+    fn an_aliased_extension_is_handed_over_unless_a_default_branch_archive() {
+        let manifest = json!({"config": {"allow-plugins": {"phpstan/extension-installer": true}}});
+        let plugin = json!({"name": "phpstan/extension-installer", "version": "1.4.3",
+            "type": "composer-plugin", "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}});
+        let ext = |version: &str, extra: Value, dist: &str| {
+            json!({"name": "a/phpstan-ext", "version": version, "type": "phpstan-extension",
+                   "extra": extra, "dist": {"type": dist, "url": "https://x/y.zip", "reference": "r"}})
+        };
+        let issues = |lock: &Lock| -> Vec<String> {
+            analyze(&proj(), lock, &manifest, true, true)
+                .issues
+                .iter()
+                .map(ToString::to_string)
+                .filter(|i| i.contains("is aliased"))
+                .collect()
+        };
+        let plain = lock_with(json!([plugin, ext("1.0.0", json!({}), "zip")]));
+        assert!(issues(&plain).is_empty());
+        let mut default_branch = ext("dev-main", json!({}), "zip");
+        default_branch["default-branch"] = json!(true);
+        assert!(issues(&lock_with(json!([plugin, default_branch]))).is_empty());
+        let branch = ext(
+            "dev-main",
+            json!({"branch-alias": {"dev-main": "1.0.x-dev"}}),
+            "zip",
+        );
+        assert_eq!(issues(&lock_with(json!([plugin, branch]))).len(), 1);
+        let inline = Lock::parse(
+            &json!({"packages": [plugin, ext("1.0.0", json!({}), "zip")], "packages-dev": [],
+                    "aliases": [{"package": "a/phpstan-ext", "version": "1.0.0.0",
+                                 "alias": "1.0.99", "alias_normalized": "1.0.99.0"}]})
+            .to_string(),
+        )
+        .expect("lock");
+        assert_eq!(issues(&inline).len(), 1);
     }
 }

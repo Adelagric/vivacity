@@ -346,8 +346,25 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &[],
             !args.no_plugins,
         )?;
-        emulate_bamarni_bin(&lock, &manifest, dev_mode, !args.no_plugins);
-        emulate_package_versions(&project, &lock, &manifest, dev_mode, !args.no_plugins)?;
+        // No transaction: the plugins in `loadInstalledPlugins`' order.
+        let listeners = if args.no_plugins {
+            Vec::new()
+        } else {
+            let composer_dir = composer_dir_of(&project, &manifest);
+            crate::plugin_order::loaded_plugins(
+                &crate::plugin_order::installed_json_packages(&composer_dir),
+                &composer_dir,
+                crate::plugin_order::global_composer_dir().as_deref(),
+            )
+        };
+        post_autoload_dump_printers(
+            &project,
+            &lock,
+            &manifest,
+            dev_mode,
+            !args.no_plugins,
+            &listeners,
+        )?;
     }
     if let Some(r) = &runner {
         let code = r.run(scripts::POST_AUTOLOAD_DUMP)?;

@@ -6,6 +6,37 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Fixed
+- **The plugin installers' lines are printed, in Composer's order.**
+  `phpstan/extension-installer` ("Extensions installed" on every install,
+  then one line per installed, unsupported and ignored package when
+  `GeneratedConfig.php` changes), `rector/extension-installer` (its lines
+  when the file changes), `dealerdirect/phpcodesniffer-composer-installer`
+  ("PHP CodeSniffer Config installed_paths set to …" or "… delete" when it
+  saves) and `composer/package-versions-deprecated` (its two lines on every
+  dump) wrote their files natively but printed nothing. The emulated
+  listeners now run in the order Composer activates their plugins —
+  installed.json sorted by `PackageSorter` (with `PluginManager`'s
+  weights), then the plugins the command installs or updates — instead of
+  a fixed order that differed on a bare vendor, on a no-op with
+  codeception/c3, and with bamarni/composer-bin-plugin. New
+  `harness/plugin-lines.sh` (46 cases, 38 red on 0.22.0).
+- **Emulated plugin listeners are tied to the versions whose source was
+  read.** phpstan/extension-installer 1.4.x, rector/extension-installer
+  0.11.x and 1.0.0, dealerdirect 1.0.0 to 1.2.1 (not 1.1.0) and
+  package-versions-deprecated 1.11.99.4/5 stay native; another version — or
+  a package these installers list under an alias, whose written version
+  depends on Composer's repository order — goes to Composer with the
+  reason, before anything is written (from the resolution on
+  `update`/`require`/`remove`). dealerdirect 1.0.0 to 1.2.0 keep a
+  registered path relative to the project, as they do.
+- **`remove` of a plugin keeps it allowed for the rest of the run.**
+  Composer drops the plugin's `allow-plugins` entry after loading it:
+  `remove codeception/c3` now deletes `c3.php` (it was left behind), and a
+  removed plugin another package still requires still writes its lines.
+- **drupal/core-project-message with a post-install-cmd message goes to
+  Composer** on `install` (it printed nothing natively).
+
 ## [0.22.0] — 2026-10-17
 
 ### Fixed

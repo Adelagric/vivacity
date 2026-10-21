@@ -11,9 +11,15 @@
 //! that are not extensions (`NOT_INSTALLED`) and the compacted
 //! `phpstan/phpstan` constraint of the extensions
 //! (`Intervals::compactConstraint`, printed `>=a, <b`). Both plugins
-//! listen to `POST_INSTALL_CMD` and `POST_UPDATE_CMD`. Their stdout lines
-//! (`… Extensions installed`, `> name: installed`) are not printed
-//! (docs/plans/install-order.md).
+//! listen to `POST_INSTALL_CMD` and `POST_UPDATE_CMD` and write on stdout
+//! (`$io->write`, normal level): phpstan's "Extensions installed" every
+//! time (`Plugin::process`, Plugin.php:198), then, when the file changed
+//! (`md5` of the old file against the new contents, :200-214), one line per
+//! installed, unsupported and ignored package; rector's
+//! "rector/rector-installer: Extensions installed" and one line per
+//! installed package only when the file changed
+//! (`PluginInstaller::install`, PluginInstaller.php:95-104).
+//! docs/plans/plugin-lines.md.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -103,14 +109,31 @@ fn constraint_into_string(c: &Constraint) -> String {
 /// hardlink: written through a temporary file and a rename (a new inode),
 /// never in place, or the store entry would carry one project's paths
 /// into the next (the rector fixture's file surfaced in sylius's warm run).
-fn write_if_changed(path: &Path, contents: &str) -> Result<()> {
-    if std::fs::read_to_string(path).ok().as_deref() == Some(contents) {
-        return Ok(());
+/// Returns whether the contents changed — the plugins compare the old
+/// file's `md5` with the new contents (no file: changed).
+fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {
+    if std::fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
+        return Ok(false);
     }
     let tmp = path.with_extension("php.vivacity-tmp");
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(true)
+}
+
+/// How many times `$package` sits in the local repository at
+/// `POST_*_CMD`: once, plus its branch alias (`ArrayLoader::getBranchAlias`,
+/// a default branch included) and each inline alias of the lock
+/// (`MarkAliasInstalled` adds them on every run: installed.json keeps
+/// none). phpstan lists an ignored package once per entry.
+fn local_repository_entries(p: &LockPackage, lock_aliases: &[Value]) -> usize {
+    let branch = usize::from(vivacity_resolver::loader::branch_alias(&p.raw).is_some());
+    // `Locker::getLockedRepository` attaches a lock alias by name.
+    let inline = lock_aliases
+        .iter()
+        .filter(|a| a.get("package").and_then(Value::as_str) == Some(p.name()))
+        .count();
+    1 + branch + inline
 }
 
 /// `sprintf($template, ...)` with `%s` only.
@@ -127,10 +150,12 @@ fn fill(template: &str, args: &[String]) -> String {
     out
 }
 
-/// phpstan's `Plugin::process` (post-autoload-dump).
+/// phpstan's `Plugin::process` (`POST_INSTALL_CMD` / `POST_UPDATE_CMD`),
+/// its lines included. `lock_aliases`: the lock's inline aliases.
 pub fn phpstan(
     layout: &Layout,
     local: &Lock,
+    lock_aliases: &[Value],
     manifest: &Value,
     with_dev: bool,
     plugins_enabled: bool,
@@ -163,6 +188,7 @@ pub fn phpstan(
         .unwrap_or_default();
     let mut data: BTreeMap<String, Value> = BTreeMap::new();
     let mut not_installed: BTreeMap<String, Value> = BTreeMap::new();
+    let mut ignored: Vec<&str> = Vec::new();
     let mut constraints: Vec<Constraint> = Vec::new();
     for p in &packages {
         let extra_phpstan = p.raw.get("extra").and_then(|e| e.get("phpstan"));
@@ -181,6 +207,9 @@ pub fn phpstan(
             continue;
         }
         if ignore.contains(&p.name()) {
+            for _ in 0..local_repository_entries(p, lock_aliases) {
+                ignored.push(p.name());
+            }
             continue;
         }
         let Some(install_path) = absolute_install_path(layout, p.name()) else {
@@ -238,6 +267,8 @@ pub fn phpstan(
             &vivacity_resolver::intervals::compact_constraint(&multi),
         ))
     };
+    let installed_names: Vec<String> = data.keys().cloned().collect();
+    let unsupported_names: Vec<String> = not_installed.keys().cloned().collect();
     let as_object = |m: BTreeMap<String, Value>| {
         let mut o = serde_json::Map::new();
         for (k, v) in m {
@@ -253,10 +284,27 @@ pub fn phpstan(
             php_var_export(&overall, 0),
         ],
     );
-    write_if_changed(&src_dir.join("GeneratedConfig.php"), &contents)
+    let changed = write_if_changed(&src_dir.join("GeneratedConfig.php"), &contents)?;
+    // `ksort($installedPackages)`, `ksort($notInstalledPackages)`,
+    // `sort($ignoredPackages)`: byte order for package names.
+    vivacity_core::out!("phpstan/extension-installer: Extensions installed");
+    if changed {
+        for name in installed_names {
+            vivacity_core::out!("> {name}: installed");
+        }
+        for name in unsupported_names {
+            vivacity_core::out!("> {name}: not supported");
+        }
+        ignored.sort_unstable();
+        for name in ignored {
+            vivacity_core::out!("> {name}: ignored");
+        }
+    }
+    Ok(())
 }
 
-/// rector's `PluginInstaller::install` (post-install-cmd).
+/// rector's `PluginInstaller::install` (`POST_INSTALL_CMD` /
+/// `POST_UPDATE_CMD`), its lines included.
 pub fn rector(
     layout: &Layout,
     local: &Lock,
@@ -302,12 +350,19 @@ pub fn rector(
         entry.insert("version".into(), Value::String(full_pretty_version(p)));
         data.insert(p.name().to_owned(), Value::Object(entry));
     }
+    let installed_names: Vec<String> = data.keys().cloned().collect();
     let mut o = serde_json::Map::new();
     for (k, v) in data {
         o.insert(k, v);
     }
     let contents = fill(RECTOR_TEMPLATE, &[php_var_export(&Value::Object(o), 0)]);
-    write_if_changed(&src_dir.join("GeneratedConfig.php"), &contents)
+    if write_if_changed(&src_dir.join("GeneratedConfig.php"), &contents)? {
+        vivacity_core::out!("rector/rector-installer: Extensions installed");
+        for name in installed_names {
+            vivacity_core::out!("> {name}: installed");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -329,6 +384,29 @@ mod tests {
             constraint_into_string(&vivacity_resolver::intervals::compact_constraint(&multi)),
             ">=1.11.5.0-dev, <2.0.0.0-dev"
         );
+    }
+
+    #[test]
+    fn an_ignored_package_is_listed_once_per_repository_entry() {
+        let lock = Lock::parse(
+            &serde_json::json!({"packages": [
+                {"name": "a/plain", "version": "1.0.0", "type": "phpstan-extension"},
+                {"name": "a/branch", "version": "dev-main", "type": "phpstan-extension",
+                 "extra": {"branch-alias": {"dev-main": "1.0.x-dev"}}},
+                {"name": "a/inline", "version": "1.0.0", "type": "phpstan-extension"},
+            ], "packages-dev": [], "aliases": [
+                {"package": "a/inline", "version": "1.0.0.0", "alias": "1.0.99", "alias_normalized": "1.0.99.0"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let count = |name: &str| {
+            let p = lock.packages.iter().find(|p| p.name() == name).unwrap();
+            local_repository_entries(p, &lock.aliases)
+        };
+        assert_eq!(count("a/plain"), 1);
+        assert_eq!(count("a/branch"), 2);
+        assert_eq!(count("a/inline"), 2);
     }
 
     #[test]

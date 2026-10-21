@@ -218,8 +218,9 @@ real ones: `symfony/runtime`, `composer/installers` (versions
 2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
 and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
 `dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
-`installed_paths`), `phpstan/extension-installer` and
-`rector/extension-installer` (their `GeneratedConfig.php`), and
+`installed_paths`, versions 1.0.0–1.2.1 but 1.1.0), `phpstan/extension-installer`
+(1.4.x) and `rector/extension-installer` (0.11.x, 1.0.0) (their
+`GeneratedConfig.php`), and
 `wikimedia/composer-merge-plugin` (the included manifests merged into the
 root — autoload, requirements, links, `extra` — for `install` and
 `dump-autoload`; with one deliberate difference: on a bare vendor the
@@ -238,11 +239,16 @@ Composer), `roots/wordpress-core-installer` (the `wordpress-core`
 package at `extra.wordpress-install-dir`, Bedrock's layout), and
 `mnsami/composer-custom-directory-installer` (a library named in
 `extra.installer-paths` laid out there), and
-`composer/package-versions-deprecated` (its own `Versions.php`, rewritten
+`composer/package-versions-deprecated` (1.11.99.4/5: its own `Versions.php`, rewritten
 from the lock at autoload-dump time — the shipped file is a stub), and
 `symfony/flex` at install time (`.env` copied from `.env.dist`, its own
 lines, `symfony-pack` packages laid out as metapackages; what it does
-when resolving is described below). A plugin listed
+when resolving is described below). The lines these plugins print are
+printed too, in the order Composer calls their listeners (the order it
+activated the plugins: installed.json sorted by `PackageSorter`, then those
+the command installs); another version of a plugin whose listener changed
+across versions, or an extension these installers list under an alias,
+goes to Composer with the reason. A plugin listed
 as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`php-http/discovery`, `symfony/thanks`,

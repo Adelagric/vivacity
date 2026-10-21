@@ -99,6 +99,8 @@ jobs:
         run: harness/custom-dirs.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
         run: harness/package-versions.sh
+      - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)
+        run: harness/plugin-lines.sh
       - name: symfony/flex at install (.env from .env.dist, its lines, symfony-pack)
         run: harness/flex-install.sh
       - name: symfony/flex on update with install (recipes decided before writing)

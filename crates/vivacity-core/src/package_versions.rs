@@ -95,14 +95,19 @@ fn php_single_quoted(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// `writeVersionClassToFile`: 0664, temporary file then rename, and
-/// nothing at all when the package's directory is gone.
-pub fn write(vendor: &Path, content: &str) -> Result<bool> {
-    let dir = vendor
+/// The directory `writeVersionClassToFile` writes `Versions.php` into.
+pub fn versions_dir(vendor: &Path) -> std::path::PathBuf {
+    vendor
         .join("composer")
         .join("package-versions-deprecated")
         .join("src")
-        .join("PackageVersions");
+        .join("PackageVersions")
+}
+
+/// `writeVersionClassToFile`: 0664, temporary file then rename, and
+/// nothing at all when the package's directory is gone.
+pub fn write(vendor: &Path, content: &str) -> Result<bool> {
+    let dir = versions_dir(vendor);
     if !dir.is_dir() {
         return Ok(false);
     }

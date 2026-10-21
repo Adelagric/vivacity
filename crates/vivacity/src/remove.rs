@@ -203,6 +203,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // re-created on the edited manifest: before the `allow-plugins` entries
     // go and before "Running composer update".
     crate::bamarni_command_event(&project, &updated, !args.no_plugins);
+    let mut allow_plugins_at_load: Option<serde_json::Value> = None;
     if let (false, Some(serde_json::Value::Object(allow))) = (
         dry_run,
         vivacity_core::layout::merged_allow_plugins(
@@ -212,6 +213,10 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     ) {
         let removed: Vec<&String> = allow.keys().filter(|k| packages.contains(k)).collect();
         if !removed.is_empty() {
+            allow_plugins_at_load = updated
+                .get("config")
+                .and_then(|c| c.get("allow-plugins"))
+                .cloned();
             if removed.len() == allow.len() {
                 json.remove_config_setting("allow-plugins")
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -294,6 +299,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         prefer_install: None,
         command_dispatched: true,
         lockless_install: None,
+        allow_plugins_at_load,
     };
     // `remove` has no prefer-stable/lowest option: only the manifest
     // counts.

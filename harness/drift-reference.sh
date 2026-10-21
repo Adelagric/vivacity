@@ -36,6 +36,9 @@ twin() {
     VersionGuesser.php)       echo "src/Composer/Package/Version/VersionGuesser.php" ;;
     Filesystem.php)           echo "src/Composer/Util/Filesystem.php" ;;
     PluginManager.php)        echo "src/Composer/Plugin/PluginManager.php" ;;
+    PluginInstaller.php)      echo "src/Composer/Installer/PluginInstaller.php" ;;
+    InstallationManager.php)  echo "src/Composer/Installer/InstallationManager.php" ;;
+    EventDispatcher.php)      echo "src/Composer/EventDispatcher/EventDispatcher.php" ;;
     ArchiveDownloader.php)    echo "src/Composer/Downloader/ArchiveDownloader.php" ;;
     ZipDownloader.php)        echo "src/Composer/Downloader/ZipDownloader.php" ;;
     TarDownloader.php)        echo "src/Composer/Downloader/TarDownloader.php" ;;

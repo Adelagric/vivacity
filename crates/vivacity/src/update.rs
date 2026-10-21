@@ -340,7 +340,10 @@ pub(crate) fn install_after_update(
         fallback_line: Some(after_update_line(args)),
         virtual_lock,
         virtual_manifest,
-        post_update: Some(Box::new(report)),
+        post_update: Some(Box::new(UpdateReport {
+            allow_plugins_at_load: args.allow_plugins_at_load.clone(),
+            ..report
+        })),
     };
     run_install(&install)
 }
@@ -394,6 +397,9 @@ pub(crate) struct UpdateReport {
     pub(crate) flex_active: bool,
     pub(crate) thanks_reminder: bool,
     pub(crate) flex_plan: Option<std::sync::Arc<crate::flex_recipes::FlexPlan>>,
+    /// `UpdateArgs::allow_plugins_at_load`: the rules the run's plugins were
+    /// loaded with, when the manifest the install phase reads has lost some.
+    pub(crate) allow_plugins_at_load: Option<serde_json::Value>,
 }
 
 impl Resolved {
@@ -404,6 +410,7 @@ impl Resolved {
             flex_active: self.flex_active,
             thanks_reminder: self.thanks_reminder,
             flex_plan: self.flex_plan.clone(),
+            allow_plugins_at_load: None,
         }
     }
 

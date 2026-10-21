@@ -90,7 +90,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             early_dump
         )?)
     };
-    proceed!(post_install(&run, &layout, &installed.report)?);
+    proceed!(post_install(
+        &run,
+        &layout,
+        &installed.report,
+        &tx.listeners
+    )?);
     say_summary(&run, &installed.report, &autoload_note);
     Ok(0)
 }
@@ -177,6 +182,25 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
             }
         }
         Ok(None) => {}
+    }
+    // `remove` takes the removed plugins out of `allow-plugins` after its
+    // `Composer` was built: the `PluginManager` keeps the rules it read
+    // (RemoveCommand.php:216-222, then :242-252), so the rest of the run
+    // judges plugins by them — as they were, order included (the first
+    // matching rule wins).
+    if let Some(allow) = args
+        .post_update
+        .as_ref()
+        .and_then(|u| u.allow_plugins_at_load.clone())
+    {
+        if let Some(root) = manifest.as_object_mut() {
+            let config = root
+                .entry("config")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(config) = config.as_object_mut() {
+                config.insert("allow-plugins".to_owned(), allow);
+            }
+        }
     }
     let manifest = manifest;
     // Parsed once: the `Value` serves the transaction, the abandoned
@@ -312,6 +336,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         prefer_install: args.prefer_install.clone(),
         command_dispatched: false,
         lockless_install: Some(line),
+        allow_plugins_at_load: None,
     };
     let options = vivacity_resolver::session::UpdateOptions {
         no_blocking: args.no_blocking || args.no_security_blocking,
@@ -602,6 +627,9 @@ struct LocalTransaction {
     transaction: vivacity_resolver::transaction::Transaction,
     /// `Locker::getMissingRequirementInfo`'s lines (empty: nothing missing).
     missing: Vec<String>,
+    /// The plugins in the order Composer activates them for this command
+    /// (`plugin_order`): the order of their listeners.
+    listeners: Vec<String>,
 }
 
 /// `LocalRepoTransaction` (installed.json against the lock) and
@@ -612,9 +640,22 @@ fn local_repository_transaction(
     root: Option<&vivacity_core::state::RootPackage>,
 ) -> anyhow::Result<LocalTransaction> {
     let mut arena: Vec<vivacity_resolver::package::Package> = Vec::new();
-    // The local repository: installed.json purged of the packages whose
+    // installed.json as written: the plugins Composer loads (before the
+    // purge), then the local repository, purged of the packages whose
     // install path is gone (`Factory::purgePackages`).
-    let mut installed_now = installed_packages(&run.project, &run.manifest);
+    let composer_dir = composer_dir_of(&run.project, &run.manifest);
+    let installed_raw = plugin_order::installed_json_packages(&composer_dir);
+    let plugins_enabled = !run.args.no_plugins;
+    let loaded = if plugins_enabled {
+        plugin_order::loaded_plugins(
+            &installed_raw,
+            &composer_dir,
+            plugin_order::global_composer_dir().as_deref(),
+        )
+    } else {
+        Vec::new()
+    };
+    let mut installed_now = purge_missing(&composer_dir, installed_raw);
     // A `symfony-pack` laid out by Flex's pack installer has no install
     // path in installed.json (`MetapackageInstaller`), which the purge above
     // reads as "always installed". `Factory::createComposer` loads the
@@ -683,12 +724,14 @@ fn local_repository_transaction(
     };
     trace("local repositories", run.t0);
     let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
+    let listeners = plugin_order::activation_order(loaded, &arena, &transaction.operations);
     Ok(LocalTransaction {
         arena,
         present,
         unchanged_names,
         transaction,
         missing,
+        listeners,
     })
 }
 
@@ -699,13 +742,26 @@ fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
     let scope = if args.dry_run {
         None
     } else {
-        Some(vivacity_core::scope::analyze(
+        let mut report = vivacity_core::scope::analyze(
             &run.project,
             &run.lock,
             &run.manifest,
             run.with_dev,
             !args.no_plugins,
-        ))
+        );
+        // `POST_INSTALL_CMD` only: not the install that follows an update.
+        if !args.after_update() {
+            report
+                .issues
+                .extend(vivacity_core::scope::core_project_message_issue(
+                    &run.project,
+                    &run.lock,
+                    &run.manifest,
+                    run.with_dev,
+                    !args.no_plugins,
+                ));
+        }
+        Some(report)
     };
 
     trace("scope analysis", run.t0);
@@ -1229,87 +1285,71 @@ fn post_autoload_dump_plugins(
         &touched,
         !args.no_plugins,
     )?;
-    emulate_bamarni_bin(local, &run.manifest, run.with_dev, !args.no_plugins);
-    emulate_package_versions(
+    // The two that print, in their plugins' activation order.
+    post_autoload_dump_printers(
         &run.project,
         local,
         &run.manifest,
         run.with_dev,
         !args.no_plugins,
-    )?;
+        &tx.listeners,
+    )
+}
+
+/// The `POST_AUTOLOAD_DUMP` listeners that write lines —
+/// bamarni/composer-bin-plugin's deprecations (stderr) and
+/// composer/package-versions-deprecated's two lines (stdout) — in the
+/// order their plugins were activated (`plugin_order`). The silent ones
+/// (pest-plugin, yii2-composer) depend on nothing the others do.
+pub(crate) fn post_autoload_dump_printers(
+    project: &std::path::Path,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+    listeners: &[String],
+) -> anyhow::Result<()> {
+    let emulated = [
+        vivacity_core::bamarni_bin::PLUGIN_NAME,
+        vivacity_core::package_versions::PLUGIN_NAME,
+    ];
+    for plugin in plugin_order::listeners_in_order(listeners, &emulated) {
+        if plugin == vivacity_core::bamarni_bin::PLUGIN_NAME {
+            emulate_bamarni_bin(local, manifest, with_dev, plugins_enabled);
+        } else {
+            emulate_package_versions(project, local, manifest, with_dev, plugins_enabled)?;
+        }
+    }
     Ok(())
 }
 
 /// The end of `Installer::run` (Installer.php:412-442): the funding count,
 /// then `POST_INSTALL_CMD` / `POST_UPDATE_CMD` — the plugins' listeners
-/// first (all at priority 0), then the scripts of composer.json, which
+/// first (all at priority 0, in the order their plugins were activated:
+/// `listeners`, `plugin_order`), then the scripts of composer.json, which
 /// `EventDispatcher::getListeners` appends after the plugins' priority-0
-/// listeners. Composer orders the plugins by activation
-/// (`PackageSorter::sortPackages`, a plugin installed by the command last);
-/// vivacity runs its emulations in a fixed order — dealerdirect, the
-/// extension-installers, codeception/c3, symfony/flex — of which only c3
-/// and Flex print (docs/plans/install-order.md). Runs without the dump too
-/// (`--no-autoloader`), as in Composer.
+/// listeners. Runs without the dump too (`--no-autoloader`), as in
+/// Composer.
 fn post_install(
     run: &Run<'_>,
     layout: &vivacity_core::layout::Layout,
     report: &vivacity_core::installer::InstallReport,
+    listeners: &[String],
 ) -> anyhow::Result<Flow> {
     let args = run.args;
     print_funding(&run.project, &run.manifest);
     let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     if !args.no_plugins {
-        // `dealerdirect/phpcodesniffer-composer-installer`.
-        let installed: Vec<&vivacity_core::lock::LockPackage> =
-            local.wanted_packages(run.with_dev).collect();
-        let allowed = matches!(
-            vivacity_core::layout::plugin_allowed(
-                &run.manifest,
-                vivacity_core::phpcs_installer::PLUGIN_NAME
-            ),
-            vivacity_core::layout::PluginVerdict::Allowed
-        );
-        if allowed
-            && installed
-                .iter()
-                .any(|p| p.name() == vivacity_core::phpcs_installer::PLUGIN_NAME)
-        {
-            vivacity_core::phpcs_installer::register_standards(
-                &run.project,
-                layout,
-                &installed,
-                &run.manifest,
-            )?;
+        let emulated = [
+            vivacity_core::phpcs_installer::PLUGIN_NAME,
+            extension_installers::PHPSTAN,
+            extension_installers::RECTOR,
+            vivacity_core::c3_plugin::PLUGIN_NAME,
+            "symfony/flex",
+        ];
+        for plugin in plugin_order::listeners_in_order(listeners, &emulated) {
+            post_install_listener(run, layout, local, plugin)?;
         }
-        extension_installers::phpstan(
-            layout,
-            local,
-            &run.manifest,
-            run.with_dev,
-            !args.no_plugins,
-        )?;
-        extension_installers::rector(layout, local, &run.manifest, run.with_dev, !args.no_plugins)?;
-    }
-    emulate_c3(
-        &run.project,
-        local,
-        &run.manifest,
-        run.with_dev,
-        args.after_update(),
-        !args.no_plugins,
-    )?;
-    // symfony/flex: `install` on `POST_INSTALL_CMD`, `update` on
-    // `POST_UPDATE_CMD` (decided by the update, which saw the operations).
-    match &args.post_update {
-        None => emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?,
-        Some(update) if update.flex_active => {
-            print_flex_post_update(
-                &update.manifest,
-                update.thanks_reminder,
-                update.flex_plan.as_deref(),
-            )?;
-        }
-        Some(_) => {}
     }
     if let Some(r) = &run.runner {
         let code = r.run(scripts::POST_INSTALL_CMD)?;
@@ -1318,6 +1358,83 @@ fn post_install(
         }
     }
     Ok(Flow::Continue(()))
+}
+
+/// One emulated `POST_INSTALL_CMD` / `POST_UPDATE_CMD` listener; each
+/// checks that its plugin is installed and allowed.
+fn post_install_listener(
+    run: &Run<'_>,
+    layout: &vivacity_core::layout::Layout,
+    local: &vivacity_core::lock::Lock,
+    plugin: &str,
+) -> anyhow::Result<()> {
+    let args = run.args;
+    match plugin {
+        // `Plugin::onDependenciesChangedEvent`; `saveInstalledPaths` writes
+        // its line when it saved.
+        vivacity_core::phpcs_installer::PLUGIN_NAME => {
+            let installed: Vec<&vivacity_core::lock::LockPackage> =
+                local.wanted_packages(run.with_dev).collect();
+            let allowed = matches!(
+                vivacity_core::layout::plugin_allowed(&run.manifest, plugin),
+                vivacity_core::layout::PluginVerdict::Allowed
+            );
+            if let Some(own) = installed
+                .iter()
+                .find(|p| p.name() == plugin)
+                .filter(|_| allowed)
+            {
+                let change = vivacity_core::phpcs_installer::register_standards(
+                    &run.project,
+                    layout,
+                    &installed,
+                    &run.manifest,
+                    vivacity_core::phpcs_installer::keeps_cwd_relative_paths(own.version()),
+                )?;
+                if let Some(line) = change.line() {
+                    vivacity_core::out!("{line}");
+                }
+            }
+        }
+        extension_installers::PHPSTAN => extension_installers::phpstan(
+            layout,
+            local,
+            &run.lock.aliases,
+            &run.manifest,
+            run.with_dev,
+            !args.no_plugins,
+        )?,
+        extension_installers::RECTOR => extension_installers::rector(
+            layout,
+            local,
+            &run.manifest,
+            run.with_dev,
+            !args.no_plugins,
+        )?,
+        vivacity_core::c3_plugin::PLUGIN_NAME => emulate_c3(
+            &run.project,
+            local,
+            &run.manifest,
+            run.with_dev,
+            args.after_update(),
+            !args.no_plugins,
+        )?,
+        // symfony/flex: `install` on `POST_INSTALL_CMD`, `update` on
+        // `POST_UPDATE_CMD` (decided by the update, which saw the operations).
+        "symfony/flex" => match &args.post_update {
+            None => emulate_flex_install(&run.project, &run.manifest, !args.no_plugins)?,
+            Some(update) if update.flex_active => {
+                print_flex_post_update(
+                    &update.manifest,
+                    update.thanks_reminder,
+                    update.flex_plan.as_deref(),
+                )?;
+            }
+            Some(_) => {}
+        },
+        _ => {}
+    }
+    Ok(())
 }
 
 /// vivacity's closing line: what the install did and where it found it.
@@ -1572,7 +1689,15 @@ pub(crate) fn emulate_package_versions(
     let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
         .unwrap_or_default()
         .vendor_dir(project);
+    // `writeVersionClassToFile` (Installer.php:200-231): its lines on
+    // stdout around the write, or the one that says why it skipped.
+    if !pv::versions_dir(&vendor).exists() {
+        vivacity_core::out!("composer/package-versions-deprecated: Package not found (probably scheduled for removal); generation of version class skipped.");
+        return Ok(());
+    }
+    vivacity_core::out!("composer/package-versions-deprecated: Generating version class...");
     pv::write(&vendor, &pv::render(&root.name, &versions))?;
+    vivacity_core::out!("composer/package-versions-deprecated: ...done generating version class");
     Ok(())
 }
 
@@ -1855,16 +1980,18 @@ pub(crate) fn installed_packages(
     manifest: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
     let composer_dir = composer_dir_of(project, manifest);
-    let Some(installed) = vivacity_core::jsonfile::read(&composer_dir.join("installed.json"))
-    else {
-        return Vec::new();
-    };
-    let list = installed
-        .get("packages")
-        .and_then(|p| p.as_array())
-        .cloned()
-        .or_else(|| installed.as_array().cloned())
-        .unwrap_or_default();
+    purge_missing(
+        &composer_dir,
+        plugin_order::installed_json_packages(&composer_dir),
+    )
+}
+
+/// `Factory::purgePackages`: the packages whose install path is gone leave
+/// the local repository (a metapackage, or an entry without a path, stays).
+fn purge_missing(
+    composer_dir: &std::path::Path,
+    list: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
     list.into_iter()
         .filter(|p| {
             if p.get("type").and_then(|t| t.as_str()) == Some("metapackage") {

@@ -17,7 +17,18 @@
 //!   exists, the new ones appended, the whole sorted (`sort()`, bytewise)
 //!   and written by phpcs into `<phpcs>/CodeSniffer.conf`:
 //!   `<?php\n $phpCodeSnifferConfig = ` + `var_export` + `;\n?>`;
-//! - nothing happens when nothing changed, or when no search path exists.
+//! - nothing happens when nothing changed, or when no search path exists;
+//! - when it saves, `saveInstalledPaths` (Plugin.php:263-315) writes one
+//!   line on stdout, "PHP CodeSniffer Config installed_paths set to <the
+//!   sorted paths, comma-joined>" or "… installed_paths delete" — returned
+//!   here as a [`ConfigChange`] for the caller to print.
+//!
+//! Versions (docs/plans/plugin-lines.md): v1.0.0 to v1.2.0 keep a
+//! registered relative path that exists relative to the working directory
+//! *or* to phpcs (`cleanInstalledPaths`' `$alternativePath`); v1.2.1
+//! resolves it against phpcs only. 0.x (which also searches the whole
+//! project) and v1.1.0 (phpcs's path from `InstalledVersions`) are handed
+//! over by `scope`.
 
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -41,40 +52,84 @@ const VCS_DIRS: &[&str] = &[
     ".hg",
 ];
 
+/// What `saveInstalledPaths` did, for its line.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfigChange {
+    /// Nothing to save (or no phpcs): no line at the normal level.
+    Unchanged,
+    /// `--config-set installed_paths <paths>`.
+    Set(String),
+    /// `--config-delete installed_paths`: no path left.
+    Deleted,
+}
+
+impl ConfigChange {
+    /// The line `saveInstalledPaths` writes on success (the `<info>` and
+    /// `<comment>` tags removed, as an undecorated output prints them).
+    pub fn line(&self) -> Option<String> {
+        match self {
+            ConfigChange::Unchanged => None,
+            ConfigChange::Set(paths) => Some(format!(
+                "PHP CodeSniffer Config installed_paths set to {paths}"
+            )),
+            ConfigChange::Deleted => {
+                Some("PHP CodeSniffer Config installed_paths delete".to_owned())
+            }
+        }
+    }
+}
+
+/// Whether this version keeps a relative path that exists relative to the
+/// working directory (`$alternativePath`, v1.0.0 to v1.2.0).
+pub fn keeps_cwd_relative_paths(plugin_version: &str) -> bool {
+    crate::version::normalize_pretty(plugin_version)
+        .ok()
+        .and_then(|v| crate::version::Version::parse(&v).ok())
+        .zip(crate::version::Version::parse("1.2.1.0").ok())
+        .is_some_and(|(v, first)| v < first)
+}
+
 /// `Plugin::onDependenciesChangedEvent` after an install: `packages` are
 /// the installed packages (the local repository), `root_manifest` the
-/// project's composer.json.
+/// project's composer.json, `cwd_relative` [`keeps_cwd_relative_paths`]
+/// for the plugin's version.
 pub fn register_standards(
     project_dir: &Path,
     layout: &Layout,
     packages: &[&LockPackage],
     root_manifest: &Value,
-) -> Result<()> {
+    cwd_relative: bool,
+) -> Result<ConfigChange> {
     let Some(phpcs) = packages.iter().find(|p| p.name() == PHPCS) else {
-        return Ok(());
+        return Ok(ConfigChange::Unchanged);
     };
     let Some(phpcs_dir) = layout.abs(phpcs.name()) else {
-        return Ok(());
+        return Ok(ConfigChange::Unchanged);
     };
     let cwd = normalize_path(&project_dir.to_string_lossy());
     let phpcs_path = normalize_path(&phpcs_dir.to_string_lossy());
     let conf = phpcs_dir.join("CodeSniffer.conf");
 
-    // loadInstalledPaths + cleanInstalledPaths
+    // loadInstalledPaths (`--config-show`, the value trimmed, nothing when
+    // empty) + cleanInstalledPaths
     let mut config = read_config(&conf)?;
     let mut installed: Vec<String> = config
         .iter()
         .find(|(k, _)| k == "installed_paths")
-        .map(|(_, v)| v.split(',').map(str::to_owned).collect())
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(str::to_owned).collect())
         .unwrap_or_default();
     let mut changed = false;
     installed.retain(|p| {
-        let dir = if crate::pathutil::is_absolute_path(p) {
-            PathBuf::from(p)
+        let is_dir = |dir: PathBuf| std::fs::canonicalize(dir).is_ok_and(|d| d.is_dir());
+        let keep = if crate::pathutil::is_absolute_path(p) {
+            is_dir(PathBuf::from(p))
         } else {
-            phpcs_dir.join(p)
+            // `is_dir($path)` on a relative path reads the working
+            // directory, the project (v1.0.0 to v1.2.0 only).
+            is_dir(phpcs_dir.join(p)) || (cwd_relative && is_dir(project_dir.join(p)))
         };
-        let keep = std::fs::canonicalize(&dir).is_ok_and(|d| d.is_dir());
         if !keep {
             changed = true;
         }
@@ -127,16 +182,21 @@ pub fn register_standards(
         }
     }
     if !changed {
-        return Ok(());
+        return Ok(ConfigChange::Unchanged);
     }
     // saveInstalledPaths: `--config-set` (sorted, comma-joined) or
     // `--config-delete`; phpcs rewrites the whole file either way.
     config.retain(|(k, _)| k != "installed_paths");
-    if !installed.is_empty() {
+    let change = if installed.is_empty() {
+        ConfigChange::Deleted
+    } else {
         installed.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        config.push(("installed_paths".to_owned(), installed.join(",")));
-    }
-    write_config(&conf, &config)
+        let paths = installed.join(",");
+        config.push(("installed_paths".to_owned(), paths.clone()));
+        ConfigChange::Set(paths)
+    };
+    write_config(&conf, &config)?;
+    Ok(change)
 }
 
 /// The `ruleset.xml` files at a depth in `[min, max]` below `base`
@@ -239,6 +299,25 @@ mod tests {
                 "installed_paths".to_owned(),
                 "../../a/b,../../c/d".to_owned()
             )]
+        );
+    }
+
+    #[test]
+    fn version_rule_for_relative_paths() {
+        assert!(keeps_cwd_relative_paths("v1.0.0"));
+        assert!(keeps_cwd_relative_paths("v1.2.0"));
+        assert!(!keeps_cwd_relative_paths("v1.2.1"));
+        assert!(!keeps_cwd_relative_paths("dev-main"));
+        assert_eq!(ConfigChange::Unchanged.line(), None);
+        assert_eq!(
+            ConfigChange::Set("../../a,../../b".into())
+                .line()
+                .as_deref(),
+            Some("PHP CodeSniffer Config installed_paths set to ../../a,../../b")
+        );
+        assert_eq!(
+            ConfigChange::Deleted.line().as_deref(),
+            Some("PHP CodeSniffer Config installed_paths delete")
         );
     }
 

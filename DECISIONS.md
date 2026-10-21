@@ -3849,3 +3849,97 @@ bloquant ; ses deux majeurs se reproduisaient contre Composer.
 - **Noté, laissé** : `install`/`update --no-suggest` refusés par clap
   (Composer avertit) — antérieur.
 
+
+## 2026-10-21 — Les lignes des installeurs de plugins, dans l'ordre d'activation de Composer
+
+Contexte : non-objectifs de `docs/plans/install-order.md` (lignes stdout de
+phpstan/rector/dealerdirect, ordre fixe des émulations) ; plan
+`docs/plans/plugin-lines.md` (matrice mesurée, références, méta-analyse et
+revue).
+
+- **Les lignes.** phpstan/extension-installer 1.4.3 (`Plugin::process`,
+  Plugin.php:198-214) : « Extensions installed » à chaque `POST_*_CMD`,
+  puis `installed` / `not supported` / `ignored` quand GeneratedConfig.php
+  change (md5 de l'ancien fichier contre le nouveau contenu) ;
+  rector/extension-installer 0.11.2 (`PluginInstaller::install`,
+  PluginInstaller.php:95-104) : « rector/rector-installer: Extensions
+  installed » et `installed`, seulement quand le fichier change ;
+  dealerdirect v1.2.1 (`saveInstalledPaths`, Plugin.php:263-315) : « set
+  to <chemins> » ou « delete » quand il sauve ; package-versions-deprecated
+  1.11.99.5 (`writeVersionClassToFile`, Installer.php:200-231) : deux lignes
+  à chaque dump. Toutes `$io->write`, niveau normal, stdout ; `-v` reste
+  rendu à Composer (lignes `> event: Classe->méthode`).
+- **L'ordre.** Porté, pas supposé : les écouteurs de priorité 0 sont appelés
+  dans l'ordre d'activation des plugins (EventDispatcher.php:537-596) —
+  installed.json tel qu'écrit, trié par `PackageSorter::sortPackages` avec
+  les poids de `PluginManager::loadRepository` (-10000 pour les plugins qui
+  changent les chemins ; un alias de branche compte deux fois dans les
+  usages), chargé avant la purge (Factory.php:448 puis :457), le dépôt
+  global ensuite ; puis la transaction, un lot par plugin
+  (InstallationManager.php:300-323) : installé → en fin, mis à jour →
+  désactivé puis réactivé en fin, désinstallé → retiré
+  (PluginInstaller.php:80-120). `crates/vivacity/src/plugin_order.rs`.
+  L'ordre fixe de vivacity coïncidait sur un retour en dev ou une mise à
+  jour de plugin, pas sur un vendor vierge (transaction), ni sur un no-op
+  où c3 précède phpstan (noms), ni quand dealerdirect est requis par des
+  standards (poids). `PackageSorter` gagne `$weights`
+  (`sort_packages_weighted`). Alternative écartée : prouver que l'ordre
+  fixe suffit — le harnais montre neuf cas où il ne suffit pas.
+- **Versions.** Les écouteurs émulés sont désormais liés aux versions lues
+  (`scope::EMULATED_VERSIONS`) : phpstan 1.4.0–1.4.3, rector 0.11.0–0.11.2
+  et 1.0.0, dealerdirect v1.0.0, v1.1.1, v1.1.2, v1.2.0, v1.2.1,
+  package-versions 1.11.99.4–1.11.99.5 ; toute autre (dont une branche dev)
+  va à Composer, nommée, avant toute écriture — et, sur
+  `update`/`require`/`remove` avec installation, dès la résolution quand le
+  plugin installé est hors liste (sinon la phase d'installation rendait
+  `composer install`, donc `POST_INSTALL_CMD`). Raisons lues dans les
+  sources : phpstan 1.3.x n'écrit pas `PHPSTAN_VERSION_CONSTRAINT`, rector
+  0.10.x a un autre gabarit, dealerdirect 0.x cherche les rulesets dans tout
+  le projet et v1.1.0 demande à `InstalledVersions` où est phpcs,
+  package-versions < 1.11.99.4 génère un autre Versions.php. Porté :
+  `$alternativePath` de v1.0.0–v1.2.0 (un chemin enregistré relatif au
+  projet est gardé ; v1.2.1 le retire) ; `installed_paths` vide lu comme
+  aucun chemin. Corpus : chamilo (v0.7.2, `unavailable`) passe au repli ;
+  les deux projets en package-versions 1.11.99.1 (mautic,
+  mautic-recommended-project) étaient déjà en repli. Corpus non rejoué.
+- **Alias.** phpstan et rector gardent pour chaque nom la version de la
+  *dernière* entrée du dépôt local. Mesuré : un alias en ligne du lock est
+  réajouté après le paquet chargé à chaque exécution — vendor vierge, la
+  version du paquet ; no-op suivant, celle de l'alias et une ligne
+  `installed` (le fichier différait déjà chez vivacity) ; un paquet `path`
+  est posé avant son alias (l'alias gagne, mesuré par la revue) ; l'alias
+  de branche par défaut d'une archive ne change rien (fixture rector).
+  Décision : un paquet listé par ces plugins et aliasé (en ligne, ou alias
+  de branche autre que celui d'une archive par défaut) va à Composer,
+  nommé. Suite possible : porter l'ordre du dépôt local (synchrone/
+  asynchrone par type de dist) au lieu de rendre la main.
+- **`remove` d'un plugin.** Trouvé par le harnais : `RemoveCommand` retire
+  les entrées `allow-plugins` des paquets retirés *après* que son
+  `Composer` a chargé les plugins (RemoveCommand.php:216-222 puis
+  :242-252), et le `PluginManager` garde les règles lues ; vivacity
+  relisait le manifeste édité — `remove codeception/c3` ne supprimait pas
+  c3.php, un plugin retiré mais encore requis n'écrivait plus ses lignes.
+  `UpdateArgs.allow_plugins_at_load` rend à la phase d'installation
+  l'`allow-plugins` du projet tel qu'il était, ordre compris (la première
+  règle qui correspond gagne : remettre seulement les entrées, en fin,
+  faisait gagner un `codeception/*: false` placé après — vu par la revue). Écart antérieur à ce chantier.
+- **drupal/core-project-message** (liste bénigne) imprime à
+  `POST_INSTALL_CMD` son message configuré ou `include-keys` : un `install`
+  où il écrirait va à Composer, nommé (GPL-2.0-or-later : pas d'émulation,
+  NOTICE.md). Aucun projet du corpus touché (tous ont aussi le scaffold).
+- **Références.** `docs/reference/{PluginInstaller,InstallationManager,EventDispatcher}.php`
+  ajoutés, surveillés par `drift-reference.sh`.
+- **Harnais** `harness/plugin-lines.sh` (46 cas, Packagist en ligne,
+  COMPOSER_HOME isolé) : 38 rouges sur `main`, 15 sur un binaire
+  intermédiaire (lignes, ordre fixe) dont neuf d'ordre, tous verts ensuite.
+- **Noté, laissé** : `update --no-install` (Composer joue `POST_UPDATE_CMD`,
+  phpstan y écrit sa ligne et les plugins leurs fichiers ; vivacity rien —
+  non-objectif d'install-order, désormais l'écart le plus visible de
+  phpstan) ; dealerdirect quand phpcs ne tourne pas sous le PHP de la
+  machine (« Failed to set … » chez Composer, vivacity écrit) ; v1.1.1
+  (`InstalledVersions::isInstalled`, diffère seulement si phpcs est
+  remplacé ou fourni) ; la ligne « not writable » de package-versions ; les
+  plugins émulés installés globalement (ordre calculé, émulation absente) ;
+  la ligne « Dependency … is also a root requirement » de `remove`, après
+  « Updating dependencies » chez vivacity, avant chez Composer (autre
+  famille, vue par la revue).
