@@ -1,0 +1,56 @@
+{
+  "$schema": "https://getcomposer.org/schema.json",
+  "name": "vivacity/laravel-pest",
+  "type": "project",
+  "description": "The laravel fixture as `laravel new --pest` lays it out: Pest instead of PHPUnit, php-http/discovery (allowed by the skeleton); the plugins pinned (verbosity.sh).",
+  "keywords": [
+    "laravel",
+    "framework"
+  ],
+  "license": "MIT",
+  "require": {
+    "php": "^8.3",
+    "laravel/framework": "^13.17",
+    "laravel/tinker": "^3.0",
+    "php-http/discovery": "1.20.0"
+  },
+  "require-dev": {
+    "fakerphp/faker": "^1.23",
+    "laravel/pail": "^1.2.5",
+    "laravel/pao": "^1.0.6",
+    "laravel/pint": "^1.27",
+    "mockery/mockery": "^1.6",
+    "nunomaduro/collision": "^8.6",
+    "pestphp/pest": "v4.7.8",
+    "pestphp/pest-plugin": "v4.0.0",
+    "pestphp/pest-plugin-laravel": "v4.1.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "app/",
+      "Database\\Factories\\": "database/factories/",
+      "Database\\Seeders\\": "database/seeders/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "dont-discover": []
+    }
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "preferred-install": "dist",
+    "sort-packages": true,
+    "allow-plugins": {
+      "pestphp/pest-plugin": true,
+      "php-http/discovery": true
+    }
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
