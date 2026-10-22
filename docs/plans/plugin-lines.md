@@ -339,7 +339,7 @@ habituel). 46 cas :
 - dealerdirect v1.1.0–v1.1.1 (`InstalledVersions::isInstalled`) : diffère
   du dépôt local seulement si phpcs est remplacé ou fourni par un autre
   paquet — non porté, noté.
-- **traité le 2026-10-22 (`docs/plans/no-install-listeners.md`)** —
+- **traité le 2026-10-22 (`docs/plans/no-install-listeners.md`, commit f8258b6)** —
   `update --no-install` : Composer joue `POST_UPDATE_CMD` (seul le dump
   est coupé, Installer.php:306-308), phpstan y écrit « Extensions
   installed », c3, dealerdirect et les extension-installers leurs
