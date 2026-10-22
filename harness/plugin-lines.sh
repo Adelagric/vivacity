@@ -37,6 +37,15 @@
 # - composer/package-versions-deprecated (`Installer::dumpVersionsClass`) :
 #   deux lignes à chaque dump, dump-autoload compris ; avec bamarni, l'ordre
 #   des deux écouteurs de `POST_AUTOLOAD_DUMP`.
+# - `update`/`require`/`remove --no-install` (docs/plans/no-install-listeners.md) :
+#   `POST_UPDATE_CMD` part sans installation, vers les plugins chargés
+#   d'installed.json, qui lisent le dépôt local (l'ancien état) — phpstan,
+#   dealerdirect, c3, rector, les quatre ensemble (ordre), Flex à son rang ;
+#   vendor vierge, plugin ajouté ou retiré par l'update, -q, --no-dev,
+#   --no-plugins, --dry-run, `config.lock: false`, vendor-dir, ensemble
+#   insoluble, yii2-composer (`activate`) ; replis nommés : versions non
+#   lues, plugin global, php-http/discovery qui surveille une abstraction,
+#   composer-patches.
 #
 # Usage : harness/plugin-lines.sh
 set -euo pipefail
@@ -88,7 +97,9 @@ step() { # ref, viv, nom, args composer..., "--", args vivacity...
   # `Note: plugin … installed as a plain library` : la note de vivacity sur
   # un plugin bénin (drupal/core-project-message), tolérée comme dans
   # flex-install.sh.
-  if ! diff <(grep -v '^  - Downloading ' "$WORK/$name.composer.all") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.all") >"$WORK/$name.order.diff"; then
+  # `Warning: Accessing 127.0.0.1 over http…` : artefact du banc (l'index de
+  # Flex servi en http local, `ni-flex`), filtré comme dans flex-update.sh.
+  if ! diff <(grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ' "$WORK/$name.composer.all") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.all") >"$WORK/$name.order.diff"; then
     echo "FAIL $name : sortie fusionnée différente"; head -12 "$WORK/$name.order.diff"; status=1; return
   fi
   if compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -381,4 +392,318 @@ step "$ref" "$viv" pvb-no-op "${I[@]}" -- "${V[@]}"
 order pvb-no-op '^Generating autoload files$' '^composer/package-versions-deprecated: \.\.\.done' '^\[bamarni-bin\]'
 step "$ref" "$viv" pvb-dump dump-autoload -- dump-autoload
 order pvb-dump '^composer/package-versions-deprecated: \.\.\.done' '^\[bamarni-bin\]'
+
+# --- update --no-install : les écouteurs de POST_UPDATE_CMD -------------------
+# (docs/plans/no-install-listeners.md) `Installer::run` sans installation
+# saute le dump mais dispatche `POST_UPDATE_CMD` (Installer.php:438-441) :
+# les plugins chargés d'installed.json lisent le dépôt LOCAL — l'ancien état,
+# purgé, dev compris —, jamais le lock. Chaque projet est installé par son
+# outil, l'état gardé au même chemin (les chemins absolus de
+# GeneratedConfig.php ne bougent pas), puis chaque cas repart de cet état.
+NI=(update --no-install "${R[@]}")
+GC=vendor/phpstan/extension-installer/src/GeneratedConfig.php
+RGC=vendor/rector/extension-installer/src/GeneratedConfig.php
+CONF=vendor/squizlabs/php_codesniffer/CodeSniffer.conf
+# ni_base <nom> <lock> : les deux copies installées, puis gardées.
+ni_base() {
+  ref="$WORK/ni-$1-ref"; viv="$WORK/ni-$1-viv"; fresh "$2" "$ref" "$viv"
+  step "$ref" "$viv" "ni-$1-install" "${I[@]}" -- "${V[@]}"
+  rm -rf "$ref.base" "$viv.base"; cp -a "$ref" "$ref.base"; cp -a "$viv" "$viv.base"
+}
+# ni_base_composer <nom> <lock> : Composer installe les deux copies (un état
+# que vivacity rend à Composer à l'install : versions non lues, alias).
+ni_base_composer() {
+  ref="$WORK/ni-$1-ref"; viv="$WORK/ni-$1-viv"; fresh "$2" "$ref" "$viv"
+  for d in "$ref" "$viv"; do (cd "$d" && composer "${I[@]}" --no-interaction -q) || { echo "FAIL ni-$1 : install de Composer"; status=1; }; done
+  rm -rf "$ref.base" "$viv.base"; cp -a "$ref" "$ref.base"; cp -a "$viv" "$viv.base"
+}
+ni_reset() { rm -rf "$ref" "$viv"; cp -a "$ref.base" "$ref"; cp -a "$viv.base" "$viv"; }
+ni_rm() { for p in "$@"; do rm -rf "${ref:?}/$p" "${viv:?}/$p"; done; }
+ni_json() { printf '%s\n' "$1" > "$ref/composer.json"; printf '%s\n' "$1" > "$viv/composer.json"; }
+# ni_refused <nom> <motif de raison> <nombre> <args vivacity…> : rendu à
+# Composer sous --no-fallback (code 3), raisons comptées, rien d'écrit.
+ni_refused() {
+  local name="$1" pat="$2" want="$3"; shift 3
+  local v_code=0 n
+  touch "$WORK/$name.mark"; sleep 1
+  (cd "$viv" && "$VIVACITY" "$@" >"$WORK/$name.vivacity.all" 2>&1) || v_code=$?
+  n=$(grep -cE -- "$pat" "$WORK/$name.vivacity.all" || true)
+  if [ "$v_code" = 3 ] && [ "$n" = "$want" ] && [ -z "$(find "$viv" -newer "$WORK/$name.mark" -print -quit)" ]; then
+    echo "OK   $name : rendu à Composer, $n raison(s), rien d'écrit"
+  else
+    echo "FAIL $name : code $v_code, $n raison(s) sur $want"; tail -6 "$WORK/$name.vivacity.all"; status=1
+  fi
+}
+PS_BASE='"phpstan/extension-installer": "1.4.3", "phpstan/phpstan": "2.3.1"'
+PS_DEV='"phpstan/phpstan-strict-rules": "2.0.4", "phpstan/phpstan-deprecation-rules": "2.0.5", "phpstan/php-8-stubs": "0.4.43"'
+PS_IGNORE='"extra": {"phpstan/extension-installer": {"ignore": ["phpstan/phpstan-deprecation-rules"]}}'
+PS_ALLOW='"config": {"allow-plugins": {"phpstan/extension-installer": true}}'
+ps_json() { ni_json "{\"name\": \"vivacity/plugin-lines-phpstan\", \"require\": {$1}, \"require-dev\": {$2}, ${3:+$3, }$PS_ALLOW}"; }
+
+# phpstan : la ligne à chaque fois ; les lignes de paquets quand le fichier
+# change — calculées sur le dépôt local, quel que soit --no-dev.
+ni_base ps phpstan
+step "$ref" "$viv" ni-ps-noop "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-noop 'looking for funding' "$PHPSTAN"; expect_not ni-ps-noop '^> '
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-lost 'looking for funding' "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$' '^> phpstan/php-8-stubs: not supported$' '^> phpstan/phpstan-deprecation-rules: ignored$'
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-quiet "${NI[@]}" -q -- "${NI[@]}" -q --no-fallback
+expect_not ni-ps-quiet '.'
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-no-dev "${NI[@]}" --no-dev -- "${NI[@]}" --no-dev --no-fallback
+expect ni-ps-no-dev '^> phpstan/phpstan-strict-rules: installed$'
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-no-plugins "${NI[@]}" --no-plugins -- "${NI[@]}" --no-plugins --no-fallback
+expect_not ni-ps-no-plugins '^phpstan/'
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-dry-run "${NI[@]}" --dry-run -- "${NI[@]}" --dry-run --no-fallback
+expect_not ni-ps-dry-run '^phpstan/'
+# Une extension ajoutée par l'update n'est pas dans le dépôt local ; une
+# extension retirée y est encore.
+ni_reset; ni_rm "$GC"; ps_json "$PS_BASE" "$PS_DEV, \"phpstan/phpstan-phpunit\": \"2.0.7\"" "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-ext-added "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-ext-added 'Locking phpstan/phpstan-phpunit' "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$'; expect_not ni-ps-ext-added 'phpstan-phpunit: installed'
+ni_reset; ni_rm "$GC"; ps_json "$PS_BASE" '"phpstan/phpstan-deprecation-rules": "2.0.5", "phpstan/php-8-stubs": "0.4.43"' "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-ext-removed "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-ext-removed 'Removing phpstan/phpstan-strict-rules' "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$'
+# Le plugin retiré par l'update : encore chargé.
+ni_reset; ps_json '"phpstan/phpstan": "2.3.1"' "$PS_DEV" "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-plugin-removed "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-plugin-removed 'Removing phpstan/extension-installer' "$PHPSTAN"
+# L'`extra` de la racine est relu : `ignore` retiré, le fichier change.
+ni_reset; ps_json "$PS_BASE" "$PS_DEV"
+step "$ref" "$viv" ni-ps-ignore-dropped "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-ignore-dropped '^> phpstan/phpstan-deprecation-rules: installed$'
+ni_reset; ps_json "$PS_BASE" "$PS_DEV, \"phpstan/phpstan-phpunit\": \"2.0.7\"" "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-partial update phpstan/phpstan-phpunit --no-install "${R[@]}" -- update phpstan/phpstan-phpunit --no-install "${R[@]}" --no-fallback
+order ni-ps-partial 'Locking phpstan/phpstan-phpunit' "$PHPSTAN"; expect_not ni-ps-partial '^> '
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-require require phpstan/phpstan-phpunit:2.0.7 --dev --no-install "${R[@]}" -- require phpstan/phpstan-phpunit:2.0.7 --dev --no-install "${R[@]}" --no-fallback
+order ni-ps-require 'Writing lock file' "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$'; expect_not ni-ps-require 'phpstan-phpunit: installed'
+# `remove` sans installation : l'écouteur lit le dépôt local (le paquet y est
+# encore), puis « Removal failed » (le dépôt local, toujours), code 2.
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-remove remove phpstan/phpstan-strict-rules --dev --no-install "${R[@]}" -- remove phpstan/phpstan-strict-rules --dev --no-install "${R[@]}" --no-fallback
+order ni-ps-remove "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$' 'Removal failed'
+ni_reset; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-remove-plugin remove phpstan/extension-installer --no-install "${R[@]}" -- remove phpstan/extension-installer --no-install "${R[@]}" --no-fallback
+order ni-ps-remove-plugin "$PHPSTAN" '^> phpstan/phpstan-strict-rules: installed$' 'Removal failed'
+# Un répertoire d'extension supprimé : purgé du dépôt local.
+ni_reset; ni_rm "$GC" vendor/phpstan/phpstan-strict-rules
+step "$ref" "$viv" ni-ps-ext-dir-gone "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-ext-dir-gone '^> phpstan/php-8-stubs: not supported$'; expect_not ni-ps-ext-dir-gone 'strict-rules: installed'
+# Vendor vierge : aucun plugin chargé, ni funding.
+ni_reset; ni_rm vendor
+step "$ref" "$viv" ni-ps-bare "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-ps-bare '^phpstan/|funding'
+# Le plugin ajouté par l'update : pas chargé.
+lock ni-ps-noplugin "{\"name\": \"vivacity/plugin-lines-phpstan\", \"require\": {\"phpstan/phpstan\": \"2.3.1\"}, \"require-dev\": {$PS_DEV}, $PS_IGNORE, $PS_ALLOW}"
+ni_base ps-add ni-ps-noplugin; ps_json "$PS_BASE" "$PS_DEV" "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-plugin-added "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-ps-plugin-added 'Locking phpstan/extension-installer'; expect_not ni-ps-plugin-added '^phpstan/'
+# Un alias en ligne : absent du dépôt local sans installation — la version
+# du paquet, une seule entrée (installé par Composer : vivacity rend
+# l'install d'une extension aliasée).
+ni_base_composer ps-alias aliased; ni_rm "$GC"
+step "$ref" "$viv" ni-ps-alias "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-alias '^> phpstan/phpstan-strict-rules: installed$'
+
+# dealerdirect : la configuration de phpcs réécrite quand elle manque, sur
+# les standards du dépôt local.
+ni_base pc phpcs
+step "$ref" "$viv" ni-pc-noop "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-pc-noop "$PHPCS"
+ni_reset; ni_rm "$CONF"
+step "$ref" "$viv" ni-pc-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-pc-lost 'looking for funding' "$PHPCS"'set to \.\./\.\./phpcsstandards/phpcsextra,\.\./\.\./phpcsstandards/phpcsutils$'
+ni_reset; ni_rm "$CONF"
+step "$ref" "$viv" ni-pc-no-dev "${NI[@]}" --no-dev -- "${NI[@]}" --no-dev --no-fallback
+expect ni-pc-no-dev "$PHPCS"'set to \.\./\.\./phpcsstandards/phpcsextra'
+# Le plugin retiré par l'update (avec les standards qui l'exigent) : encore
+# chargé, il réenregistre les standards du dépôt local.
+ni_reset; ni_rm "$CONF"; ni_json '{"name": "vivacity/plugin-lines-phpcs", "require": {"squizlabs/php_codesniffer": "4.0.4"}, "config": {"allow-plugins": {"dealerdirect/phpcodesniffer-composer-installer": true}}}'
+step "$ref" "$viv" ni-pc-plugin-removed "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-pc-plugin-removed 'Removing dealerdirect/phpcodesniffer-composer-installer' "$PHPCS"'set to \.\./\.\./phpcsstandards/phpcsextra,\.\./\.\./phpcsstandards/phpcsutils$'
+ni_reset; ni_json '{"name": "vivacity/plugin-lines-phpcs", "require": {"dealerdirect/phpcodesniffer-composer-installer": "v1.2.1", "squizlabs/php_codesniffer": "4.0.4"}, "require-dev": {"phpcsstandards/phpcsextra": "1.5.1", "phpcsstandards/phpcsutils": "1.2.3", "slevomat/coding-standard": "8.31.1"}, "config": {"allow-plugins": {"dealerdirect/phpcodesniffer-composer-installer": true}}}'
+step "$ref" "$viv" ni-pc-std-added "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-pc-std-added 'Locking slevomat/coding-standard'; expect_not ni-pc-std-added "$PHPCS"
+
+# codeception/c3 : `askForUpdateV2` copie le c3.php du c3 INSTALLÉ quand il
+# manque ; muet s'il est à jour ou modifié.
+C3_ALLOW='"config": {"allow-plugins": {"codeception/c3": true}}'
+lock ni-c3 "{\"name\": \"vivacity/plugin-lines-c3\", \"require\": {\"psr/log\": \"3.0.2\"}, \"require-dev\": {\"codeception/c3\": \"2.9.0\"}, $C3_ALLOW}"
+lock ni-c3-old "{\"name\": \"vivacity/plugin-lines-c3\", \"require\": {\"psr/log\": \"3.0.2\"}, \"require-dev\": {\"codeception/c3\": \"2.8.1\"}, $C3_ALLOW}"
+lock ni-c3-none "{\"name\": \"vivacity/plugin-lines-c3\", \"require\": {\"psr/log\": \"3.0.2\"}, $C3_ALLOW}"
+ni_base c3 ni-c3
+step "$ref" "$viv" ni-c3-noop "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-c3-noop "$C3"
+ni_reset; ni_rm c3.php
+step "$ref" "$viv" ni-c3-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-c3-lost 'Writing lock file' "$C3"'Copying' "$C3"'Include'
+ni_reset; for d in "$ref" "$viv"; do echo '<?php // edited' > "$d/c3.php"; done
+step "$ref" "$viv" ni-c3-edited "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-c3-edited "$C3"
+ni_reset; ni_rm c3.php
+step "$ref" "$viv" ni-c3-remove remove codeception/c3 --dev --no-install "${R[@]}" -- remove codeception/c3 --dev --no-install "${R[@]}" --no-fallback
+order ni-c3-remove 'Removing codeception/c3' "$C3"'Copying' 'Removal failed'
+ni_base c3-old ni-c3-old; ni_rm c3.php; ni_json "{\"name\": \"vivacity/plugin-lines-c3\", \"require\": {\"psr/log\": \"3.0.2\"}, \"require-dev\": {\"codeception/c3\": \"2.9.0\"}, $C3_ALLOW}"
+step "$ref" "$viv" ni-c3-updated "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-c3-updated 'Upgrading codeception/c3 \(2\.8\.1 => 2\.9\.0\)' "$C3"'Copying'
+ni_base c3-add ni-c3-none; ni_json "{\"name\": \"vivacity/plugin-lines-c3\", \"require\": {\"psr/log\": \"3.0.2\"}, \"require-dev\": {\"codeception/c3\": \"2.9.0\"}, $C3_ALLOW}"
+step "$ref" "$viv" ni-c3-plugin-added "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-c3-plugin-added 'Locking codeception/c3'; expect_not ni-c3-plugin-added "$C3"
+
+# rector : seulement quand le fichier change ; une branche par défaut
+# (alias chargé avant son paquet : la version du paquet).
+ni_base rc rector; ni_rm "$RGC"
+step "$ref" "$viv" ni-rc-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-rc-lost 'Writing lock file' "$RECTOR" '^> rector/rector-symfony: installed$'
+lock ni-rc-main '{"name": "vivacity/plugin-lines-rector-main", "minimum-stability": "dev", "prefer-stable": true,
+  "require": {"rector/extension-installer": "0.11.2"}, "require-dev": {"rector/rector-symfony": "dev-main"},
+  "config": {"allow-plugins": {"rector/extension-installer": true}}}'
+ni_base rc-main ni-rc-main
+step "$ref" "$viv" ni-rc-main-noop "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-rc-main-noop "$RECTOR"
+ni_reset; ni_rm "$RGC"
+step "$ref" "$viv" ni-rc-main-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-rc-main-lost '^> rector/rector-symfony: installed$'
+
+# Les quatre : l'ordre d'activation d'installed.json (dealerdirect d'abord,
+# puis les noms), sans transaction.
+ni_base all all
+step "$ref" "$viv" ni-all-noop "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-all-noop 'looking for funding' "$PHPSTAN"; expect_not ni-all-noop "$PHPCS|$C3|$RECTOR"
+ni_reset; ni_rm "$GC" "$RGC" "$CONF" c3.php
+step "$ref" "$viv" ni-all-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-all-lost 'looking for funding' "$PHPCS"'set to' "$C3"'Copying' "$PHPSTAN" "$RECTOR"
+ni_reset; ni_rm "$GC" "$RGC" "$CONF" c3.php
+step "$ref" "$viv" ni-all-quiet "${NI[@]}" -q -- "${NI[@]}" -q --no-fallback
+expect_not ni-all-quiet '.'
+
+# Replis : les versions non lues des trois écouteurs (package-versions,
+# muet sans dump, n'est pas nommé).
+ni_base_composer old old-versions
+ni_refused ni-old-versions '^  - plugin (dealerdirect/phpcodesniffer-composer-installer v0\.7\.2|phpstan/extension-installer 1\.3\.1|rector/extension-installer 0\.10\.2) is not emulated in this version' 3 "${NI[@]}" --no-fallback
+if grep -q '^  - plugin composer/package-versions-deprecated' "$WORK/ni-old-versions.vivacity.all"; then echo "FAIL ni-old-versions : package-versions nommé"; status=1; fi
+# php-http/discovery : son `postUpdate` interroge le dépôt local, pas le
+# lock, et peut éditer composer.json puis relancer un `Installer` (mesuré :
+# sans fin sous --no-install) ; `getMissingRequires` n'est pas porté — dès
+# qu'il surveille une abstraction, rendu. Composer n'est pas lancé sur les
+# cas rendus (il boucle sur `ni-discovery-dev`, mesuré par la méta-analyse).
+DISC='"php-http/discovery": "1.20.0", "psr/http-client-implementation": "*", "guzzlehttp/guzzle": "7.10.0"'
+DISC_ALLOW='"config": {"allow-plugins": {"php-http/discovery": true}}'
+DISC_PAT='^  - plugin php-http/discovery looks for PSR implementations'
+lock ni-discovery "{\"name\": \"vivacity/plugin-lines-discovery\", \"require\": {$DISC}, $DISC_ALLOW}"
+ni_base discovery ni-discovery
+ni_refused ni-discovery-same "$DISC_PAT" 1 "${NI[@]}" --no-fallback
+ni_json "{\"name\": \"vivacity/plugin-lines-discovery\", \"require\": {$DISC, \"psr/log\": \"3.0.2\"}, $DISC_ALLOW}"
+ni_refused ni-discovery "$DISC_PAT" 1 "${NI[@]}" --no-fallback
+lock ni-discovery-dev "{\"name\": \"vivacity/plugin-lines-discovery-dev\", \"type\": \"project\",
+  \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client-implementation\": \"*\"},
+  \"require-dev\": {\"guzzlehttp/guzzle\": \"7.10.0\"}, $DISC_ALLOW}"
+ni_base discovery-dev ni-discovery-dev
+ni_refused ni-discovery-dev "$DISC_PAT" 1 "${NI[@]}" --no-fallback
+# Rien de surveillé (aucune abstraction exigée) : natif, comparé.
+lock ni-discovery-idle "{\"name\": \"vivacity/plugin-lines-discovery-idle\",
+  \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client\": \"1.0.3\"}, $DISC_ALLOW}"
+ni_base discovery-idle ni-discovery-idle
+ni_json "{\"name\": \"vivacity/plugin-lines-discovery-idle\", \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client\": \"1.0.3\", \"psr/log\": \"3.0.2\"}, $DISC_ALLOW}"
+step "$ref" "$viv" ni-discovery-idle "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-discovery-idle 'Locking psr/log'
+
+# Bloqué (`allow-plugins` à false) : pas chargé.
+ni_base ps-blocked phpstan; ni_rm "$GC"
+for d in "$ref" "$viv"; do jq '.config["allow-plugins"]["phpstan/extension-installer"] = false' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "$ref" "$viv" ni-ps-blocked "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-ps-blocked '^phpstan/'
+# Sans --no-scripts (aucun script déclaré) : les écouteurs partent pareil.
+ni_reset; ni_rm "$GC"; for d in "$ref" "$viv"; do jq '.config["allow-plugins"]["phpstan/extension-installer"] = true' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "$ref" "$viv" ni-ps-scripts update --no-install --no-audit --no-security-blocking -- update --no-install --no-audit --no-security-blocking --no-fallback
+expect ni-ps-scripts '^> phpstan/phpstan-strict-rules: installed$'
+# Le répertoire du plugin supprimé : sa classe introuvable, pas chargé.
+ni_reset; ni_rm "$GC" vendor/phpstan/extension-installer
+step "$ref" "$viv" ni-ps-plugin-dir-gone "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect_not ni-ps-plugin-dir-gone '^phpstan/'
+# `config.lock: false` : aucun lock écrit, l'écouteur part quand même.
+ni_reset; ni_rm "$GC"
+for d in "$ref" "$viv"; do jq '.config.lock = false' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json"; done
+step "$ref" "$viv" ni-ps-lock-false "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-lock-false '^> phpstan/phpstan-strict-rules: installed$'
+# Un ensemble insoluble : code 2, aucun écouteur.
+ni_reset; ni_rm "$GC"; ps_json "$PS_BASE, \"phpstan/phpstan-strict-rules\": \"9.9.9\"" '"phpstan/php-8-stubs": "0.4.43"' "$PS_IGNORE"
+step "$ref" "$viv" ni-ps-unsolvable "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-unsolvable 'Your requirements could not be resolved'; expect_not ni-ps-unsolvable '^phpstan/'
+# --working-dir depuis le répertoire parent : `getcwd()` est le projet.
+ni_reset; ni_rm "$GC"
+c_code=0; v_code=0
+(cd "$WORK" && composer "${NI[@]}" --working-dir="$ref" --no-interaction --no-ansi >"$WORK/ni-ps-working-dir.composer.all" 2>&1) || c_code=$?
+(cd "$WORK" && "$VIVACITY" "${NI[@]}" --working-dir="$viv" --no-fallback >"$WORK/ni-ps-working-dir.vivacity.all" 2>&1) || v_code=$?
+if [ "$c_code" = "$v_code" ] && diff <(grep -v '^  - Downloading ' "$WORK/ni-ps-working-dir.composer.all") <(grep -v '^vivacity: ' "$WORK/ni-ps-working-dir.vivacity.all") >/dev/null \
+   && grep -q '^> phpstan/phpstan-strict-rules: installed$' "$WORK/ni-ps-working-dir.composer.all" \
+   && compare_vendor "$ref" "$viv" "$WORK/ni-ps-working-dir.diff" >/dev/null; then
+  echo "OK   ni-ps-working-dir : projet et sortie fusionnée identiques"
+else
+  echo "FAIL ni-ps-working-dir : codes $c_code vs $v_code"; { diff "$WORK/ni-ps-working-dir.composer.all" "$WORK/ni-ps-working-dir.vivacity.all" || true; } | head -8; status=1
+fi
+# Un vendor-dir configuré : les chemins écrits suivent.
+lock ni-ps-vendor-dir "{\"name\": \"vivacity/plugin-lines-phpstan-vendor-dir\", \"require\": {$PS_BASE}, \"require-dev\": {$PS_DEV}, $PS_IGNORE,
+  \"config\": {\"vendor-dir\": \"lib\", \"allow-plugins\": {\"phpstan/extension-installer\": true}}}"
+ni_base ps-vendor-dir ni-ps-vendor-dir; ni_rm lib/phpstan/extension-installer/src/GeneratedConfig.php
+step "$ref" "$viv" ni-ps-vendor-dir "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-ps-vendor-dir '^> phpstan/phpstan-strict-rules: installed$'
+# Un écouteur émulé installé GLOBALEMENT : chargé aussi (le dépôt global),
+# vivacity ne joue que ceux du projet — rendu.
+ni_base ps-global phpstan
+# (`Factory::createGlobalComposer` : seulement avec COMPOSER_HOME/composer.json)
+mkdir -p "$WORK/home/vendor/composer" "$WORK/home/vendor/phpstan/extension-installer"
+printf '{}\n' > "$WORK/home/composer.json"
+printf '{"packages": [{"name": "phpstan/extension-installer", "version": "1.4.3", "type": "composer-plugin", "install-path": "../phpstan/extension-installer"}], "dev": true, "dev-package-names": []}\n' > "$WORK/home/vendor/composer/installed.json"
+ni_refused ni-global '^  - plugin phpstan/extension-installer is installed globally' 1 "${NI[@]}" --no-fallback
+rm -rf "$WORK/home/vendor" "$WORK/home/composer.json"
+# yiisoft/yii2-composer : `activate` recrée extensions.php, sans
+# installation et en dry run aussi.
+lock ni-yii2 '{"name": "vivacity/plugin-lines-yii2", "require": {"yiisoft/yii2-composer": "2.0.11", "psr/log": "3.0.2"},
+  "config": {"allow-plugins": {"yiisoft/yii2-composer": true}}}'
+ni_base yii2 ni-yii2; ni_rm vendor/yiisoft/extensions.php
+step "$ref" "$viv" ni-yii2-lost "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-yii2-lost 'Nothing to modify in lock file'
+ni_reset; ni_rm vendor/yiisoft/extensions.php
+step "$ref" "$viv" ni-yii2-dry-run update --dry-run "${R[@]}" -- update --dry-run "${R[@]}" --no-fallback
+expect ni-yii2-dry-run 'Nothing to modify in lock file'
+# Un ensemble insoluble : le plugin a été activé au chargement quand même.
+ni_reset; ni_rm vendor/yiisoft/extensions.php
+ni_json '{"name": "vivacity/plugin-lines-yii2", "require": {"yiisoft/yii2-composer": "2.0.11", "psr/log": "9.9.9"}, "config": {"allow-plugins": {"yiisoft/yii2-composer": true}}}'
+step "$ref" "$viv" ni-yii2-unsolvable "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-yii2-unsolvable 'Your requirements could not be resolved'
+# cweagans/composer-patches (installé par Composer : vivacity rend son
+# install) : `PRE_UPDATE_CMD` part aussi sans installation — rendu.
+lock ni-patches '{"name": "vivacity/plugin-lines-patches", "require": {"cweagans/composer-patches": "1.7.3", "psr/log": "3.0.2"},
+  "config": {"allow-plugins": {"cweagans/composer-patches": true}}}'
+ni_base_composer patches ni-patches
+ni_refused ni-patches '^  - plugin cweagans/composer-patches runs listeners' 1 "${NI[@]}" --no-fallback
+# symfony/flex avec phpstan : la sortie de Flex à son rang d'activation
+# (phpstan avant symfony/flex, ordre des noms), l'index servi en local.
+flex_index_serve
+lock ni-flex "{\"name\": \"vivacity/plugin-lines-flex\", \"require\": {\"symfony/flex\": \"v2.11.0\", $PS_BASE},
+  \"extra\": {\"symfony\": {\"endpoint\": [\"$FLEX_INDEX_URL\"]}},
+  \"config\": {\"secure-http\": false, \"allow-plugins\": {\"symfony/flex\": true, \"phpstan/extension-installer\": true}}}"
+ni_base flex ni-flex; ni_rm "$GC"
+step "$ref" "$viv" ni-flex "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-flex 'looking for funding' "$PHPSTAN" '^Run composer recipes at any time'
+# Flex requis par un paquet installé (`PackageSorter` : poids -1) : activé
+# avant phpstan, sa sortie passe devant — l'ancien emplacement (Flex en
+# dernier) ne le donnerait pas.
+mkdir -p "$WORK/pkg/needs-flex"
+printf '{"name": "vivacity/needs-flex", "version": "1.0.0", "require": {"symfony/flex": "v2.11.0"}}\n' > "$WORK/pkg/needs-flex/composer.json"
+lock ni-flex-weighted "{\"name\": \"vivacity/plugin-lines-flex-weighted\",
+  \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pkg/needs-flex\"}],
+  \"require\": {\"vivacity/needs-flex\": \"1.0.0\", \"symfony/flex\": \"v2.11.0\", $PS_BASE},
+  \"extra\": {\"symfony\": {\"endpoint\": [\"$FLEX_INDEX_URL\"]}},
+  \"config\": {\"secure-http\": false, \"allow-plugins\": {\"symfony/flex\": true, \"phpstan/extension-installer\": true}}}"
+ni_base flex-weighted ni-flex-weighted; ni_rm "$GC"
+step "$ref" "$viv" ni-flex-weighted "${NI[@]}" -- "${NI[@]}" --no-fallback
+order ni-flex-weighted 'looking for funding' '^Run composer recipes at any time' "$PHPSTAN"
+flex_index_stop
 exit $status
