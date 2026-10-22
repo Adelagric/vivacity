@@ -19,7 +19,8 @@
 #
 # Seconde partie, `online` (docs/plans/verbose-plugins.md) : des projets à
 # plugins ACTIFS résolus sur Packagist en ligne (lock écrit une fois par
-# Composer sous `--no-plugins`, versions exactes sauf le projet Laravel),
+# Composer sous `--no-plugins`, versions exactes à la racine ; le projet
+# Laravel a son lock figé, fixtures/projects/laravel-pest),
 # COMPOSER_HOME isolé, cache de fichiers partagé. Sous `-v`, Composer écrit une
 # ligne `> <événement>: <classe>-><méthode>` par écouteur de plugin qu'il
 # appelle (EventDispatcher.php:230) : chaque cas compare stdout et stderr
@@ -390,6 +391,7 @@ PROJECTS[c3]='{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.9.0",
 PROJECTS[c3-old]='{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.8.1","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
 PROJECTS[message]='{"name":"vivacity/verbose-message","require":{"drupal/core-project-message":"11.4.6"},'"$(allow drupal/core-project-message)"'}'
 PROJECTS[unpack]='{"name":"vivacity/verbose-unpack","require":{"drupal/core-recipe-unpack":"11.4.6"},'"$(allow drupal/core-recipe-unpack)"'}'
+PROJECTS[bamarni-dev]='{"name":"vivacity/verbose-bamarni-dev","require-dev":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
 PROJECTS[bamarni]='{"name":"vivacity/verbose-bamarni","require":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
 PROJECTS[installers]='{"name":"vivacity/verbose-installers","require":{"composer/installers":"v2.3.0","roots/wordpress-core-installer":"v4.0.0"},'"$(allow composer/installers roots/wordpress-core-installer)"'}'
 # mnsami avec composer/installers est rendu à Composer dès le niveau normal
@@ -478,6 +480,13 @@ ONLINE_CASES=(
   "bamarni|require psr/clock:1.0.0 --dry-run @vendor:plugins @levels:-v @expect:BamarniBinPlugin_composer_tmp0->onCommandEvent$"
   "bamarni|remove bamarni/composer-bin-plugin --dry-run @vendor:plugins @levels:-v @expect:BamarniBinPlugin_composer_tmp0->onCommandEvent$"
   "bamarni|require psr/clock:1.0.0 --no-update @vendor:plugins @levels:-v @silent"
+  # Chargé, donc appelé, quel que soit le mode du dump (en require-dev sous
+  # --no-dev) ; ses classes absentes du disque : pas chargé au démarrage (pas
+  # de `command`), réinstallé puis appelé. (Le même `dump-autoload` sur le
+  # répertoire perdu n'est pas un cas : vivacity ne purge pas le paquet de
+  # l'autoloader comme `Factory::purgePackages`, écart antérieur noté.)
+  "bamarni-dev|dump-autoload --no-dev @vendor:plugins @levels:normal,-v @expect:Calling.onPostAutoloadDump"
+  "bamarni|install @vendor:plugins @rm:vendor/bamarni/composer-bin-plugin @levels:normal,-v"
   # Sans écouteur : rien de plus sous -v, mais leurs classes comptent dans
   # le compteur de `require` (custom-directory-installer 2.0.0 en déclare
   # trois : pest-plugin, chargé après lui, prend le quatrième suffixe).
@@ -621,12 +630,14 @@ if [[ " ${FIXTURES[*]} " == *" online "* ]]; then
            || ! grep -E '^(vivacity: |  - plugin )' "$ONLINE_WORK/$n.vivacity.err" | grep -qE -- "$delegates"; then
           echo "FAIL $label : vivacity ne rend pas la commande avec la raison « $delegates »"; grep -E '^(vivacity: |  - plugin )' "$ONLINE_WORK/$n.vivacity.err" | head -3 || true; ok=0
         fi
-        # Ce que Composer écrit une fois la main rendue est comparé ; une
-        # délégation décidée sur le lock résolu suit les lignes que vivacity
-        # a déjà écrites (« has been updated », « Updating dependencies »…),
-        # que Composer réécrit — écart connu (HANDOVER, sortie d'une run
-        # rendue à Composer).
+        # Avant la ligne « delegating to », seules les lignes propres à
+        # vivacity (sa raison) : une ligne de la commande elle-même serait
+        # écrite deux fois, Composer la réécrivant. Ce qui suit est comparé.
         for f in err all; do
+          before=$(sed -n '/^vivacity: delegating to /q;p' "$ONLINE_WORK/$n.vivacity.$f" | grep -v -E '^(vivacity: |  - plugin |Note: )' || true)
+          if [ -n "$before" ]; then
+            echo "FAIL $label : vivacity écrit avant de rendre la main (Composer le réécrit)"; printf '%s\n' "$before" | head -4; ok=0
+          fi
           sed -n '/^vivacity: delegating to /,$p' "$ONLINE_WORK/$n.vivacity.$f" | tail -n +2 > "$ONLINE_WORK/$n.vivacity.$f.cut"
           mv "$ONLINE_WORK/$n.vivacity.$f.cut" "$ONLINE_WORK/$n.vivacity.$f"
         done

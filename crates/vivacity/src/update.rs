@@ -749,6 +749,9 @@ pub(crate) fn resolve_and_lock(
             }
         }
     }
+    // The run is vivacity's from here on as far as -v is concerned: what
+    // it kept since the start (`run_once`) is written now.
+    vivacity_core::io::release_deferred();
 
     // symfony/flex with install: its `POST_UPDATE_CMD` applies recipes to
     // what the install lays out. vivacity emulates that only where Flex

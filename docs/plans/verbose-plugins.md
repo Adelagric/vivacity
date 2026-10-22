@@ -223,7 +223,8 @@ celle mesurée ; hors de ces versions (antérieure, postérieure, branche dev),
    (`VERBOSE_PLUGINS` : nom, versions lues, classe, écouteurs ;
    `VERBOSE_DELEGATED` : nom, raison), `issue` (la raison d'une délégation, ou
    rien), `announce` (la ligne `>` d'un plugin pour un événement, au niveau
-   `-v`), le compteur de renommage (`reload_plugins`, `note_updates`) ; tests
+   `-v`), le compteur de renommage (`first_load`, `reload_plugins`,
+   `plugin_registered`) ; tests
    unitaires.
 3. `crates/vivacity/src/fallback.rs` : `active_plugin` → la raison de
    `verbose_listeners::issue` (petit diff : une autre branche y travaille).
@@ -233,7 +234,8 @@ celle mesurée ; hors de ces versions (antérieure, postérieure, branche dev),
    `post-install-cmd`/`post-update-cmd` (plus message, discovery, recipe-unpack
    dans la liste parcourue), à `post-autoload-dump` (plus runtime et pest), à
    `pre-autoload-dump` (discovery) ; bamarni : ses lignes `logDebug` ;
-   `note_updates` sur la transaction.
+   `note_plugin_operations` sur la transaction (premier chargement, puis
+   chaque opération de plugin).
 6. `crates/vivacity/src/dump.rs` : `pre-autoload-dump` et `post-autoload-dump`
    dans l'ordre de chargement.
 7. `crates/vivacity/src/update.rs` (`print_post_update` : `post-update-cmd`
@@ -348,6 +350,55 @@ cette section l'emporte.
 Risque sur les harnais existants jugé faible par le relecteur : `all-verbose`
 de plugin-lines.sh reste rendu (dealerdirect) et sa phrase attendue correspond
 encore.
+
+## Revue indépendante (sous-agent frais, sur `git diff main`, 2026-10-22) — et ce qui a changé
+
+Pas de bloquant ; trois majeurs, deux mineurs, des nits. Le relecteur a
+rejoué la partie `online` du harnais (113 passages, tous verts) et cinq
+scénarios à la main (`require --dry-run -v` avec pest et discovery,
+`update codeception/c3 -v`, `require` qui amène deux plugins, `require`
+avec choix de version, `remove` d'un plugin) : identiques à l'octet.
+
+1. **Majeur — une délégation tardive réimprimait le début de la run.**
+   `require php-http/discovery:1.15.0 -v` sur un projet à pest-plugin :
+   `resolved_issue` rend la main après la résolution, vivacity avait déjà
+   écrit « has been updated », « Running composer update… », « Updating
+   dependencies » — que Composer réécrit ; `main` rendait la main avant
+   toute ligne. Et le harnais coupait tout ce qui précède « delegating to ».
+   **Corrigé** : `vivacity_core::io::defer` (les deux flux gardés dans
+   l'ordre) dès `run_once` pour un `update`/`require`/`remove` qui installe
+   sous `-v`, relâchés par `resolve_and_lock` une fois le lock accepté,
+   jetés par `delegate_resolution` quand Composer prend la main ;
+   le harnais n'admet plus avant « delegating to » que les lignes propres à
+   vivacity (`vivacity: `, `  - plugin `). Reste : l'`install` sans lock.
+2. **Majeur — bamarni : la ligne `>` suivait le chargement, ses lignes le
+   mode dev.** `dump-autoload --no-dev` avec bamarni en `require-dev` :
+   Composer (plugin chargé) écrit la ligne, « Calling onPostAutoloadDump() »
+   et les dépréciations, vivacity la ligne seule ; répertoire supprimé :
+   l'inverse. **Corrigé** : ses lignes suivent le chargement (niveau normal
+   compris) ; cas `bamarni-dev dump-autoload --no-dev` et `bamarni install
+   @rm:vendor/bamarni/…` (normal et `-v`). La même dissymétrie existe pour
+   package-versions (ses deux lignes et Versions.php suivent le mode dev) :
+   **notée**, laissée (écart du niveau normal, fichier compris ; un
+   package-versions en `require-dev` est rare).
+3. **Majeur — des bornes uniques acceptaient les correctifs à venir.**
+   `>=5.3.0 <=8.1.9` aurait accepté une v7.4.22 non lue. **Corrigé** : une
+   plage par branche, jusqu'au dernier tag lu de la branche ; tests
+   (`v7.4.22`, `v4.0.1`, `11.4.12`, `12.0.0-beta3` refusés).
+4. **Mineur — un test lisait le `COMPOSER_HOME` de la machine.**
+   **Corrigé** : le répertoire global est un paramètre d'`issue`, le cas
+   « non autorisé » refuse explicitement.
+5. **Mineur — README** (la liste « ci-dessus » n'existait pas ; cas rendus
+   incomplets). **Corrigé**.
+6. **Nits** : CHANGELOG (le correctif de bamarni sous `### Fixed`), noms
+   périmés du plan, en-tête du harnais : **corrigés**. Le lock figé
+   contenait, par laravel/pao → laravel/agent-detector, des mots-clés amont
+   nommant des outils : **retiré** (laravel/pao ôté du squelette Laravel +
+   Pest).
+
+Trouvé en écrivant ces cas : `dump-autoload` sur un plugin dont le
+répertoire a disparu garde le paquet dans l'autoloader, là où Composer le
+purge (`Factory::purgePackages`) — reproduit sur `main`, antérieur, noté.
 
 ## Critère « vert »
 

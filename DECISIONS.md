@@ -4052,9 +4052,11 @@ revue).
   plugin recharge les siennes. Porté comme un ensemble de classes déclarées
   (minuscules), remis à zéro à chaque `run` (méta-analyse, point 9).
 - **Versions.** La table lie chaque plugin aux tags lus un par un (classe,
-  `getSubscribedEvents`, écritures VERBOSE hors tests) ; une version publiée
-  après, une branche dev, ou 1.15–1.16 de php-http/discovery (une table
-  d'écouteurs différente) rendent `-v` à Composer, nommées. Contrôlées :
+  `getSubscribedEvents`, écritures VERBOSE hors tests), **branche par
+  branche** (`>=7.4.0 <=7.4.21 || …`, revue, point 3 : une borne unique
+  acceptait les correctifs à venir d'une branche maintenue) ; une version
+  publiée après, une branche dev, ou 1.15–1.16 de php-http/discovery (une
+  table d'écouteurs différente) rendent `-v` à Composer, nommées. Contrôlées :
   version installée, version du lock, version résolue (`resolved_issue`,
   avant l'écriture du lock). Coût accepté : une sortie de symfony/runtime
   renvoie `-v` des projets Symfony… mais Flex les y renvoie déjà. Mise à
@@ -4069,6 +4071,15 @@ revue).
   global), `--run-scripts`, et phpstan / rector / c3 sous `--no-install`
   (Composer joue leur effet, vivacity non : la ligne `>` seule aurait
   aggravé l'écart — méta-analyse, point 2).
+- **Délégation après résolution, sans doublon** (revue, point 1). Sous
+  `-v`, un `update`/`require`/`remove` qui installe garde ses lignes
+  (`vivacity_core::io::defer`, les deux flux dans l'ordre) jusqu'au lock
+  résolu : relâchées si la run reste à vivacity, jetées si un plugin qu'elle
+  activerait la rend à Composer — qui les écrit lui-même. Sinon ces lignes
+  (« has been updated », « Updating dependencies »…) sortaient deux fois,
+  alors que `main` rendait ces runs avant toute ligne. Coût : rien ne
+  s'affiche pendant la résolution sous `-v`. Non couvert : l'`install` sans
+  lock (résolu comme un `update`), rare.
 - **`--dry-run`** ne coupe que les événements de script : `command` part
   quand même (bamarni) et `require`/`remove` rechargent (méta-analyse,
   point 1).

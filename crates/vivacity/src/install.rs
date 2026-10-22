@@ -1432,7 +1432,11 @@ pub(crate) fn post_autoload_dump_printers(
             crate::verbose_listeners::announce(plugin, event, manifest);
         }
         if plugin == vivacity_core::bamarni_bin::PLUGIN_NAME {
-            emulate_bamarni_bin(local, manifest, with_dev, plugins_enabled);
+            // Composer calls it when the plugin is loaded — installed, its
+            // classes on disk, whatever the dev mode of this dump.
+            if loaded {
+                emulate_bamarni_bin(manifest);
+            }
         } else if plugin == vivacity_core::package_versions::PLUGIN_NAME {
             emulate_package_versions(project, local, manifest, with_dev, plugins_enabled)?;
         }
@@ -1777,25 +1781,16 @@ pub(crate) fn emulate_c3(
     Ok(())
 }
 
-/// bamarni/composer-bin-plugin's `POST_AUTOLOAD_DUMP` listener: the
-/// deprecation lines again (the plugin now installed and allowed).
-pub(crate) fn emulate_bamarni_bin(
-    local: &vivacity_core::lock::Lock,
-    manifest: &serde_json::Value,
-    with_dev: bool,
-    plugins_enabled: bool,
-) {
+/// bamarni/composer-bin-plugin's `POST_AUTOLOAD_DUMP` listener
+/// (`onPostAutoloadDump`), for a loaded plugin: its `logDebug` line at -v,
+/// then the deprecation lines again — unless `allow-plugins` refuses it.
+pub(crate) fn emulate_bamarni_bin(manifest: &serde_json::Value) {
     use vivacity_core::bamarni_bin as bin;
     let allowed = matches!(
         vivacity_core::layout::plugin_allowed(manifest, bin::PLUGIN_NAME),
         vivacity_core::layout::PluginVerdict::Allowed
     );
-    if !plugins_enabled
-        || !allowed
-        || !local
-            .wanted_packages(with_dev)
-            .any(|p| p.name() == bin::PLUGIN_NAME)
-    {
+    if !allowed {
         return;
     }
     // `onPostAutoloadDump`'s `logDebug` (BamarniBinPlugin.php:88), at -v.

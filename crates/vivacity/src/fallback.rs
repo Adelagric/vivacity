@@ -94,9 +94,14 @@ pub(crate) fn delegate_resolution(
     // QUIET when the run stops here, so that an exit 3 is never mute.
     let composer = which_composer();
     let stops = no_fallback || composer.is_none();
-    if !stops {
-        // Composer writes what vivacity held (the root-version warning).
+    if stops {
+        // The run ends here: what it kept under -v is its output.
+        vivacity_core::io::release_deferred();
+    } else {
+        // Composer writes what vivacity held (the root-version warning), and
+        // what it kept under -v.
         vivacity_core::io::drop_held();
+        vivacity_core::io::drop_deferred();
     }
     let reason_line = |line: &str| {
         if stops {
@@ -404,7 +409,13 @@ pub(crate) fn active_plugin(
     run_scripts: bool,
     no_install: bool,
 ) -> Option<String> {
-    crate::verbose_listeners::issue(project, plugins_enabled, run_scripts, no_install)
+    crate::verbose_listeners::issue(
+        project,
+        crate::plugin_order::global_composer_dir().as_deref(),
+        plugins_enabled,
+        run_scripts,
+        no_install,
+    )
 }
 
 /// The whole command handed to Composer before anything is read or written

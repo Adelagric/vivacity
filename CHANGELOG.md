@@ -35,12 +35,21 @@ byte-identical-output promise are the public API.
   version, a plugin installed globally, `--run-scripts`, phpstan, rector
   and c3 under `--no-install` (vivacity does not play their effect there),
   and a plugin the resolution would bring in under those rules (decided on
-  the solved lock, before it is written). `harness/verbosity.sh` gains a
-  second part with plugins active (online projects, a frozen Laravel + Pest
-  skeleton): stdout, stderr, the merged output and the project compared.
-- bamarni/composer-bin-plugin's `command` lines need its classes on disk,
-  as Composer loads it (a plugin whose directory is gone printed its
-  deprecation lines at the `command` event).
+  the solved lock, before it is written; under `-v` the lines of such a
+  resolution are held until then, so that Composer does not print them a
+  second time). Each table entry is bound to the tags read, branch by
+  branch: a later patch release goes to Composer until it is read.
+  `harness/verbosity.sh` gains a second part with plugins active (online
+  projects, a frozen Laravel + Pest skeleton): stdout, stderr, the merged
+  output and the project compared.
+
+### Fixed
+- **bamarni/composer-bin-plugin's lines follow whether Composer loaded
+  it.** Its `command` lines needed only an installed.json entry (a plugin
+  whose directory is gone printed them; Composer does not load it), and its
+  `post-autoload-dump` lines needed it in the dump's dev mode (a
+  `dump-autoload --no-dev` with the plugin in `require-dev` printed none;
+  Composer, which loaded it, prints them).
 
 ### Fixed
 - **`update --no-install` runs the plugins' `POST_UPDATE_CMD` listeners.**

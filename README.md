@@ -177,13 +177,23 @@ set, the stale-lock warning) and the exit code; `-v` adds Composer's
 verbose lines in their places — resolution durations, the pool and rule
 counts, the `Installs:` / `Updates:` / `Removals:` summaries, the detailed
 explanations, and the `> <event>: <class>-><method>` line Composer writes
-for each plugin listener it calls, in the plugins' activation order (the
-plugins listed above, in the versions whose source was read).
+for each plugin listener it calls, in the plugins' activation order:
+symfony/runtime, pestphp/pest-plugin, php-http/discovery,
+composer/package-versions-deprecated, phpstan/extension-installer,
+rector/extension-installer, codeception/c3, drupal/core-project-message,
+drupal/core-recipe-unpack and bamarni/composer-bin-plugin (with its two
+`Calling …` lines), each in the versions whose source was read;
+composer/installers, roots/wordpress-core-installer,
+mnsami/composer-custom-directory-installer, ibexa/post-install and
+ergebnis/composer-normalize have no listener and add nothing.
 `-vv` and `-vvv` hand the command to Composer, whose debug output vivacity
-does not reproduce; so does `-v` with a plugin whose verbose lines are not
-reproduced — symfony/flex, dealerdirect, composer-merge-plugin,
-yii2-composer, symfony/thanks, another plugin or version — and the
-delegation line names it. The level is
+does not reproduce; so does `-v` with symfony/flex, dealerdirect,
+composer-merge-plugin, yii2-composer, symfony/thanks or the licence-check
+plugin, with any other plugin or version, with a plugin installed
+globally, under `--run-scripts`, and with phpstan, rector or c3 under
+`--no-install` (vivacity does not play their effect there); a plugin that
+a resolution would bring in is judged on the solved lock, before it is
+written, and the delegation line names the reason. The level is
 read as Symfony Console reads it (`SHELL_VERBOSITY`, then `-q`, then
 `-v…`), and passed on to every Composer process vivacity starts.
 `harness/verbosity.sh` compares stdout and stderr whole, at each level.

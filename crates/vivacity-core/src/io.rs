@@ -30,6 +30,15 @@
 //! wrote anything drops them ([`drop_held`]), since the Composer it runs
 //! writes its own. The traces of `VIVACITY_TRACE` (diagnostics, not
 //! Composer's output) bypass them.
+//!
+//! A run can also be *deferred* ([`defer`]): every line, on either stream,
+//! is kept in order instead of written, until the command knows the run is
+//! its own ([`release_deferred`]) or hands it to Composer before Composer
+//! would have printed anything different ([`drop_deferred`]). `update`,
+//! `require` and `remove` under `-v` use it up to the solved lock, where a
+//! plugin the install would activate can still send the run to Composer
+//! (docs/plans/verbose-plugins.md): the lines already printed would
+//! otherwise come twice.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -71,8 +80,74 @@ impl Scope {
 
 impl Drop for Scope {
     fn drop(&mut self) {
+        // Whatever a run still defers is its own output: written, not lost.
+        release_deferred();
         drop_held();
         LEVEL.store(Verbosity::Normal as u8, Ordering::Relaxed);
+    }
+}
+
+/// The deferred lines (`true`: stdout), in order, and whether the run
+/// defers (the common case — not deferring — takes no lock).
+static DEFERRED: Mutex<Vec<(bool, String)>> = Mutex::new(Vec::new());
+static DEFERRING: AtomicBool = AtomicBool::new(false);
+
+fn deferred() -> std::sync::MutexGuard<'static, Vec<(bool, String)>> {
+    DEFERRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// From now on, every line is kept instead of written ([`release_deferred`],
+/// [`drop_deferred`]).
+pub fn defer() {
+    DEFERRING.store(true, Ordering::Release);
+}
+
+/// Writes the deferred lines, in order, each on its stream, and stops
+/// deferring.
+pub fn release_deferred() {
+    if !DEFERRING.load(Ordering::Acquire) {
+        return;
+    }
+    let mut slot = deferred();
+    DEFERRING.store(false, Ordering::Release);
+    for (stdout, line) in slot.drain(..) {
+        if stdout {
+            println!("{line}");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Forgets the deferred lines and stops deferring: the command goes to
+/// Composer, which writes its own.
+pub fn drop_deferred() {
+    if !DEFERRING.load(Ordering::Acquire) {
+        return;
+    }
+    let mut slot = deferred();
+    DEFERRING.store(false, Ordering::Release);
+    slot.clear();
+}
+
+/// Writes one line on stderr (`stdout` false) or stdout, after the held
+/// lines — or keeps it while the run defers. The writing macros' body.
+pub fn emit(stdout: bool, line: std::fmt::Arguments<'_>) {
+    release_held();
+    if DEFERRING.load(Ordering::Acquire) {
+        let mut slot = deferred();
+        // Checked again under the lock: a release may have just ended.
+        if DEFERRING.load(Ordering::Acquire) {
+            slot.push((stdout, line.to_string()));
+            return;
+        }
+    }
+    if stdout {
+        println!("{line}");
+    } else {
+        eprintln!("{line}");
     }
 }
 
@@ -107,10 +182,24 @@ pub fn release_held() {
         return;
     }
     let mut slot = held();
-    for line in slot.drain(..) {
+    let lines: Vec<String> = slot.drain(..).collect();
+    HOLDING.store(false, Ordering::Release);
+    drop(slot);
+    if DEFERRING.load(Ordering::Acquire) {
+        let mut d = deferred();
+        if DEFERRING.load(Ordering::Acquire) {
+            d.extend(lines.into_iter().map(|l| (false, l)));
+            return;
+        }
+        drop(d);
+        for line in lines {
+            eprintln!("{line}");
+        }
+        return;
+    }
+    for line in lines {
         eprintln!("{line}");
     }
-    HOLDING.store(false, Ordering::Release);
 }
 
 /// Forgets the held lines: the command goes to Composer, which writes its
@@ -261,10 +350,14 @@ macro_rules! say_verbose {
 /// part), after the held lines.
 #[macro_export]
 macro_rules! say_at {
-    ($level:expr, $($arg:tt)*) => {
+    ($level:expr $(,)?) => {
         if $crate::io::shows($level) {
-            $crate::io::release_held();
-            eprintln!($($arg)*);
+            $crate::io::emit(false, format_args!(""));
+        }
+    };
+    ($level:expr, $($arg:tt)+) => {
+        if $crate::io::shows($level) {
+            $crate::io::emit(false, format_args!($($arg)*));
         }
     };
 }
@@ -272,10 +365,14 @@ macro_rules! say_at {
 /// A `NORMAL` line on stdout (`$io->write($line)`), after the held lines.
 #[macro_export]
 macro_rules! out {
-    ($($arg:tt)*) => {
+    () => {
         if $crate::io::shows($crate::io::Verbosity::Normal) {
-            $crate::io::release_held();
-            println!($($arg)*);
+            $crate::io::emit(true, format_args!(""));
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::io::shows($crate::io::Verbosity::Normal) {
+            $crate::io::emit(true, format_args!($($arg)*));
         }
     };
 }
@@ -293,9 +390,30 @@ mod tests {
         assert_eq!(escape_data("%0A"), "%250A");
     }
 
-    // One test: the level is process-wide and cargo runs tests in threads.
+    // One test: the level and the deferral are process-wide and cargo runs
+    // tests in threads.
     #[test]
     fn levels_and_symfony_parsing() {
+        // Deferred lines are kept in order, released once, or dropped.
+        defer();
+        hold(Verbosity::Normal, "held".to_owned());
+        emit(false, format_args!("err {}", 1));
+        emit(true, format_args!("out"));
+        assert_eq!(
+            deferred().clone(),
+            [
+                (false, "held".to_owned()),
+                (false, "err 1".to_owned()),
+                (true, "out".to_owned())
+            ]
+        );
+        release_deferred();
+        assert!(deferred().is_empty());
+        defer();
+        emit(false, format_args!("gone"));
+        drop_deferred();
+        assert!(deferred().is_empty());
+        assert!(!DEFERRING.load(Ordering::Acquire));
         assert_eq!(level(), Verbosity::Normal);
         {
             let _s = Scope::new(Verbosity::Quiet);

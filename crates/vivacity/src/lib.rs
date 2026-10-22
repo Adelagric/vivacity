@@ -602,6 +602,13 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     }
     // The `_composer_tmpN` counter belongs to one run, like a process.
     verbose_listeners::reset();
+    // Under -v, a resolution that installs may still go to Composer once
+    // solved (a plugin it would activate, `verbose_listeners::resolved_issue`):
+    // its lines are kept until then, so that Composer does not print them a
+    // second time (released by `resolve_and_lock`, dropped by the hand-over).
+    if requested == 2 && cli.plugins_enabled() && cli.resolves_then_installs() {
+        vivacity_core::io::defer();
+    }
     // `RootPackageLoader::load` guesses the root's version with git, then
     // hg, fossil and svn (`VersionGuesser::guessVersion`); vivacity reads git
     // only. Where one of the others would answer, the command is Composer's,
@@ -740,6 +747,17 @@ impl Cli {
             Cli::Update(a) => a.no_install && !a.dry_run,
             Cli::Require(a) => a.no_install && !a.no_update && !a.dry_run,
             Cli::Remove(a) => a.no_install && !a.no_update && !a.dry_run,
+            Cli::Install(_) | Cli::DumpAutoload(_) => false,
+        }
+    }
+
+    /// `update`, `require` or `remove` that installs what it resolves (no
+    /// `--no-install`, `--no-update` or `--dry-run`).
+    fn resolves_then_installs(&self) -> bool {
+        match self {
+            Cli::Update(a) => !a.no_install && !a.dry_run,
+            Cli::Require(a) => !a.no_install && !a.no_update && !a.dry_run,
+            Cli::Remove(a) => !a.no_install && !a.no_update && !a.dry_run,
             Cli::Install(_) | Cli::DumpAutoload(_) => false,
         }
     }

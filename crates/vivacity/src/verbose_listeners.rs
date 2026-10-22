@@ -35,7 +35,9 @@ use std::path::Path;
 /// on these commands (`post-create-project-cmd`) are left out.
 pub(crate) struct VerbosePlugin {
     pub(crate) name: &'static str,
-    /// A Composer constraint on the plugin's version.
+    /// The versions read, as a Composer constraint: one range per branch,
+    /// up to the last tag of that branch when it was read — a later patch
+    /// release is not accepted unread.
     pub(crate) versions: &'static str,
     pub(crate) class: &'static str,
     pub(crate) listeners: &'static [(&'static str, &'static str)],
@@ -55,33 +57,33 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     // `Installer`, a `composer-installer`, before).
     VerbosePlugin {
         name: "composer/installers",
-        versions: ">=1.0.0 <=2.3.0",
+        versions: ">=1.0.0 <=1.0.25 || >=1.1.0 <=1.1.0 || >=1.2.0 <=1.2.0 || >=1.3.0 <=1.3.0 || >=1.4.0 <=1.4.0 || >=1.5.0 <=1.5.0 || >=1.6.0 <=1.6.0 || >=1.7.0 <=1.7.0 || >=1.8.0 <=1.8.0 || >=1.9.0 <=1.9.0 || >=1.10.0 <=1.10.0 || >=1.11.0 <=1.11.0 || >=1.12.0 <=1.12.0 || >=2.0.0 <=2.0.1 || >=2.1.0 <=2.1.1 || >=2.2.0 <=2.2.0 || >=2.3.0 <=2.3.0",
         class: "Composer\\Installers\\Plugin",
         listeners: &[],
     },
     VerbosePlugin {
         name: "roots/wordpress-core-installer",
-        versions: ">=1.0.0 <=4.0.0",
+        versions: ">=1.0.0 <=1.0.0 || >=1.1.0 <=1.1.0 || >=1.100.0 <=1.100.0 || >=2.0.0 <=2.0.0 || >=3.0.0 <=3.0.0 || >=4.0.0 <=4.0.0",
         class: "Roots\\Composer\\WordPressCorePlugin",
         listeners: &[],
     },
     VerbosePlugin {
         name: "mnsami/composer-custom-directory-installer",
-        versions: ">=1.0.0 <=2.3.0",
+        versions: ">=1.0.0 <=1.0.4 || >=1.1.0 <=1.1.1 || >=2.0.0 <=2.0.0 || >=2.1.0 <=2.1.0 || >=2.2.0 <=2.2.1 || >=2.3.0 <=2.3.0",
         class: "Composer\\CustomDirectoryInstaller\\LibraryPlugin",
         listeners: &[],
     },
     // A `CommandProvider`; `activate` / `deactivate` write at DEBUG.
     VerbosePlugin {
         name: "ibexa/post-install",
-        versions: ">=1.0.0 <=5.0.10",
+        versions: ">=1.0.0 <=1.0.16 || >=4.0.0 <=4.0.8 || >=4.1.0 <=4.1.5 || >=4.2.0 <=4.2.4 || >=4.3.0 <=4.3.5 || >=4.4.0 <=4.4.4 || >=4.5.0 <=4.5.7 || >=4.6.0 <=4.6.32 || >=5.0.0 <=5.0.10",
         class: "Ibexa\\PostInstall\\PostInstall",
         listeners: &[],
     },
     // A `CommandProvider` with an empty `activate`.
     VerbosePlugin {
         name: "ergebnis/composer-normalize",
-        versions: ">=0.1.0 <=2.54.0",
+        versions: ">=0.1.0 <=0.1.0 || >=0.2.0 <=0.2.0 || >=0.3.0 <=0.3.0 || >=0.4.0 <=0.4.1 || >=0.5.0 <=0.5.0 || >=0.6.0 <=0.6.0 || >=0.7.0 <=0.7.0 || >=0.8.0 <=0.8.0 || >=0.9.0 <=0.9.0 || >=1.0.0 <=1.0.0 || >=1.1.0 <=1.1.4 || >=1.2.0 <=1.2.0 || >=1.3.0 <=1.3.1 || >=2.0.0 <=2.0.2 || >=2.1.0 <=2.1.2 || >=2.2.0 <=2.2.4 || >=2.3.0 <=2.3.2 || >=2.4.0 <=2.4.0 || >=2.5.0 <=2.5.2 || >=2.6.0 <=2.6.1 || >=2.7.0 <=2.7.1 || >=2.8.0 <=2.8.2 || >=2.9.0 <=2.9.1 || >=2.10.0 <=2.10.0 || >=2.11.0 <=2.11.0 || >=2.12.0 <=2.12.2 || >=2.13.0 <=2.13.4 || >=2.14.0 <=2.14.0 || >=2.15.0 <=2.15.0 || >=2.16.0 <=2.16.0 || >=2.17.0 <=2.17.0 || >=2.18.0 <=2.18.0 || >=2.19.0 <=2.19.0 || >=2.20.0 <=2.20.0 || >=2.21.0 <=2.21.0 || >=2.22.0 <=2.22.0 || >=2.23.0 <=2.23.1 || >=2.24.0 <=2.24.1 || >=2.25.0 <=2.25.2 || >=2.26.0 <=2.26.0 || >=2.27.0 <=2.27.0 || >=2.28.0 <=2.28.3 || >=2.29.0 <=2.29.0 || >=2.30.0 <=2.30.2 || >=2.31.0 <=2.31.0 || >=2.32.0 <=2.32.0 || >=2.33.0 <=2.33.0 || >=2.34.0 <=2.34.0 || >=2.35.0 <=2.35.0 || >=2.36.0 <=2.36.0 || >=2.37.0 <=2.37.0 || >=2.38.0 <=2.38.0 || >=2.39.0 <=2.39.0 || >=2.40.0 <=2.40.0 || >=2.41.0 <=2.41.1 || >=2.42.0 <=2.42.0 || >=2.43.0 <=2.43.0 || >=2.44.0 <=2.44.0 || >=2.45.0 <=2.45.0 || >=2.46.0 <=2.46.0 || >=2.47.0 <=2.47.0 || >=2.48.0 <=2.48.2 || >=2.49.0 <=2.49.0 || >=2.50.0 <=2.50.0 || >=2.51.0 <=2.51.0 || >=2.52.0 <=2.52.0 || >=2.53.0 <=2.53.0 || >=2.54.0 <=2.54.0",
         class: "Ergebnis\\Composer\\Normalize\\NormalizePlugin",
         listeners: &[],
     },
@@ -89,20 +91,20 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     // activated (it always is when the dispatcher asks).
     VerbosePlugin {
         name: "symfony/runtime",
-        versions: ">=5.3.0 <=8.1.9",
+        versions: ">=5.3.0 <=5.3.14 || >=5.4.0 <=5.4.53 || >=6.0.0 <=6.0.19 || >=6.1.0 <=6.1.11 || >=6.2.0 <=6.2.13 || >=6.3.0 <=6.3.12 || >=6.4.0 <=6.4.41 || >=7.0.0 <=7.0.8 || >=7.1.0 <=7.1.7 || >=7.2.0 <=7.2.8 || >=7.3.0 <=7.3.8 || >=7.4.0 <=7.4.21 || >=8.0.0 <=8.0.14 || >=8.1.0 <=8.1.9",
         class: "Symfony\\Component\\Runtime\\Internal\\ComposerPlugin",
         listeners: &[(POST_AUTOLOAD_DUMP, "updateAutoloadFile")],
     },
     VerbosePlugin {
         name: "pestphp/pest-plugin",
-        versions: ">=0.2.0 <=5.0.0",
+        versions: ">=0.2.0 <=0.2.1 || >=0.3.0 <=0.3.0 || >=1.0.0 <=1.0.0 || >=1.1.0 <=1.1.0 || >=2.0.0 <=2.0.1 || >=2.1.0 <=2.1.1 || >=3.0.0 <=3.0.0 || >=4.0.0 <=4.0.0 || >=5.0.0 <=5.0.0",
         class: "Pest\\Plugin\\Manager",
         listeners: &[(POST_AUTOLOAD_DUMP, "registerPlugins")],
     },
     // 1.15 and 1.16 listen to `post-update-cmd` only.
     VerbosePlugin {
         name: "php-http/discovery",
-        versions: ">=1.17.0 <=1.20.0",
+        versions: ">=1.17.0 <=1.17.0 || >=1.18.0 <=1.18.1 || >=1.19.0 <=1.19.4 || >=1.20.0 <=1.20.0",
         class: "Http\\Discovery\\Composer\\Plugin",
         listeners: &[
             (PRE_AUTOLOAD_DUMP, "preAutoloadDump"),
@@ -111,26 +113,26 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     },
     VerbosePlugin {
         name: "composer/package-versions-deprecated",
-        versions: ">=1.8.0 <=1.11.99.5",
+        versions: ">=1.8.0 <=1.8.2 || >=1.10.0 <=1.10.99.1 || >=1.11.0 <=1.11.99.5",
         class: "PackageVersions\\Installer",
         listeners: &[(POST_AUTOLOAD_DUMP, "dumpVersionsClass")],
     },
     VerbosePlugin {
         name: "phpstan/extension-installer",
-        versions: ">=1.0.0 <=1.4.3",
+        versions: ">=1.0.0 <=1.0.6 || >=1.1.0 <=1.1.0 || >=1.2.0 <=1.2.0 || >=1.3.0 <=1.3.1 || >=1.4.0 <=1.4.3",
         class: "PHPStan\\ExtensionInstaller\\Plugin",
         listeners: &[(POST_INSTALL_CMD, "process"), (POST_UPDATE_CMD, "process")],
     },
     VerbosePlugin {
         name: "rector/extension-installer",
-        versions: ">=0.10.0 <=1.0.0",
+        versions: ">=0.10.0 <=0.10.2 || >=0.11.0 <=0.11.2 || >=1.0.0 <=1.0.0",
         class: "Rector\\RectorInstaller\\Plugin",
         listeners: &[(POST_INSTALL_CMD, "process"), (POST_UPDATE_CMD, "process")],
     },
     // Before 2.6.0, package events (`copyC3`, `askForUpdate`, `deleteC3`).
     VerbosePlugin {
         name: "codeception/c3",
-        versions: ">=2.6.0 <=2.9.0",
+        versions: ">=2.6.0 <=2.6.6 || >=2.7.0 <=2.7.0 || >=2.8.0 <=2.8.1 || >=2.9.0 <=2.9.0",
         class: "Codeception\\c3\\Installer",
         listeners: &[
             (POST_INSTALL_CMD, "copyC3V2"),
@@ -139,7 +141,7 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     },
     VerbosePlugin {
         name: "drupal/core-project-message",
-        versions: ">=8.8.0 <=12.0.0-beta2",
+        versions: ">=8.8.0 <=8.8.12 || >=8.9.0 <=8.9.20 || >=9.0.0 <=9.0.14 || >=9.1.0 <=9.1.15 || >=9.2.0 <=9.2.21 || >=9.3.0 <=9.3.22 || >=9.4.0 <=9.4.15 || >=9.5.0 <=9.5.11 || >=10.0.0 <=10.0.11 || >=10.1.0 <=10.1.8 || >=10.2.0 <=10.2.12 || >=10.3.0 <=10.3.14 || >=10.4.0 <=10.4.10 || >=10.5.0 <=10.5.12 || >=10.6.0 <=10.6.20 || >=11.0.0 <=11.0.13 || >=11.1.0 <=11.1.10 || >=11.2.0 <=11.2.14 || >=11.3.0 <=11.3.20 || >=11.4.0 <=11.4.11 || >=11.5.0-dev <=11.5.0-beta1 || >=12.0.0-dev <=12.0.0-beta2",
         class: "Drupal\\Composer\\Plugin\\ProjectMessage\\MessagePlugin",
         listeners: &[(POST_INSTALL_CMD, "displayPostCreateMessage")],
     },
@@ -147,7 +149,7 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     // (Plugin.php:100-124), which `resolution_effect` already hands over.
     VerbosePlugin {
         name: "drupal/core-recipe-unpack",
-        versions: ">=11.2.0 <=12.0.0-beta2",
+        versions: ">=11.2.0 <=11.2.14 || >=11.3.0 <=11.3.20 || >=11.4.0 <=11.4.11 || >=11.5.0-dev <=11.5.0-beta1 || >=12.0.0-dev <=12.0.0-beta2",
         class: "Drupal\\Composer\\Plugin\\RecipeUnpack\\Plugin",
         listeners: &[(POST_UPDATE_CMD, "unpackOnRequire")],
     },
@@ -157,7 +159,7 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
     // `forward-command`, handed over at every level.
     VerbosePlugin {
         name: "bamarni/composer-bin-plugin",
-        versions: ">=1.8.0 <=1.9.1",
+        versions: ">=1.8.0 <=1.8.3 || >=1.9.0 <=1.9.1",
         class: "Bamarni\\Composer\\Bin\\BamarniBinPlugin",
         listeners: &[
             (COMMAND, "onCommandEvent"),
@@ -279,6 +281,7 @@ fn allowed(manifest: &Value, name: &str) -> bool {
 /// composer.json (the command reports that itself).
 pub(crate) fn issue(
     project: &Path,
+    global: Option<&Path>,
     plugins_enabled: bool,
     run_scripts: bool,
     no_install: bool,
@@ -290,8 +293,8 @@ pub(crate) fn issue(
         serde_json::from_str(&std::fs::read_to_string(project.join(name)).ok()?).ok()
     };
     let manifest = read("composer.json")?;
-    if let Some(global) = crate::plugin_order::global_composer_dir() {
-        for p in vivacity_core::layout::installed_packages_at(&global) {
+    if let Some(global) = global {
+        for p in vivacity_core::layout::installed_packages_at(global) {
             if let (true, Some((name, _))) = (is_plugin(&p), name_version(&p)) {
                 return Some(format!(
                     "-v while {name} is active (its listeners' lines: it is installed globally)"
@@ -549,10 +552,18 @@ mod tests {
             assert!(version_read(runtime, v), "{v}");
         }
         assert!(!version_read(runtime, "v8.2.0"));
+        // A patch release after the last one read, on a maintained branch.
+        assert!(!version_read(runtime, "v7.4.22"));
+        assert!(!version_read(
+            plugin("pestphp/pest-plugin").expect("listed"),
+            "v4.0.1"
+        ));
         let message = plugin("drupal/core-project-message").expect("listed");
         assert!(version_read(message, "11.4.6"));
         assert!(version_read(message, "12.0.0-beta2"));
+        assert!(!version_read(message, "12.0.0-beta3"));
         assert!(!version_read(message, "12.0.0"));
+        assert!(!version_read(message, "11.4.12"));
         let pv = plugin("composer/package-versions-deprecated").expect("listed");
         assert!(version_read(pv, "1.11.99.5"));
         assert!(!version_read(pv, "1.7.0"));
@@ -660,16 +671,16 @@ mod tests {
                 plugin("php-http/discovery", "1.20.0")
             ]),
         );
-        assert_eq!(issue(tmp.path(), true, false, false), None);
-        assert_eq!(issue(tmp.path(), false, false, false), None);
-        assert!(issue(tmp.path(), true, true, false)
+        assert_eq!(issue(tmp.path(), None, true, false, false), None);
+        assert_eq!(issue(tmp.path(), None, false, false, false), None);
+        assert!(issue(tmp.path(), None, true, true, false)
             .expect("run-scripts")
             .contains("--run-scripts"));
         write(
             allow(&["php-http/discovery"]),
             json!([plugin("php-http/discovery", "1.15.0")]),
         );
-        assert!(issue(tmp.path(), true, false, false)
+        assert!(issue(tmp.path(), None, true, false, false)
             .expect("old")
             .starts_with(
                 "-v while php-http/discovery 1.15.0 is active (its listeners' lines: 1.15.0 is not among"
@@ -678,7 +689,7 @@ mod tests {
             allow(&["symfony/flex"]),
             json!([plugin("symfony/flex", "v2.11.0")]),
         );
-        assert!(issue(tmp.path(), true, false, false)
+        assert!(issue(tmp.path(), None, true, false, false)
             .expect("flex")
             .starts_with(
                 "-v while symfony/flex v2.11.0 is active (its listeners' lines: it listens"
@@ -688,8 +699,8 @@ mod tests {
             allow(&["phpstan/extension-installer"]),
             json!([plugin("phpstan/extension-installer", "1.4.3")]),
         );
-        assert_eq!(issue(tmp.path(), true, false, false), None);
-        assert!(issue(tmp.path(), true, false, true)
+        assert_eq!(issue(tmp.path(), None, true, false, false), None);
+        assert!(issue(tmp.path(), None, true, false, true)
             .expect("no-install")
             .contains("--no-install"));
         let lock = json!({"packages": [plugin("php-http/discovery", "1.15.0")], "packages-dev": [plugin("symfony/flex", "v2.11.0")]});
@@ -703,14 +714,18 @@ mod tests {
         let lock = json!({"packages": [plugin("php-http/discovery", "1.20.0")], "packages-dev": [plugin("symfony/flex", "v2.11.0")]});
         assert_eq!(resolved_issue(&lock, &manifest, false), None);
         assert!(resolved_issue(&lock, &manifest, true).is_some());
-        // Not allowed: never loaded, nothing to print.
-        write(json!({}), json!([plugin("symfony/flex", "v2.11.0")]));
-        assert_eq!(issue(tmp.path(), true, false, false), None);
+        // Not allowed: never loaded, nothing to print (explicitly refused,
+        // whatever a global `allow-plugins` on this machine says).
+        write(
+            json!({"config": {"allow-plugins": {"symfony/flex": false}}}),
+            json!([plugin("symfony/flex", "v2.11.0")]),
+        );
+        assert_eq!(issue(tmp.path(), None, true, false, false), None);
         write(
             allow(&["acme/unknown"]),
             json!([plugin("acme/unknown", "1.0.0")]),
         );
-        assert!(issue(tmp.path(), true, false, false)
+        assert!(issue(tmp.path(), None, true, false, false)
             .expect("unknown")
             .contains("not on vivacity's -v list"));
     }
