@@ -109,7 +109,7 @@ psr/clock`, `dump-autoload`, `install --dry-run`. « — » : rien.
 | codeception/c3 2.9.0 | `> post-install-cmd: Codeception\c3\Installer->copyC3V2` | `> post-update-cmd: …->askForUpdateV2` | idem | idem, tmp | — | — |
 | drupal/core-project-message 11.4.6 (sans message) | `> post-install-cmd: Drupal\Composer\Plugin\ProjectMessage\MessagePlugin->displayPostCreateMessage` | — | — | — | — | — |
 | drupal/core-recipe-unpack 11.4.6 | — | `> post-update-cmd: Drupal\Composer\Plugin\RecipeUnpack\Plugin->unpackOnRequire` | idem | idem, tmp (require : déjà rendu au niveau normal) | — | — |
-| bamarni/composer-bin-plugin 1.9.1 | no-op : `> command: Bamarni\Composer\Bin\BamarniBinPlugin->onCommandEvent`, `[bamarni-bin] Calling onCommandEvent().` (avant ses dépréciations) ; puis `> post-autoload-dump: …->onPostAutoloadDump`, `[bamarni-bin] Calling onPostAutoloadDump().` ; vierge : le second seulement | les deux | `command` | les deux, tmp | les deux | — |
+| bamarni/composer-bin-plugin 1.9.1 | no-op : `> command: Bamarni\Composer\Bin\BamarniBinPlugin->onCommandEvent`, `[bamarni-bin] Calling onCommandEvent().` (avant ses dépréciations) ; puis `> post-autoload-dump: …->onPostAutoloadDump`, `[bamarni-bin] Calling onPostAutoloadDump().` ; vierge : le second seulement | les deux | `command` | les deux, tmp | les deux | `command` (méta, point 1) |
 | yiisoft/yii2-composer 2.0.11 | — (mais `post-package-update` sur une mise à jour) | `> post-update-cmd: yii\composer\Plugin->showUpgradeNotes` | idem | idem, tmp | — | — |
 | symfony/thanks v1.4.1 | — (mais `post-package-update`) | `> post-update-cmd: Symfony\Thanks\Thanks->displayReminder` | idem | idem, tmp | — | — |
 | dealerdirect v1.2.1 | `> post-install-cmd: PHPCSStandards\…\Plugin->onDependenciesChangedEvent`, « Running PHPCodeSniffer Composer Installer », puis la sortie de `phpcs --config-set` (« Using config file: <chemin absolu> », « Config value "installed_paths" added successfully ») ou « No PHPCS standards to install or update » | idem | idem | idem, tmp | — | — |
@@ -205,7 +205,8 @@ celle mesurée ; hors de ces versions (antérieure, postérieure, branche dev),
    `--no-install` : écart du niveau normal, déjà noté (`plugin-lines.md`,
    non-objectifs : phpstan imprime « Extensions installed ») — `-v` n'en ajoute
    pas d'autre.
-6. `--dry-run` : aucune ligne (pas d'événement chez Composer). `-vv`/`-vvv` :
+6. `--dry-run` : aucun événement de **script** (mais `command`, voir la
+   méta-analyse, point 1). `-vv`/`-vvv` :
    inchangé, rendu. `--no-plugins` : inchangé, natif. `-q` : inchangé.
 
 ## Fichiers
@@ -265,6 +266,88 @@ la sortie de Composer passe des deux côtés mais `@delegates:` ou l'assertion
 « natif » échoue) — d'où une assertion de plus par cas `-v` : **vivacity ne
 délègue pas** (aucune ligne `vivacity: delegating` ni « outside what vivacity »
 sur sa stderr brute), sauf les cas `@delegates:`.
+
+## Méta-analyse (sous-agent frais, sur le plan et le code, 2026-10-22) — et ce qui change
+
+Un bloquant, six majeurs, cinq mineurs, deux nits. Le relecteur a rejoué
+Composer 2.10.3 sur ses propres projets : le modèle du compteur a tenu partout
+(plugin à trois classes — mnsami 2.0.0 prend tmp0 à tmp2 —, mise à jour de
+plugin dans un `require` — tmp0 à tmp3 au rechargement, puis tmp4 —,
+répertoire de plugin perdu — non compté, réinstallé sans suffixe, en dernier —,
+plugin retiré — sa ligne `command` garde le suffixe, les suivantes
+disparaissent). Ce plan est **amendé** par ce qui suit ; là où ils divergent,
+cette section l'emporte.
+
+1. **Bloquant — `--dry-run` n'est pas muet.** Seuls les événements de *script*
+   sont coupés (`Installer.php:292-296`) ; `command` part avant
+   `Installer::run`, et `require`/`remove` rechargent le `Composer` même en
+   dry run. Mesuré : `bamarni … --dry-run -v` écrit `> command: …` (et
+   `_composer_tmp0` pour `require`/`remove`). **Adopté** : la décision 6 et la
+   colonne dry-run de la matrice sont fausses pour `command` ; vivacity passe
+   déjà par `bamarni_command_event` et `reload_plugins` en dry run ; quatre
+   cas bamarni `--dry-run` ajoutés.
+2. **Majeur — `--no-install` empirait.** Aujourd'hui `-v` rend ces runs à
+   Composer, donc la sortie est juste ; native, elle porterait la ligne `>`
+   de phpstan sans « Extensions installed » (écart du niveau normal).
+   **Adopté** : sous `-v` et `--no-install` (sans `--dry-run`), phpstan,
+   rector et c3 rendent la commande, raison nommée (`UNPLAYED_WITHOUT_INSTALL`) ;
+   cas `phpstan update --no-install` → `@delegates`. discovery,
+   recipe-unpack et bamarni n'ont pas d'effet là : natifs.
+3. **Majeur — les plugins qu'amène la résolution.** Le contrôle de `run_once`
+   ne voit que l'installé et le lock ; un `require`/`update` qui amène un
+   plugin non reproduit serait rendu *après* l'écriture du lock, par un
+   `composer install -v` dont les lignes diffèrent. **Adopté** :
+   `verbose_listeners::resolved_issue` sur le lock résolu, dans
+   `resolve_and_lock`, avant l'écriture, via `Resolved::hand_over` ; cas
+   `pest require php-http/discovery:1.15.0` (rendu) et `…:1.20.0` (natif,
+   plugin activé par le run, sans suffixe).
+4. **Majeur — quelle version, et des listes qui vieillissent.** **Adopté** :
+   versions installée, cible (lock) et résolue toutes contrôlées. **Gardé** :
+   les bornes restent les tags lus (la ligne `>` ne dépend que de la classe et
+   de la méthode, stables sur tous les tags lus, mais une version publiée
+   demain n'a pas été lue — le contrat est l'octet, la délégation coûte une
+   exécution Composer) ; procédure de mise à jour dans DECISIONS. Le libellé
+   de 1.15/1.16 de discovery est corrigé : « n'est pas parmi les versions
+   reproduites » (elles ont été lues, elles diffèrent).
+5. **Majeur — plugins globaux.** Composer les juge par l'`allow-plugins`
+   global. **Adopté** tel quel : tout plugin du dépôt global rend `-v`,
+   quel que soit l'`allow-plugins` du projet.
+6. **Majeur — le harnais pouvait passer sans rien tester.** **Adopté** : sous
+   `-v` (ou `SHELL_VERBOSITY=1`), la stderr de Composer doit contenir au moins
+   une ligne `>` (sauf `@silent`, qui exige zéro) ; `@expect:` sur les
+   suffixes ; le cas Symfony existant (`install --dry-run @plugins`) exige
+   `@delegates:symfony/flex`.
+7. **Majeur — Laravel en contraintes larges.** **Adopté** :
+   `fixtures/projects/laravel-pest` (composer.json et lock figés, plugins
+   épinglés : pest-plugin v4.0.0, discovery 1.20.0) ; les cas `update` sont
+   partiels (`update php-http/discovery`).
+8. **Mineur — couverture du compteur.** **Adopté** : mnsami (trois classes)
+   dans la combinaison, `c3-old require codeception/c3:2.9.0` (rechargement
+   puis mise à jour), `combo remove bamarni/composer-bin-plugin`, répertoire
+   de pest-plugin supprimé (`@rm:`).
+9. **Mineur — le renommage suit le nom de classe, pas l'opération.**
+   **Adopté** : un ensemble des classes déclarées (minuscules, comme PHP les
+   compare) ; `Install` d'un plugin déjà enregistré ignoré ; une classe
+   nouvelle d'une version mise à jour chargée sans suffixe.
+10. **Mineur — `command` et la présence sur le disque.** **Adopté** :
+    `bamarni_command_event` exige aussi le plugin dans `loaded_plugins` (ses
+    classes sur le disque), au niveau normal comme sous `-v`.
+11. **Mineur — cas manquants.** **Adoptés** : `--no-autoloader`, `install`
+    sans lock (`post-update-cmd` alors que `command` dit `install`),
+    `require --no-update` (`@silent`), `SHELL_VERBOSITY=1`. Non ajouté :
+    `config.lock: false` (même chemin que l'install sans lock côté vivacity).
+12. **Mineur — sortie fusionnée.** Déjà ainsi : chaque capture tourne une
+    fois, sur sa propre copie, préparée à l'identique.
+13. **Nit — `COMPOSER_DEBUG_EVENTS`** (« Dispatching … » au niveau normal,
+    `EventDispatcher.php:195-205`) : non-objectif, noté.
+14. **Nit — l'auto-installation de discovery** (`postUpdate` qui installe une
+    implémentation manquante : `stopPropagation`, `Factory::create`, d'autres
+    renommages) : non-objectif — le classement « bénin » de discovery suppose
+    déjà un lock complet.
+
+Risque sur les harnais existants jugé faible par le relecteur : `all-verbose`
+de plugin-lines.sh reste rendu (dealerdirect) et sa phrase attendue correspond
+encore.
 
 ## Critère « vert »
 
