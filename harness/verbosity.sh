@@ -377,29 +377,32 @@ done
 # (fixtures/projects/laravel-pest, lock figé), et des plugins rendus à
 # Composer sous -v avec la raison. Versions exactes partout : une version
 # publiée demain hors des versions lues rendrait la commande à Composer.
-declare -A PROJECTS
+# Le manifeste de chaque projet, dans une variable `PROJ_<nom>` : pas de
+# tableau associatif (bash 4), le bash de macOS est en 3.2.
+proj_var() { printf 'PROJ_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"; }
+set_project() { printf -v "$(proj_var "$1")" '%s' "$2"; }
 # allow <nom>… : la clé `config` qui les autorise.
 allow() { local out="" n; for n in "$@"; do out="$out${out:+,}\"$n\":true"; done; printf '"config":{"allow-plugins":{%s}}' "$out"; }
-PROJECTS[runtime]='{"name":"vivacity/verbose-runtime","require":{"symfony/runtime":"v7.4.14"},'"$(allow symfony/runtime)"'}'
-PROJECTS[pest]='{"name":"vivacity/verbose-pest","require":{"pestphp/pest-plugin":"v4.0.0"},'"$(allow pestphp/pest-plugin php-http/discovery)"'}'
-PROJECTS[discovery]='{"name":"vivacity/verbose-discovery","require":{"php-http/discovery":"1.20.0"},'"$(allow php-http/discovery)"'}'
-PROJECTS[discovery-old]='{"name":"vivacity/verbose-discovery-old","require":{"php-http/discovery":"1.15.0"},'"$(allow php-http/discovery)"'}'
-PROJECTS[pv]='{"name":"vivacity/verbose-pv","require":{"composer/package-versions-deprecated":"1.11.99.5"},'"$(allow composer/package-versions-deprecated)"'}'
-PROJECTS[phpstan]='{"name":"vivacity/verbose-phpstan","require":{"phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","phpstan/phpstan-strict-rules":"2.0.4"},'"$(allow phpstan/extension-installer)"'}'
-PROJECTS[rector]='{"name":"vivacity/verbose-rector","require":{"rector/extension-installer":"0.11.2"},"require-dev":{"rector/rector-symfony":"1.1.0"},'"$(allow rector/extension-installer)"'}'
-PROJECTS[c3]='{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.9.0","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
-PROJECTS[c3-old]='{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.8.1","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
-PROJECTS[message]='{"name":"vivacity/verbose-message","require":{"drupal/core-project-message":"11.4.6"},'"$(allow drupal/core-project-message)"'}'
-PROJECTS[unpack]='{"name":"vivacity/verbose-unpack","require":{"drupal/core-recipe-unpack":"11.4.6"},'"$(allow drupal/core-recipe-unpack)"'}'
-PROJECTS[bamarni-dev]='{"name":"vivacity/verbose-bamarni-dev","require-dev":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
-PROJECTS[bamarni]='{"name":"vivacity/verbose-bamarni","require":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
-PROJECTS[installers]='{"name":"vivacity/verbose-installers","require":{"composer/installers":"v2.3.0","roots/wordpress-core-installer":"v4.0.0"},'"$(allow composer/installers roots/wordpress-core-installer)"'}'
+set_project runtime '{"name":"vivacity/verbose-runtime","require":{"symfony/runtime":"v7.4.14"},'"$(allow symfony/runtime)"'}'
+set_project pest '{"name":"vivacity/verbose-pest","require":{"pestphp/pest-plugin":"v4.0.0"},'"$(allow pestphp/pest-plugin php-http/discovery)"'}'
+set_project discovery '{"name":"vivacity/verbose-discovery","require":{"php-http/discovery":"1.20.0"},'"$(allow php-http/discovery)"'}'
+set_project discovery-old '{"name":"vivacity/verbose-discovery-old","require":{"php-http/discovery":"1.15.0"},'"$(allow php-http/discovery)"'}'
+set_project pv '{"name":"vivacity/verbose-pv","require":{"composer/package-versions-deprecated":"1.11.99.5"},'"$(allow composer/package-versions-deprecated)"'}'
+set_project phpstan '{"name":"vivacity/verbose-phpstan","require":{"phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","phpstan/phpstan-strict-rules":"2.0.4"},'"$(allow phpstan/extension-installer)"'}'
+set_project rector '{"name":"vivacity/verbose-rector","require":{"rector/extension-installer":"0.11.2"},"require-dev":{"rector/rector-symfony":"1.1.0"},'"$(allow rector/extension-installer)"'}'
+set_project c3 '{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.9.0","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
+set_project c3-old '{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.8.1","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
+set_project message '{"name":"vivacity/verbose-message","require":{"drupal/core-project-message":"11.4.6"},'"$(allow drupal/core-project-message)"'}'
+set_project unpack '{"name":"vivacity/verbose-unpack","require":{"drupal/core-recipe-unpack":"11.4.6"},'"$(allow drupal/core-recipe-unpack)"'}'
+set_project bamarni-dev '{"name":"vivacity/verbose-bamarni-dev","require-dev":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
+set_project bamarni '{"name":"vivacity/verbose-bamarni","require":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
+set_project installers '{"name":"vivacity/verbose-installers","require":{"composer/installers":"v2.3.0","roots/wordpress-core-installer":"v4.0.0"},'"$(allow composer/installers roots/wordpress-core-installer)"'}'
 # mnsami avec composer/installers est rendu à Composer dès le niveau normal
 # (précédence des installeurs) : à part, avec pest-plugin pour le compteur.
-PROJECTS[customdir]='{"name":"vivacity/verbose-customdir","require":{"mnsami/composer-custom-directory-installer":"2.0.0","pestphp/pest-plugin":"v4.0.0"},'"$(allow mnsami/composer-custom-directory-installer pestphp/pest-plugin)"'}'
-PROJECTS[combo]='{"name":"vivacity/verbose-combo","require":{"symfony/runtime":"v7.4.14","pestphp/pest-plugin":"v4.0.0","php-http/discovery":"1.20.0","composer/package-versions-deprecated":"1.11.99.5","phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","codeception/c3":"2.9.0","bamarni/composer-bin-plugin":"1.9.1","drupal/core-project-message":"11.4.6","composer/installers":"v2.3.0"},"require-dev":{"phpstan/phpstan-strict-rules":"2.0.4"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow symfony/runtime pestphp/pest-plugin php-http/discovery composer/package-versions-deprecated phpstan/extension-installer codeception/c3 bamarni/composer-bin-plugin drupal/core-project-message composer/installers)"'}'
-PROJECTS[phpcs]='{"name":"vivacity/verbose-phpcs","require":{"dealerdirect/phpcodesniffer-composer-installer":"v1.2.1","squizlabs/php_codesniffer":"4.0.4","phpcsstandards/phpcsutils":"1.2.3"},'"$(allow dealerdirect/phpcodesniffer-composer-installer)"'}'
-PROJECTS[flex]='{"name":"vivacity/verbose-flex","require":{"symfony/flex":"v2.11.0"},'"$(allow symfony/flex)"'}'
+set_project customdir '{"name":"vivacity/verbose-customdir","require":{"mnsami/composer-custom-directory-installer":"2.0.0","pestphp/pest-plugin":"v4.0.0"},'"$(allow mnsami/composer-custom-directory-installer pestphp/pest-plugin)"'}'
+set_project combo '{"name":"vivacity/verbose-combo","require":{"symfony/runtime":"v7.4.14","pestphp/pest-plugin":"v4.0.0","php-http/discovery":"1.20.0","composer/package-versions-deprecated":"1.11.99.5","phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","codeception/c3":"2.9.0","bamarni/composer-bin-plugin":"1.9.1","drupal/core-project-message":"11.4.6","composer/installers":"v2.3.0"},"require-dev":{"phpstan/phpstan-strict-rules":"2.0.4"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow symfony/runtime pestphp/pest-plugin php-http/discovery composer/package-versions-deprecated phpstan/extension-installer codeception/c3 bamarni/composer-bin-plugin drupal/core-project-message composer/installers)"'}'
+set_project phpcs '{"name":"vivacity/verbose-phpcs","require":{"dealerdirect/phpcodesniffer-composer-installer":"v1.2.1","squizlabs/php_codesniffer":"4.0.4","phpcsstandards/phpcsutils":"1.2.3"},'"$(allow dealerdirect/phpcodesniffer-composer-installer)"'}'
+set_project flex '{"name":"vivacity/verbose-flex","require":{"symfony/flex":"v2.11.0"},'"$(allow symfony/flex)"'}'
 # "projet|arguments @préparations" — préparations propres à cette partie :
 #   @vendor:plugins  vendor/ posé au préalable par Composer, plugins actifs
 #                    (le même état des deux côtés)
@@ -514,11 +517,12 @@ online_lock() { # <projet> : écrit une fois par passage, ou figé (fixtures/pro
   local d="$ONLINE_WORK/locks/$1"
   [ -f "$d/composer.lock" ] && return 0
   rm -rf "$d"; mkdir -p "$d"
-  if [ -z "${PROJECTS[$1]+set}" ]; then
+  local pv; pv=$(proj_var "$1")
+  if [ -z "${!pv+set}" ]; then
     cp "$ROOT/fixtures/projects/$1/composer.json" "$ROOT/fixtures/projects/$1/composer.lock" "$d/"
     return 0
   fi
-  printf '%s\n' "${PROJECTS[$1]}" > "$d/composer.json"
+  printf '%s\n' "${!pv}" > "$d/composer.json"
   (cd "$d" && COMPOSER_HOME="$ONLINE_HOME" COMPOSER_CACHE_DIR="$CACHE_DIR" composer update --no-install --no-plugins --no-scripts --no-audit --no-security-blocking -n -q) \
     || { echo "FAIL lock $1 : Composer n'a pas résolu le projet"; return 1; }
 }
@@ -548,6 +552,11 @@ online_stage() { # <projet> <répertoire> <préparations…>
 online_filter() { # <niveau> : les lignes propres à vivacity, tolérées hors -q
   if [ "$1" = -q ]; then cat; else grep -v -E '^(vivacity|Note): ' || true; fi
 }
+# Les lignes `  - Downloading` dépendent du cache, pas de l'outil : la
+# référence passe la première et télécharge ce que la machine n'a jamais vu,
+# vivacity le trouve ensuite en cache. Hors comparaison des deux côtés, comme
+# dans scripts.sh et yii2-composer.sh (download-lines.sh les compare à part).
+online_cold() { grep -v -E '^  - Downloading [^ ]+ \(' || true; }
 if [[ " ${FIXTURES[*]} " == *" online "* ]]; then
   rm -rf "$ONLINE_WORK"; mkdir -p "$ONLINE_WORK/home"
   ONLINE_HOME="$ONLINE_WORK/home"
@@ -656,9 +665,9 @@ if [[ " ${FIXTURES[*]} " == *" online "* ]]; then
         fi
       fi
       for stream in out err; do
-        normalize "$ONLINE_WORK/$n.composer.$stream" "$ONLINE_WORK/ref-split-$n" > "$ONLINE_WORK/$n.composer.$stream.n"
+        normalize "$ONLINE_WORK/$n.composer.$stream" "$ONLINE_WORK/ref-split-$n" | online_cold > "$ONLINE_WORK/$n.composer.$stream.n"
         if [ "$stream" = err ]; then
-          normalize "$ONLINE_WORK/$n.vivacity.$stream" "$ONLINE_WORK/viv-split-$n" | online_filter "$level" > "$ONLINE_WORK/$n.vivacity.$stream.n"
+          normalize "$ONLINE_WORK/$n.vivacity.$stream" "$ONLINE_WORK/viv-split-$n" | online_filter "$level" | online_cold > "$ONLINE_WORK/$n.vivacity.$stream.n"
         else
           normalize "$ONLINE_WORK/$n.vivacity.$stream" "$ONLINE_WORK/viv-split-$n" > "$ONLINE_WORK/$n.vivacity.$stream.n"
         fi
@@ -667,8 +676,8 @@ if [[ " ${FIXTURES[*]} " == *" online "* ]]; then
           diff "$ONLINE_WORK/$n.composer.$stream.n" "$ONLINE_WORK/$n.vivacity.$stream.n" | head -12 || true; ok=0
         fi
       done
-      normalize "$ONLINE_WORK/$n.composer.all" "$ONLINE_WORK/ref-merged-$n" > "$ONLINE_WORK/$n.composer.all.n"
-      normalize "$ONLINE_WORK/$n.vivacity.all" "$ONLINE_WORK/viv-merged-$n" | online_filter "$level" > "$ONLINE_WORK/$n.vivacity.all.n"
+      normalize "$ONLINE_WORK/$n.composer.all" "$ONLINE_WORK/ref-merged-$n" | online_cold > "$ONLINE_WORK/$n.composer.all.n"
+      normalize "$ONLINE_WORK/$n.vivacity.all" "$ONLINE_WORK/viv-merged-$n" | online_filter "$level" | online_cold > "$ONLINE_WORK/$n.vivacity.all.n"
       if ! diff -q "$ONLINE_WORK/$n.composer.all.n" "$ONLINE_WORK/$n.vivacity.all.n" >/dev/null; then
         echo "FAIL $label : sortie fusionnée différente (ordre)"
         diff "$ONLINE_WORK/$n.composer.all.n" "$ONLINE_WORK/$n.vivacity.all.n" | head -12 || true; ok=0
