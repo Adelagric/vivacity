@@ -43,9 +43,11 @@ set :composer_install_flags, '--no-dev --prefer-dist --no-interaction --quiet --
   own; with this flag it runs them through `composer run-script` at
   Composer's points (Laravel's `package:discover`, Symfony's
   `auto-scripts`). Without it, a deploy that relies on them breaks.
-- **No `--verbose`.** With a plugin active (most Laravel and Symfony
-  projects), vivacity hands a `-v` run to Composer, and the deploy gains
-  nothing. The default flags above do not pass it.
+- **No `--verbose` needed.** Under `-v`, vivacity stays native with the
+  plugins whose verbose lines it knows (a standard Laravel project's among
+  them) and hands the deploy to Composer with any other (symfony/flex,
+  dealerdirect's PHP_CodeSniffer installer…), which then gains nothing. The
+  default flags above do not pass it.
 - **The store** is `~/.cache/vivacity` (`VIVACITY_CACHE_DIR` to change it).
   Hardlinks need the store and the releases on the same filesystem; across
   filesystems vivacity copies (same result, smaller gain), so keep the

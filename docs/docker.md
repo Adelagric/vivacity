@@ -64,9 +64,11 @@ Why these choices:
   `package:discover` and Symfony's `auto-scripts` hang on. `--no-autoloader`
   in the dependency layer keeps the classmap for the step that has the
   application code.
-- **`-v` / `--verbose`**: leave it out. With a plugin active (most Laravel and
-  Symfony projects), vivacity hands a `-v` run to Composer, and the build
-  gains nothing.
+- **`-v` / `--verbose`** stays native with the plugins whose verbose lines
+  vivacity knows (a standard Laravel project's among them); a project with
+  symfony/flex, dealerdirect's PHP_CodeSniffer installer or another plugin
+  outside that list goes to Composer under `-v`, and the build gains nothing.
+  Leaving `-v` out avoids the question.
 - **Pin the version** (`VIVACITY_VERSION`), as the image pins Composer: the
   install script checks the sha256 of the release asset it downloads.
 
