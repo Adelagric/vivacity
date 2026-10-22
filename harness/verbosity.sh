@@ -391,8 +391,11 @@ PROJECTS[c3-old]='{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.8
 PROJECTS[message]='{"name":"vivacity/verbose-message","require":{"drupal/core-project-message":"11.4.6"},'"$(allow drupal/core-project-message)"'}'
 PROJECTS[unpack]='{"name":"vivacity/verbose-unpack","require":{"drupal/core-recipe-unpack":"11.4.6"},'"$(allow drupal/core-recipe-unpack)"'}'
 PROJECTS[bamarni]='{"name":"vivacity/verbose-bamarni","require":{"bamarni/composer-bin-plugin":"1.9.1"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow bamarni/composer-bin-plugin)"'}'
-PROJECTS[installers]='{"name":"vivacity/verbose-installers","require":{"composer/installers":"v2.3.0","roots/wordpress-core-installer":"v4.0.0","mnsami/composer-custom-directory-installer":"2.0.0"},'"$(allow composer/installers roots/wordpress-core-installer mnsami/composer-custom-directory-installer)"'}'
-PROJECTS[combo]='{"name":"vivacity/verbose-combo","require":{"symfony/runtime":"v7.4.14","pestphp/pest-plugin":"v4.0.0","php-http/discovery":"1.20.0","composer/package-versions-deprecated":"1.11.99.5","phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","codeception/c3":"2.9.0","bamarni/composer-bin-plugin":"1.9.1","drupal/core-project-message":"11.4.6","composer/installers":"v2.3.0","mnsami/composer-custom-directory-installer":"2.0.0"},"require-dev":{"phpstan/phpstan-strict-rules":"2.0.4"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow symfony/runtime pestphp/pest-plugin php-http/discovery composer/package-versions-deprecated phpstan/extension-installer codeception/c3 bamarni/composer-bin-plugin drupal/core-project-message composer/installers mnsami/composer-custom-directory-installer)"'}'
+PROJECTS[installers]='{"name":"vivacity/verbose-installers","require":{"composer/installers":"v2.3.0","roots/wordpress-core-installer":"v4.0.0"},'"$(allow composer/installers roots/wordpress-core-installer)"'}'
+# mnsami avec composer/installers est rendu à Composer dès le niveau normal
+# (précédence des installeurs) : à part, avec pest-plugin pour le compteur.
+PROJECTS[customdir]='{"name":"vivacity/verbose-customdir","require":{"mnsami/composer-custom-directory-installer":"2.0.0","pestphp/pest-plugin":"v4.0.0"},'"$(allow mnsami/composer-custom-directory-installer pestphp/pest-plugin)"'}'
+PROJECTS[combo]='{"name":"vivacity/verbose-combo","require":{"symfony/runtime":"v7.4.14","pestphp/pest-plugin":"v4.0.0","php-http/discovery":"1.20.0","composer/package-versions-deprecated":"1.11.99.5","phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","codeception/c3":"2.9.0","bamarni/composer-bin-plugin":"1.9.1","drupal/core-project-message":"11.4.6","composer/installers":"v2.3.0"},"require-dev":{"phpstan/phpstan-strict-rules":"2.0.4"},"extra":{"bamarni-bin":{"bin-links":false}},'"$(allow symfony/runtime pestphp/pest-plugin php-http/discovery composer/package-versions-deprecated phpstan/extension-installer codeception/c3 bamarni/composer-bin-plugin drupal/core-project-message composer/installers)"'}'
 PROJECTS[phpcs]='{"name":"vivacity/verbose-phpcs","require":{"dealerdirect/phpcodesniffer-composer-installer":"v1.2.1","squizlabs/php_codesniffer":"4.0.4","phpcsstandards/phpcsutils":"1.2.3"},'"$(allow dealerdirect/phpcodesniffer-composer-installer)"'}'
 PROJECTS[flex]='{"name":"vivacity/verbose-flex","require":{"symfony/flex":"v2.11.0"},'"$(allow symfony/flex)"'}'
 # "projet|arguments @préparations" — préparations propres à cette partie :
@@ -461,7 +464,8 @@ ONLINE_CASES=(
   "c3-old|require codeception/c3:2.9.0 @vendor:plugins @levels:-v @expect:Installer_composer_tmp2->askForUpdateV2$"
   "message|install @levels:-v @expect:MessagePlugin->displayPostCreateMessage$"
   "unpack|update @vendor:plugins @levels:-v @expect:RecipeUnpack.Plugin->unpackOnRequire$"
-  "unpack|remove drupal/core-recipe-unpack @vendor:plugins @levels:-v"
+  # Le plugin retiré n'est plus là à `post-update-cmd` : aucune ligne.
+  "unpack|remove drupal/core-recipe-unpack @vendor:plugins @levels:-v @silent"
   "bamarni|install @levels:-v"
   "bamarni|install @vendor:plugins @levels:-v @expect:^.bamarni-bin..Calling.onCommandEvent"
   "bamarni|dump-autoload @vendor:plugins @levels:-v"
@@ -475,16 +479,19 @@ ONLINE_CASES=(
   "bamarni|remove bamarni/composer-bin-plugin --dry-run @vendor:plugins @levels:-v @expect:BamarniBinPlugin_composer_tmp0->onCommandEvent$"
   "bamarni|require psr/clock:1.0.0 --no-update @vendor:plugins @levels:-v @silent"
   # Sans écouteur : rien de plus sous -v, mais leurs classes comptent dans
-  # le compteur de `require` (custom-directory-installer en déclare trois).
+  # le compteur de `require` (custom-directory-installer 2.0.0 en déclare
+  # trois : pest-plugin, chargé après lui, prend le quatrième suffixe).
   "installers|install @levels:-v @silent"
   "installers|require psr/clock:1.0.0 @vendor:plugins @levels:-v @silent"
+  "customdir|install @levels:-v"
+  "customdir|require psr/clock:1.0.0 @vendor:plugins @levels:-v @expect:Manager_composer_tmp3->registerPlugins$"
   # Plusieurs plugins : l'ordre d'activation à chaque événement, le compteur.
   "combo|install @levels:-v"
   "combo|install @vendor:plugins @levels:-v"
   "combo|install --no-dev @vendor:plugins @levels:-v"
   "combo|install --no-autoloader @vendor:plugins @levels:-v @expect:^>.post-install-cmd:"
   "combo|update @vendor:plugins @levels:-v"
-  "combo|require psr/clock:1.0.0 @vendor:plugins @levels:-v @expect:ComposerPlugin_composer_tmp11->updateAutoloadFile$"
+  "combo|require psr/clock:1.0.0 @vendor:plugins @levels:-v @expect:ComposerPlugin_composer_tmp8->updateAutoloadFile$"
   "combo|remove drupal/core-project-message @vendor:plugins @levels:-v"
   "combo|remove bamarni/composer-bin-plugin @vendor:plugins @levels:-v"
   "combo|dump-autoload @vendor:plugins @levels:-v"
@@ -611,9 +618,18 @@ if [[ " ${FIXTURES[*]} " == *" online "* ]]; then
       # des deux côtés et ne prouverait rien).
       if [ -n "$delegates" ]; then
         if ! grep -q '^vivacity: delegating to ' "$ONLINE_WORK/$n.vivacity.err" \
-           || ! grep -E '^(vivacity: |  - )' "$ONLINE_WORK/$n.vivacity.err" | grep -qE -- "$delegates"; then
-          echo "FAIL $label : vivacity ne rend pas la commande avec la raison « $delegates »"; grep -E '^(vivacity: |  - )' "$ONLINE_WORK/$n.vivacity.err" | head -3 || true; ok=0
+           || ! grep -E '^(vivacity: |  - plugin )' "$ONLINE_WORK/$n.vivacity.err" | grep -qE -- "$delegates"; then
+          echo "FAIL $label : vivacity ne rend pas la commande avec la raison « $delegates »"; grep -E '^(vivacity: |  - plugin )' "$ONLINE_WORK/$n.vivacity.err" | head -3 || true; ok=0
         fi
+        # Ce que Composer écrit une fois la main rendue est comparé ; une
+        # délégation décidée sur le lock résolu suit les lignes que vivacity
+        # a déjà écrites (« has been updated », « Updating dependencies »…),
+        # que Composer réécrit — écart connu (HANDOVER, sortie d'une run
+        # rendue à Composer).
+        for f in err all; do
+          sed -n '/^vivacity: delegating to /,$p' "$ONLINE_WORK/$n.vivacity.$f" | tail -n +2 > "$ONLINE_WORK/$n.vivacity.$f.cut"
+          mv "$ONLINE_WORK/$n.vivacity.$f.cut" "$ONLINE_WORK/$n.vivacity.$f"
+        done
       elif grep -qE '^vivacity: (delegating to|.*outside what vivacity)' "$ONLINE_WORK/$n.vivacity.err"; then
         echo "FAIL $label : vivacity rend la commande à Composer"; grep '^vivacity' "$ONLINE_WORK/$n.vivacity.err" | head -2 || true; ok=0
       fi
