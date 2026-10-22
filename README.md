@@ -45,6 +45,9 @@ GitHub Actions:
 - run: vivacity install
 ```
 
+In a Docker image build: [docs/docker.md](docs/docker.md). Deploying with
+Capistrano: [docs/capistrano.md](docs/capistrano.md).
+
 ## How it is checked
 
 `harness/diff-vendor.sh` runs `composer install` and `vivacity install` on six
