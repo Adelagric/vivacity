@@ -412,3 +412,110 @@ dépendance).
   passage de main réel (sans `--no-fallback`) n'a pas de cas (le passage de
   main lui-même est couvert par `fallback-args.sh`) ; `require
   --no-install` couvert pour phpstan seulement.
+
+## Résultat (2026-10-22, branche `no-install-listeners-wip`)
+
+`Linux vm 6.18.44-fc-v140 #1 SMP PREEMPT_DYNAMIC @0 x86_64 x86_64 x86_64 GNU/Linux` — `nproc` : 4.
+
+**Commits** : 47af6b3 (plan et matrice mesurée), aa89814 (cas de harnais),
+f8258b6 (code et docs), puis celui de ce Résultat.
+
+**Rouges** (`harness/plugin-lines.sh` sur le binaire de `main`, fe8ad48,
+utilisateur non root) : les 46 cas existants passent ; la section
+`--no-install` compte 72 lignes — 54 cas et 18 installs de départ
+(comparés eux aussi, tous verts). Sur les 54 cas, **40 rouges** :
+`ni-ps-noop`, `-lost`, `-quiet`, `-no-dev`, `-ext-added`, `-ext-removed`,
+`-plugin-removed`, `-ignore-dropped`, `-partial`, `-require`, `-remove`,
+`-remove-plugin`, `-ext-dir-gone`, `-alias`, `-scripts`, `-lock-false`,
+`-working-dir`, `-vendor-dir` ; `ni-pc-lost`, `-no-dev`,
+`-plugin-removed` ; `ni-c3-lost`, `-remove`, `-updated` ; `ni-rc-lost`,
+`ni-rc-main-lost` ; `ni-all-noop`, `-lost`, `-quiet` ; `ni-old-versions`,
+`ni-discovery-same`, `ni-discovery`, `ni-discovery-dev`, `ni-global`,
+`ni-patches` ; `ni-yii2-lost`, `-dry-run`, `-unsolvable` ; `ni-flex`,
+`ni-flex-weighted`. Ligne type d'un rouge (`ni-ps-noop`) : `<
+phpstan/extension-installer: Extensions installed` absente chez vivacity ;
+d'un repli (`ni-old-versions`) : `code 0, 0 raison(s) sur 3`. **14
+garde-fous** verts sur `main` comme après : `ni-ps-no-plugins`,
+`-dry-run`, `-bare`, `-plugin-added`, `-blocked`, `-plugin-dir-gone`,
+`-unsolvable`, `ni-pc-noop`, `-std-added`, `ni-c3-noop`, `-edited`,
+`-plugin-added`, `ni-rc-main-noop`, `ni-discovery-idle`.
+
+**Verts** sur le binaire final : `plugin-lines.sh` **118/118**, code 0.
+
+**Portes** : `cargo fmt --all -- --check` ; `cargo clippy --workspace
+--all-targets -- -D warnings` (Linux) et `--target x86_64-pc-windows-gnu`
+(mingw) : 0 avertissement ; `cargo test --workspace` : **350 réussis, 0
+échec** (36 blocs ; +6 tests : deux dans `scope`, quatre dans
+`no_install`, dont `a_plugin_allowed_but_not_installed_runs_nothing`,
+rouge sans la correction de la revue).
+
+**Harnais** (binaire final, utilisateur non root comme le runner, chaque
+passage dans son répertoire, supprimé après) — les 31 passages de
+`ci.yml` plus `root-manifest.sh`, en ligne de commande exacte :
+
+| passage | code | OK / FAIL |
+|---|---|---|
+| diff-vendor | 100 | 8 / 0 — arrêté sur wordpress (réseau) |
+| diff-vendor --with-autoloader ×2 | 100, 100 | 8 / 0 chacun — idem |
+| update | 1 | 18 / 1 — drupal (packages.drupal.org refusé) |
+| steps | 1 | 148 / 1 — drupal require (idem) |
+| removal | 100 | 0 / 0 — wordpress d'abord (réseau) |
+| transitions | 0 | 13 / 0 |
+| path-repos | 0 | 14 / 0 |
+| vendor-dir | 1 | 5 / 1 — la variante wordpress (réseau) |
+| merge-plugin | 0 | 18 / 0 |
+| scripts | 0 | 6 / 0 |
+| tar-dist | 0 | 7 / 0 |
+| yii2-composer | 1 | 5 / 6 — les six : asset-packagist.org refusé |
+| bin-plugin | 0 | 13 / 0 |
+| wp-core | 100 | 0 / 3 — downloads.wordpress.org refusé |
+| custom-dirs | 0 | 4 / 0 |
+| package-versions | 0 | 7 / 0 |
+| plugin-lines | 0 | 118 / 0 |
+| flex-install | 0 | 7 / 0 |
+| flex-update | 0 | 26 / 0 |
+| flex-recipes | 0 | 26 / 0 |
+| download-lines | 1 | 1 / 1 — exige un cache froid et les zipballs de GitHub (refusés) |
+| artifact-repo | 0 | 9 / 0 |
+| compare-selftest | 0 | 11 / 0 |
+| two-stage | 0 | 12 / 0 |
+| transport-exit | 0 | 9 / 0 |
+| verbosity | 0 | 212 / 0 |
+| fallback-args | 0 | 50 / 0 |
+| root-scan | 0 | 12 / 0 |
+| boot | 1 | 5 / 1 — wordpress (réseau) |
+| drift-reference | 0 | 132 fichiers identiques |
+| root-manifest | 0 | 44 / 0 |
+
+21 passages à 0 ; les 11 autres échouent sur un hôte que le proxy de la
+session refuse (wordpress.org, packages.drupal.org, asset-packagist.org,
+api.github.com), aucun sur une différence de vivacity. Relancés sur ce que
+le réseau permet (mêmes scripts, fixtures choisies par leurs arguments ;
+pour `removal` et `boot`, qui codent la liste en dur, une copie hors dépôt
+sans wordpress) : diff-vendor sur laravel, symfony, sylius, rector, drupal
+**10/10** (trois fois, dont deux `--with-autoloader`), update sans drupal
+**18/18**, steps sans drupal **276/276**, removal laravel et drupal
+**2/2**, vendor-dir hors wordpress **5/5**, boot hors wordpress **5/5** —
+tous à 0. Restent non mesurés ici : la fixture wordpress (cinq archives),
+les cas drupal d'update et de steps qui interrogent packages.drupal.org,
+les six cas yii2 qui passent par asset-packagist, download-lines, et le
+job Windows (seul clippy `x86_64-pc-windows-gnu` a tourné).
+
+**Ce que l'environnement a demandé** (hors dépôt) : PHP 8.5.12 de
+conda-forge avec `gd` compilé à part ; Composer 2.10.3 de la release
+GitHub ; le cache de fichiers de Composer amorcé par `git archive` des
+commits verrouillés, via un `composer` intercalé dans le `PATH` des
+harnais (pour une commande qui résout puis installe, une résolution
+préalable sur une copie jetable) — les deux outils lisent la même
+archive ; `RUST_BACKTRACE` retiré (posé par la session, pas par la CI) ;
+harnais lancés par un utilisateur non root (en root, Composer imprime « Plugins have been
+disabled automatically as you are running as root » sous `--no-plugins`,
+ce qui faisait échouer sept cas de root-manifest et un de transport-exit).
+
+**Défauts vus, laissés** (raisons dans les non-objectifs et la revue) :
+plugin installé non mentionné par `allow-plugins` (Composer sort en 1,
+vivacity continue — toutes commandes de résolution) ; php-http/discovery
+sur `update` avec installation ; dealerdirect v1.1.x sans installation ;
+purge par `install-path` enregistré ; règles `allow-plugins` globales pour
+un plugin global ; un passage de main réel (sans `--no-fallback`) sans cas
+dans ce harnais ; `require --no-install` couvert pour phpstan seulement.
