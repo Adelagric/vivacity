@@ -408,3 +408,113 @@ purge (`Factory::purgePackages`) — reproduit sur `main`, antérieur, noté.
 - Tous les harnais de `ci.yml` à 0 (32 passages, `diff-vendor.sh` trois fois),
   plus `harness/root-manifest.sh` ; ceux qui ne peuvent pas tourner ici sont
   nommés avec la raison et leur sortie.
+
+## Résultat (2026-10-22)
+
+`Linux vm 6.18.44-fc-v140 #1 SMP PREEMPT_DYNAMIC @0 x86_64 x86_64 x86_64 GNU/Linux` — `nproc` : 4.
+
+**Commits** (branche `verbose-plugins`, depuis `main` fe8ad48) : 34e97b9
+(plan et matrice), b5e7b38 (méta-analyse), 896056b (cas rouges), 18caed8
+(cas mal construits corrigés), fd1ad39 (code et docs), 01dc0ed (revue :
+délégation tardive sans doublon, bamarni, bornes par branche), et le commit
+de ce résultat.
+
+**Natifs sous `-v`** : composer/installers, roots/wordpress-core-installer,
+mnsami/composer-custom-directory-installer, ibexa/post-install,
+ergebnis/composer-normalize (aucune ligne) ; symfony/runtime,
+pestphp/pest-plugin, php-http/discovery, composer/package-versions-deprecated,
+phpstan/extension-installer, rector/extension-installer, codeception/c3,
+drupal/core-project-message, drupal/core-recipe-unpack,
+bamarni/composer-bin-plugin (leurs lignes `>`, et les deux `Calling …` de
+bamarni), dans les versions lues, branche par branche. **Rendus, raison
+nommée** : symfony/flex, dealerdirect, wikimedia/composer-merge-plugin,
+yiisoft/yii2-composer, symfony/thanks, metasyntactical/composer-plugin-license-check,
+tout autre plugin, une version non lue, un plugin global, `--run-scripts`,
+phpstan / rector / c3 sous `--no-install`, un plugin qu'amène la résolution
+(sur le lock résolu, avant écriture, lignes gardées jusque-là).
+
+**Rouges** (`harness/verbosity.sh online`, binaire de `main` 0.23.0) :
+
+- premier jeu (avant la méta-analyse) : 65 cas×niveaux, 46 rouges — tous
+  les cas `-v` à plugin sauf `--no-plugins`, Flex rendu et `-vv` ;
+- jeu amendé, première moitié (laravel-pest, runtime, pest, discovery, pv,
+  phpstan, et la partie Symfony) : 49, 27 rouges — 25 « vivacity rend la
+  commande à Composer », `discovery install @nolock` (les lignes
+  `pre-autoload-dump` / `post-update-cmd` manquaient : sans lock ni
+  vendor, `main` ne voyait aucun plugin et restait natif), `phpstan update
+  --no-install` (raison sans `--no-install`) ; seconde moitié (rector à
+  discovery-old) : 33, 31 rouges — seuls Flex et la version 1.15.0 de
+  discovery étaient déjà rendus, avec une raison qui convenait ;
+- cas de la revue : 6, 6 rouges, dont les deux `bamarni-dev
+  dump-autoload --no-dev` et `bamarni install @rm:` **au niveau normal** (les
+  lignes de bamarni manquaient ou étaient de trop).
+
+**Verts** (binaire final) : `verbosity.sh` 296 cas×niveaux, 0 échec — 212
+de la partie instantané (inchangée, plus `@delegates:symfony/flex`) et 84
+de la partie `online` (64 sous `-v`).
+
+**Portes** : `cargo fmt --all -- --check` ; `cargo clippy --workspace
+--all-targets -- -D warnings` (Linux et `--target x86_64-pc-windows-gnu`,
+mingw-w64) ; `cargo test --workspace --no-fail-fast` 349 réussis, 0 échec
+(36 blocs) ; `tools/check-pcre2-symbols.sh` et `tools/check-clib-deps.sh`
+OK.
+
+**Harnais** (binaire final, chacun dans son `VIVACITY_HARNESS_DIR`
+supprimé après) — les 32 passages de `ci.yml` et root-manifest.sh :
+
+| passage | résultat |
+|---|---|
+| diff-vendor ×3 (sans, puis deux fois `--with-autoloader`) | 12, 12, 12 OK, code 0 |
+| update | 18 OK, 1 échec réseau (drupal : packages.drupal.org refusé) |
+| steps | 277 OK ; drupal `require drupal/core-project-message` : code 100 contre 1 sur un refus du proxy (réseau), et le cas suivant non joué (voir défauts) ; les quatre dernières fixtures rejouées à part : 129 OK |
+| removal, transitions, path-repos, vendor-dir, merge-plugin, scripts, tar-dist | 3, 13, 14, 6, 18, 6, 7 OK, code 0 |
+| yii2-composer | 5 OK, 6 échecs réseau (asset-packagist.org refusé : l'avertissement du dépôt injoignable porte le texte de curl chez Composer, de reqwest chez vivacity) |
+| bin-plugin, custom-dirs, package-versions | 13, 4, 7 OK, code 0 |
+| wp-core | **ne peut pas tourner ici** : `roots/wordpress-no-content` a un `shasum`, downloads.wordpress.org est refusé (code 100 des deux côtés) |
+| plugin-lines | 46 OK, code 0 |
+| flex-install, flex-update, flex-recipes | 7, 26, 26 OK, code 0 |
+| download-lines | **ne peut pas tourner ici** : il exige un téléchargement réel sur cache vierge, les archives GitHub sont refusées |
+| artifact-repo, compare-selftest, two-stage | 9, 11, 12 OK, code 0 |
+| transport-exit | 8 OK, 1 échec propre à root ; **en utilisateur non root : 9 OK, code 0** |
+| verbosity | 296 OK, code 0 |
+| fallback-args, root-scan, boot | 50, 12, 6 OK, code 0 |
+| drift-reference | 132 fichiers identiques, code 0 |
+| root-manifest | 37 OK, 7 échecs propres à root ; **en utilisateur non root : 44 OK, code 0** |
+
+Adaptations à cet environnement, aucune dans le dépôt : PHP 8.4.27 compilé
+(reconstruit contre la PCRE2 du système : avec la PCRE2 embarquée de PHP, le
+test `the_real_php_is_seen_and_its_cache_matches_a_fresh_probe` ne trouvait
+pas de bibliothèque pcre2 parmi les images, ce que le PHP de la CI fournit) ;
+le cache de fichiers amorcé par `git archive` ; les quatre archives
+WordPress sans `shasum` reconstruites (0755/0644) ; pour flex-update,
+flex-recipes et verbosity, dont les homes Composer ont un cache privé,
+`cache/files` lié au cache amorcé par un script hors dépôt ;
+`RUST_BACKTRACE=1` posé par l'environnement retiré pour les passages en
+utilisateur non root (il ajoute une pile à `Error: …`). « Propre à root » :
+Composer ajoute « Plugins have been disabled automatically as you are
+running as root… » à une exception sous `--no-plugins` quand il tourne en
+root (Application.php), ce que les runners de la CI ne font pas.
+
+**Défauts vus, laissés** :
+
+- `harness/steps.sh:520` : `tail -3 <deux fichiers>` est refusé par le
+  `tail` de GNU (« option used in invalid context ») ; sous `set -e` le
+  harnais s'arrête au premier code de sortie différent — sans effet tant
+  que tout passe, il masque les fixtures suivantes sinon (`tail -n 3`
+  suffirait ; hors du sujet de ce chantier) ;
+- vivacity répond 1 là où Composer répond 100 quand le proxy refuse le
+  `CONNECT` (drupal, cas réseau) : la classification de cette erreur de
+  transport n'est pas celle de Composer ;
+- un répertoire de zip au mode 0775 : `unzip` (Composer) le pose, vivacity
+  pose 0755 (le mode d'une entrée répertoire est ignoré), vu sur des
+  archives reconstruites, jamais sur les archives réelles des fixtures ;
+- `dump-autoload` garde dans l'autoloader un paquet dont le répertoire a
+  disparu, Composer le purge (`Factory::purgePackages`) — reproduit sur
+  0.23.0 ;
+- package-versions-deprecated en `require-dev` sous `dump-autoload
+  --no-dev` : Composer (plugin chargé) écrit ses deux lignes et
+  Versions.php, vivacity suit le mode dev ;
+- l'`install` sans lock, résolu comme un `update` : sous `-v`, une
+  délégation tardive y réimprime encore ses premières lignes ;
+- `COMPOSER_DEBUG_EVENTS`, l'auto-installation de php-http/discovery :
+  non portés.
