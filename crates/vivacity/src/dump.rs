@@ -303,7 +303,25 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     } else {
         "autoload files"
     };
+    // No transaction: the plugins in `loadInstalledPlugins`' order.
+    let listeners = if args.no_plugins {
+        Vec::new()
+    } else {
+        let composer_dir = composer_dir_of(&project, &manifest);
+        crate::plugin_order::loaded_plugins(
+            &crate::plugin_order::installed_json_packages(&composer_dir),
+            &composer_dir,
+            crate::plugin_order::global_composer_dir().as_deref(),
+        )
+    };
     vivacity_core::out!("Generating {kind}");
+    // `AutoloadGenerator::dump`'s PRE_AUTOLOAD_DUMP: the plugins' listeners
+    // (-v lines), then the scripts.
+    crate::announce_in_order(
+        &listeners,
+        crate::verbose_listeners::PRE_AUTOLOAD_DUMP,
+        &manifest,
+    );
     if let Some(r) = &runner {
         let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
         if code != 0 {
@@ -346,17 +364,6 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &[],
             !args.no_plugins,
         )?;
-        // No transaction: the plugins in `loadInstalledPlugins`' order.
-        let listeners = if args.no_plugins {
-            Vec::new()
-        } else {
-            let composer_dir = composer_dir_of(&project, &manifest);
-            crate::plugin_order::loaded_plugins(
-                &crate::plugin_order::installed_json_packages(&composer_dir),
-                &composer_dir,
-                crate::plugin_order::global_composer_dir().as_deref(),
-            )
-        };
         post_autoload_dump_printers(
             &project,
             &lock,

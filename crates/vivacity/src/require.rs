@@ -647,6 +647,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     };
     let names: Vec<String> = requirements.iter().map(|(n, _)| n.clone()).collect();
     vivacity_core::say!("Running composer update {}{flags}", names.join(" "));
+    // The `Composer` re-created by `doUpdate` (RequireCommand.php:409-410)
+    // loads every installed plugin's classes again: renamed, as the -v
+    // lines print them.
+    crate::verbose_listeners::reload_plugins(&project, &manifest, !args.no_plugins);
     // `PluginEvents::COMMAND`, right after that line (RequireCommand.php:461).
     crate::bamarni_command_event(&project, &manifest, !args.no_plugins);
     // `Locker::isLocked`: a readable lock with a non-null `packages` key;

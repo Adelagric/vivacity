@@ -200,6 +200,9 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
+    // That `Composer` loads every installed plugin's classes again: renamed,
+    // as the -v lines print them.
+    crate::verbose_listeners::reload_plugins(&project, &updated, !args.no_plugins);
     // `PluginEvents::COMMAND` (RemoveCommand.php:239), from the Composer
     // re-created on the edited manifest: before the `allow-plugins` entries
     // go and before "Running composer update".

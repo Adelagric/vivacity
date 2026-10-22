@@ -447,10 +447,15 @@ pub(crate) fn hand_resolution_over(
 
 /// Prints the post-update report of `Installer::run` when the update has
 /// no install phase (`--no-install`): the precomputed lines, the funding
-/// count, then `POST_UPDATE_CMD` — dispatched without an install too
-/// (Installer.php:438-441), not on a dry run — whose emulated listeners run
-/// on the local repository, in their plugins' activation order, Flex's
-/// output at its rank (`no_install`, docs/plans/no-install-listeners.md).
+/// count, then `POST_UPDATE_CMD` (Installer.php:438-441) — dispatched
+/// without an install too, not under `--dry-run`, which dispatches no
+/// script event (Installer.php:292-294). Under -v, first the line of each
+/// loaded plugin's listener, in the order the plugins were loaded; then the
+/// emulated listeners run on the local repository, in their plugins'
+/// activation order, Flex's output at its rank (`no_install`,
+/// docs/plans/no-install-listeners.md). The two do not interleave: a -v run
+/// whose `--no-install` listeners print (phpstan, rector, c3, Flex) is
+/// handed to Composer before resolving (docs/plans/verbose-plugins.md).
 /// With an install phase, that phase prints it (`run_install`).
 pub(crate) fn print_post_update(
     resolved: &Resolved,
@@ -464,6 +469,21 @@ pub(crate) fn print_post_update(
     print_funding(project, &resolved.manifest);
     if args.dry_run {
         return Ok(());
+    }
+    if !args.no_plugins {
+        // -v: `EventDispatcher` writes each listener's line before calling it
+        // (`manifest`: the rules the plugins were loaded with).
+        let composer_dir = composer_dir_of(project, &manifest);
+        let loaded = crate::plugin_order::loaded_plugins(
+            &crate::plugin_order::installed_json_packages(&composer_dir),
+            &composer_dir,
+            crate::plugin_order::global_composer_dir().as_deref(),
+        );
+        crate::announce_in_order(
+            &loaded,
+            crate::verbose_listeners::POST_UPDATE_CMD,
+            &manifest,
+        );
     }
     let flex = || print_flex_post_update(&resolved.manifest, resolved.thanks_reminder, None);
     crate::no_install::post_update_listeners(
@@ -705,6 +725,30 @@ pub(crate) fn resolve_and_lock(
         Err(e) => return Err(session_error(e)),
     };
     trace("resolve", t0);
+
+    // Under -v, a plugin the install phase would activate and whose lines
+    // vivacity does not print (docs/plans/verbose-plugins.md): the command
+    // goes to Composer now, before the lock is written — handed over after
+    // it, the install phase would run `composer install -v`, which prints
+    // `post-install-cmd` and no `_composer_tmpN`.
+    if vivacity_core::io::level() == vivacity_core::io::Verbosity::Verbose
+        && !args.dry_run
+        && !args.no_install
+        && !args.no_plugins
+    {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            if let Some((plugin, reason)) =
+                crate::verbose_listeners::resolved_issue(&lock, &m, installer_dev_mode)
+            {
+                return Ok(Resolved {
+                    hand_over: Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                        plugin, reason,
+                    )),
+                    ..Resolved::stopped(0)
+                });
+            }
+        }
+    }
 
     // symfony/flex with install: its `POST_UPDATE_CMD` applies recipes to
     // what the install lays out. vivacity emulates that only where Flex

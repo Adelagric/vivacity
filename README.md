@@ -176,9 +176,14 @@ Composer prints at its quiet level (errors, the headline of an unsolvable
 set, the stale-lock warning) and the exit code; `-v` adds Composer's
 verbose lines in their places — resolution durations, the pool and rule
 counts, the `Installs:` / `Updates:` / `Removals:` summaries, the detailed
-explanations. `-vv` and `-vvv` hand the command to Composer, whose debug
-output vivacity does not reproduce; so does `-v` when a plugin is active,
-since Composer then logs each plugin listener it dispatches. The level is
+explanations, and the `> <event>: <class>-><method>` line Composer writes
+for each plugin listener it calls, in the plugins' activation order (the
+plugins listed above, in the versions whose source was read).
+`-vv` and `-vvv` hand the command to Composer, whose debug output vivacity
+does not reproduce; so does `-v` with a plugin whose verbose lines are not
+reproduced — symfony/flex, dealerdirect, composer-merge-plugin,
+yii2-composer, symfony/thanks, another plugin or version — and the
+delegation line names it. The level is
 read as Symfony Console reads it (`SHELL_VERBOSITY`, then `-q`, then
 `-v…`), and passed on to every Composer process vivacity starts.
 `harness/verbosity.sh` compares stdout and stderr whole, at each level.

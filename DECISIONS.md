@@ -4021,3 +4021,64 @@ Contexte : non-objectif « `update --no-install` » de
   dealerdirect v1.1.x (`InstalledVersions::isInstalled` lit l'installed.php
   non purgé) ; la purge suit l'`install-path` enregistré, Composer le
   `getInstallPath` courant.
+
+## 2026-10-22 — `-v` avec des plugins actifs : les lignes des écouteurs, plus la délégation par défaut
+
+Contexte : décision 4 et bloquant de la revue de `docs/plans/v0.21-verbosity.md`
+(tout plugin autorisé actif rendait `-v` à Composer) ; plan
+`docs/plans/verbose-plugins.md` (matrice mesurée, versions lues, méta-analyse,
+revue).
+
+- **Ce que `-v` ajoute pour un plugin.** Une ligne par écouteur appelé,
+  `> <événement>: <classe>-><méthode>` sur stderr au niveau VERBOSE
+  (`EventDispatcher::doDispatch`, EventDispatcher.php:230), dans l'ordre de
+  priorité puis d'ajout (`getListeners`, :583-596) — donc l'ordre
+  d'activation des plugins déjà porté (`plugin_order`) ; plus les écritures
+  VERBOSE propres à quelques plugins. Mesuré sur Composer 2.10.3 pour chaque
+  plugin des listes (`install` vierge, no-op, `--no-dev`, `update` avec et
+  sans installation, `require`/`remove`, `dump-autoload`, `--dry-run`).
+- **Décision : reproduire ces lignes, et ne rendre la main que pour ce qui
+  ne l'est pas.** `crates/vivacity/src/verbose_listeners.rs` porte la table
+  (plugin, versions lues, classe, écouteurs) et la raison de chaque
+  délégation restante ; `fallback::active_plugin` rend cette raison.
+  Alternative écartée : élargir seulement la liste des plugins « muets » —
+  aucun plugin à écouteur n'est muet sous `-v`, la ligne `>` est le cas
+  général, pas l'exception.
+- **Le nom de classe.** `PluginManager::registerPackage`
+  (PluginManager.php:286-307) recharge une classe déjà déclarée sous
+  `<classe>_composer_tmp<N>`, `N` compteur du processus : `require` et
+  `remove` recréent leur `Composer` (toutes les classes des plugins chargés,
+  muets compris, dans l'ordre de `loadRepository`), et une mise à jour de
+  plugin recharge les siennes. Porté comme un ensemble de classes déclarées
+  (minuscules), remis à zéro à chaque `run` (méta-analyse, point 9).
+- **Versions.** La table lie chaque plugin aux tags lus un par un (classe,
+  `getSubscribedEvents`, écritures VERBOSE hors tests) ; une version publiée
+  après, une branche dev, ou 1.15–1.16 de php-http/discovery (une table
+  d'écouteurs différente) rendent `-v` à Composer, nommées. Contrôlées :
+  version installée, version du lock, version résolue (`resolved_issue`,
+  avant l'écriture du lock). Coût accepté : une sortie de symfony/runtime
+  renvoie `-v` des projets Symfony… mais Flex les y renvoie déjà. Mise à
+  jour : relire les nouveaux tags (même balayage), étendre la borne.
+- **Restent rendus, raison nommée** : symfony/flex (écouteurs de pool, de
+  paquet, configurateurs verbeux), dealerdirect (sortie de `phpcs
+  --config-set`), wikimedia/composer-merge-plugin (`init`,
+  `pre-install-cmd`, `post-package-install`, journal VERBOSE),
+  yiisoft/yii2-composer et symfony/thanks (`post-package-update`, dispatché
+  entre les opérations), metasyntactical/composer-plugin-license-check, tout
+  autre plugin, un plugin global (Composer le juge par l'`allow-plugins`
+  global), `--run-scripts`, et phpstan / rector / c3 sous `--no-install`
+  (Composer joue leur effet, vivacity non : la ligne `>` seule aurait
+  aggravé l'écart — méta-analyse, point 2).
+- **`--dry-run`** ne coupe que les événements de script : `command` part
+  quand même (bamarni) et `require`/`remove` rechargent (méta-analyse,
+  point 1).
+- **Harnais.** `harness/verbosity.sh`, seconde partie `online` : projets à
+  plugins actifs (Packagist, lock écrit sous `--no-plugins`, versions
+  exactes ; `fixtures/projects/laravel-pest` figé), stdout et stderr entiers,
+  sortie fusionnée (ordre), projet entier, et vivacity ne doit PAS déléguer
+  (sauf `@delegates:`) ; la stderr de Composer doit contenir au moins une
+  ligne `>` (sauf `@silent`).
+- **Noté, laissé** : `COMPOSER_DEBUG_EVENTS` (« Dispatching … » au niveau
+  normal) ; l'auto-installation de php-http/discovery ; les effets des
+  écouteurs sous `update --no-install` au niveau normal (écart de
+  plugin-lines.md, inchangé).

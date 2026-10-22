@@ -424,10 +424,30 @@ pub(crate) fn bamarni_command_event(
     manifest: &serde_json::Value,
     plugins_enabled: bool,
 ) {
-    if vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+    // Loaded the way `Factory::createComposer` loads it: installed, its
+    // classes on disk (`loaded_plugins`), allowed (`active_plugins`).
+    let composer_dir = composer_dir_of(project, manifest);
+    let loaded = plugins_enabled
+        && plugin_order::loaded_plugins(
+            &plugin_order::installed_json_packages(&composer_dir),
+            &composer_dir,
+            plugin_order::global_composer_dir().as_deref(),
+        )
         .iter()
-        .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
+        .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME);
+    if loaded
+        && vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+            .iter()
+            .any(|p| p == vivacity_core::bamarni_bin::PLUGIN_NAME)
     {
+        // Under -v: Composer's line for the listener, then the plugin's
+        // `logDebug` (BamarniBinPlugin.php:110, `Logger::log` at VERBOSE).
+        crate::verbose_listeners::announce(
+            vivacity_core::bamarni_bin::PLUGIN_NAME,
+            crate::verbose_listeners::COMMAND,
+            manifest,
+        );
+        vivacity_core::say_verbose!("[bamarni-bin] Calling onCommandEvent().");
         if let Ok(cfg) = vivacity_core::bamarni_bin::config(manifest.get("extra")) {
             vivacity_core::bamarni_bin::print_deprecations(&cfg);
         }
@@ -656,6 +676,8 @@ fn local_repository_transaction(
     } else {
         Vec::new()
     };
+    // The entries as loaded, for the classes the plugins declare.
+    let installed_raw_names = installed_raw.clone();
     let mut installed_now = purge_missing(&composer_dir, installed_raw);
     // A `symfony-pack` laid out by Flex's pack installer has no install
     // path in installed.json (`MetapackageInstaller`), which the purge above
@@ -725,6 +747,7 @@ fn local_repository_transaction(
     };
     trace("local repositories", run.t0);
     let transaction = vivacity_resolver::transaction::Transaction::new(&arena, &present, &result);
+    note_plugin_operations(run, &loaded, &installed_raw_names, &arena, &transaction);
     let listeners = plugin_order::activation_order(loaded, &arena, &transaction.operations);
     Ok(LocalTransaction {
         arena,
@@ -734,6 +757,74 @@ fn local_repository_transaction(
         missing,
         listeners,
     })
+}
+
+/// The plugin classes this run loads, for the names the `-v` lines print
+/// (`verbose_listeners`): the first `Composer` loads the installed plugins
+/// (`loaded`, from installed.json as written), then each plugin operation
+/// of the transaction registers its target (`PluginInstaller::install` —
+/// unless that plugin is registered already — and `update`).
+fn note_plugin_operations(
+    run: &Run<'_>,
+    loaded: &[String],
+    installed: &[serde_json::Value],
+    arena: &[vivacity_resolver::package::Package],
+    transaction: &vivacity_resolver::transaction::Transaction,
+) {
+    if run.args.no_plugins {
+        return;
+    }
+    crate::verbose_listeners::first_load(&run.manifest, loaded, installed);
+    let locked: Vec<&serde_json::Value> = ["packages", "packages-dev"]
+        .iter()
+        .filter_map(|k| run.lock_value.get(*k).and_then(serde_json::Value::as_array))
+        .flatten()
+        .collect();
+    let target_of = |name: &str| {
+        locked.iter().copied().find(|p| {
+            p.get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
+    };
+    let plugin_type = |p: &vivacity_resolver::package::Package| {
+        matches!(
+            p.package_type.as_str(),
+            "composer-plugin" | "composer-installer"
+        )
+    };
+    let allowed = |name: &str| {
+        matches!(
+            vivacity_core::layout::plugin_allowed(&run.manifest, name),
+            vivacity_core::layout::PluginVerdict::Allowed
+        )
+    };
+    let mut registered: Vec<String> = loaded.iter().filter(|n| allowed(n)).cloned().collect();
+    use vivacity_resolver::transaction::Operation;
+    for op in &transaction.operations {
+        let (target, update) = match *op {
+            Operation::Install(p) => (p, false),
+            Operation::Update(_, t) => (t, true),
+            Operation::Uninstall(p) => {
+                registered.retain(|n| *n != arena[p].name);
+                continue;
+            }
+            _ => continue,
+        };
+        let name = arena[target].name.as_str();
+        if !plugin_type(&arena[target]) || !allowed(name) {
+            continue;
+        }
+        if !update && registered.iter().any(|n| n == name) {
+            continue;
+        }
+        if let Some(entry) = target_of(name) {
+            crate::verbose_listeners::plugin_registered(name, entry);
+        }
+        if !registered.iter().any(|n| n == name) {
+            registered.push(name.to_owned());
+        }
+    }
 }
 
 /// The scope analysis is pure (lock, manifest, installed.json, global
@@ -1188,6 +1279,16 @@ fn dump_autoloader(
             ""
         }
     );
+    // `AutoloadGenerator::dump` dispatches PRE_AUTOLOAD_DUMP: the plugins'
+    // listeners (-v lines only: php-http/discovery's is silent), then the
+    // scripts.
+    if !args.no_plugins {
+        announce_in_order(
+            &tx.listeners,
+            crate::verbose_listeners::PRE_AUTOLOAD_DUMP,
+            &run.manifest,
+        );
+    }
     if let Some(r) = &run.runner {
         let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
         if code != 0 {
@@ -1313,18 +1414,41 @@ pub(crate) fn post_autoload_dump_printers(
     plugins_enabled: bool,
     listeners: &[String],
 ) -> anyhow::Result<()> {
-    let emulated = [
+    // The printers, and under -v every listener of the event: each plugin's
+    // `> post-autoload-dump: …` line precedes what it prints.
+    let mut emulated = vec![
         vivacity_core::bamarni_bin::PLUGIN_NAME,
         vivacity_core::package_versions::PLUGIN_NAME,
     ];
+    let event = crate::verbose_listeners::POST_AUTOLOAD_DUMP;
+    for name in crate::verbose_listeners::listening_to(event) {
+        if !emulated.contains(&name) {
+            emulated.push(name);
+        }
+    }
     for plugin in plugin_order::listeners_in_order(listeners, &emulated) {
+        let loaded = plugins_enabled && listeners.iter().any(|n| n == plugin);
+        if loaded {
+            crate::verbose_listeners::announce(plugin, event, manifest);
+        }
         if plugin == vivacity_core::bamarni_bin::PLUGIN_NAME {
             emulate_bamarni_bin(local, manifest, with_dev, plugins_enabled);
-        } else {
+        } else if plugin == vivacity_core::package_versions::PLUGIN_NAME {
             emulate_package_versions(project, local, manifest, with_dev, plugins_enabled)?;
         }
     }
     Ok(())
+}
+
+/// The `-v` lines of `event` for the plugins loaded (`listeners`, in
+/// activation order) that listen to it and print nothing else there.
+pub(crate) fn announce_in_order(listeners: &[String], event: &str, manifest: &serde_json::Value) {
+    let names = crate::verbose_listeners::listening_to(event);
+    for plugin in listeners {
+        if names.contains(&plugin.as_str()) {
+            crate::verbose_listeners::announce(plugin, event, manifest);
+        }
+    }
 }
 
 /// The end of `Installer::run` (Installer.php:412-442): the funding count,
@@ -1344,14 +1468,30 @@ fn post_install(
     print_funding(&run.project, &run.manifest);
     let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     if !args.no_plugins {
-        let emulated = [
+        let mut emulated = vec![
             vivacity_core::phpcs_installer::PLUGIN_NAME,
             extension_installers::PHPSTAN,
             extension_installers::RECTOR,
             vivacity_core::c3_plugin::PLUGIN_NAME,
             "symfony/flex",
         ];
+        // `Installer::run` (Installer.php:440): POST_UPDATE_CMD after an
+        // update, POST_INSTALL_CMD otherwise. Under -v each listener's line
+        // precedes what it prints.
+        let event = if args.after_update() {
+            crate::verbose_listeners::POST_UPDATE_CMD
+        } else {
+            crate::verbose_listeners::POST_INSTALL_CMD
+        };
+        for name in crate::verbose_listeners::listening_to(event) {
+            if !emulated.contains(&name) {
+                emulated.push(name);
+            }
+        }
         for plugin in plugin_order::listeners_in_order(listeners, &emulated) {
+            if listeners.iter().any(|n| n == plugin) {
+                crate::verbose_listeners::announce(plugin, event, &run.manifest);
+            }
             post_install_listener(run, layout, local, plugin)?;
         }
     }
@@ -1658,6 +1798,8 @@ pub(crate) fn emulate_bamarni_bin(
     {
         return;
     }
+    // `onPostAutoloadDump`'s `logDebug` (BamarniBinPlugin.php:88), at -v.
+    vivacity_core::say_verbose!("[bamarni-bin] Calling onPostAutoloadDump().");
     if let Ok(cfg) = bin::config(manifest.get("extra")) {
         bin::print_deprecations(&cfg);
     }

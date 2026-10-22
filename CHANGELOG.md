@@ -6,6 +6,42 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Changed
+- **`-v` stays native with the plugins whose verbose lines are known.**
+  Since 0.21, `-v` handed the whole command to Composer as soon as any
+  allowed plugin was active, so a standard Laravel project (Pest,
+  php-http/discovery) and every deployment tool that passes `--verbose`
+  ran Composer instead. Measured against Composer 2.10.3, a plugin adds at
+  `-v` one `> <event>: <class>-><method>` line per listener Composer calls
+  (`EventDispatcher::doDispatch`), and only a few log more. vivacity now
+  prints those lines at their place, in the plugins' activation order —
+  `command`, `pre-autoload-dump`, `post-autoload-dump`,
+  `post-install-cmd` / `post-update-cmd` (also under `--no-install`, never
+  under `--dry-run`, which still dispatches `command`) — with the
+  `_composer_tmpN` class names Composer gives a plugin class it loads a
+  second time (`require` and `remove` re-create their `Composer`; a plugin
+  updated during the run). Native at `-v`: composer/installers,
+  roots/wordpress-core-installer, mnsami/composer-custom-directory-installer,
+  ibexa/post-install, ergebnis/composer-normalize (no listener),
+  symfony/runtime, pestphp/pest-plugin, php-http/discovery,
+  composer/package-versions-deprecated, phpstan/extension-installer,
+  rector/extension-installer, codeception/c3, drupal/core-project-message,
+  drupal/core-recipe-unpack and bamarni/composer-bin-plugin (its two
+  `Calling …` lines), each in the versions whose source was read (every
+  tag of a range). Still handed to Composer, with the reason in the
+  delegation line: symfony/flex, dealerdirect (phpcs's own output),
+  wikimedia/composer-merge-plugin, yiisoft/yii2-composer and symfony/thanks
+  (`post-package-update`), the licence-check plugin, any other plugin or
+  version, a plugin installed globally, `--run-scripts`, phpstan, rector
+  and c3 under `--no-install` (vivacity does not play their effect there),
+  and a plugin the resolution would bring in under those rules (decided on
+  the solved lock, before it is written). `harness/verbosity.sh` gains a
+  second part with plugins active (online projects, a frozen Laravel + Pest
+  skeleton): stdout, stderr, the merged output and the project compared.
+- bamarni/composer-bin-plugin's `command` lines need its classes on disk,
+  as Composer loads it (a plugin whose directory is gone printed its
+  deprecation lines at the `command` event).
+
 ### Fixed
 - **`update --no-install` runs the plugins' `POST_UPDATE_CMD` listeners.**
   Composer skips the install and the dump but still dispatches

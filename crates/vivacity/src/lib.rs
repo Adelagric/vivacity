@@ -28,6 +28,7 @@ mod no_install;
 mod plugin_order;
 mod require;
 mod scripts;
+mod verbose_listeners;
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -576,10 +577,11 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
         }
     };
     // What vivacity cannot print as Composer does goes to Composer, whole,
-    // before anything is read or written: `-vv`/`-vvv`, and `-v` when an
-    // emulated plugin whose output changes with it takes part.
-    // `--check-scope` asks what vivacity would do with the lock, not for a
-    // run: it is answered natively whatever the verbosity.
+    // before anything is read or written: `-vv`/`-vvv`, and `-v` when a
+    // plugin Composer would load writes lines vivacity does not reproduce
+    // (`verbose_listeners`). `--check-scope` asks what vivacity would do
+    // with the lock, not for a run: it is answered natively whatever the
+    // verbosity.
     let tail = &argv[1..];
     let check_scope = tail.iter().any(|t| t == "--check-scope");
     if requested >= 3 && !check_scope {
@@ -588,12 +590,18 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     }
     if requested == 2 && !check_scope {
         if let Ok(project) = project_dir(cli.working_dir()) {
-            if let Some(plugin) = active_plugin(&project, cli.plugins_enabled()) {
-                let reason = format!("-v while {plugin} is active (its listeners' lines)");
-                return delegate_for_verbosity(tail, &reason, &format!("drop {reason}"));
+            if let Some(reason) = active_plugin(
+                &project,
+                cli.plugins_enabled(),
+                cli.run_scripts(),
+                cli.resolves_without_install(),
+            ) {
+                return delegate_for_verbosity(tail, &reason, "drop -v");
             }
         }
     }
+    // The `_composer_tmpN` counter belongs to one run, like a process.
+    verbose_listeners::reset();
     // `RootPackageLoader::load` guesses the root's version with git, then
     // hg, fossil and svn (`VersionGuesser::guessVersion`); vivacity reads git
     // only. Where one of the others would answer, the command is Composer's,
@@ -721,6 +729,27 @@ impl Cli {
             Cli::Update(a) => a.working_dir.as_deref(),
             Cli::Remove(a) => a.working_dir.as_deref(),
             Cli::Require(a) => a.working_dir.as_deref(),
+        }
+    }
+
+    /// `update`, `require` or `remove` with `--no-install` and without
+    /// `--dry-run` (which dispatches no script event): `POST_UPDATE_CMD`
+    /// still runs its listeners (Installer.php:440).
+    fn resolves_without_install(&self) -> bool {
+        match self {
+            Cli::Update(a) => a.no_install && !a.dry_run,
+            Cli::Require(a) => a.no_install && !a.no_update && !a.dry_run,
+            Cli::Remove(a) => a.no_install && !a.no_update && !a.dry_run,
+            Cli::Install(_) | Cli::DumpAutoload(_) => false,
+        }
+    }
+
+    /// `--run-scripts` (`install` and `dump-autoload` only).
+    fn run_scripts(&self) -> bool {
+        match self {
+            Cli::Install(a) => a.run_scripts,
+            Cli::DumpAutoload(a) => a.run_scripts,
+            Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) => false,
         }
     }
 

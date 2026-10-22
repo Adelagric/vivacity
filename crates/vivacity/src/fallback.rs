@@ -386,51 +386,25 @@ pub(crate) fn after_update_line(args: &UpdateArgs) -> Vec<std::ffi::OsString> {
     line
 }
 
-/// A plugin Composer would load in this project: installed (project or
-/// `COMPOSER_HOME`) or locked — `install` activates it as soon as it is laid
-/// out — and allowed by `allow-plugins`. Under `-v`, Composer writes a line
-/// per plugin listener it dispatches (`EventDispatcher.php:230`:
-/// `> post-autoload-dump: Class->method`), and the emulated plugins log on
-/// top of it (bamarni's `Logger.php:34`, composer-merge-plugin's
-/// `Logger.php:68`, Flex's configurators, dealerdirect's `Plugin.php`):
-/// vivacity reproduces their effect, not those lines, so such a run goes to
-/// Composer. `None` under `--no-plugins`, or without a readable
-/// composer.json (the command reports that itself).
-pub(crate) fn active_plugin(project: &std::path::Path, plugins_enabled: bool) -> Option<String> {
-    if !plugins_enabled {
-        return None;
-    }
-    let read = |name: &str| -> Option<serde_json::Value> {
-        serde_json::from_str(&std::fs::read_to_string(project.join(name)).ok()?).ok()
-    };
-    let manifest = read("composer.json")?;
-    let mut names: Vec<String> = vivacity_core::scope::active_plugins(project, &manifest, true);
-    if let Some(lock) = read("composer.lock") {
-        for key in ["packages", "packages-dev"] {
-            for p in lock
-                .get(key)
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if p.get("type").and_then(serde_json::Value::as_str) != Some("composer-plugin") {
-                    continue;
-                }
-                if let Some(n) = p.get("name").and_then(serde_json::Value::as_str) {
-                    let n = n.to_ascii_lowercase();
-                    if !names.contains(&n)
-                        && matches!(
-                            vivacity_core::layout::plugin_allowed(&manifest, &n),
-                            vivacity_core::layout::PluginVerdict::Allowed
-                        )
-                    {
-                        names.push(n);
-                    }
-                }
-            }
-        }
-    }
-    names.into_iter().next()
+/// Why `-v` on this project goes to Composer, if it does. Under `-v`,
+/// Composer writes a line per plugin listener it dispatches
+/// (`EventDispatcher.php:230`: `> post-autoload-dump: Class->method`), and
+/// some plugins log on top of it (dealerdirect's `Plugin.php`, Flex's
+/// configurators, composer-merge-plugin's `Logger.php:68`). vivacity prints
+/// those lines for the plugins of `verbose_listeners::VERBOSE_PLUGINS`, in
+/// the versions read; any other plugin Composer would load — installed
+/// (project or `COMPOSER_HOME`) or locked, and allowed — hands the run
+/// over, named (docs/plans/verbose-plugins.md). `no_install`: a resolution
+/// command without install phase (not a dry run). `None` under
+/// `--no-plugins`, or without a readable composer.json (the command
+/// reports that itself).
+pub(crate) fn active_plugin(
+    project: &std::path::Path,
+    plugins_enabled: bool,
+    run_scripts: bool,
+    no_install: bool,
+) -> Option<String> {
+    crate::verbose_listeners::issue(project, plugins_enabled, run_scripts, no_install)
 }
 
 /// The whole command handed to Composer before anything is read or written
