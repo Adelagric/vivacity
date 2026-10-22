@@ -339,7 +339,8 @@ habituel). 46 cas :
 - dealerdirect v1.1.0–v1.1.1 (`InstalledVersions::isInstalled`) : diffère
   du dépôt local seulement si phpcs est remplacé ou fourni par un autre
   paquet — non porté, noté.
-- `update --no-install` : Composer joue `POST_UPDATE_CMD` (seul le dump
+- **traité le 2026-10-22 (`docs/plans/no-install-listeners.md`)** —
+  `update --no-install` : Composer joue `POST_UPDATE_CMD` (seul le dump
   est coupé, Installer.php:306-308), phpstan y écrit « Extensions
   installed », c3, dealerdirect et les extension-installers leurs
   fichiers ; vivacity ne joue aucun écouteur. Non-objectif
@@ -486,7 +487,8 @@ drift-reference (132 fichiers identiques), root-manifest (44) — 913 lignes
 n'y est pas ajouté (Packagist en ligne, mesuré sur macOS seulement).
 
 **Suites proposées** : jouer les écouteurs `POST_UPDATE_CMD` sous
-`update --no-install` (la ligne de phpstan d'abord) ; porter l'ordre du
+`update --no-install` (la ligne de phpstan d'abord — **fait le 2026-10-22,
+`docs/plans/no-install-listeners.md`**) ; porter l'ordre du
 dépôt local d'un paquet aliasé (asynchrone pour une archive, synchrone pour
 `path`, alias en ligne réajoutés) au lieu du repli ; rendre à l'avance
 seulement les versions que la commande garde (`resolution_issues`) ; la

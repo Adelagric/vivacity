@@ -3943,3 +3943,81 @@ revue).
   la ligne « Dependency … is also a root requirement » de `remove`, après
   « Updating dependencies » chez vivacity, avant chez Composer (autre
   famille, vue par la revue).
+
+## 2026-10-22 — Les écouteurs `POST_UPDATE_CMD` sous `update --no-install`
+
+Contexte : non-objectif « `update --no-install` » de
+`docs/plans/plugin-lines.md` ; plan `docs/plans/no-install-listeners.md`
+(matrice mesurée contre Composer 2.10.3, références, méta-analyse et revue).
+
+- **Le constat.** `Installer::run` avec `setInstall(false)` saute le dump
+  (Installer.php:305-307) et rend 0 après le lock (`doUpdate`, :684-689),
+  mais imprime le funding (:412-436) et dispatche `POST_UPDATE_CMD`
+  (:438-441) ; `--no-scripts` ne coupe que les scripts de composer.json
+  (EventDispatcher.php:585), `--dry-run` coupe tout (:292-298). `update`,
+  `require` et `remove` avec `--no-install` sont concernés.
+- **Ce que lisent les écouteurs : le dépôt local.** Mesuré, et lu dans les
+  sources (phpstan `Plugin.php:124`, rector `PluginInstaller.php:60-105`,
+  dealerdirect `Plugin.php:503-534`, c3 `Installer.php:114-126`) :
+  installed.json tel qu'il est, purgé des répertoires disparus
+  (Factory.php:457), dev compris quel que soit `--no-dev`, sans les alias en
+  ligne du lock, un alias de branche chargé avant son paquet
+  (ArrayRepository.php:215-231 : la version écrite reste celle du paquet).
+  Les plugins sont ceux qu'installed.json charge (Factory.php:448) : vendor
+  vierge ou plugin ajouté par la commande, rien ; plugin retiré par la
+  commande, il joue encore ; c3 copie le c3.php de la version **installée**.
+  Émulé (`crates/vivacity/src/no_install.rs`) : les émulations existantes
+  de dealerdirect, phpstan, rector, c3 et la sortie de Flex, dans l'ordre
+  d'activation d'installed.json (`plugin_order`, sans transaction), sur ce
+  dépôt et sa disposition (`Layout::resolve`), avec les `allow-plugins` du
+  chargement pour `remove`. Et `yiisoft/yii2-composer::activate`, qui
+  recrée `extensions.php` au chargement — sans installation et en dry run
+  (vu par la méta-analyse).
+- **Rendu à Composer, nommé, avant toute écriture.** Une version non lue de
+  dealerdirect/phpstan/rector installée (`EMULATED_VERSIONS`, désormais
+  contrôlée aussi sans installation ; package-versions n'est pas concerné,
+  `POST_AUTOLOAD_DUMP` ne part pas ; c3 n'a pas de garde : `Installer.php`
+  identique de 2.6.1 à 2.9.0, 2.6.0 ne diffère que sur le chemin Composer 1,
+  les versions antérieures exigent `composer-plugin-api ^1.0`) ; un de ces
+  écouteurs installé globalement ; un plugin actif ni émulé ni bénin
+  (composer-patches, installers-extender : `RESOLUTION_INERT` pour le lock,
+  pas pour le reste du run) ; une disposition non calculable ; et
+  **php-http/discovery** dès qu'il surveille une abstraction PSR ou dans
+  une version non lue. Pour ce dernier, mesuré : son `postUpdate` édite
+  composer.json et relance un `Installer` cloné, sans converger sous
+  `--no-install` (25 écritures du lock en 25 minutes, coupé) ; la première
+  version du plan le gardait natif quand le dépôt local égale le lock — la
+  méta-analyse a montré (mesuré) que c'est faux pour une racine `project`
+  dont l'implémentation est en dev. Alternative écartée : porter
+  `getMissingRequires` (table `PROVIDE_RULES`, contraintes de version,
+  règles dev/projet, épinglage par `extra.discovery` depuis 1.18.0) pour ne
+  rendre que lorsqu'il agirait — plus de code qu'il n'en faut pour un
+  plugin qu'on rend ; l'épinglage n'est pas lu (une abstraction épinglée
+  compte comme surveillée). Décidé en tête de `resolve_and_lock`, sur le
+  manifeste que la commande résout, avant toute ligne.
+- **`activate` de yii2-composer** au chargement (Factory.php:448) : joué
+  dans `resolve_and_lock` où le run reste celui de vivacity — erreurs
+  imprimées après chargement, ensemble insoluble, succès —, jamais avant un
+  passage de main (Composer l'y fait lui-même) ; et au dry run
+  d'`install`. Trouvé par la méta-analyse, placé par la revue.
+- **Seuls les plugins chargés jouent** : `listeners_in_order` ajoute en fin
+  les noms émulés absents ; sans filtre, un plugin autorisé mais non
+  installé faisait calculer la disposition du dépôt local et pouvait faire
+  échouer la commande après l'écriture du lock (revue, reproduit).
+- **Harnais** : `harness/plugin-lines.sh` gagne une section
+  `--no-install` (les nombres de cas, rouges et verts sont dans le
+  Résultat du plan).
+- **Environnement de mesure** : Linux x86_64, PHP 8.5.12 (conda-forge,
+  `gd` compilé à part), Composer 2.10.3 ; les zipballs d'`api.github.com`
+  refusés par le proxy de la session, le cache de fichiers de Composer
+  amorcé par `git archive` du commit verrouillé (les deux outils lisent la
+  même archive) ; `*.wordpress.org` refusé : la fixture wordpress n'a pas
+  pu être construite.
+- **Noté, laissé** : un plugin installé qu'`allow-plugins` ne mentionne pas
+  (Composer lève `PluginBlockedException`, sort en 1 ; vivacity continue —
+  toutes les commandes de résolution, écart antérieur) ; php-http/discovery
+  sur `update` **avec** installation (même `getMissingRequires`, liste
+  « inerte » qualifiée sur `install` seulement ; non mesuré ici) ;
+  dealerdirect v1.1.x (`InstalledVersions::isInstalled` lit l'installed.php
+  non purgé) ; la purge suit l'`install-path` enregistré, Composer le
+  `getInstallPath` courant.

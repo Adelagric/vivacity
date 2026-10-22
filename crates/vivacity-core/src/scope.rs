@@ -280,6 +280,52 @@ pub const BENIGN_PLUGINS: &[&str] = &[
     "ergebnis/composer-normalize",
 ];
 
+/// php-http/discovery (a benign plugin at install, inert at resolution).
+pub const DISCOVERY: &str = "php-http/discovery";
+
+/// The abstractions php-http/discovery's `POST_UPDATE_CMD` listener looks
+/// after (`Plugin::PROVIDE_RULES` keys, the same from 1.15.0 — its first
+/// version as a plugin — to 1.20.0).
+pub const DISCOVERY_ABSTRACTIONS: &[&str] = &[
+    "php-http/async-client-implementation",
+    "php-http/client-implementation",
+    "psr/http-client-implementation",
+    "psr/http-message-implementation",
+    "psr/http-factory-implementation",
+];
+
+/// Whether php-http/discovery's `Plugin::postUpdate` has anything to look
+/// after (`getMissingRequires`, Plugin.php:243-268 at 1.20.0): the root's
+/// `require` and `require-dev` when the root's `require` names
+/// php-http/discovery, plus the `require` of every package of the local
+/// repository (`installed`, installed.json entries) that requires it — one
+/// of them naming an abstraction it provides implementations for. Pinning
+/// through `extra.discovery` (from 1.18.0, and only for the four
+/// abstractions of `INTERFACE_MAP`) is not read: a pinned abstraction counts
+/// as looked after, which only ever hands the command over.
+pub fn discovery_watches(root_manifest: &Value, installed: &[Value]) -> bool {
+    let keys = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_object)
+            .map(|m| m.keys().map(|k| k.to_ascii_lowercase()).collect())
+            .unwrap_or_default()
+    };
+    let mut required: Vec<String> = Vec::new();
+    let root_require = keys(root_manifest.get("require"));
+    if root_require.iter().any(|k| k == DISCOVERY) {
+        required.extend(root_require);
+        required.extend(keys(root_manifest.get("require-dev")));
+    }
+    for p in installed {
+        let requires = keys(p.get("require"));
+        if requires.iter().any(|k| k == DISCOVERY) {
+            required.extend(requires);
+        }
+    }
+    required
+        .iter()
+        .any(|k| DISCOVERY_ABSTRACTIONS.contains(&k.as_str()))
+}
+
 /// Plugins known to change the install layout or the package contents:
 /// always out of scope.
 pub const LAYOUT_PLUGINS: &[&str] = &[
@@ -422,16 +468,35 @@ pub fn resolution_effect(
     })
 }
 
+/// The plugins whose `POST_UPDATE_CMD` listener vivacity reproduces from
+/// their source in the versions of [`EMULATED_VERSIONS`], and which run
+/// without an install too: `update --no-install` (and `require` /
+/// `remove`) still dispatch `POST_UPDATE_CMD` (Installer.php:438-441), to
+/// the plugins loaded from installed.json. codeception/c3 is absent: its
+/// listener is the same from 2.6.0 to 2.9.0, and older versions require
+/// `composer-plugin-api ^1.0`, so Composer 2 never loads them;
+/// package-versions-deprecated is absent: it listens to
+/// `POST_AUTOLOAD_DUMP`, which is not dispatched without an install
+/// (docs/plans/no-install-listeners.md).
+pub const POST_UPDATE_FILE_LISTENERS: &[&str] = &[
+    "dealerdirect/phpcodesniffer-composer-installer",
+    "phpstan/extension-installer",
+    "rector/extension-installer",
+];
+
 /// The plugins Composer would load for a resolution command, and what
 /// each does to it: those installed (installed.json of the project and
 /// of `COMPOSER_HOME`) that `allow-plugins` allows. Empty under
 /// `--no-plugins`. One issue per plugin that is not inert for `command`.
+/// `post_update_cmd`: the command dispatches `POST_UPDATE_CMD` (any but a
+/// dry run, install or not).
 pub fn resolution_issues(
     project_dir: &Path,
     root_manifest: &Value,
     command: ResolutionCommand,
     plugins_enabled: bool,
     with_install: bool,
+    post_update_cmd: bool,
 ) -> Vec<ScopeIssue> {
     let mut issues = Vec::new();
     for name in active_plugins(project_dir, root_manifest, plugins_enabled) {
@@ -444,7 +509,10 @@ pub fn resolution_issues(
     // lock is written (`POST_INSTALL_CMD` instead of `POST_UPDATE_CMD`); the
     // whole command goes now instead — whatever the command does with the
     // plugin (an update to a version read, its removal: conservative).
-    if plugins_enabled && with_install {
+    // Without an install, the plugins loaded from installed.json still run
+    // their `POST_UPDATE_CMD` listener on the local repository: the same
+    // check, for those listeners.
+    if plugins_enabled && (with_install || post_update_cmd) {
         for p in crate::layout::installed_packages_of(project_dir, root_manifest) {
             let (Some(name), Some(version)) = (
                 p.get("name").and_then(Value::as_str),
@@ -452,10 +520,12 @@ pub fn resolution_issues(
             ) else {
                 continue;
             };
-            if matches!(
-                crate::layout::plugin_allowed(root_manifest, name),
-                crate::layout::PluginVerdict::Allowed
-            ) {
+            if (with_install || POST_UPDATE_FILE_LISTENERS.contains(&name))
+                && matches!(
+                    crate::layout::plugin_allowed(root_manifest, name),
+                    crate::layout::PluginVerdict::Allowed
+                )
+            {
                 issues.extend(emulated_version_issue(name, version));
             }
         }
@@ -1348,5 +1418,88 @@ mod tests {
         )
         .expect("lock");
         assert_eq!(issues(&inline).len(), 1);
+    }
+
+    #[test]
+    fn post_update_listener_versions_are_checked_without_install_too() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let composer = tmp.path().join("vendor/composer");
+        std::fs::create_dir_all(&composer).expect("mkdir");
+        std::fs::write(
+            composer.join("installed.json"),
+            json!({"packages": [
+                {"name": "phpstan/extension-installer", "version": "1.3.1", "type": "composer-plugin"},
+                {"name": "composer/package-versions-deprecated", "version": "1.11.99.1", "type": "composer-plugin"},
+            ]})
+            .to_string(),
+        )
+        .expect("installed.json");
+        let manifest = json!({"config": {"allow-plugins": {
+            "phpstan/extension-installer": true, "composer/package-versions-deprecated": true}}});
+        let names = |with_install: bool, post_update_cmd: bool| -> Vec<String> {
+            resolution_issues(
+                tmp.path(),
+                &manifest,
+                ResolutionCommand::Update,
+                true,
+                with_install,
+                post_update_cmd,
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+        };
+        // With an install: every listener vivacity reproduces.
+        assert_eq!(names(true, true).len(), 2);
+        // `--no-install`: `POST_UPDATE_CMD` still runs, `POST_AUTOLOAD_DUMP`
+        // does not — phpstan only.
+        let no_install = names(false, true);
+        assert_eq!(no_install.len(), 1, "{no_install:?}");
+        assert!(no_install[0].contains("phpstan/extension-installer 1.3.1"));
+        // A dry run dispatches nothing.
+        assert!(names(false, false).is_empty());
+        // `--no-plugins`: nothing is loaded.
+        assert!(resolution_issues(
+            tmp.path(),
+            &manifest,
+            ResolutionCommand::Update,
+            false,
+            false,
+            true
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn discovery_watches_what_postupdate_reads() {
+        let impl_pkg = json!({"name": "acme/sdk", "require": {"php-http/discovery": "^1.15", "psr/http-client-implementation": "*"}});
+        let plain =
+            json!({"name": "acme/other", "require": {"psr/http-client-implementation": "*"}});
+        // Nothing requires php-http/discovery: nothing looked after.
+        assert!(!discovery_watches(
+            &json!({"require": {"psr/http-client-implementation": "*"}}),
+            std::slice::from_ref(&plain)
+        ));
+        // The root requires it (in `require`): its own links count,
+        // `require-dev` included.
+        assert!(discovery_watches(
+            &json!({"require": {"php-http/discovery": "^1.20"}, "require-dev": {"psr/http-factory-implementation": "*"}}),
+            &[]
+        ));
+        // Only in `require-dev`: the root's links do not count.
+        assert!(!discovery_watches(
+            &json!({"require-dev": {"php-http/discovery": "^1.20", "psr/http-client-implementation": "*"}}),
+            &[]
+        ));
+        // An installed package that requires it brings its own `require`.
+        assert!(discovery_watches(
+            &json!({}),
+            std::slice::from_ref(&impl_pkg)
+        ));
+        // A pin in `extra.discovery` is not read: still looked after.
+        assert!(discovery_watches(
+            &json!({"extra": {"discovery": {"psr/http-client-implementation": "Acme\\Client"}}}),
+            &[impl_pkg]
+        ));
     }
 }

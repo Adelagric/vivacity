@@ -9,7 +9,10 @@ use super::*;
 /// hands the whole command to Composer with the same arguments — before
 /// any write (the caller reverts its manifest edit first). `--no-fallback`
 /// stops with exit 3 instead. `Some(code)` when the command was handled
-/// here; `None` when vivacity goes on natively.
+/// here; `None` when vivacity goes on natively. `post_update_cmd`: the
+/// command dispatches `POST_UPDATE_CMD` (not a dry run) — without an
+/// install, to the plugins loaded from installed.json
+/// (docs/plans/no-install-listeners.md).
 pub(crate) fn resolution_fallback(
     project: &std::path::Path,
     manifest: &serde_json::Value,
@@ -17,6 +20,7 @@ pub(crate) fn resolution_fallback(
     no_plugins: bool,
     no_fallback: bool,
     with_install: bool,
+    post_update_cmd: bool,
 ) -> anyhow::Result<Option<i32>> {
     let mut issues = vivacity_core::scope::resolution_issues(
         project,
@@ -24,7 +28,16 @@ pub(crate) fn resolution_fallback(
         command,
         !no_plugins,
         with_install,
+        post_update_cmd,
     );
+    // Without an install, `POST_UPDATE_CMD` still runs the loaded plugins'
+    // listeners on the local repository: what vivacity cannot reproduce
+    // there goes to Composer now, before anything is written.
+    if !with_install && post_update_cmd && !no_plugins {
+        issues.extend(crate::no_install::issues_before_resolution(
+            project, manifest,
+        ));
+    }
     // Flex emulated for this command: its file-writing behaviours are
     // still Composer's.
     let flex_active = vivacity_core::scope::active_plugins(project, manifest, !no_plugins)

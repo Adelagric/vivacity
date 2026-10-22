@@ -24,6 +24,7 @@ mod remove;
 use remove::*;
 mod flex;
 mod flex_recipes;
+mod no_install;
 mod plugin_order;
 mod require;
 mod scripts;

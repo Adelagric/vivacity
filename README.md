@@ -249,9 +249,14 @@ lines, `symfony-pack` packages laid out as metapackages; what it does
 when resolving is described below). The lines these plugins print are
 printed too, in the order Composer calls their listeners (the order it
 activated the plugins: installed.json sorted by `PackageSorter`, then those
-the command installs); another version of a plugin whose listener changed
+the command installs) — on `update`, `require` and `remove` with
+`--no-install` too, where Composer still runs `post-update-cmd` for the
+plugins already installed, and they read the installed packages rather
+than the new lock; another version of a plugin whose listener changed
 across versions, or an extension these installers list under an alias,
-goes to Composer with the reason. A plugin listed
+goes to Composer with the reason (without an install, so does
+`php-http/discovery` when it looks after a PSR implementation: its
+listener may edit `composer.json` and update again). A plugin listed
 as `false` in `allow-plugins` is
 skipped, like Composer does. A short list of plugins that do nothing at install
 time (`php-http/discovery`, `symfony/thanks`,

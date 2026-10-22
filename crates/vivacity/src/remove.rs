@@ -90,6 +90,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         args.no_plugins,
         args.no_fallback,
         !args.no_install && !args.dry_run,
+        !args.dry_run,
     )? {
         return Ok(code);
     }

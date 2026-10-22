@@ -226,6 +226,7 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 args.no_plugins,
                 args.no_fallback,
                 !args.no_install && !args.dry_run,
+                !args.dry_run,
             )? {
                 return Ok(code);
             }
@@ -296,7 +297,7 @@ pub(crate) fn run_update_resolved(
         let status = install_after_update(args, resolved.report(), virtual_lock, virtual_manifest)?;
         return Ok(ended(status));
     }
-    print_post_update(&resolved, &project_dir(args.working_dir.as_deref())?)?;
+    print_post_update(&resolved, &project_dir(args.working_dir.as_deref())?, args)?;
     Ok(ended(0))
 }
 
@@ -446,20 +447,53 @@ pub(crate) fn hand_resolution_over(
 
 /// Prints the post-update report of `Installer::run` when the update has
 /// no install phase (`--no-install`): the precomputed lines, the funding
-/// count, then Flex's `POST_UPDATE_CMD` output. With an install phase,
-/// that phase prints it (`run_install`).
+/// count, then `POST_UPDATE_CMD` — dispatched without an install too
+/// (Installer.php:438-441), not on a dry run — whose emulated listeners run
+/// on the local repository, in their plugins' activation order, Flex's
+/// output at its rank (`no_install`, docs/plans/no-install-listeners.md).
+/// With an install phase, that phase prints it (`run_install`).
 pub(crate) fn print_post_update(
     resolved: &Resolved,
     project: &std::path::Path,
+    args: &UpdateArgs,
 ) -> anyhow::Result<()> {
+    let manifest = listeners_manifest(&resolved.manifest, args.allow_plugins_at_load.as_ref());
     for line in &resolved.post {
         vivacity_core::say!("{line}");
     }
     print_funding(project, &resolved.manifest);
-    if resolved.flex_active {
-        print_flex_post_update(&resolved.manifest, resolved.thanks_reminder, None)?;
+    if args.dry_run {
+        return Ok(());
     }
-    Ok(())
+    let flex = || print_flex_post_update(&resolved.manifest, resolved.thanks_reminder, None);
+    crate::no_install::post_update_listeners(
+        project,
+        &manifest,
+        !args.no_plugins,
+        resolved
+            .flex_active
+            .then_some(&flex as &dyn Fn() -> anyhow::Result<()>),
+    )
+}
+
+/// The root package the plugins' listeners see: `remove` takes the removed
+/// plugins out of `allow-plugins` after its `Composer` loaded them
+/// (RemoveCommand.php:221-222, then :242-252), and the `PluginManager`
+/// keeps the rules it read — as they were, order included.
+pub(crate) fn listeners_manifest(
+    manifest: &serde_json::Value,
+    allow_plugins_at_load: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut manifest = manifest.clone();
+    if let (Some(allow), Some(root)) = (allow_plugins_at_load, manifest.as_object_mut()) {
+        let config = root
+            .entry("config")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(config) = config.as_object_mut() {
+            config.insert("allow-plugins".to_owned(), allow.clone());
+        }
+    }
+    manifest
 }
 
 pub(crate) fn resolve_and_lock(
@@ -506,6 +540,36 @@ pub(crate) fn resolve_and_lock(
             }
         }
     }
+    // The manifest the run's plugins were loaded with (`remove`: the
+    // `allow-plugins` rules as read before its edit).
+    let loaded_manifest = serde_json::from_str::<serde_json::Value>(&manifest_text)
+        .ok()
+        .map(|m| listeners_manifest(&m, args.allow_plugins_at_load.as_ref()));
+    // Without an install, php-http/discovery's `POST_UPDATE_CMD` listener
+    // reads the old installed state (`no_install::discovery_issue`):
+    // decided on the manifest this command resolves (`require`'s edit
+    // included), before anything is printed or written.
+    if args.no_install && !args.dry_run && !args.no_plugins {
+        if let Some(issue) = loaded_manifest
+            .as_ref()
+            .and_then(|m| crate::no_install::discovery_issue(&project, m))
+        {
+            return Ok(Resolved {
+                hand_over: Some(issue),
+                ..Resolved::stopped(0)
+            });
+        }
+    }
+    // `Factory::createComposer` activates the installed plugins before
+    // anything is resolved: yiisoft/yii2-composer's `activate` writes its
+    // file whatever the run then does — done where the run stays
+    // vivacity's (not before a hand-over to Composer, which does it).
+    let activate = || -> anyhow::Result<()> {
+        match &loaded_manifest {
+            Some(m) => crate::no_install::activate_yii2_composer(&project, m, !args.no_plugins),
+            None => Ok(()),
+        }
+    };
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
     let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
@@ -538,6 +602,7 @@ pub(crate) fn resolve_and_lock(
                     bamarni_command_event(&project, &m, !args.no_plugins);
                 }
             }
+            activate()?;
             print_session_error(&e);
             if let Some(line) = &e.stdout {
                 vivacity_core::out!("{line}");
@@ -633,6 +698,7 @@ pub(crate) fn resolve_and_lock(
     let (lock, report) = match session.update(&manifest_text, &filter) {
         Ok(r) => r,
         Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsolvable => {
+            activate()?;
             print_session_error(&e);
             return Ok(Resolved::stopped(2));
         }
@@ -807,6 +873,7 @@ pub(crate) fn resolve_and_lock(
         .join("installed.json")
         .is_file();
     let post = post_update_report(&session, ops, &lock, &manifest_text, fresh_install);
+    activate()?;
     Ok(Resolved {
         status: 0,
         virtual_lock: !write_lock,

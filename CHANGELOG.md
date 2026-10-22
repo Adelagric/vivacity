@@ -6,6 +6,35 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Fixed
+- **`update --no-install` runs the plugins' `POST_UPDATE_CMD` listeners.**
+  Composer skips the install and the dump but still dispatches
+  `POST_UPDATE_CMD` (so do `require --no-install` and `remove
+  --no-install`) to the plugins it loaded from installed.json, and their
+  listeners read the installed packages, not the new lock:
+  `phpstan/extension-installer` prints "Extensions installed" every time,
+  and it, `rector/extension-installer`,
+  `dealerdirect/phpcodesniffer-composer-installer` and `codeception/c3`
+  rewrite `GeneratedConfig.php`, `CodeSniffer.conf` and `c3.php` when they
+  are missing or stale. vivacity wrote the same lock and none of that. The
+  listeners now run there too, in their plugins' activation order (Flex's
+  output at its rank), on installed.json as it is — purged of missing
+  directories, dev packages included whatever `--no-dev` says; a bare
+  vendor or a plugin the command adds loads nothing, a plugin it removes
+  still runs, `--dry-run` and `--no-plugins` run nothing.
+  `yiisoft/yii2-composer`'s `activate` (it recreates `extensions.php` when
+  the plugin is loaded) is reproduced on these commands and on dry runs.
+- **What those listeners would do that vivacity does not reproduce goes to
+  Composer, named, before anything is written:** an unread version of the
+  three file-writing installers (now checked under `--no-install` too),
+  an emulated listener installed globally, an active plugin that is neither emulated
+  nor benign (`cweagans/composer-patches`, installers extenders), and
+  `php-http/discovery` as soon as it looks after a PSR implementation or
+  comes in a version not read (its listener may edit `composer.json` and
+  update again; measured never converging under `--no-install`).
+  `harness/plugin-lines.sh` gains a `--no-install` section; the counts are
+  in `docs/plans/no-install-listeners.md`.
+
 ## [0.23.0] — 2026-10-21
 
 ### Fixed

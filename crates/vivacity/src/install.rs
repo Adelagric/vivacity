@@ -296,6 +296,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         args.no_plugins,
         args.no_fallback,
         !args.dry_run,
+        !args.dry_run,
     )? {
         return Ok(code);
     }
@@ -969,6 +970,9 @@ fn report_operations(tx: &LocalTransaction) {
 /// funding count — no dump, and no `POST_*_CMD` (`runScripts` is off).
 /// 0, unless the lock has no `packages-dev` ([`report_before_dump`]).
 fn dry_run(run: &Run<'_>, tx: &LocalTransaction) -> anyhow::Result<i32> {
+    // Plugins activated when the `Composer` was created: a dry run executes
+    // no operation, so only those loaded from installed.json.
+    crate::no_install::activate_yii2_composer(&run.project, &run.manifest, !run.args.no_plugins)?;
     for op in &tx.transaction.operations {
         if let Some(line) = op.show(&tx.arena, false) {
             vivacity_core::say!("  - {line}");
@@ -1370,31 +1374,8 @@ fn post_install_listener(
 ) -> anyhow::Result<()> {
     let args = run.args;
     match plugin {
-        // `Plugin::onDependenciesChangedEvent`; `saveInstalledPaths` writes
-        // its line when it saved.
         vivacity_core::phpcs_installer::PLUGIN_NAME => {
-            let installed: Vec<&vivacity_core::lock::LockPackage> =
-                local.wanted_packages(run.with_dev).collect();
-            let allowed = matches!(
-                vivacity_core::layout::plugin_allowed(&run.manifest, plugin),
-                vivacity_core::layout::PluginVerdict::Allowed
-            );
-            if let Some(own) = installed
-                .iter()
-                .find(|p| p.name() == plugin)
-                .filter(|_| allowed)
-            {
-                let change = vivacity_core::phpcs_installer::register_standards(
-                    &run.project,
-                    layout,
-                    &installed,
-                    &run.manifest,
-                    vivacity_core::phpcs_installer::keeps_cwd_relative_paths(own.version()),
-                )?;
-                if let Some(line) = change.line() {
-                    vivacity_core::out!("{line}");
-                }
-            }
+            emulate_phpcs(&run.project, layout, local, &run.manifest, run.with_dev)?;
         }
         extension_installers::PHPSTAN => extension_installers::phpstan(
             layout,
@@ -1433,6 +1414,44 @@ fn post_install_listener(
             Some(_) => {}
         },
         _ => {}
+    }
+    Ok(())
+}
+
+/// dealerdirect/phpcodesniffer-composer-installer's `POST_INSTALL_CMD` /
+/// `POST_UPDATE_CMD` listener (`Plugin::onDependenciesChangedEvent`):
+/// with the plugin among `local`'s packages and allowed, PHP_CodeSniffer's
+/// `installed_paths` registered from them; `saveInstalledPaths` writes its
+/// line when it saved.
+pub(crate) fn emulate_phpcs(
+    project: &std::path::Path,
+    layout: &vivacity_core::layout::Layout,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::phpcs_installer as phpcs;
+    let installed: Vec<&vivacity_core::lock::LockPackage> =
+        local.wanted_packages(with_dev).collect();
+    let allowed = matches!(
+        vivacity_core::layout::plugin_allowed(manifest, phpcs::PLUGIN_NAME),
+        vivacity_core::layout::PluginVerdict::Allowed
+    );
+    if let Some(own) = installed
+        .iter()
+        .find(|p| p.name() == phpcs::PLUGIN_NAME)
+        .filter(|_| allowed)
+    {
+        let change = phpcs::register_standards(
+            project,
+            layout,
+            &installed,
+            manifest,
+            phpcs::keeps_cwd_relative_paths(own.version()),
+        )?;
+        if let Some(line) = change.line() {
+            vivacity_core::out!("{line}");
+        }
     }
     Ok(())
 }
@@ -1988,7 +2007,7 @@ pub(crate) fn installed_packages(
 
 /// `Factory::purgePackages`: the packages whose install path is gone leave
 /// the local repository (a metapackage, or an entry without a path, stays).
-fn purge_missing(
+pub(crate) fn purge_missing(
     composer_dir: &std::path::Path,
     list: Vec<serde_json::Value>,
 ) -> Vec<serde_json::Value> {
