@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-10-23
+
 ### Changed
 - **`-v` stays native with the plugins whose verbose lines are known.**
   Since 0.21, `-v` handed the whole command to Composer as soon as any

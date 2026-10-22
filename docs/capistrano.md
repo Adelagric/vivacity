@@ -24,7 +24,7 @@ sha256 of the release asset; pin the version as you pin Composer):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Adelagric/vivacity/main/install.sh \
-  | VIVACITY_VERSION=v0.23.0 sh
+  | VIVACITY_VERSION=v0.24.0 sh
 ```
 
 It lands in `~/.local/bin` (`VIVACITY_INSTALL_DIR` to change it); give
