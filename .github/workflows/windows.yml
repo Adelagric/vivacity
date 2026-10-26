@@ -115,25 +115,25 @@ jobs:
         run: fixtures/make.sh
 
       - name: Parity without autoloader (0 diff required)
-        run: harness/diff-vendor.sh
+        run: harness/net-retry.sh harness/diff-vendor.sh
 
       - name: Parity with autoloader, cold then warm classmap cache
         run: |
-          harness/diff-vendor.sh --with-autoloader
-          harness/diff-vendor.sh --with-autoloader
+          harness/net-retry.sh harness/diff-vendor.sh --with-autoloader
+          harness/net-retry.sh harness/diff-vendor.sh --with-autoloader
       - name: config.vendor-dir / bin-dir
-        run: harness/vendor-dir.sh
+        run: harness/net-retry.sh harness/vendor-dir.sh
       - name: tar dists
-        run: harness/tar-dist.sh
+        run: harness/net-retry.sh harness/tar-dist.sh
       - name: yiisoft/yii2-composer
-        run: harness/yii2-composer.sh
+        run: harness/net-retry.sh harness/yii2-composer.sh
       - name: bamarni/composer-bin-plugin
-        run: harness/bin-plugin.sh
+        run: harness/net-retry.sh harness/bin-plugin.sh
       - name: roots/wordpress-core-installer
-        run: harness/wp-core.sh
+        run: harness/net-retry.sh harness/wp-core.sh
       - name: mnsami/composer-custom-directory-installer
-        run: harness/custom-dirs.sh
+        run: harness/net-retry.sh harness/custom-dirs.sh
       - name: composer/package-versions-deprecated
-        run: harness/package-versions.sh
+        run: harness/net-retry.sh harness/package-versions.sh
       - name: symfony/flex at install
-        run: harness/flex-install.sh
+        run: harness/net-retry.sh harness/flex-install.sh

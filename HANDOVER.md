@@ -10,6 +10,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 cargo test                               # inclut les tests oracle (php + composer dans le PATH)
 cargo build --release
 harness/diff-vendor.sh [--with-autoloader]   # parité vs Composer sur les 6 fixtures (projet entier pour wordpress et drupal ; second passage --no-plugins des deux côtés, natif exigé) — harness/lib/compare.sh : diff -r + inventaire des modes et des liens
+harness/net-retry.sh harness/<nom>.sh     # ce que la CI lance pour chaque harnais : en échec avec une erreur réseau dans la sortie (DNS perdu par un runner, curl 6/7/28, erreur d'envoi du client de vivacity), un second passage une minute plus tard ; une vraie différence échoue deux fois
 harness/removal.sh                       # paquets retirés du lock : même projet que Composer après
 harness/root-scan.sh                     # scans hors store : 9 éditions de sources racine + classe ambiguë + violation PSR vs Composer (vendor/ et avertissements)
 bench/ci-bench.sh && bench/gate.py <dir> --baseline bench/results/baseline-ratio.json   # ratio vivacity/Composer par scénario (bench.yml en CI ; baseline = médiane de plusieurs runs, --merge)

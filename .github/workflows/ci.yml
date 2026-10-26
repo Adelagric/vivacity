@@ -62,71 +62,71 @@ jobs:
         run: tools/check-clib-deps.sh
 
       - name: Parity without autoloader
-        run: harness/diff-vendor.sh
+        run: harness/net-retry.sh harness/diff-vendor.sh
 
       - name: Parity with autoloader, cold then warm classmap cache
         run: |
-          harness/diff-vendor.sh --with-autoloader
-          harness/diff-vendor.sh --with-autoloader
+          harness/net-retry.sh harness/diff-vendor.sh --with-autoloader
+          harness/net-retry.sh harness/diff-vendor.sh --with-autoloader
 
       - name: Resolver parity (composer.lock written by `update --no-install`)
-        run: harness/update.sh
+        run: harness/net-retry.sh harness/update.sh
 
       - name: Manifest edits by `remove` (composer.json and composer.lock)
-        run: harness/steps.sh
+        run: harness/net-retry.sh harness/steps.sh
 
       - name: Removals (inside and outside vendor/)
-        run: harness/removal.sh
+        run: harness/net-retry.sh harness/removal.sh
       - name: Transitions left to Composer (plugin upgrade)
-        run: harness/transitions.sh
+        run: harness/net-retry.sh harness/transitions.sh
       - name: Path repositories (symlink and mirror strategies, modes and links)
-        run: harness/path-repos.sh
+        run: harness/net-retry.sh harness/path-repos.sh
       - name: config.vendor-dir / bin-dir (install, dump -o, no-op on moved directories)
-        run: harness/vendor-dir.sh
+        run: harness/net-retry.sh harness/vendor-dir.sh
       - name: wikimedia/composer-merge-plugin (merged root, no implicit update)
-        run: harness/merge-plugin.sh
+        run: harness/net-retry.sh harness/merge-plugin.sh
       - name: --run-scripts (the scripts, by Composer, in Composer's order)
-        run: harness/scripts.sh
+        run: harness/net-retry.sh harness/scripts.sh
       - name: tar dists (asset-packagist tarballs, modes from the header, cache shared)
-        run: harness/tar-dist.sh
+        run: harness/net-retry.sh harness/tar-dist.sh
       - name: yiisoft/yii2-composer (extensions.php from the yii2-extension packages)
-        run: harness/yii2-composer.sh
+        run: harness/net-retry.sh harness/yii2-composer.sh
       - name: bamarni/composer-bin-plugin (deprecation lines, forward-command refused)
-        run: harness/bin-plugin.sh
+        run: harness/net-retry.sh harness/bin-plugin.sh
       - name: roots/wordpress-core-installer (wordpress-core placed at wordpress-install-dir)
-        run: harness/wp-core.sh
+        run: harness/net-retry.sh harness/wp-core.sh
       - name: mnsami/composer-custom-directory-installer (libraries at extra.installer-paths)
-        run: harness/custom-dirs.sh
+        run: harness/net-retry.sh harness/custom-dirs.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
-        run: harness/package-versions.sh
+        run: harness/net-retry.sh harness/package-versions.sh
       - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)
-        run: harness/plugin-lines.sh
+        run: harness/net-retry.sh harness/plugin-lines.sh
       - name: symfony/flex at install (.env from .env.dist, its lines, symfony-pack)
-        run: harness/flex-install.sh
+        run: harness/net-retry.sh harness/flex-install.sh
       - name: symfony/flex on update with install (recipes decided before writing)
-        run: harness/flex-update.sh
+        run: harness/net-retry.sh harness/flex-update.sh
       - name: symfony/flex recipes applied on update (real recipes served offline)
-        run: harness/flex-recipes.sh
+        run: harness/net-retry.sh harness/flex-recipes.sh
       - name: FileDownloader's Downloading lines (cold files cache on both sides)
-        run: harness/download-lines.sh
+        run: harness/net-retry.sh harness/download-lines.sh
       - name: Artifact repositories (local dists read off the disk, modes kept)
-        run: harness/artifact-repo.sh
+        run: harness/net-retry.sh harness/artifact-repo.sh
       - name: The comparator's own tolerances (anchored, not substrings)
-        run: harness/compare-selftest.sh
+        run: harness/net-retry.sh harness/compare-selftest.sh
       - name: unzip fails then ZipArchive resumes (duplicates, file/dir collisions)
-        run: harness/two-stage.sh
+        run: harness/net-retry.sh harness/two-stage.sh
       - name: Transport failures exit 100 (404 dist, dead repository, missing local dist)
-        run: harness/transport-exit.sh
+        run: harness/net-retry.sh harness/transport-exit.sh
       - name: -q and -v print what Composer prints (stdout and stderr whole)
-        run: harness/verbosity.sh
+        run: harness/net-retry.sh harness/verbosity.sh
       - name: The fallback hands Composer the command line (argv, cwd, env, exit code)
-        run: harness/fallback-args.sh
+        run: harness/net-retry.sh harness/fallback-args.sh
 
       - name: Per-file scan cache (root sources edited between installs)
-        run: harness/root-scan.sh
+        run: harness/net-retry.sh harness/root-scan.sh
 
       - name: Boot on vivacity vendor
-        run: harness/boot.sh
+        run: harness/net-retry.sh harness/boot.sh
 
       - name: Reference twins still match the pinned Composer
-        run: harness/drift-reference.sh
+        run: harness/net-retry.sh harness/drift-reference.sh

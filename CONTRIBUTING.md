@@ -149,7 +149,12 @@ of composer-merge-plugin), `fallback.rs` (handing the command to Composer),
   fake `composer` records it), `harness/drift-reference.sh` (every
   vendored file under `docs/reference/` identical to the phar).
   `harness/linux.sh` runs the whole chain in a Linux container; the
-  Windows parity job runs on `windows-latest` in CI.
+  Windows parity job runs on `windows-latest` in CI. CI wraps every harness
+  in `harness/net-retry.sh`: a harness that fails with a network error in
+  its output (a runner losing its DNS while resolving against Packagist)
+  runs once more a minute later; a real difference fails twice. Harness
+  scripts stay compatible with bash 3.2, the one macOS ships (no
+  associative arrays, no `mapfile`).
 - Every ported function has its reference vendored under `docs/reference/`
   with its licence, and a row in NOTICE.md when it comes from a new
   origin. Documentation (README, HANDOVER, DECISIONS, CHANGELOG, the crate

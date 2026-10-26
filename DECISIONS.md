@@ -4093,3 +4093,31 @@ revue).
   normal) ; l'auto-installation de php-http/discovery ; les effets des
   écouteurs sous `update --no-install` au niveau normal (écart de
   plugin-lines.md, inchangé).
+
+## 2026-10-26 — Les harnais en ligne relancés une fois sur une panne réseau, pas tolérés
+
+Deux CI rouges de suite sur le job macOS (22 et 23 octobre, `plugin-lines.sh`
+puis `verbosity.sh`) : le runner a perdu sa résolution DNS (« Could not
+resolve host: repo.packagist.org ») pendant les parties qui résolvent contre
+le vrai Packagist. Composer et vivacity retombent alors sur leurs caches avec
+des messages différents (curl d'un côté, le client HTTP de l'autre), ou la
+référence échoue tout court : le harnais est rouge sur le réseau, pas sur
+vivacity.
+
+Écartés : classer chaque cas « réseau indisponible » comme le corpus (des
+dizaines de points d'échec à toucher dans quatre harnais, et un cas sauté
+en silence finit par masquer une régression) ; figer ces projets sur un
+instantané hors ligne (c'est ce que font les fixtures ; les parties en ligne
+existent justement pour exercer des versions de plugins que l'instantané n'a
+pas, et le refaire coûte un chantier).
+
+Retenu : `harness/net-retry.sh`, qui enveloppe chaque harnais dans `ci.yml`
+et `windows.yml`. Un harnais qui passe tourne une fois. Un harnais en échec
+dont la sortie porte une erreur réseau (curl 6/7/28, résolveur, erreur
+d'envoi du client de vivacity) est relancé une fois après une minute, et
+c'est le second passage qui décide. Une vraie régression échoue deux fois et
+reste rouge ; le coût n'est payé que sur panne. Vérifié sur quatre harnais
+simulés sous le bash 3.2 de macOS : réseau puis vert (deux passages, 0),
+différence sans réseau (un passage, 1), réseau deux fois (deux passages, 1),
+vert (un passage, 0).
+
