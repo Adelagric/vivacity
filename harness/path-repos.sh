@@ -72,7 +72,7 @@ step() {
   (cd "$viv" && "$VIVACITY" "$@" >"$WORK/$label.vivacity.log" 2>"$WORK/$label.vivacity.err") || viv_code=$?
   if [ "$ref_code" != "$viv_code" ]; then
     echo "FAIL path-repos $label : code retour composer=$ref_code vivacity=$viv_code"
-    tail -3 "$WORK/$label.composer.err" "$WORK/$label.vivacity.err"; status=1; return
+    tail -n 3 "$WORK/$label.composer.err" "$WORK/$label.vivacity.err"; status=1; return
   fi
   sed -E -n "/$anchor/,\$p" "$WORK/$label.composer.err" > "$WORK/$label.composer.tail"
   sed -E -n "/$anchor/,\$p" "$WORK/$label.vivacity.err" | grep -v '^vivacity: ' > "$WORK/$label.vivacity.tail" || true

@@ -517,7 +517,7 @@ for fx in "${FIXTURES[@]}"; do
     label="$fx ${sargs[*]}"; [ ${#preps[@]} -gt 0 ] && label="$label (${preps[*]})"
     if [ "$ref_code" != "$viv_code" ]; then
       echo "FAIL $label : code retour composer=$ref_code vivacity=$viv_code"
-      tail -3 "$WORK/$fx-$n.composer.err" "$WORK/$fx-$n.vivacity.err"; status=1; continue
+      tail -n 3 "$WORK/$fx-$n.composer.err" "$WORK/$fx-$n.vivacity.err"; status=1; continue
     fi
     ok=1
     if [ "$expect_fallback" = 1 ] && ! grep -q 'delegating to `composer' "$WORK/$fx-$n.vivacity.err"; then
