@@ -22,6 +22,13 @@ byte-identical-output promise are the public API.
   `-v`** when the resolution brings in a plugin whose verbose lines are not
   reproduced: its output is held until the solved lock is accepted, as on
   `update`, and dropped when Composer takes the run.
+- **Directory modes of a zip dist reach `vendor/`.** `unzip` restores a
+  directory's stored mode and Composer renames the extracted tree into
+  place; vivacity created the package root and every cloned directory with
+  the default mode (0775 and 0700 directories came out 0755). The store's
+  layout segment moves to `v3`, so entries extracted before are not served
+  again (they stay on disk until the cache is cleared). Measured cost on a
+  warm Laravel reinstall: none beyond noise (one `stat` per directory).
 - **`dump-autoload` drops a package whose directory is gone from the
   autoloader**, as Composer does (`Factory::purgePackages` before the
   dump); it kept its autoload rules.

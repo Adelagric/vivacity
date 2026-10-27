@@ -513,6 +513,7 @@ root (Application.php), ce que les runners de la CI ne font pas.
 - un répertoire de zip au mode 0775 : `unzip` (Composer) le pose, vivacity
   pose 0755 (le mode d'une entrée répertoire est ignoré), vu sur des
   archives reconstruites, jamais sur les archives réelles des fixtures ;
+  *corrigé le 2026-10-27 (racine et clone ; store en `v3`)* ;
 - `dump-autoload` garde dans l'autoloader un paquet dont le répertoire a
   disparu, Composer le purge (`Factory::purgePackages`) — reproduit sur
   0.23.0 ; *corrigé le 2026-10-27* ;

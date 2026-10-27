@@ -4142,3 +4142,30 @@ EventDispatcher.php:230), d'où la délégation maintenue.
   rector, c3 avec c3.php perdu, la combinaison) — rouges sur `main`
   (f3f5524 : délégation, ou lignes dans le mauvais ordre), verts ensuite.
 
+## 2026-10-27 — Les modes des répertoires d'un zip, jusqu'à vendor/
+
+Vu en reconstruisant des archives WordPress pour le harnais : un zip d'hôte
+unix dont les répertoires portent 0775 s'installe en 0775 chez Composer,
+en 0755 chez vivacity. Deux pertes :
+
+- **la racine** : `ArchiveDownloader::install` (ArchiveDownloader.php:172-182)
+  renomme le répertoire de tête extrait par `unzip` en `$path` quand celui-ci
+  est neuf — le mode suit ; vivacity sautait l'entrée de ce répertoire (le
+  retrait de la racine la rend vide) et la racine de l'entrée de store
+  prenait le défaut. Elle prend maintenant la règle de `unzip_mode` de cette
+  entrée ;
+- **le clone** : `link_or_copy_tree` créait chaque répertoire avec le défaut
+  (0777 & ~umask) ; il recopie le mode de la source, une fois le répertoire
+  rempli (0500 interdirait d'y écrire), seulement s'il diffère du défaut lu
+  une fois par clone. Sous macOS `clonefile` les gardait déjà.
+
+Le segment du store passe à `v3` (précédent : `v2`, DECISIONS du
+2026-09-30) : une entrée extraite avant n'est plus servie. Coût mesuré sur
+une réinstallation chaude de Laravel (1 306 répertoires), quinze passes
+alternées : médiane 346 ms contre 365 ms pour 0.24.0, dans le bruit.
+Harnais : `artifact-repo.sh` gagne une racine 0775 et un `docs/` 0700 —
+rouge sur 0.24.0 (vendor/ différent, 755 sur les deux), vert ensuite ; test
+unitaire `directory_modes_follow_the_source`. Les zipballs de GitHub (hôte
+FAT, `git archive`) ne portent aucun mode de répertoire : sans effet sur
+elles.
+

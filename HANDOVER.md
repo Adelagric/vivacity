@@ -89,10 +89,11 @@ par aller-retour) : `brew install mingw-w64` puis
 compilation et les lints propres à `#[cfg(windows)]`, qui sont la cause de
 presque tous les rouges de ce job.
 
-⚠️ Le store ne porte aucune marque de version : une entrée extraite par une
-version antérieure garde les modes de l'époque et continue d'être servie
-(`<store>/<vendor>/<pkg>/<version>-<ref12>`). Après un changement de sémantique
-d'extraction, vider le store (`VIVACITY_CACHE_DIR`) pour mesurer.
+⚠️ Le store porte un segment de disposition (`<store>/v3/<vendor>/<pkg>/<version>-<ref12>`,
+`store.rs`, `LAYOUT`) : un changement de sémantique d'extraction le fait
+monter (v3, 2026-10-27 : la racine d'une entrée prend le mode du répertoire
+de tête de l'archive, et le clone recopie les modes des répertoires) ;
+sinon une entrée extraite avant continue d'être servie.
 
 ## Publication sur crates.io (dernière : 0.24.0 le 2026-10-23)
 

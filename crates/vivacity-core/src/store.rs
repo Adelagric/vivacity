@@ -30,11 +30,12 @@ pub struct Store {
 /// Segment naming the extraction semantics an entry was written with. A store
 /// entry is a *tree*, not an archive, so it carries whatever rule the build
 /// that wrote it applied — and when that rule changes (`v2`: the modes come
-/// from the archive instead of "executable → 0755, default otherwise"), an old
-/// entry keeps serving the old tree forever, silently. Bumping this segment is
-/// what makes the change take effect; the previous trees stay on disk, unused,
-/// until the cache is cleared.
-const LAYOUT: &str = "v2";
+/// from the archive instead of "executable → 0755, default otherwise"; `v3`:
+/// the root of the entry takes the mode of the archive's top-level directory),
+/// an old entry keeps serving the old tree forever, silently. Bumping this
+/// segment is what makes the change take effect; the previous trees stay on
+/// disk, unused, until the cache is cleared.
+const LAYOUT: &str = "v3";
 
 /// Where extractions happen, swept of orphans on the way in. Six hours is well
 /// past any install, and short enough that a killed process does not leave a

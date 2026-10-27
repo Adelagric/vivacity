@@ -471,6 +471,19 @@ fn extract_zip_with_limit(zip_bytes: &[u8], dest: &Path, limit: u64) -> Result<(
         let mut entry = archive.by_index(i).map_err(Error::zip(dest))?;
         let raw = entry_path(&entry, dest)?;
         let Some(stripped) = strip_root(&raw, strip.as_deref()) else {
+            // The archive's single top-level directory itself: Composer
+            // renames it into place (`ArchiveDownloader::install`,
+            // `$filesystem->rename($extractedDir, $path)` on a fresh path),
+            // so the package root carries the mode `unzip` gave it.
+            if strip.is_some() && entry.is_dir() {
+                let (host, ext) = attrs.get(entry.name_raw()).copied().unwrap_or_else(|| {
+                    (
+                        HOST_UNIX,
+                        entry.unix_mode().map_or(0, |m| (m & 0o177777) << 16),
+                    )
+                });
+                dir_modes.push((dest.to_path_buf(), unzip_mode(host, ext)));
+            }
             continue;
         };
         // The two guards below look up the entry's OWN ancestors in the sets

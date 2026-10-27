@@ -35,13 +35,57 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
 
 fn link_or_copy_tree(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(Error::io(dst))?;
+    // The mode a new directory gets (0777 & ~umask), read once per clone on
+    // the destination's root, still untouched.
+    #[cfg(unix)]
+    let default = mode_of(dst)?;
+    #[cfg(not(unix))]
+    let default = 0;
+    link_or_copy_dir(src, dst, default)
+}
+
+/// One directory of the clone, its tree, then its mode. A directory is
+/// created with the default mode; the store's carries the archive's
+/// (`unzip` restores it, and Composer moves the extracted tree into place
+/// whole). Applied once the directory is filled — its mode may forbid
+/// writing into it — and only when it differs: one `stat` of the source per
+/// directory, a `chmod` for an unusual mode only.
+fn link_or_copy_dir(src: &Path, dst: &Path, default: u32) -> Result<()> {
+    link_or_copy_entries(src, dst, default)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let want = mode_of(src)?;
+        if want != default {
+            std::fs::set_permissions(dst, std::fs::Permissions::from_mode(want))
+                .map_err(Error::io(dst))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = default;
+    Ok(())
+}
+
+/// The permission bits of a path.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Result<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    Ok(std::fs::metadata(path)
+        .map_err(Error::io(path))?
+        .permissions()
+        .mode()
+        & 0o7777)
+}
+
+fn link_or_copy_entries(src: &Path, dst: &Path, default: u32) -> Result<()> {
     for entry in std::fs::read_dir(src).map_err(Error::io(src))? {
         let entry = entry.map_err(Error::io(src))?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         let ftype = entry.file_type().map_err(Error::io(&from))?;
         if ftype.is_dir() {
-            link_or_copy_tree(&from, &to)?;
+            std::fs::create_dir(&to).map_err(Error::io(&to))?;
+            link_or_copy_dir(&from, &to, default)?;
         } else if ftype.is_symlink() {
             let target = std::fs::read_link(&from).map_err(Error::io(&from))?;
             #[cfg(unix)]
@@ -177,6 +221,33 @@ pub fn symlink_like_unzip(target: &std::path::Path, link: &std::path::Path) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn directory_modes_follow_the_source() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("locked/inner")).expect("mkdir");
+        std::fs::write(src.join("locked/inner/f"), b"x").expect("write");
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).expect("chmod")
+        };
+        // Set leaf first: 0500 forbids writing into `locked` afterwards.
+        set(&src.join("locked/inner"), 0o700);
+        set(&src.join("locked"), 0o500);
+        set(&src, 0o775);
+        let dst = tmp.path().join("dst");
+        link_or_copy_tree(&src, &dst).expect("clone");
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode(&dst), 0o775);
+        assert_eq!(mode(&dst.join("locked")), 0o500);
+        assert_eq!(mode(&dst.join("locked/inner")), 0o700);
+        assert!(dst.join("locked/inner/f").exists());
+        // So that the temporary directory can be removed.
+        set(&src.join("locked"), 0o700);
+        set(&dst.join("locked"), 0o700);
+    }
 
     #[test]
     fn clones_files_dirs_symlinks_and_exec_bits() {

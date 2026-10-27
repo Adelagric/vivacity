@@ -12,7 +12,9 @@
 #
 # Les zips portent exprès des modes que les zipballs réelles n'ont pas (0600,
 # 0640, 0666, 0700) : `unzip` pose le mode stocké sans l'umask, et le banc
-# compare les modes, donc il tient aussi la règle de modes de l'extraction.
+# compare les modes, donc il tient aussi la règle de modes de l'extraction —
+# répertoires compris : la racine de l'archive (0775), que Composer renomme
+# en place, et `docs/` (0700) ; `src/`, sans entrée, prend le défaut.
 #
 # Aucun réseau. Usage : harness/artifact-repo.sh
 set -uo pipefail
@@ -39,12 +41,21 @@ $make = function (string $file, string $root, array $entries) {
     $z = new ZipArchive();
     $z->open($file, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     foreach ($entries as $path => [$content, $mode]) {
+        // null: a directory entry ("" names the top-level directory).
+        if ($content === null) {
+            $name = rtrim("$root/$path", "/") . "/";
+            $z->addEmptyDir(rtrim($name, "/"));
+            $z->setExternalAttributesName($name, ZipArchive::OPSYS_UNIX, ($mode | 040000) << 16);
+            continue;
+        }
         $z->addFromString("$root/$path", $content);
         $z->setExternalAttributesName("$root/$path", ZipArchive::OPSYS_UNIX, ($mode | 0100000) << 16);
     }
     $z->close();
 };
 $make("$dir/acme-widget-1.0.0.zip", "acme-widget", [
+    "" => [null, 0775],
+    "docs" => [null, 0700],
     "composer.json" => [json_encode(["name" => "acme/widget", "version" => "1.0.0", "autoload" => ["psr-4" => ["Acme\\\\Widget\\\\" => "src/"]]], JSON_PRETTY_PRINT), 0644],
     "src/Widget.php" => ["<?php namespace Acme\\Widget; class Widget {}", 0600],
     "bin/run.sh" => ["#!/bin/sh\necho run\n", 0700],
@@ -124,7 +135,7 @@ else
 fi
 
 # Les modes stockés doivent survivre à l'install, des deux côtés.
-for f in src/Widget.php:600 bin/run.sh:700 LICENSE:666 docs/readme.md:640 composer.json:644; do
+for f in src/Widget.php:600 bin/run.sh:700 LICENSE:666 docs/readme.md:640 composer.json:644 .:775 docs:700; do
   path="${f%%:*}"; want="${f##*:}"
   a=$(mode_of "$WORK/ref/vendor/acme/widget/$path")
   b=$(mode_of "$WORK/viv/vendor/acme/widget/$path")
