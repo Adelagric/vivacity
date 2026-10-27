@@ -382,7 +382,10 @@ avec choix de version, `remove` d'un plugin) : identiques à l'octet.
    @rm:vendor/bamarni/…` (normal et `-v`). La même dissymétrie existe pour
    package-versions (ses deux lignes et Versions.php suivent le mode dev) :
    **notée**, laissée (écart du niveau normal, fichier compris ; un
-   package-versions en `require-dev` est rare).
+   package-versions en `require-dev` est rare). *(Mesuré le 2026-10-27 :
+   pas d'écart. Sous `--no-dev`, `getVersions` lit le lock sans
+   `packages-dev` (`COMPOSER_DEV_MODE=0`), le plugin ne s'y trouve pas et
+   rend la main sans ligne ni fichier — comme vivacity ; cas `pv-dev`.)*
 3. **Majeur — des bornes uniques acceptaient les correctifs à venir.**
    `>=5.3.0 <=8.1.9` aurait accepté une v7.4.22 non lue. **Corrigé** : une
    plage par branche, jusqu'au dernier tag lu de la branche ; tests
@@ -513,9 +516,9 @@ root (Application.php), ce que les runners de la CI ne font pas.
 - `dump-autoload` garde dans l'autoloader un paquet dont le répertoire a
   disparu, Composer le purge (`Factory::purgePackages`) — reproduit sur
   0.23.0 ; *corrigé le 2026-10-27* ;
-- package-versions-deprecated en `require-dev` sous `dump-autoload
-  --no-dev` : Composer (plugin chargé) écrit ses deux lignes et
-  Versions.php, vivacity suit le mode dev ;
+- ~~package-versions-deprecated en `require-dev` sous `dump-autoload
+  --no-dev`~~ : pas un écart, mesuré le 2026-10-27 (le plugin se cherche
+  dans le lock sans `packages-dev` et rend la main, sans ligne) ;
 - l'`install` sans lock, résolu comme un `update` : sous `-v`, une
   délégation tardive y réimprime encore ses premières lignes ;
 - `COMPOSER_DEBUG_EVENTS`, l'auto-installation de php-http/discovery :

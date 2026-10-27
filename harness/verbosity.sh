@@ -388,6 +388,7 @@ set_project pest '{"name":"vivacity/verbose-pest","require":{"pestphp/pest-plugi
 set_project discovery '{"name":"vivacity/verbose-discovery","require":{"php-http/discovery":"1.20.0"},'"$(allow php-http/discovery)"'}'
 set_project discovery-old '{"name":"vivacity/verbose-discovery-old","require":{"php-http/discovery":"1.15.0"},'"$(allow php-http/discovery)"'}'
 set_project pv '{"name":"vivacity/verbose-pv","require":{"composer/package-versions-deprecated":"1.11.99.5"},'"$(allow composer/package-versions-deprecated)"'}'
+set_project pv-dev '{"name":"vivacity/verbose-pv-dev","require-dev":{"composer/package-versions-deprecated":"1.11.99.5"},'"$(allow composer/package-versions-deprecated)"'}'
 set_project phpstan '{"name":"vivacity/verbose-phpstan","require":{"phpstan/extension-installer":"1.4.3","phpstan/phpstan":"2.3.1","phpstan/phpstan-strict-rules":"2.0.4"},'"$(allow phpstan/extension-installer)"'}'
 set_project rector '{"name":"vivacity/verbose-rector","require":{"rector/extension-installer":"0.11.2"},"require-dev":{"rector/rector-symfony":"1.1.0"},'"$(allow rector/extension-installer)"'}'
 set_project c3 '{"name":"vivacity/verbose-c3","require":{"codeception/c3":"2.9.0","symfony/runtime":"v7.4.14"},'"$(allow codeception/c3 symfony/runtime)"'}'
@@ -455,6 +456,11 @@ ONLINE_CASES=(
   "discovery|install @nolock @levels:-v @expect:->postUpdate$"
   "pv|install @levels:-v @expect:PackageVersions.Installer->dumpVersionsClass$"
   "pv|install @vendor:plugins @levels:-v"
+  # En require-dev sous --no-dev : chargé (la ligne `>` sous -v), mais
+  # `getVersions` lit le lock sans packages-dev (COMPOSER_DEV_MODE=0), ne
+  # s'y trouve pas et rend la main sans rien écrire.
+  "pv-dev|dump-autoload --no-dev @vendor:plugins @levels:normal,-v @expect:PackageVersions.Installer->dumpVersionsClass$"
+  "pv-dev|install --no-dev @vendor:plugins @levels:normal,-v @silent"
   "phpstan|install @levels:-v @expect:^>.post-install-cmd:.PHPStan"
   "phpstan|install @vendor:plugins @levels:-v"
   # Sous --no-install, `post-update-cmd` part quand même : la ligne de
