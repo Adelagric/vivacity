@@ -185,6 +185,15 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }
+    if let Some(code) = crate::plugin_allow::at_load(
+        &project,
+        &manifest,
+        None,
+        !args.no_plugins,
+        args.no_fallback,
+    )? {
+        return Ok(code);
+    }
     // `PluginEvents::COMMAND` (DumpAutoloadCommand.php:59).
     bamarni_command_event(&project, &manifest, !args.no_plugins);
     // Dev mode: that of the installed state (installed.json), like Composer.

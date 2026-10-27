@@ -219,6 +219,20 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
             .map_err(anyhow::Error::from)
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(Into::into))
         {
+            // The root package, then the installed plugins
+            // (`Factory::createComposer`), before anything resolves.
+            if let Some(code) = refuse_invalid_root(&manifest) {
+                return Ok(code);
+            }
+            if let Some(code) = crate::plugin_allow::at_load(
+                &project,
+                &manifest,
+                None,
+                !args.no_plugins,
+                args.no_fallback,
+            )? {
+                return Ok(code);
+            }
             if let Some(code) = resolution_fallback(
                 &project,
                 &manifest,
@@ -753,6 +767,29 @@ pub(crate) fn resolve_and_lock(
                         "symfony/flex".to_owned(),
                         reason,
                     )),
+                    ..Resolved::stopped(0)
+                });
+            }
+        }
+    }
+    // The install phase, decided on the solved lock before it is written:
+    // a plugin it would install that `allow-plugins` does not cover stops
+    // Composer in the middle of the installation; php-http/discovery's
+    // `POST_UPDATE_CMD` may edit composer.json and update again.
+    if !args.dry_run && !args.no_install && !args.no_plugins {
+        if let Some(m) = &loaded_manifest {
+            let parsed = vivacity_core::lock::Lock::from_value(&lock);
+            let issue = crate::plugin_allow::install_issue(
+                &project,
+                m,
+                crate::plugin_allow::installed_by(&project, m, &parsed, installer_dev_mode)
+                    .iter()
+                    .map(|(n, o)| (n.as_str(), *o)),
+            )
+            .or_else(|| crate::discovery::resolved_issue(m, &lock, installer_dev_mode));
+            if let Some(issue) = issue {
+                return Ok(Resolved {
+                    hand_over: Some(issue),
                     ..Resolved::stopped(0)
                 });
             }

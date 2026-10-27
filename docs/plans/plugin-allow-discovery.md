@@ -170,19 +170,100 @@ actuelle (rendu dès qu'il surveille) devient ce prédicat : plus étroite,
 exacte. Phalcon (`class_exists(Phalcon\Http\Message\RequestFactory)`) ne
 peut que supprimer une action : ignoré, au pire un rendu de trop.
 
+## Méta-analyse (sous-agent frais) et ce qui change
+
+Un bloquant, quatre majeurs, cinq mineurs ; tous vérifiés dans les sources
+avant d'être pris.
+
+1. **Bloquant — `remove` ne juge qu'après l'édition.** Le premier
+   chargement (`BaseCommand::initialize` → `tryComposer`) avale toute
+   `RuntimeException` (`Application::getComposer(false)`,
+   Application.php:630-645 ; `PluginBlockedException` en hérite).
+   `RemoveCommand` édite composer.json, imprime « ./composer.json has been
+   updated » (:210), puis `tryComposer` (:216, avalé), `resetComposer`,
+   `requireComposer` (:222) qui lève. Retirer le plugin bloqué lui-même
+   réussit donc (l'avertissement deux fois **après** l'édition) ; en
+   retirer un autre refuse **après** l'édition, composer.json laissé
+   édité. Pris : `remove` juge le manifeste édité ; imprimé une fois
+   (premier chargement réussi : `tryComposer` rend l'objet en cache) ou
+   deux fois (premier chargement refusé). `none-remove-ni` corrigé (le
+   refus vient après « has been updated », composer.json édité) ; cas
+   `remove-blocked-itself` et `remove-blocked-other` ajoutés.
+2. **Majeur — un refus réimprime ce que Factory imprime.** Chaque
+   création échouée recommence : `initialize` (avalée), la commande
+   (`requireComposer`, lève), puis `hintCommonErrors` → `getComposer(false,
+   true)` plugins coupés (Application.php:528-545). Soit, avant le texte :
+   (lignes retenues + avertissements des plugins jugés avant le refus) ×2,
+   l'annotation GitHub Actions (stdout), les lignes retenues ×1. Pris tel
+   quel (lignes retenues : `io::held_lines`) ; cas
+   `gone-then-blocked-install` et `lockfalse-blocked-install` (sous
+   `GITHUB_ACTIONS`).
+3. **Majeur — les règles nulles passent avant toute exemption.**
+   `isPluginAllowed` teste `null` avant les règles, package-versions et
+   `plugin-optional` (le code porté le fait déjà) ; vaut aussi à
+   l'installation (B) : un lock ancien et un vendor vierge → rendu.
+   `config.lock` faux → le lock est /dev/null, jamais « locked ». Cas
+   `old-lock-optional-dump`, `old-lock-bare-install` (rendu),
+   `old-lock-lockfalse` (garde-fou).
+4. **Majeur — le Composer global.** Il n'existe que si
+   `COMPOSER_HOME/composer.json` existe et se charge
+   (`createGlobalComposer` avale l'échec) ; ses règles : `config.json`
+   fusionné au `config` de ce composer.json (clés de ce dernier d'abord) ;
+   son dépôt sous son `vendor-dir`. Cas `global-no-manifest` (garde-fou).
+   `scope::active_plugins` lit le global sans ces conditions : préexistant,
+   laissé (non-objectifs).
+5. **Majeur — discovery, porte et point de décision.** `--dry-run` coupe
+   `runScripts` (Installer.php:291-296) : pas de `POST_UPDATE_CMD`, rien à
+   juger (`--no-scripts` ne coupe que les scripts). Avec installation, le
+   discovery actif est celui du lock résolu (installé pendant la commande
+   compris), autorisé, non désinstallé ; `--no-dev` : `$allPackages` sans
+   les paquets dev, noms dev du lock entier. Particularités portées, une
+   par test unitaire : `$devPackages += $names` sans effet (clés
+   entières), `getNames(false)` sans `provide`, un nom remplacé présent
+   (`isset` d'un `false`), `findPackage` par nom exact avec les alias,
+   `array_diff_key` sur `[1]` avant l'aplatissement. Cas `disc-update-dry`
+   (garde-fou), `disc-nodev-update`.
+6. **Mineur — l'API de plugins avant `allow-plugins`.** `registerPackage`
+   (PluginManager.php:172-205) teste `composer-plugin-api` (absent →
+   autre exception ; incompatible avec 2.9.0 → ignoré avec un
+   avertissement ; égal au texte « 2.9.0 » → avertissement) et flex
+   < 1.9.8 avant le jugement. Pris : un refus sur un tel plugin est rendu
+   à Composer (nommé) au lieu d'être imprimé.
+7. **Mineur — l'installation (B).** `--no-plugins` et `--dry-run` en
+   sont exempts, les désinstallations ne sont pas jugées. Cas
+   `bare-install-dry`, `bare-update-dry` (garde-fous).
+8. **Mineur — un refus que seul le second chargement de `require`
+   lèverait** (le paquet demandé rend requis un plugin installé non
+   couvert) : calculable d'avance ; rendu à Composer. Cas
+   `require-makes-required`.
+9. **Mineur — étiquettes.** `gone-quiet`, `disc-plain-update`,
+   `bare-update-ni`, `none-no-plugins` passent déjà : ce sont des
+   garde-fous (le harnais les range ainsi).
+10. **Mineur — merge-plugin et `-v`.** L'ensemble requis vient de la
+    racine non fusionnée (`INIT` après `loadInstalledPlugins`) : le
+    jugement précède `merge_plugin`. Sous `-v`, l'encadré ajoute la classe
+    de l'exception ; le harnais compare le texte extrait.
+
 ## Fichiers
 
 1. `harness/allow-plugins.sh` (nouveau, ajouté à `ci.yml`) : les rouges
    d'abord.
 2. `crates/vivacity/src/plugin_allow.rs` (nouveau) : règles, ensemble
-   requis, jugement, messages ; tests unitaires.
-3. `crates/vivacity-core/src/layout.rs` : la configuration globale lue
-   aussi dans `COMPOSER_HOME/composer.json` pour les plugins globaux.
-4. `crates/vivacity-core/src/discovery.rs` (nouveau) : le prédicat porté ;
-   tests sur les cas mesurés.
-5. `crates/vivacity/src/{install,dump,update,require,remove}.rs` : les
+   requis, jugement, messages, refus répété, contrôle à l'installation ;
+   tests unitaires.
+3. `crates/vivacity/src/discovery.rs` (nouveau) : le prédicat porté et le
+   dépôt local qu'il lit (lock résolu ou installed.json) ; tests sur les
+   particularités PHP. Dans `vivacity` plutôt que `vivacity-core` : il lui
+   faut le parseur de contraintes du résolveur (`findPackage`).
+4. `crates/vivacity/src/plugin_order.rs` : le parcours trié de
+   `loadRepository` exposé (plugin présent ou non, `plugin-optional`,
+   exigence `composer-plugin-api`, version).
+5. `crates/vivacity-core/src/layout.rs` : les règles du Composer global
+   (`config.json` + le `config` de `COMPOSER_HOME/composer.json`) ;
+   `io.rs` : `held_lines` (lire les lignes retenues sans les vider).
+6. `crates/vivacity/src/{install,dump,update,require,remove}.rs` : les
    appels ; `no_install.rs` : le prédicat au lieu de « surveille ».
-6. Docs : CHANGELOG (`[Unreleased]` → `### Fixed`), DECISIONS, HANDOVER
+7. Docs : CHANGELOG (`[Unreleased]` → `### Fixed`), DECISIONS, HANDOVER
    (le « Restent » corrigé, compteurs), README si la description des
    plugins change, ce plan.
 

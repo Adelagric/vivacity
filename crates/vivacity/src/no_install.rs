@@ -105,31 +105,21 @@ pub(crate) fn layout_issue(
     })
 }
 
-/// The php-http/discovery versions whose `postUpdate` was read: it became
-/// a `composer-plugin` at 1.15.0, and `PROVIDE_RULES` names the same five
-/// abstractions in every version up to 1.20.0.
-const DISCOVERY_VERSIONS: &[&str] = &[
-    "1.15.0", "1.15.1", "1.15.2", "1.15.3", "1.16.0", "1.17.0", "1.18.0", "1.18.1", "1.19.0",
-    "1.19.1", "1.19.2", "1.19.3", "1.19.4", "1.20.0",
-];
-
 /// php-http/discovery loaded and allowed: its `postUpdate`
 /// (Plugin.php:145-240 at 1.20.0) asks the local repository — not the new
-/// lock — for an implementation of every abstraction it looks after
-/// ([`vivacity_core::scope::discovery_watches`]), and may then move a
-/// package to `require`, add one, edit composer.json and run a cloned
-/// `Installer` again; measured, with the implementation absent from the
-/// local repository, and (meta-analysis) with a `project` root whose only
+/// lock — for an implementation of every abstraction it looks after, and
+/// may then move a package to `require`, add one, edit composer.json and
+/// run a cloned `Installer` again; measured, with the implementation absent
+/// from the local repository, and with a `project` root whose only
 /// implementation is a dev package: never converging under `--no-install`.
-/// `getMissingRequires` is not ported: as soon as it has something to look
-/// after — or in a version not read — the command goes to Composer.
-/// Decided on the manifest the command resolves (`require`'s edit
-/// included), before the lock is written.
+/// When it would act ([`crate::discovery::post_update_issue`]) the command
+/// goes to Composer. Decided on the manifest the command resolves
+/// (`require`'s edit included), before the lock is written.
 pub(crate) fn discovery_issue(
     project: &std::path::Path,
     manifest: &serde_json::Value,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
-    use vivacity_core::scope::DISCOVERY;
+    use crate::discovery::DISCOVERY;
     let repo = local_repository(project, manifest, true);
     if !repo.listeners.iter().any(|p| p == DISCOVERY) || !allowed(manifest, DISCOVERY) {
         return None;
@@ -139,26 +129,30 @@ pub(crate) fn discovery_issue(
         .packages
         .iter()
         .find(|p| p.name() == DISCOVERY)
-        .map(|p| p.version().trim_start_matches('v').to_owned());
-    let read = version
-        .as_deref()
-        .is_some_and(|v| DISCOVERY_VERSIONS.contains(&v));
-    if read && !vivacity_core::scope::discovery_watches(manifest, &repo.entries) {
-        return None;
-    }
-    let why = if read {
-        "looks for PSR implementations in the installed packages at post-update-cmd, and may edit composer.json and update again (not emulated without an install)".to_owned()
-    } else {
-        format!(
-            "{} listens to post-update-cmd in a version not read (versions read: {}; not emulated without an install)",
-            version.as_deref().unwrap_or("?"),
-            DISCOVERY_VERSIONS.join(", ")
-        )
-    };
-    Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
-        DISCOVERY.to_owned(),
-        why,
-    ))
+        .map(|p| p.version().to_owned());
+    let packages: Vec<crate::discovery::RepoPackage> = repo
+        .entries
+        .iter()
+        .flat_map(crate::discovery::RepoPackage::from_entry)
+        .collect();
+    // `InstalledFilesystemRepository::getDevPackageNames`: installed.json's
+    // `dev-package-names`.
+    let dev_names =
+        vivacity_core::jsonfile::read(&composer_dir_of(project, manifest).join("installed.json"))
+            .and_then(|v| v.get("dev-package-names").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.to_ascii_lowercase())
+            .collect();
+    crate::discovery::post_update_issue(
+        version.as_deref(),
+        &packages,
+        &dev_names,
+        manifest,
+        || vivacity_core::scope::discovery_watches(manifest, &repo.entries),
+        "not emulated without an install",
+    )
 }
 
 /// Decided before resolving, for a command that dispatches

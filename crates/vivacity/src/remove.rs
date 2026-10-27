@@ -50,6 +50,25 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }
+    // `BaseCommand::initialize` loads the installed plugins on the manifest
+    // as it is; a refusal there is swallowed (`tryComposer`): the edit goes
+    // on and the command's own load, on the edited manifest, decides —
+    // removing the refused plugin itself works.
+    let first_load = (!args.no_plugins).then(|| crate::plugin_allow::load_for(&project, &manifest));
+    if let Some(load) = &first_load {
+        if let Some(name) = &load.hand_over {
+            return crate::delegate_resolution(
+                &[crate::plugin_allow::hand_over_issue(name)],
+                args.no_fallback,
+            );
+        }
+        // `--unused` asks for the `Composer` before the edit.
+        if load.refusal.is_some() && args.unused {
+            return Ok(crate::plugin_allow::refuse(load, 2));
+        }
+        crate::plugin_allow::hold_warnings(load);
+    }
+    let first_refused = first_load.as_ref().is_some_and(|l| l.refusal.is_some());
     refuse_merge_plugin_resolution(&project, &manifest, !args.no_plugins)?;
     if serde_json::from_str::<serde_json::Value>(&manifest_text)
         .ok()
@@ -185,21 +204,54 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     if args.no_update {
         return Ok(0);
     }
-    // `resetComposer` + `requireComposer` (RemoveCommand.php:216-222) load
-    // the root package again, warning included, before `COMMAND`.
-    for line in [&root_version_warning, &ignored_lock_warning]
-        .into_iter()
-        .flatten()
-    {
-        vivacity_core::say!("{line}");
-    }
-
     // `allow-plugins`: the merged config (project then global); entries
     // whose key is a removed package are dropped from composer.json.
     let updated: serde_json::Value = std::fs::read_to_string(&file)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
+    // `resetComposer` + `requireComposer` (RemoveCommand.php:216-222) load
+    // the root package again, warning included, then the installed plugins
+    // on the manifest as written (unedited under `--dry-run`), before
+    // `COMMAND`. When the first load was refused, `tryComposer` (:216) runs
+    // one more load first; a refusal now stops the command, composer.json
+    // left edited.
+    let held: Vec<&String> = [&root_version_warning, &ignored_lock_warning]
+        .into_iter()
+        .flatten()
+        .collect();
+    for line in &held {
+        vivacity_core::say!("{line}");
+    }
+    if !args.no_plugins {
+        let load = crate::plugin_allow::load_for(&project, &updated);
+        if let Some(name) = &load.hand_over {
+            std::fs::write(&file, &backup)
+                .with_context(|| format!("cannot restore {}", file.display()))?;
+            return crate::delegate_resolution(
+                &[crate::plugin_allow::hand_over_issue(name)],
+                args.no_fallback,
+            );
+        }
+        for attempt in 0..if first_refused { 2 } else { 1 } {
+            if attempt > 0 {
+                for line in &held {
+                    vivacity_core::say!("{line}");
+                }
+            }
+            for w in &load.warnings {
+                vivacity_core::say!("{w}");
+            }
+        }
+        if let Some(refusal) = &load.refusal {
+            vivacity_core::io::github_action_error(refusal);
+            for line in &held {
+                vivacity_core::say!("{line}");
+            }
+            vivacity_core::say_always!("{refusal}");
+            return Ok(1);
+        }
+    }
     // That `Composer` loads every installed plugin's classes again: renamed,
     // as the -v lines print them.
     crate::verbose_listeners::reload_plugins(&project, &updated, !args.no_plugins);

@@ -49,14 +49,31 @@ pub(crate) fn installed_json_packages(composer_dir: &Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// `loadRepository` on one installed.json: its plugins, in activation
-/// order. `composer_dir` is the directory installed.json lives in (its
-/// `install-path`s are relative to it).
-fn load_repository(packages: &[Value], composer_dir: &Path) -> Vec<String> {
+/// A `composer-plugin` / `composer-installer` package of an installed.json,
+/// as `loadRepository` meets it.
+#[derive(Clone)]
+pub(crate) struct InstalledPlugin {
+    pub(crate) name: String,
+    /// Its directory is on disk (the classes can be loaded).
+    pub(crate) present: bool,
+    /// `extra.plugin-optional` is `true`.
+    pub(crate) optional: bool,
+    /// Of type `composer-plugin` (not the old `composer-installer`).
+    pub(crate) composer_plugin: bool,
+    /// Its `composer-plugin-api` requirement, as written.
+    pub(crate) plugin_api: Option<String>,
+    /// Its version, as written.
+    pub(crate) version: String,
+}
+
+/// `loadRepository`'s walk of one installed.json: its plugins in
+/// `PackageSorter` order, each once. `composer_dir` is the directory
+/// installed.json lives in (its `install-path`s are relative to it).
+pub(crate) fn sorted_plugins(packages: &[Value], composer_dir: &Path) -> Vec<InstalledPlugin> {
     struct Entry {
         name: String,
         requires: Vec<String>,
-        plugin: bool,
+        plugin: Option<InstalledPlugin>,
     }
     let mut entries: Vec<Entry> = Vec::new();
     let mut weights: BTreeMap<String, i64> = BTreeMap::new();
@@ -84,18 +101,32 @@ fn load_repository(packages: &[Value], composer_dir: &Path) -> Vec<String> {
         // The class files are on disk: the plugin's directory exists, the
         // test `purgePackages` makes too (an entry without `install-path`,
         // as Composer 1 wrote installed.json, counts as present).
-        let plugin = PLUGIN_TYPES.contains(&ty)
-            && obj
+        let plugin = PLUGIN_TYPES.contains(&ty).then(|| InstalledPlugin {
+            name: name.clone(),
+            present: obj
                 .get("install-path")
                 .and_then(Value::as_str)
-                .is_none_or(|rel| composer_dir.join(rel).exists());
+                .is_none_or(|rel| composer_dir.join(rel).exists()),
+            optional: crate::plugin_allow::optional(obj),
+            composer_plugin: ty == "composer-plugin",
+            plugin_api: obj
+                .get("require")
+                .and_then(|r| r.get("composer-plugin-api"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            version: obj
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        });
         // The branch alias: the same links once more in the usage table;
         // never registered (`CompleteAliasPackage` is no `CompletePackage`).
         if vivacity_resolver::loader::branch_alias(obj).is_some() {
             entries.push(Entry {
                 name: name.clone(),
                 requires: requires.clone(),
-                plugin: false,
+                plugin: None,
             });
         }
         entries.push(Entry {
@@ -112,15 +143,26 @@ fn load_repository(packages: &[Value], composer_dir: &Path) -> Vec<String> {
         })
         .collect();
     let weights: BTreeMap<&str, i64> = weights.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<InstalledPlugin> = Vec::new();
     for i in vivacity_autoload::sorter::sort_packages_weighted(&sortable, &weights) {
-        let e = &entries[i];
-        // `registerPackage` returns early for a name already registered.
-        if e.plugin && !out.contains(&e.name) {
-            out.push(e.name.clone());
+        if let Some(p) = &entries[i].plugin {
+            if !out.iter().any(|o| o.name == p.name) {
+                out.push(p.clone());
+            }
         }
     }
     out
+}
+
+/// `loadRepository` on one installed.json: the plugins it registers, in
+/// activation order — those whose classes are on disk (`registerPackage`
+/// returns early for a name already registered).
+fn load_repository(packages: &[Value], composer_dir: &Path) -> Vec<String> {
+    sorted_plugins(packages, composer_dir)
+        .into_iter()
+        .filter(|p| p.present)
+        .map(|p| p.name)
+        .collect()
 }
 
 /// Step 1: the plugins `Factory::createComposer` activates, in order — the

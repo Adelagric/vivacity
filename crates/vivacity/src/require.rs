@@ -383,6 +383,37 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             if let Some(code) = crate::refuse_invalid_root(&manifest) {
                 return Ok(code);
             }
+            // The installed plugins (`allow-plugins`), and those the second
+            // load (`doUpdate`, on the edited manifest) would judge.
+            let edited = (!args.dry_run && !args.no_update).then(|| {
+                let mut m = manifest.clone();
+                let key = if args.dev { "require-dev" } else { "require" };
+                if let Some(root) = m.as_object_mut() {
+                    let links = root
+                        .entry(key)
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Some(links) = links.as_object_mut() {
+                        for p in &args.packages {
+                            let name = crate::package_of_requirement(p).to_ascii_lowercase();
+                            if name.contains('/') {
+                                links
+                                    .entry(name)
+                                    .or_insert_with(|| Value::String("*".to_owned()));
+                            }
+                        }
+                    }
+                }
+                m
+            });
+            if let Some(code) = crate::plugin_allow::at_load(
+                &project,
+                &manifest,
+                edited.as_ref(),
+                !args.no_plugins,
+                args.no_fallback,
+            )? {
+                return Ok(code);
+            }
             if let Some(code) = crate::resolution_fallback(
                 &project,
                 &manifest,
@@ -624,12 +655,21 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     }
 
     // `doUpdate`: `resetComposer` + `requireComposer` load the root package
-    // again (RequireCommand.php:409-410), warning included.
+    // again (RequireCommand.php:409-410), warning included, then the
+    // installed plugins — on the manifest as written (unedited under
+    // `--dry-run`).
     for line in [&root_version_warning, &ignored_lock_warning]
         .into_iter()
         .flatten()
     {
         vivacity_core::say!("{line}");
+    }
+    if !args.no_plugins {
+        if let Some(written) = vivacity_core::jsonfile::read(&json) {
+            for w in crate::plugin_allow::load_for(&project, &written).warnings {
+                vivacity_core::say!("{w}");
+            }
+        }
     }
     let transitive = if args.update_with_all_dependencies
         || args.with_all_dependencies

@@ -105,7 +105,7 @@ pub fn merged_allow_plugins(project: Option<&Value>, global: Option<&Value>) -> 
 }
 
 /// `PluginManager::parseAllowedPlugins` + `isPluginAllowed` (non-interactive).
-fn plugin_verdict(allow: Option<&Value>, package: &str) -> PluginVerdict {
+pub fn plugin_verdict(allow: Option<&Value>, package: &str) -> PluginVerdict {
     match allow {
         Some(Value::Bool(true)) => PluginVerdict::Allowed,
         Some(Value::Bool(false)) => PluginVerdict::Blocked,
@@ -137,6 +137,21 @@ pub fn plugin_allowed(manifest: &Value, package: &str) -> PluginVerdict {
 /// `config.allow-plugins` from COMPOSER_HOME/config.json.
 pub fn global_allow_plugins() -> Option<Value> {
     global_config_value("allow-plugins")
+}
+
+/// `allow-plugins` of the global Composer (`Factory::createGlobalComposer`,
+/// whose manifest is COMPOSER_HOME/composer.json): config.json's value
+/// merged with that manifest's `config` (`Config::merge`), the rules its
+/// plugins are judged by.
+pub fn global_composer_allow_plugins() -> Option<Value> {
+    let manifest = crate::jsonfile::read(&crate::fetch::composer_home()?.join("composer.json"));
+    merged_allow_plugins(
+        manifest
+            .as_ref()
+            .and_then(|m| m.get("config"))
+            .and_then(|c| c.get("allow-plugins")),
+        global_allow_plugins().as_ref(),
+    )
 }
 
 /// One `config.<key>` value of COMPOSER_HOME/config.json — the global

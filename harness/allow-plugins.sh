@@ -83,13 +83,18 @@ runboth() { # <nom> <args...> : codes dans c_code, v_code
   (cd "$WORK/$name-ref" && COLUMNS=400 composer "$@" --no-interaction --no-ansi >"$WORK/$name.composer.out" 2>"$WORK/$name.composer.err") || c_code=$?
   (cd "$WORK/$name-viv" && "$VIVACITY" "$@" --no-fallback >"$WORK/$name.vivacity.out" 2>"$WORK/$name.vivacity.err") || v_code=$?
 }
-# refused <base> <nom> <motif attendu dans l'encadré> <args…>
+# refused <base> <nom> <motif attendu dans l'encadré> <args…> : avant
+# l'encadré, ce que Composer imprime (une création de Composer échouée
+# recommence : `initialize`, la commande, `hintCommonErrors`), puis le texte
+# de l'encadré, contre les lignes de vivacity. WRITTEN=<fichier> : le seul
+# fichier écrit, identique des deux côtés (`remove` édite avant de juger).
 refused() {
   local b="$1" name="$2" pat="$3"; shift 3
   copy "$b" "$name"; runboth "$name" "$@"
-  box_text "$WORK/$name.composer.err" > "$WORK/$name.composer.msg"
+  { sed '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/,$d' "$WORK/$name.composer.err" | grep -v '^$' | grep -v '^  - Downloading ' || true
+    box_text "$WORK/$name.composer.err"; } > "$WORK/$name.composer.msg"
   grep -v '^$' "$WORK/$name.vivacity.err" > "$WORK/$name.vivacity.msg" || true
-  if ! grep -qE -- "$pat" "$WORK/$name.composer.msg"; then
+  if ! box_text "$WORK/$name.composer.err" | grep -qE -- "$pat"; then
     echo "FAIL $name : « $pat » absent de l'encadré de Composer (cas mal construit)"; status=1; return
   fi
   if [ "$c_code" != "$v_code" ]; then echo "FAIL $name : codes $c_code vs $v_code"; head -3 "$WORK/$name.vivacity.err"; status=1; return; fi
@@ -99,9 +104,12 @@ refused() {
   if ! diff -q "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" >/dev/null; then
     echo "FAIL $name : stdout différente"; diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" | head -4 || true; status=1; return
   fi
-  local w; w=$(find "$WORK/$name-viv" "$WORK/$name-ref" -newer "$WORK/$name.marker" -print -quit)
+  local w; w=$(find "$WORK/$name-viv" "$WORK/$name-ref" -newer "$WORK/$name.marker" -type f | grep -v "/${WRITTEN:-^}\$" | head -1 || true)
   if [ -n "$w" ]; then echo "FAIL $name : écrit $w"; status=1; return; fi
-  echo "OK   $name : code $c_code, message identique, rien d'écrit des deux côtés"
+  if [ -n "${WRITTEN:-}" ] && ! cmp -s "$WORK/$name-ref/$WRITTEN" "$WORK/$name-viv/$WRITTEN"; then
+    echo "FAIL $name : $WRITTEN différent"; status=1; return
+  fi
+  echo "OK   $name : code $c_code, message identique, rien d'écrit${WRITTEN:+ hors $WRITTEN}"
 }
 # same <base> <nom> <motif attendu chez Composer ou -> <args…> : sortie
 # fusionnée (stdout puis stderr séparées, comparées chacune) et projet.
@@ -161,7 +169,10 @@ refused none none-update-ni "$BLOCKED" update --no-install "${R[@]}"
 refused none none-update-dry "$BLOCKED" update --dry-run "${R[@]}"
 refused none none-require "$BLOCKED" require psr/log:3.0.2 "${R[@]}"
 refused none none-require-ni "$BLOCKED" require psr/log:3.0.2 --no-install "${R[@]}"
-refused none none-remove-ni "$BLOCKED" remove phpstan/phpstan --no-install "${R[@]}"
+# `remove` juge le manifeste édité : le refus après « has been updated »,
+# composer.json laissé édité ; retirer le plugin bloqué lui-même réussit.
+WRITTEN=composer.json refused none none-remove-ni "$BLOCKED" remove phpstan/phpstan --no-install "${R[@]}"
+same none remove-blocked-itself "$WARN" remove phpstan/extension-installer --no-install "${R[@]}"
 refused none none-dump "$BLOCKED" dump-autoload
 refused none none-quiet "$BLOCKED" update --no-install "${R[@]}" -q
 same none none-no-plugins - update --no-install "${R[@]}" --no-plugins
@@ -198,6 +209,20 @@ same gone gone-remove-ni "$WARN" remove phpstan/phpstan --no-install "${R[@]}"
 same gone gone-quiet - "${I[@]}" -q
 base falsegone ps '.config["allow-plugins"]["phpstan/extension-installer"] = false | del(.require["phpstan/extension-installer"])'
 same falsegone false-gone-install "$WARN" "${I[@]}"
+# Le `require` rend requis un plugin installé non couvert : seul le second
+# chargement refuse (composer.json rétabli) — rendu.
+handed gone require-makes-required 'phpstan/extension-installer.*allow-plugins' require phpstan/extension-installer:1.4.3 "${R[@]}"
+# Un plugin plus requis trié avant le plugin refusé : avertissement et lignes
+# de Factory répétés à chaque création échouée.
+lock both '{"name": "vivacity/allow-both", "require": {"phpstan/extension-installer": "1.4.3", "phpstan/phpstan": "2.3.1",
+  "dealerdirect/phpcodesniffer-composer-installer": "v1.2.1", "squizlabs/php_codesniffer": "4.0.4"},
+  "config": {"allow-plugins": {"phpstan/extension-installer": true, "dealerdirect/phpcodesniffer-composer-installer": true}}}'
+base gb both 'del(.config["allow-plugins"]) | del(.require["dealerdirect/phpcodesniffer-composer-installer"])'
+refused gb gone-then-blocked-install "$BLOCKED" "${I[@]}"
+grep -q '^The "dealerdirect/phpcodesniffer-composer-installer" plugin was not loaded' "$WORK/gone-then-blocked-install.composer.err" \
+  || { echo "FAIL gone-then-blocked-install : pas d'avertissement chez Composer (cas mal construit)"; status=1; }
+base lockfalse ps 'del(.config["allow-plugins"]) | .config.lock = false'
+(export GITHUB_ACTIONS=true; refused lockfalse lockfalse-blocked-install "$BLOCKED" "${I[@]}"; exit $status) || status=1
 # Requis et `false` : pas chargé, rien d'imprimé.
 base falsereq ps '.config["allow-plugins"]["phpstan/extension-installer"] = false'
 same falsereq false-required-install - "${I[@]}"
@@ -214,6 +239,16 @@ lock pv '{"name": "vivacity/allow-pv", "require": {"composer/package-versions-de
 base pv pv 'del(.config["allow-plugins"])'
 same pv package-versions-install - "${I[@]}"
 same pv package-versions-dump - dump-autoload
+# Un lock ancien : les règles nulles passent avant `plugin-optional` ; sans
+# lock (`config.lock` faux), jugement ordinaire ; vendor vierge, le refus
+# vient de `PluginInstaller::prepare` — rendu.
+base discold discopt 'del(.config["allow-plugins"])'
+for s in ref viv; do jq --indent 4 '."plugin-api-version" = "2.1.0"' "$WORK/base/discold/$s/composer.lock" > "$WORK/base/discold/$s/l.tmp" && mv "$WORK/base/discold/$s/l.tmp" "$WORK/base/discold/$s/composer.lock"; done
+refused discold old-lock-optional-dump 'generated before the allow-plugins security feature' dump-autoload
+mkdir -p "$WORK/base/discoldbare"; for s in ref viv; do rm -rf "$WORK/base/discoldbare/$s"; cp -a "$WORK/base/discold/$s" "$WORK/base/discoldbare/$s"; rm -rf "$WORK/base/discoldbare/$s/vendor"; done
+handed discoldbare old-lock-bare-install 'allow-plugins' "${I[@]}"
+mkdir -p "$WORK/base/discoldlf"; for s in ref viv; do rm -rf "$WORK/base/discoldlf/$s"; cp -a "$WORK/base/discold/$s" "$WORK/base/discoldlf/$s"; jq --indent 4 '.config.lock = false' "$WORK/base/discold/$s/composer.json" > "$WORK/base/discoldlf/$s/composer.json"; done
+same discoldlf old-lock-lockfalse 'is present but ignored' dump-autoload
 
 # --- un plugin global que la configuration globale ne couvre pas
 GH="$WORK/home-global"; mkdir -p "$GH"
@@ -224,6 +259,9 @@ jq 'del(.config)' "$GH/composer.json" > "$GH/c.tmp" && mv "$GH/c.tmp" "$GH/compo
 lock plain '{"name": "vivacity/allow-plain", "require": {"psr/log": "3.0.2"}}'
 base plain plain
 (export COMPOSER_HOME="$GH"; refused plain global-install "installed globally" "${I[@]}"; exit $status) || status=1
+# Sans COMPOSER_HOME/composer.json, pas de Composer global : rien de jugé.
+GN="$WORK/home-global-nomanifest"; rm -rf "$GN"; cp -a "$GH" "$GN"; rm "$GN/composer.json"
+(export COMPOSER_HOME="$GN"; same plain global-no-manifest - "${I[@]}"; exit $status) || status=1
 
 # --- vendor vierge : la transaction installerait le plugin non couvert
 # (`PluginInstaller::prepare` : Composer s'arrête en pleine installation).
@@ -231,6 +269,8 @@ mkdir -p "$WORK/base/bare"; for s in ref viv; do rm -rf "$WORK/base/bare/$s"; cp
 handed bare bare-install 'phpstan/extension-installer.*allow-plugins' "${I[@]}"
 handed bare bare-update 'phpstan/extension-installer.*allow-plugins' update "${R[@]}"
 same bare bare-update-ni - update --no-install "${R[@]}"
+same bare bare-install-dry - "${I[@]}" --dry-run
+same bare bare-update-dry - update --dry-run "${R[@]}"
 
 # --- php-http/discovery à `POST_UPDATE_CMD`
 DA='"config": {"allow-plugins": {"php-http/discovery": true}}'
@@ -243,6 +283,21 @@ base discunknown disc-unknown
 composer_acts discunknown disc-unknown-update update "${R[@]}"
 handed discunknown disc-unknown-update 'php-http/discovery' update "${R[@]}"
 handed discunknown disc-unknown-update-ni 'php-http/discovery' update --no-install "${R[@]}"
+# `--dry-run` coupe `POST_UPDATE_CMD` : rien.
+same discdev disc-update-dry - update --dry-run "${R[@]}"
+# Un discovery installé par la commande même.
+mkdir -p "$WORK/base/discbare"; for s in ref viv; do rm -rf "$WORK/base/discbare/$s"; cp -a "$WORK/base/discdev/$s" "$WORK/base/discbare/$s"; rm -rf "$WORK/base/discbare/$s/vendor"; done
+composer_acts discbare disc-bare-update update "${R[@]}"
+handed discbare disc-bare-update 'php-http/discovery' update "${R[@]}"
+# Une bibliothèque qui n'exige aucune implémentation (`psr/http-client`
+# seul) : rien, avec ou sans les paquets dev.
+lock disc-libdev "{\"name\": \"vivacity/allow-disc-libdev\", \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client\": \"1.0.3\"}, \"require-dev\": {\"guzzlehttp/guzzle\": \"7.10.0\"}, $DA}"
+base disclibdev disc-libdev
+same disclibdev disc-libdev-update - update "${R[@]}"
+same disclibdev disc-libdev-nodev-update - update --no-dev "${R[@]}"
+# `--no-dev` : le dépôt local sans les paquets dev, leurs noms ceux du lock.
+composer_acts discdev disc-nodev-update update --no-dev "${R[@]}"
+handed discdev disc-nodev-update 'php-http/discovery' update --no-dev "${R[@]}"
 lock disc-plain "{\"name\": \"vivacity/allow-disc-plain\", \"type\": \"project\", \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client-implementation\": \"*\", \"guzzlehttp/guzzle\": \"7.10.0\"}, $DA}"
 base discplain disc-plain
 same discplain disc-plain-update 'Nothing to modify in lock file' update "${R[@]}"

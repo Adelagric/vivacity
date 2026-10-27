@@ -173,6 +173,15 @@ pub fn hold(level: Verbosity, line: String) {
     HOLDING.store(true, Ordering::Release);
 }
 
+/// The held lines, in order, left held — for output Composer repeats (a
+/// `Factory` run that fails is run again).
+pub fn held_lines() -> Vec<String> {
+    if !HOLDING.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    held().clone()
+}
+
 /// Writes the held lines on stderr, once, in order. Called by every writing
 /// macro before its own line, and before vivacity starts a process whose
 /// output the user sees. The lines are written under the lock: a line

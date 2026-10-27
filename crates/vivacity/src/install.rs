@@ -62,7 +62,22 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let verification = spawn_verification(&run)?;
     let root = verification.as_ref().map(|v| root_package(&run, v));
     let tx = local_repository_transaction(&run, root.as_ref())?;
-    let scope = analyze_scope(&run);
+    let mut scope = analyze_scope(&run);
+    // `PluginInstaller::prepare`: a plugin the transaction installs or
+    // updates that `allow-plugins` does not cover stops Composer in the
+    // middle of it (an install after an update was decided on its lock).
+    if let Some(report) = scope
+        .as_mut()
+        .filter(|_| !args.after_update() && !args.no_plugins)
+    {
+        let targets: Vec<(String, bool)> =
+            crate::plugin_allow::installed_by(&run.project, &run.manifest, &run.lock, run.with_dev);
+        report.issues.extend(crate::plugin_allow::install_issue(
+            &run.project,
+            &run.manifest,
+            targets.iter().map(|(n, o)| (n.as_str(), *o)),
+        ));
+    }
     let early_dump = plan_autoload_early(&run, &tx, scope.as_ref());
     // `if (!$alreadySolved)`: the missing requirements (exit 4) before the
     // pool exists, then the solve on the locked pool (exit 2, or 4). None
@@ -154,6 +169,19 @@ fn read_manifests(args: &InstallArgs) -> anyhow::Result<Flow<Run<'_>>> {
     // it reads the lock, so a stale lock is not the error to report.
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(Flow::Break(code));
+    }
+    // Then the installed plugins, judged by `allow-plugins` (an install
+    // that follows an update runs in the update's `Composer`).
+    if !args.after_update() {
+        if let Some(code) = crate::plugin_allow::at_load(
+            &project,
+            &manifest,
+            None,
+            !args.no_plugins,
+            args.no_fallback,
+        )? {
+            return Ok(Flow::Break(code));
+        }
     }
     // `--prefer-source` / `--prefer-dist` / `--prefer-install` are what
     // `getPreferredInstallOptions` makes of them: the effective
