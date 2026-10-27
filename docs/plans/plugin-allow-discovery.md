@@ -300,16 +300,18 @@ Composer imprime avant l'encadré puis le texte de l'encadré (comme
 `root-manifest.sh`) contre les lignes de vivacity, stdout identique, rien
 d'écrit (`find -newer`, sauf composer.json pour `remove`) ; sinon sorties
 et projet entiers ; pour un rendu, code 3 sous `--no-fallback`, la raison,
-rien d'écrit. 57 cas :
+rien d'écrit. 58 cas :
 
 - refus (rouges) : `none-{install,update,update-ni,update-dry,require,require-ni,remove-ni,dump,quiet}`,
   `gha-none-install`, `other-install`, `dir-gone-install`,
   `old-lock-{install,update-ni,empty-install,optional-dump}`,
   `transitive-{install,update-ni}`, `global-install`,
-  `gone-then-blocked-install`, `lockfalse-blocked-install` ;
+  `gone-then-blocked-install`, `lockfalse-blocked-install`,
+  `env-gone-then-blocked-install` ;
 - avertissement (rouges) : `gone-{install,update,update-ni,dump,require,remove-ni}`,
-  `false-gone-install`, `remove-blocked-itself` ;
+  `false-gone-install`, `remove-blocked-itself`, `env-gone-update-dry` ;
 - rendus (rouges) : `bare-install`, `bare-update`, `old-lock-bare-install`,
+  `old-flex-dump` (Composer seul réussit),
   `require-makes-required`, `disc-{dev,unknown,bare,nodev}-update`
   (chacun avec Composer seul qui réécrit composer.json), `disc-plain-update-ni`
   devenu natif ;
