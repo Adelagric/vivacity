@@ -4080,8 +4080,8 @@ revue).
   activerait la rend à Composer — qui les écrit lui-même. Sinon ces lignes
   (« has been updated », « Updating dependencies »…) sortaient deux fois,
   alors que `main` rendait ces runs avant toute ligne. Coût : rien ne
-  s'affiche pendant la résolution sous `-v`. Non couvert : l'`install` sans
-  lock (résolu comme un `update`), rare.
+  s'affiche pendant la résolution sous `-v`. L'`install` sans lock (résolu
+  comme un `update`) garde aussi ses lignes depuis le 2026-10-27.
 - **`--dry-run`** ne coupe que les événements de script : `command` part
   quand même (bamarni) et `require`/`remove` rechargent (méta-analyse,
   point 1).

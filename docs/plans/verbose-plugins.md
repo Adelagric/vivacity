@@ -520,6 +520,7 @@ root (Application.php), ce que les runners de la CI ne font pas.
   --no-dev`~~ : pas un écart, mesuré le 2026-10-27 (le plugin se cherche
   dans le lock sans `packages-dev` et rend la main, sans ligne) ;
 - l'`install` sans lock, résolu comme un `update` : sous `-v`, une
-  délégation tardive y réimprime encore ses premières lignes ;
+  délégation tardive y réimprime encore ses premières lignes ; *corrigé le
+  2026-10-27* ;
 - `COMPOSER_DEBUG_EVENTS`, l'auto-installation de php-http/discovery :
   non portés.

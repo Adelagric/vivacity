@@ -528,6 +528,9 @@ ONLINE_CASES=(
   "phpcs|install @levels:-v @delegates:dealerdirect/phpcodesniffer-composer-installer.*phpcs"
   "flex|install @levels:-v @delegates:symfony/flex"
   "discovery-old|install @levels:-v @delegates:php-http/discovery.*1\.15\.0"
+  # Sans lock, `install` résout : la version non reproduite n'apparaît
+  # qu'au lock résolu, et ce que la run a écrit jusque-là n'est pas réécrit.
+  "discovery-old|install @nolock @levels:-v @delegates:php-http/discovery.*1\.15\.0"
 )
 ONLINE_WORK="$WORK/online"
 online_lock() { # <projet> : écrit une fois par passage, ou figé (fixtures/projects/<projet>) sans manifeste ici

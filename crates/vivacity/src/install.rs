@@ -285,6 +285,15 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         };
         return fallback_or_fail(args, &report);
     }
+    // Under -v, the lines of this resolution are kept until the solved lock
+    // is accepted, as for `update` (`run_once`): a plugin it would activate
+    // may still hand the run to Composer, which prints them itself.
+    if vivacity_core::io::level() == vivacity_core::io::Verbosity::Verbose
+        && !args.no_plugins
+        && !args.dry_run
+    {
+        vivacity_core::io::defer();
+    }
     let project = project_dir(args.working_dir.as_deref())?;
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join("composer.json"))?)

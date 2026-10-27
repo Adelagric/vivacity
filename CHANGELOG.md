@@ -18,6 +18,10 @@ byte-identical-output promise are the public API.
 - **`require` exits 100 when a repository cannot be reached while it picks
   the version to write**, as Composer does for a `TransportException`; it
   exited 1 (the transport failure was turned into plain text on that path).
+- **`install` without a lock no longer prints its first lines twice under
+  `-v`** when the resolution brings in a plugin whose verbose lines are not
+  reproduced: its output is held until the solved lock is accepted, as on
+  `update`, and dropped when Composer takes the run.
 - **`dump-autoload` drops a package whose directory is gone from the
   autoloader**, as Composer does (`Factory::purgePackages` before the
   dump); it kept its autoload rules.
