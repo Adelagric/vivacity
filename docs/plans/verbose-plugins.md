@@ -558,7 +558,7 @@ les archives Linux (il lit aussi les archives mingw de `target/`, que la CI
 Linux ne construit pas).
 
 **Harnais** (binaire final) : comme le 2026-10-22, sauf `verbosity.sh` —
-la partie instantané 212 OK, la partie `online` ONLINE_N — et root-manifest
+la partie instantané 212 OK, la partie `online` 98 OK (73 sous `-v`), 0 échec : 310 en tout — et root-manifest
 44 OK, transport-exit 10 OK en utilisateur non root. Le premier passage
 complet de `verbosity.sh` s'est arrêté sur un disque plein (« No space left
 on device » dans le home Composer), pas sur un écart ; la partie `online`
