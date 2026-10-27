@@ -348,3 +348,36 @@ interdit (dit dans le Résultat, avec les relances restreintes), plus
 - Un plugin autorisé dont l'API ne correspond pas (Composer l'ignore avec
   un avertissement) ; `scope::active_plugins`, qui lit le dépôt global sans
   les conditions du Composer global.
+
+## Résultat (2026-10-27)
+
+```
+$ uname -a
+Linux vm 6.18.44-fc-v165 #1 SMP PREEMPT_DYNAMIC @0 x86_64 x86_64 x86_64 GNU/Linux
+$ nproc
+4
+```
+
+- `harness/allow-plugins.sh` : 58/58 sur le binaire de la branche ; sur
+  main (f3f5524), 39 rouges pour la bonne raison (code, ligne absente,
+  rendu manquant), 16 garde-fous verts, 2 cas mal construits refaits.
+- `cargo fmt --all -- --check`, clippy `-D warnings` (Linux et
+  `x86_64-pc-windows-gnu`), `cargo test --workspace` : propres (tests de
+  `plugin_allow` et `discovery` indépendants de `COMPOSER_HOME`).
+- Tous les harnais de `ci.yml` plus `root-manifest.sh`, en utilisateur non
+  root : verts, sauf ce que le réseau de la session interdit. Refusés par
+  le proxy : wordpress.org (`diff-vendor` ×3, `removal`, `vendor-dir`,
+  `boot`, `wp-core`), packages.drupal.org (`update`, `steps`),
+  asset-packagist.org (`yii2-composer`) ; relances restreintes sans eux
+  vertes (`diff-vendor` 10 ×3, `update` 18, `steps` 276, `removal` 2,
+  `vendor-dir` 5, `boot` 5). `download-lines` : « cache pas froid » à
+  l'identique sur main (les dists amorcées par `git archive` remplissent
+  le cache). Comptes : `plugin-lines` 118, `verbosity` 296, `flex-update`
+  26, `flex-recipes` 26, `root-manifest` 44.
+- `plugin-lines.sh` suit le nouveau jugement : `ni-discovery` et
+  `ni-discovery-same` (implémentation en `require`) deviennent natifs et
+  comparés à Composer ; `ni-global` reçoit la règle globale et l'exigence
+  d'API qu'une vraie installation a.
+- Méta-analyse : 1 bloquant, 4 majeurs, 5 mineurs, tous pris. Revue
+  indépendante : 2 majeurs, 5 mineurs, 6 détails ; majeurs et mineurs
+  corrigés, les détails laissés sont dans les non-objectifs.
