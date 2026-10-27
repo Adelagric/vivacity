@@ -271,23 +271,29 @@ avant d'être pris.
 
 `harness/allow-plugins.sh` : projets en ligne, versions exactes, lock écrit
 par Composer `--no-plugins`, vendor posé par chaque outil plugin autorisé,
-puis `allow-plugins` modifié. Par cas : code, texte (encadré extrait côté
-Composer, comme `root-manifest.sh`) ou sortie fusionnée entière, et rien
-d'écrit (`find -newer`) pour un refus.
+puis `allow-plugins` modifié. Par cas : code ; pour un refus, ce que
+Composer imprime avant l'encadré puis le texte de l'encadré (comme
+`root-manifest.sh`) contre les lignes de vivacity, stdout identique, rien
+d'écrit (`find -newer`, sauf composer.json pour `remove`) ; sinon sorties
+et projet entiers ; pour un rendu, code 3 sous `--no-fallback`, la raison,
+rien d'écrit. 57 cas :
 
-- refus : `none-{install,update,update-ni,update-dry,require,require-ni,remove-ni,dump,quiet}`,
-  `other-install`, `dir-gone-install`, `transitive-install`,
-  `old-lock-install`, `old-lock-empty-install`, `global-install` ;
-  `GITHUB_ACTIONS=true` sur un cas (l'annotation) ;
-- avertissement : `gone-{install,update,update-ni,dump,require,remove-ni,quiet}`,
-  `false-gone-install` ;
-- garde-fous : `no-plugins`, `false-required-install`, `discovery-optional`,
-  `package-versions`, `bare-update-ni` ;
-- rendu à Composer : `bare-install`, `bare-update` (code 3 sous
-  `--no-fallback`, raison, rien d'écrit) ;
-- discovery : `disc-dev-update`, `disc-unknown-update` (rendus),
-  `disc-plain-update` (natif, comparé), `disc-unknown-update-ni` (rendu),
-  `disc-plain-update-ni` (natif — rendu aujourd'hui).
+- refus (rouges) : `none-{install,update,update-ni,update-dry,require,require-ni,remove-ni,dump,quiet}`,
+  `gha-none-install`, `other-install`, `dir-gone-install`,
+  `old-lock-{install,update-ni,empty-install,optional-dump}`,
+  `transitive-{install,update-ni}`, `global-install`,
+  `gone-then-blocked-install`, `lockfalse-blocked-install` ;
+- avertissement (rouges) : `gone-{install,update,update-ni,dump,require,remove-ni}`,
+  `false-gone-install`, `remove-blocked-itself` ;
+- rendus (rouges) : `bare-install`, `bare-update`, `old-lock-bare-install`,
+  `require-makes-required`, `disc-{dev,unknown,bare,nodev}-update`
+  (chacun avec Composer seul qui réécrit composer.json), `disc-plain-update-ni`
+  devenu natif ;
+- garde-fous : `none-no-plugins`, `gone-quiet`, `false-required-install`,
+  `discovery-optional-{install,update-ni}`, `package-versions-{install,dump}`,
+  `old-lock-lockfalse`, `global-no-manifest`, `bare-{update-ni,install-dry,update-dry}`,
+  `disc-unknown-update-ni`, `disc-update-dry`, `disc-libdev-update`,
+  `disc-libdev-nodev-update`, `disc-plain-update`.
 
 ## Critère « vert »
 

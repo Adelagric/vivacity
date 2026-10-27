@@ -4169,3 +4169,49 @@ unitaire `directory_modes_follow_the_source`. Les zipballs de GitHub (hôte
 FAT, `git archive`) ne portent aucun mode de répertoire : sans effet sur
 elles.
 
+## 2026-10-27 — `allow-plugins` jugé au chargement des plugins, et php-http/discovery porté
+
+Deux écarts silencieux (`docs/plans/plugin-allow-discovery.md`). Composer
+juge chaque plugin installé au chargement (`PluginManager::loadRepository`),
+avant toute commande : non couvert et requis, `PluginBlockedException`,
+code 1 ; plus requis, une ligne d'avertissement. vivacity installait,
+résolvait, écrivait, code 0. Et php-http/discovery, après un `update` qui
+installe, peut réécrire composer.json et relancer un update : vivacity ne
+faisait rien.
+
+- **Refus reproduits, pas rendus.** Le message de Composer sans l'encadré
+  de Symfony, code 1, l'annotation GitHub Actions — le précédent des refus
+  de `RootPackageLoader` (`harness/root-manifest.sh`). Écarté : rendre à
+  Composer (exact, mais un `--no-fallback` sortirait en 3 là où Composer
+  sort en 1, pour un cas entièrement déterminé). La méta-analyse a montré
+  qu'une création de `Composer` échouée recommence (`initialize` avalé, la
+  commande, `hintCommonErrors` plugins coupés) : les lignes retenues et
+  les avertissements sont réimprimés comme chez Composer
+  (`io::held_lines`), mesuré par `gone-then-blocked-install` et
+  `lockfalse-blocked-install`.
+- **`remove` juge après l'édition.** Le premier chargement est avalé
+  (`tryComposer`) ; le refus vient du `requireComposer` qui suit « has been
+  updated », composer.json laissé édité. Retirer le plugin bloqué lui-même
+  réussit donc — le plan initial l'aurait refusé (bloquant de la
+  méta-analyse).
+- **Rendus, nommés, avant toute écriture** : ce que vivacity ne voit pas
+  à l'avance sans le rejouer — un plugin non couvert que l'installation
+  poserait (Composer s'arrête au milieu de la transaction, paquets
+  précédents posés), un `require` qui rend requis un tel plugin (refus au
+  second chargement puis composer.json rétabli), un plugin dont Composer
+  vérifie l'API avant de le juger.
+- **php-http/discovery : le prédicat porté plutôt qu'une règle large.**
+  `getMissingRequires` (identique de 1.19.0 à 1.20.0) et le `array_filter`
+  qui le suit, particularités PHP comprises (`$devPackages += $names` sans
+  effet, `isset` d'un `false`, `array_diff_key` avant l'aplatissement),
+  dans `crates/vivacity/src/discovery.rs` (il lui faut le parseur de
+  contraintes du résolveur). Évalué sur le lock résolu avec installation,
+  sur installed.json sans : il remplace « rendu dès qu'il surveille une
+  abstraction » de `--no-install`, gardé pour 1.15.0–1.18.1 ; toute autre
+  version reste rendue. Écarté : émuler son action (édition de
+  composer.json puis update imbriqué, réseau compris) — c'est la commande
+  entière de Composer.
+- **Laissés** : le mode interactif (jamais chez vivacity) ; l'écart
+  préexistant de `scope::active_plugins`, qui lit le dépôt global sans les
+  conditions du Composer global ; un plugin autorisé dont l'API ne
+  correspond pas (Composer l'ignore avec un avertissement).

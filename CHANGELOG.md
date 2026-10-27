@@ -36,6 +36,43 @@ byte-identical-output promise are the public API.
   first failing case on Linux**: GNU `tail` refuses the obsolete `-3` with
   two files, which under `set -e` ended the run (148 of 279 `steps.sh`
   cases had been played).
+- **An installed plugin that `allow-plugins` does not cover stops the
+  command, as in Composer.** Composer judges every installed plugin when
+  it loads them, before any command runs — `install`, `update`, `require`,
+  `remove`, `dump-autoload`, dry runs and `-q` included: one the root
+  requires (directly or through a package) and no rule covers throws
+  "… contains a Composer plugin which is blocked by your allow-plugins
+  config …", exit 1, nothing written; a lock written before plugin API
+  2.2.0 with no `allow-plugins` throws "Your composer.lock was generated
+  before the allow-plugins security feature was introduced …"; a global
+  plugin is judged by the global configuration ("(installed globally)").
+  vivacity installed, resolved and wrote the lock and the autoloader, exit
+  0. It now stops with Composer's message (without Symfony's box, like the
+  root-manifest refusals), exit 1 and the GitHub Actions annotation, and
+  repeats what Composer repeats on that path (each failed `Factory` run
+  prints its lines again). `remove` judges the edited manifest, as
+  Composer does: removing the blocked plugin itself works, removing
+  another one is refused after `./composer.json has been updated`.
+- **"The "x" plugin was not loaded as it is not listed in allow-plugins and
+  is not required by the root package anymore."** is printed where
+  Composer prints it (twice on `require` and `remove`, which load the
+  plugins again).
+- **Handed to Composer, named, before anything is written:** a plugin the
+  install would lay out that `allow-plugins` does not cover (Composer
+  stops in the middle of the installation; also under an old lock), a
+  `require` that makes such a plugin required (Composer refuses it after
+  editing composer.json), and an uncovered plugin Composer checks for its
+  plugin API before judging it.
+- **`php-http/discovery` after an `update` that installs.** Its
+  `post-update-cmd` listener adds or moves a PSR implementation, edits
+  composer.json and updates again when one it looks after is missing (or,
+  for a `project`, only in `require-dev`); vivacity did nothing. Its
+  decision (`getMissingRequires`, 1.19.0 to 1.20.0) is now ported and
+  evaluated on the solved lock: when it would act, the command goes to
+  Composer before the lock is written. The same decision replaces the
+  broader rule under `--no-install`, where a discovery with nothing to add
+  no longer hands the command over. `harness/allow-plugins.sh` covers it
+  all; the cases are in `docs/plans/plugin-allow-discovery.md`.
 
 ## [0.24.0] — 2026-10-23
 
@@ -83,8 +120,6 @@ byte-identical-output promise are the public API.
   `post-autoload-dump` lines needed it in the dump's dev mode (a
   `dump-autoload --no-dev` with the plugin in `require-dev` printed none;
   Composer, which loaded it, prints them).
-
-### Fixed
 - **`update --no-install` runs the plugins' `POST_UPDATE_CMD` listeners.**
   Composer skips the install and the dump but still dispatches
   `POST_UPDATE_CMD` (so do `require --no-install` and `remove
