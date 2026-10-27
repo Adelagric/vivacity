@@ -119,6 +119,11 @@ cat > "$WORK/repo/ref/composer.json" <<JSON
 JSON
 cp "$WORK/repo/ref/composer.json" "$WORK/repo/viv/"
 compare repo update --no-install --no-scripts --no-fallback -- update --no-install --no-scripts
+# … et sur `require` sans contrainte : la version à écrire est cherchée dans
+# ce dépôt avant toute résolution (`PackageDiscoveryTrait`), une
+# `TransportException` là aussi (vivacity sortait en 1).
+for d in ref viv; do mkdir -p "$WORK/repo-require/$d"; cp "$WORK/repo/ref/composer.json" "$WORK/repo-require/$d/"; done
+compare repo-require require acme/nothing --no-scripts --no-fallback -- require acme/nothing --no-scripts
 
 # 3. un dist local absent (dépôt `package` pointant sur un fichier qui n'existe pas).
 mkdir -p "$WORK/local/ref" "$WORK/local/viv"

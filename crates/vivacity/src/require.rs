@@ -264,7 +264,7 @@ fn find_best_version_and_name(
      -> anyhow::Result<Option<usize>> {
         let candidates = session
             .find_packages_for_require(name, ignore_stability)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(crate::session_error)?;
         let mut warnings = Vec::new();
         let found = find_best_candidate(
             &candidates,
@@ -466,12 +466,18 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
             );
         }
+        // A repository Composer cannot reach either is its
+        // `TransportException`: exit 100 (`crate::session_error`), the
+        // message unchanged.
         Err(e) => {
             if newly_created {
                 files.revert()?;
-                anyhow::bail!("No composer.json present in the current directory ({file_label}), this may be the cause of the following exception.\n{e}");
+                let message = format!("No composer.json present in the current directory ({file_label}), this may be the cause of the following exception.\n{e}");
+                return Err(crate::session_error(
+                    vivacity_resolver::session::SessionError { message, ..e },
+                ));
             }
-            return Err(anyhow::anyhow!("{e}"));
+            return Err(crate::session_error(e));
         }
     };
     let preferred_stability = if session.root.prefer_stable {

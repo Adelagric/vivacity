@@ -14,6 +14,15 @@ byte-identical-output promise are the public API.
   listener printed went to Composer. Each line now comes right before its
   listener, in the plugins' activation order, as Composer writes them.
 
+### Fixed
+- **`require` exits 100 when a repository cannot be reached while it picks
+  the version to write**, as Composer does for a `TransportException`; it
+  exited 1 (the transport failure was turned into plain text on that path).
+- **`harness/steps.sh` and `harness/path-repos.sh` no longer stop at their
+  first failing case on Linux**: GNU `tail` refuses the obsolete `-3` with
+  two files, which under `set -e` ended the run (148 of 279 `steps.sh`
+  cases had been played).
+
 ## [0.24.0] — 2026-10-23
 
 ### Changed
