@@ -435,7 +435,8 @@ bamarni), dans les versions lues, branche par branche. **Rendus, raison
 nommée** : symfony/flex, dealerdirect, wikimedia/composer-merge-plugin,
 yiisoft/yii2-composer, symfony/thanks, metasyntactical/composer-plugin-license-check,
 tout autre plugin, une version non lue, un plugin global, `--run-scripts`,
-phpstan / rector / c3 sous `--no-install`, un plugin qu'amène la résolution
+phpstan / rector / c3 sous `--no-install` (natifs depuis le 2026-10-27,
+voir la suite plus bas), un plugin qu'amène la résolution
 (sur le lock résolu, avant écriture, lignes gardées jusque-là).
 
 **Rouges** (`harness/verbosity.sh online`, binaire de `main` 0.23.0) :
@@ -525,3 +526,40 @@ root (Application.php), ce que les runners de la CI ne font pas.
   2026-10-27* ;
 - `COMPOSER_DEBUG_EVENTS`, l'auto-installation de php-http/discovery :
   non portés.
+
+## Suite : les défauts laissés (2026-10-27)
+
+`Linux vm 6.18.44-fc-v165 #1 SMP PREEMPT_DYNAMIC @0 x86_64 x86_64 x86_64 GNU/Linux` — `nproc` : 4.
+
+**Commits** (branche `verbose-plugins` repartie de `main` f3f5524, 0.24.0
+fusionnée) : be59029 (`-v` sous `--no-install` : la ligne de chaque
+écouteur avant ce qu'il écrit), 2d70ace (`tail -n 3`), 786004c (`require` :
+code 100 sur un dépôt injoignable), 8ac2d5c (`dump-autoload` purge),
+72e5e03 (package-versions-deprecated en dev, mesuré), aadd391 (`install`
+sans lock : `-v` retenu), 05193b7 (modes des répertoires de zip), et le
+commit de cette suite.
+
+**Rouges sur `main`, verts sur la branche** :
+
+| défaut | cas | `main` | branche |
+|---|---|---|---|
+| phpstan / rector / c3 / combo sous `--no-install` | `verbosity.sh online` (cas `--no-install`) | 7 OK, 6 échecs | 13 OK |
+| `require` sur un dépôt injoignable | `transport-exit.sh` `repo-require` | code 1 contre 100 | 10 OK |
+| purge de `dump-autoload` | `verbosity.sh online` (`@rm:`) | 3 échecs | 3 OK |
+| `install` sans lock, délégation tardive | `discovery-old install @nolock` | 2 échecs | 2 OK |
+| modes des répertoires de zip | `artifact-repo.sh` (`.:775 docs:700`) | 2 échecs (`docs` en 775) | 11 OK |
+| `tail -3` de steps.sh / path-repos.sh | `steps.sh` sur un cas en échec | arrêt du harnais | les fixtures suivantes jouées |
+
+**Portes** : `cargo fmt --all -- --check` ; `cargo clippy --workspace
+--all-targets -- -D warnings` (Linux et `--target x86_64-pc-windows-gnu`) ;
+`cargo test --workspace --no-fail-fast` 356 réussis, 0 échec (36 blocs) ;
+`tools/check-clib-deps.sh` OK ; `tools/check-pcre2-symbols.sh` OK sur toutes
+les archives Linux (il lit aussi les archives mingw de `target/`, que la CI
+Linux ne construit pas).
+
+**Harnais** (binaire final) : comme le 2026-10-22, sauf `verbosity.sh` —
+la partie instantané 212 OK, la partie `online` ONLINE_N — et root-manifest
+44 OK, transport-exit 10 OK en utilisateur non root. Le premier passage
+complet de `verbosity.sh` s'est arrêté sur un disque plein (« No space left
+on device » dans le home Composer), pas sur un écart ; la partie `online`
+a été rejouée seule.
