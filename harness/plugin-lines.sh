@@ -589,17 +589,21 @@ ni_refused ni-old-versions '^  - plugin (dealerdirect/phpcodesniffer-composer-in
 if grep -q '^  - plugin composer/package-versions-deprecated' "$WORK/ni-old-versions.vivacity.all"; then echo "FAIL ni-old-versions : package-versions nommé"; status=1; fi
 # php-http/discovery : son `postUpdate` interroge le dépôt local, pas le
 # lock, et peut éditer composer.json puis relancer un `Installer` (mesuré :
-# sans fin sous --no-install) ; `getMissingRequires` n'est pas porté — dès
-# qu'il surveille une abstraction, rendu. Composer n'est pas lancé sur les
-# cas rendus (il boucle sur `ni-discovery-dev`, mesuré par la méta-analyse).
+# sans fin sous --no-install) ; quand il agirait (`getMissingRequires`
+# porté, 1.19.0–1.20.0), rendu. Composer n'est pas lancé sur les cas rendus
+# (il boucle sur `ni-discovery-dev`, mesuré par la méta-analyse).
 DISC='"php-http/discovery": "1.20.0", "psr/http-client-implementation": "*", "guzzlehttp/guzzle": "7.10.0"'
 DISC_ALLOW='"config": {"allow-plugins": {"php-http/discovery": true}}'
-DISC_PAT='^  - plugin php-http/discovery looks for PSR implementations'
+DISC_PAT='^  - plugin php-http/discovery (looks for PSR implementations|would add or move a PSR implementation)'
 lock ni-discovery "{\"name\": \"vivacity/plugin-lines-discovery\", \"require\": {$DISC}, $DISC_ALLOW}"
 ni_base discovery ni-discovery
-ni_refused ni-discovery-same "$DISC_PAT" 1 "${NI[@]}" --no-fallback
+# Depuis le 2026-10-27, sa décision est portée (docs/plans/plugin-allow-discovery.md) :
+# l'implémentation installée en `require`, il ne fait rien — natif, comparé.
+step "$ref" "$viv" ni-discovery-same "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-discovery-same 'Nothing to modify in lock file'
 ni_json "{\"name\": \"vivacity/plugin-lines-discovery\", \"require\": {$DISC, \"psr/log\": \"3.0.2\"}, $DISC_ALLOW}"
-ni_refused ni-discovery "$DISC_PAT" 1 "${NI[@]}" --no-fallback
+step "$ref" "$viv" ni-discovery "${NI[@]}" -- "${NI[@]}" --no-fallback
+expect ni-discovery 'Locking psr/log'
 lock ni-discovery-dev "{\"name\": \"vivacity/plugin-lines-discovery-dev\", \"type\": \"project\",
   \"require\": {\"php-http/discovery\": \"1.20.0\", \"psr/http-client-implementation\": \"*\"},
   \"require-dev\": {\"guzzlehttp/guzzle\": \"7.10.0\"}, $DISC_ALLOW}"
@@ -658,8 +662,9 @@ expect ni-ps-vendor-dir '^> phpstan/phpstan-strict-rules: installed$'
 ni_base ps-global phpstan
 # (`Factory::createGlobalComposer` : seulement avec COMPOSER_HOME/composer.json)
 mkdir -p "$WORK/home/vendor/composer" "$WORK/home/vendor/phpstan/extension-installer"
-printf '{}\n' > "$WORK/home/composer.json"
-printf '{"packages": [{"name": "phpstan/extension-installer", "version": "1.4.3", "type": "composer-plugin", "install-path": "../phpstan/extension-installer"}], "dev": true, "dev-package-names": []}\n' > "$WORK/home/vendor/composer/installed.json"
+# (autorisé par la configuration globale, son API exigée : chargé)
+printf '{"config": {"allow-plugins": {"phpstan/extension-installer": true}}}\n' > "$WORK/home/composer.json"
+printf '{"packages": [{"name": "phpstan/extension-installer", "version": "1.4.3", "type": "composer-plugin", "require": {"composer-plugin-api": "^2.0"}, "install-path": "../phpstan/extension-installer"}], "dev": true, "dev-package-names": []}\n' > "$WORK/home/vendor/composer/installed.json"
 ni_refused ni-global '^  - plugin phpstan/extension-installer is installed globally' 1 "${NI[@]}" --no-fallback
 rm -rf "$WORK/home/vendor" "$WORK/home/composer.json"
 # yiisoft/yii2-composer : `activate` recrée extensions.php, sans
