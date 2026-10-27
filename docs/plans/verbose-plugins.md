@@ -499,12 +499,12 @@ root (Application.php), ce que les runners de la CI ne font pas.
 
 **Défauts vus, laissés** :
 
-- `harness/steps.sh:520` : `tail -3 <deux fichiers>` est refusé par le
+- *(corrigé le 2026-10-27)* `harness/steps.sh:520` : `tail -3 <deux fichiers>` est refusé par le
   `tail` de GNU (« option used in invalid context ») ; sous `set -e` le
   harnais s'arrête au premier code de sortie différent — sans effet tant
   que tout passe, il masque les fixtures suivantes sinon (`tail -n 3`
   suffirait ; hors du sujet de ce chantier) ;
-- vivacity répond 1 là où Composer répond 100 quand le proxy refuse le
+- *(corrigé le 2026-10-27, `require`)* vivacity répond 1 là où Composer répond 100 quand le proxy refuse le
   `CONNECT` (drupal, cas réseau) : la classification de cette erreur de
   transport n'est pas celle de Composer ;
 - un répertoire de zip au mode 0775 : `unzip` (Composer) le pose, vivacity
@@ -512,7 +512,7 @@ root (Application.php), ce que les runners de la CI ne font pas.
   archives reconstruites, jamais sur les archives réelles des fixtures ;
 - `dump-autoload` garde dans l'autoloader un paquet dont le répertoire a
   disparu, Composer le purge (`Factory::purgePackages`) — reproduit sur
-  0.23.0 ;
+  0.23.0 ; *corrigé le 2026-10-27* ;
 - package-versions-deprecated en `require-dev` sous `dump-autoload
   --no-dev` : Composer (plugin chargé) écrit ses deux lignes et
   Versions.php, vivacity suit le mode dev ;

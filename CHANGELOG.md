@@ -18,6 +18,9 @@ byte-identical-output promise are the public API.
 - **`require` exits 100 when a repository cannot be reached while it picks
   the version to write**, as Composer does for a `TransportException`; it
   exited 1 (the transport failure was turned into plain text on that path).
+- **`dump-autoload` drops a package whose directory is gone from the
+  autoloader**, as Composer does (`Factory::purgePackages` before the
+  dump); it kept its autoload rules.
 - **`harness/steps.sh` and `harness/path-repos.sh` no longer stop at their
   first failing case on Linux**: GNU `tail` refuses the obsolete `-3` with
   two files, which under `set -e` ended the run (148 of 279 `steps.sh`

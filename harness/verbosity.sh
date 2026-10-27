@@ -494,10 +494,13 @@ ONLINE_CASES=(
   # Chargé, donc appelé, quel que soit le mode du dump (en require-dev sous
   # --no-dev) ; ses classes absentes du disque : pas chargé au démarrage (pas
   # de `command`), réinstallé puis appelé. (Le même `dump-autoload` sur le
-  # répertoire perdu n'est pas un cas : vivacity ne purge pas le paquet de
-  # l'autoloader comme `Factory::purgePackages`, écart antérieur noté.)
+  # répertoire perdu : ni chargé ni appelé, et le paquet purgé de
+  # l'autoloader comme `Factory::purgePackages` le fait.)
   "bamarni-dev|dump-autoload --no-dev @vendor:plugins @levels:normal,-v @expect:Calling.onPostAutoloadDump"
   "bamarni|install @vendor:plugins @rm:vendor/bamarni/composer-bin-plugin @levels:normal,-v"
+  "bamarni|dump-autoload @vendor:plugins @rm:vendor/bamarni/composer-bin-plugin @levels:normal,-v @silent"
+  # Une bibliothèque au répertoire perdu : hors de l'autoloader régénéré.
+  "laravel-pest|dump-autoload @vendor:plugins @rm:vendor/laravel/tinker @levels:normal"
   # Sans écouteur : rien de plus sous -v, mais leurs classes comptent dans
   # le compteur de `require` (custom-directory-installer 2.0.0 en déclare
   # trois : pest-plugin, chargé après lui, prend le quatrième suffixe).

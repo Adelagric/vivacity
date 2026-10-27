@@ -196,11 +196,33 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     // lock may be stale or absent, or no composer.lock) installed.json is
     // the source, split by its `dev-package-names`.
     let lock_path = project.join("composer.lock");
-    let lock = if config_lock_enabled(&manifest_text) && lock_path.exists() {
+    let mut lock = if config_lock_enabled(&manifest_text) && lock_path.exists() {
         vivacity_core::lock::Lock::read(&lock_path)?
     } else {
         local_repository_as_lock(installed_json.as_deref())
     };
+    // `Factory::createComposer` purges the local repository of the packages
+    // whose install path is gone (`purgePackages`) before the dump reads
+    // it: their autoload rules go with them.
+    let composer_dir = composer_dir_of(&project, &manifest);
+    let installed_entries = crate::plugin_order::installed_json_packages(&composer_dir);
+    let kept = purge_missing(&composer_dir, installed_entries.clone());
+    let name_of = |p: &serde_json::Value| {
+        p.get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    let purged: Vec<String> = installed_entries
+        .iter()
+        .filter(|p| !kept.contains(p))
+        .filter_map(name_of)
+        .collect();
+    if !purged.is_empty() {
+        let keep =
+            |p: &vivacity_core::lock::LockPackage| !purged.contains(&p.name().to_ascii_lowercase());
+        lock.packages.retain(keep);
+        lock.packages_dev.retain(keep);
+    }
     let installed_dev = installed_json
         .as_ref()
         .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))
