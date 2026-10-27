@@ -43,6 +43,8 @@ pub(crate) struct Load {
     pub(crate) refusal: Option<String>,
     /// The plugin the refusal is about.
     pub(crate) refused: Option<String>,
+    /// The project's plugins registered before the refusal, in order.
+    pub(crate) loaded: Vec<String>,
     /// A plugin `registerPackage` checks before judging it (its
     /// `composer-plugin-api` requirement, symfony/flex < 1.9.8) while it is
     /// not allowed: Composer skips it or throws another exception — not
@@ -107,13 +109,40 @@ fn lock_predates_allow_plugins(lock_path: &Path) -> bool {
     vivacity_resolver::phpver::version_compare(api, "2.2.0") == std::cmp::Ordering::Less
 }
 
+/// What the global configuration brings to a load.
+#[derive(Default)]
+pub(crate) struct Globals {
+    /// `config.allow-plugins` of COMPOSER_HOME/config.json, merged under
+    /// the project's.
+    pub(crate) allow_plugins: Option<Value>,
+    /// The global Composer, when COMPOSER_HOME/composer.json exists: its
+    /// vendor/composer and its rules.
+    pub(crate) composer: Option<(std::path::PathBuf, Value)>,
+}
+
+impl Globals {
+    /// The global configuration of this run (`COMPOSER_HOME`).
+    pub(crate) fn current() -> Globals {
+        Globals {
+            allow_plugins: vivacity_core::layout::global_allow_plugins(),
+            composer: crate::plugin_order::global_composer_dir().map(|dir| {
+                (
+                    dir,
+                    vivacity_core::layout::global_composer_allow_plugins()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                )
+            }),
+        }
+    }
+}
+
 /// `parseAllowedPlugins` for the project: its `allow-plugins` merged with
 /// the global config; null when that is `[]` and the lock predates 2.2.0
 /// (`lock_path` `None`: `config.lock` off, the lock is /dev/null).
-fn project_rules(manifest: &Value, lock_path: Option<&Path>) -> Rules {
+fn project_rules(manifest: &Value, globals: &Globals, lock_path: Option<&Path>) -> Rules {
     let merged = vivacity_core::layout::merged_allow_plugins(
         manifest.get("config").and_then(|c| c.get("allow-plugins")),
-        vivacity_core::layout::global_allow_plugins().as_ref(),
+        globals.allow_plugins.as_ref(),
     );
     if is_empty_config(merged.as_ref()) && lock_path.is_some_and(lock_predates_allow_plugins) {
         return None;
@@ -183,6 +212,7 @@ fn checked_before_judgement(p: &crate::plugin_order::InstalledPlugin) -> bool {
     };
     let accepts = vivacity_resolver::constraint::parse_constraints(api)
         .is_ok_and(|c| c.constraint.matches_version("2.9.0.0") && c.pretty != PLUGIN_API_VERSION);
+    // `getVersion()`: the normalized version (`1.9.7.0` for `v1.9.7`).
     let old_flex = p.name == "symfony/flex"
         && p.version.chars().all(|c| c.is_ascii_digit() || c == '.')
         && vivacity_resolver::phpver::version_compare(&p.version, "1.9.8")
@@ -195,25 +225,27 @@ const PLUGIN_API_VERSION: &str = "2.9.0";
 /// `loadInstalledPlugins` for a project: `composer_dir` is its
 /// vendor/composer, `lock_path` its lock (`None` when `config.lock` is
 /// off).
-pub(crate) fn load(manifest: &Value, composer_dir: &Path, lock_path: Option<&Path>) -> Load {
+pub(crate) fn load(
+    manifest: &Value,
+    composer_dir: &Path,
+    lock_path: Option<&Path>,
+    globals: &Globals,
+) -> Load {
     let mut out = Load::default();
-    let rules = project_rules(manifest, lock_path);
+    let rules = project_rules(manifest, globals, lock_path);
     let installed = crate::plugin_order::installed_json_packages(composer_dir);
     let required = required_names(&installed, manifest);
     let mut judged: Vec<(crate::plugin_order::InstalledPlugin, bool)> = Vec::new();
     for p in crate::plugin_order::sorted_plugins(&installed, composer_dir) {
         judged.push((p, false));
     }
-    if let Some(global_dir) = crate::plugin_order::global_composer_dir() {
-        let installed = crate::plugin_order::installed_json_packages(&global_dir);
-        for p in crate::plugin_order::sorted_plugins(&installed, &global_dir) {
+    if let Some((global_dir, _)) = &globals.composer {
+        let installed = crate::plugin_order::installed_json_packages(global_dir);
+        for p in crate::plugin_order::sorted_plugins(&installed, global_dir) {
             judged.push((p, true));
         }
     }
-    let global_rules: Rules = Some(
-        vivacity_core::layout::global_composer_allow_plugins()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    );
+    let global_rules: Rules = globals.composer.as_ref().map(|(_, r)| r.clone());
     for (p, global) in &judged {
         let rules = if *global { &global_rules } else { &rules };
         if !global && !required.contains(&p.name) {
@@ -238,10 +270,14 @@ pub(crate) fn load(manifest: &Value, composer_dir: &Path, lock_path: Option<&Pat
             out.hand_over = Some(p.name.clone());
             return out;
         }
-        if let Err(e) = verdict {
-            out.refusal = Some(e);
-            out.refused = Some(p.name.clone());
-            break;
+        match verdict {
+            Err(e) => {
+                out.refusal = Some(e);
+                out.refused = Some(p.name.clone());
+                break;
+            }
+            Ok(true) if !global && p.present => out.loaded.push(p.name.clone()),
+            Ok(_) => {}
         }
     }
     out
@@ -253,6 +289,7 @@ pub(crate) fn load_for(project: &Path, manifest: &Value) -> Load {
         manifest,
         &composer_dir(project, manifest),
         lock_path(project, manifest).as_deref(),
+        &Globals::current(),
     )
 }
 
@@ -273,6 +310,32 @@ pub(crate) fn hand_over_issue(name: &str) -> vivacity_core::scope::ScopeIssue {
         name.to_owned(),
         "is not allowed by config.allow-plugins and Composer checks its plugin API (or its version) before judging it (not emulated)".to_owned(),
     )
+}
+
+/// Root without `COMPOSER_ALLOW_SUPERUSER`, not interactive: Composer
+/// disables the plugins (Application.php:232-320, outside Docker) — a
+/// condition vivacity does not reproduce, so a refusal there goes to
+/// Composer.
+fn root_without_superuser() -> bool {
+    let allowed =
+        std::env::var("COMPOSER_ALLOW_SUPERUSER").is_ok_and(|v| !v.is_empty() && v != "0");
+    #[cfg(unix)]
+    let root = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
+    };
+    #[cfg(not(unix))]
+    let root = false;
+    root && !allowed
+}
+
+/// The hand-over of a judgement Composer skips as root.
+pub(crate) fn root_issue() -> Option<vivacity_core::scope::ScopeIssue> {
+    root_without_superuser().then(|| {
+        vivacity_core::scope::ScopeIssue::Layout(
+            "running as root without COMPOSER_ALLOW_SUPERUSER, where Composer disables the plugins and would not judge them (not emulated)".to_owned(),
+        )
+    })
 }
 
 /// The first `Composer` of a command (`BaseCommand::initialize`, then the
@@ -300,53 +363,77 @@ pub(crate) fn at_load(
         (None, Some(edited)) if load.refusal.is_none() => second_load_issue(project, edited),
         _ => None,
     };
+    let issue = match issue {
+        Some(i) => Some(root_issue().unwrap_or(i)),
+        None if load.refusal.is_some() => root_issue(),
+        None => None,
+    };
     if let Some(issue) = issue {
         return crate::delegate_resolution(&[issue], no_fallback).map(Some);
     }
     if load.refusal.is_some() {
-        return Ok(Some(refuse(&load, 2)));
+        return refuse(project, manifest, &load, 2).map(Some);
     }
     hold_warnings(&load);
     Ok(None)
 }
 
-/// Holds the warnings of a load that went through.
+/// Holds the warnings of a load that went through, right after the lines
+/// of the `Factory` run that printed them.
 pub(crate) fn hold_warnings(load: &Load) {
-    for w in &load.warnings {
-        vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, w.clone());
+    vivacity_core::io::hold_after_factory(vivacity_core::io::Verbosity::Normal, &load.warnings);
+}
+
+/// yiisoft/yii2-composer registered before a refusal: its `activate` wrote
+/// extensions.php all the same.
+pub(crate) fn activate_before_refusal(
+    project: &Path,
+    manifest: &Value,
+    load: &Load,
+) -> anyhow::Result<()> {
+    if load
+        .loaded
+        .iter()
+        .any(|n| n == vivacity_core::yii2_composer::PLUGIN_NAME)
+    {
+        crate::no_install::activate_yii2_composer(project, manifest, true)?;
     }
+    Ok(())
 }
 
 /// A refused load, as Composer prints it: every `Factory` run that fails
-/// is run again — `initialize` (swallowed), the command's own
-/// (`requireComposer`, which throws), so the lines held so far and the
-/// warnings before the refusal `attempts` times; then the GitHub Actions
-/// annotation, `hintCommonErrors`'s run with plugins off (the held lines
-/// once more), and the message, without Symfony Console's box (as
-/// `refuse_invalid_root`). Exit 1; nothing written.
-pub(crate) fn refuse(load: &Load, attempts: usize) -> i32 {
-    let held = vivacity_core::io::held_lines();
+/// is run again — `initialize` (swallowed), then what the command held
+/// since (the platform-requirement environment, its first lines), the
+/// command's own (`requireComposer`, which throws): the `Factory` lines
+/// and the warnings before the refusal `attempts` times; then the GitHub
+/// Actions annotation, `hintCommonErrors`'s run with plugins off (the
+/// `Factory` lines once more), and the message, without Symfony Console's
+/// box (as `refuse_invalid_root`). Exit 1; nothing written but what a
+/// plugin registered before the refusal writes on activation.
+pub(crate) fn refuse(
+    project: &Path,
+    manifest: &Value,
+    load: &Load,
+    attempts: usize,
+) -> anyhow::Result<i32> {
     let Some(refusal) = &load.refusal else {
-        return 0;
+        return Ok(0);
     };
-    for attempt in 0..attempts {
-        if attempt == 0 {
-            vivacity_core::io::release_held();
-        } else {
-            for line in &held {
-                vivacity_core::say!("{line}");
-            }
-        }
-        for w in &load.warnings {
-            vivacity_core::say!("{w}");
+    activate_before_refusal(project, manifest, load)?;
+    let factory = vivacity_core::io::factory_held();
+    hold_warnings(load);
+    vivacity_core::io::release_held();
+    for _ in 1..attempts {
+        for line in factory.iter().chain(&load.warnings) {
+            vivacity_core::say!("{line}");
         }
     }
     vivacity_core::io::github_action_error(refusal);
-    for line in &held {
+    for line in &factory {
         vivacity_core::say!("{line}");
     }
     vivacity_core::say_always!("{refusal}");
-    1
+    Ok(1)
 }
 
 /// `PluginInstaller::prepare` (PluginInstaller.php:55-62): a plugin the
@@ -359,7 +446,21 @@ pub(crate) fn install_issue<'a>(
     load_manifest: &Value,
     plugins: impl IntoIterator<Item = (&'a str, bool)>,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
-    let rules = project_rules(load_manifest, lock_path(project, load_manifest).as_deref());
+    let issue = install_issue_with(project, load_manifest, &Globals::current(), plugins)?;
+    Some(root_issue().unwrap_or(issue))
+}
+
+fn install_issue_with<'a>(
+    project: &Path,
+    load_manifest: &Value,
+    globals: &Globals,
+    plugins: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Option<vivacity_core::scope::ScopeIssue> {
+    let rules = project_rules(
+        load_manifest,
+        globals,
+        lock_path(project, load_manifest).as_deref(),
+    );
     for (name, optional) in plugins {
         if let Err(e) = is_allowed(&rules, name, false, optional) {
             let why = if e == OLD_LOCK {
@@ -448,12 +549,16 @@ mod tests {
                "require": {"composer-plugin-api": "^2.0"}})
     }
 
+    /// The load, `loaded` set aside (asserted where it matters).
     fn run(dir: &Path, manifest: Value) -> Load {
-        load(
+        let mut l = load(
             &manifest,
             &dir.join("vendor/composer"),
             Some(&dir.join("composer.lock")),
-        )
+            &Globals::default(),
+        );
+        l.loaded.clear();
+        l
     }
 
     #[test]
@@ -500,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn required_through_a_package_provide_or_replace() {
+    fn required_through_a_package_replace_or_provide() {
         let mut lib = json!({"name": "b/lib", "version": "1.0.0", "require": {"a/p": "*"},
                              "replace": {"c/old": "*"}});
         let d = project(json!([plugin("a/p"), lib.clone()]), None);
@@ -617,15 +722,82 @@ mod tests {
             [("a/ok", false), ("b/opt", true), (PACKAGE_VERSIONS, false)]
         )
         .is_none());
-        assert!(install_issue(d.path(), &m, [("c/blocked", false)])
-            .is_some_and(|i| i.to_string().starts_with("plugin c/blocked is not covered")));
+        assert!(
+            install_issue_with(d.path(), &m, &Globals::default(), [("c/blocked", false)])
+                .is_some_and(|i| i.to_string().starts_with("plugin c/blocked is not covered"))
+        );
         // An old lock: even the optional ones stop it.
         let d = project(
             json!([]),
             Some(json!({"packages": [], "plugin-api-version": "2.1.0"})),
         );
-        assert!(install_issue(d.path(), &json!({}), [("b/opt", true)]).is_some());
-        assert!(install_issue(d.path(), &m, [("b/opt", true)]).is_none());
+        assert!(
+            install_issue_with(d.path(), &json!({}), &Globals::default(), [("b/opt", true)])
+                .is_some()
+        );
+        assert!(install_issue_with(d.path(), &m, &Globals::default(), [("b/opt", true)]).is_none());
+    }
+
+    #[test]
+    fn an_old_flex_is_skipped_by_composer_on_its_normalized_version() {
+        let mut flex = plugin("symfony/flex");
+        flex["version"] = json!("v1.9.7");
+        flex["require"] = json!({"composer-plugin-api": "^1.0|^2.0"});
+        let d = project(json!([flex.clone()]), None);
+        let l = run(d.path(), json!({"require": {"symfony/flex": "*"}}));
+        assert_eq!(l.hand_over.as_deref(), Some("symfony/flex"));
+        flex["version"] = json!("v1.9.8");
+        let d = project(json!([flex]), None);
+        let l = run(d.path(), json!({"require": {"symfony/flex": "*"}}));
+        assert!(l.hand_over.is_none() && l.refusal.is_some());
+    }
+
+    #[test]
+    fn a_global_plugin_is_judged_by_the_global_rules() {
+        let d = project(json!([]), None);
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("installed.json"),
+            json!({"packages": [plugin("g/p")]}).to_string(),
+        )
+        .unwrap();
+        let globals = |rules: Value| Globals {
+            allow_plugins: None,
+            composer: Some((home.path().to_path_buf(), rules)),
+        };
+        // The project's rules do not count for it.
+        let m = json!({"config": {"allow-plugins": {"g/p": true}}});
+        let l = load(
+            &m,
+            &d.path().join("vendor/composer"),
+            None,
+            &globals(json!([])),
+        );
+        assert!(l
+            .refusal
+            .unwrap()
+            .starts_with("g/p (installed globally) contains"));
+        let l = load(
+            &m,
+            &d.path().join("vendor/composer"),
+            None,
+            &globals(json!({"g/*": true})),
+        );
+        assert!(l.refusal.is_none() && l.warnings.is_empty() && l.loaded.is_empty());
+        // config.json's rules merge under the project's.
+        let globals = Globals {
+            allow_plugins: Some(json!({"a/p": true})),
+            composer: None,
+        };
+        let d = project(json!([plugin("a/p")]), None);
+        let l = load(
+            &json!({"require": {"a/p": "*"}}),
+            &d.path().join("vendor/composer"),
+            None,
+            &globals,
+        );
+        assert_eq!(l.loaded, vec!["a/p".to_owned()]);
+        assert!(l.refusal.is_none());
     }
 
     #[test]

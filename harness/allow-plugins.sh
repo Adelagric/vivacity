@@ -221,6 +221,10 @@ base gb both 'del(.config["allow-plugins"]) | del(.require["dealerdirect/phpcode
 refused gb gone-then-blocked-install "$BLOCKED" "${I[@]}"
 grep -q '^The "dealerdirect/phpcodesniffer-composer-installer" plugin was not loaded' "$WORK/gone-then-blocked-install.composer.err" \
   || { echo "FAIL gone-then-blocked-install : pas d'avertissement chez Composer (cas mal construit)"; status=1; }
+# `COMPOSER_IGNORE_PLATFORM_REQS` : son avertissement (`initialize`, après le
+# premier chargement) vient après les lignes du chargement, et une fois.
+(export COMPOSER_IGNORE_PLATFORM_REQS=1; same gone env-gone-update-dry "$WARN" update --dry-run "${R[@]}"; exit $status) || status=1
+(export COMPOSER_IGNORE_PLATFORM_REQS=1; refused gb env-gone-then-blocked-install "$BLOCKED" "${I[@]}"; exit $status) || status=1
 base lockfalse ps 'del(.config["allow-plugins"]) | .config.lock = false'
 (export GITHUB_ACTIONS=true; refused lockfalse lockfalse-blocked-install "$BLOCKED" "${I[@]}"; exit $status) || status=1
 # Requis et `false` : pas chargé, rien d'imprimé.
@@ -249,6 +253,15 @@ mkdir -p "$WORK/base/discoldbare"; for s in ref viv; do rm -rf "$WORK/base/disco
 handed discoldbare old-lock-bare-install 'allow-plugins' "${I[@]}"
 mkdir -p "$WORK/base/discoldlf"; for s in ref viv; do rm -rf "$WORK/base/discoldlf/$s"; cp -a "$WORK/base/discold/$s" "$WORK/base/discoldlf/$s"; jq --indent 4 '.config.lock = false' "$WORK/base/discold/$s/composer.json" > "$WORK/base/discoldlf/$s/composer.json"; done
 same discoldlf old-lock-lockfalse 'is present but ignored' dump-autoload
+
+# symfony/flex < 1.9.8 : `registerPackage` le saute avant tout jugement
+# (« not compatible with Composer 2+ ») — rendu, non refusé.
+lock oldflex '{"name": "vivacity/allow-oldflex", "require": {"symfony/flex": "v1.9.7"},
+  "config": {"allow-plugins": {"symfony/flex": true}}}'
+base oldflex oldflex 'del(.config["allow-plugins"])'
+handed oldflex old-flex-dump 'symfony/flex' dump-autoload
+(cd "$WORK/base/oldflex/ref" && composer dump-autoload --no-interaction >/dev/null 2>&1) \
+  || { echo "FAIL old-flex-dump : Composer refuse (cas mal construit)"; status=1; }
 
 # --- un plugin global que la configuration globale ne couvre pas
 GH="$WORK/home-global"; mkdir -p "$GH"

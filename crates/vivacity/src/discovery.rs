@@ -303,11 +303,14 @@ pub(crate) fn resolved_issue(
         return None;
     }
     let parsed = vivacity_core::lock::Lock::from_value(lock);
-    let version = parsed
+    let locked = parsed
         .wanted_packages(with_dev)
-        .find(|p| p.name().eq_ignore_ascii_case(DISCOVERY))?
-        .version()
-        .to_owned();
+        .find(|p| p.name().eq_ignore_ascii_case(DISCOVERY))?;
+    // A plain library before 1.15.0: no listener.
+    if locked.raw.get("type").and_then(Value::as_str) != Some("composer-plugin") {
+        return None;
+    }
+    let version = locked.version().to_owned();
     let entries: Vec<Value> = parsed
         .wanted_packages(with_dev)
         .map(|p| Value::Object(p.raw.clone()))
@@ -401,7 +404,11 @@ pub(crate) fn would_act(repo: &[RepoPackage], dev_names: &BTreeSet<String>, root
             .map(|m| m.keys().map(|k| k.to_ascii_lowercase()).collect())
             .unwrap_or_default()
     };
-    let is_project = root.get("type").and_then(Value::as_str) == Some("project");
+    // `ArrayLoader` lowercases the type.
+    let is_project = root
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("project"));
     let pinned = pinned_abstractions(root);
     let mut requires: [BTreeSet<String>; 2] = [
         keys("require").into_iter().collect(),
@@ -646,12 +653,20 @@ mod tests {
     }
 
     #[test]
-    fn an_abstraction_in_both_lists() {
-        // Decided once per list (`array_diff_key` then drops the dev
-        // entry): satisfied in both.
+    fn an_abstraction_in_both_lists_is_decided_once_per_list() {
+        // Satisfied in both: nothing. Missing: both lists name it, and
+        // `array_diff_key` keeps the `require` one — it acts either way.
         let r = repo(&[pkg("guzzlehttp/guzzle", "7.10.0")]);
         let m = root("library", &[DISCOVERY, ROOT_REQ], &[ROOT_REQ]);
         assert!(!would_act(&r, &devs(&[]), &m));
+        assert!(would_act(&repo(&[]), &devs(&[]), &m));
+    }
+
+    #[test]
+    fn the_root_type_is_read_lowercased() {
+        let r = repo(&[pkg("guzzlehttp/guzzle", "7.10.0")]);
+        let m = root("Project", &[DISCOVERY, ROOT_REQ], &[]);
+        assert!(would_act(&r, &devs(&["guzzlehttp/guzzle"]), &m));
     }
 
     #[test]

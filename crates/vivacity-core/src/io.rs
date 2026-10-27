@@ -40,7 +40,7 @@
 //! (docs/plans/verbose-plugins.md): the lines already printed would
 //! otherwise come twice.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// A run's verbosity, or the level of a line.
@@ -173,13 +173,48 @@ pub fn hold(level: Verbosity, line: String) {
     HOLDING.store(true, Ordering::Release);
 }
 
-/// The held lines, in order, left held — for output Composer repeats (a
-/// `Factory` run that fails is run again).
-pub fn held_lines() -> Vec<String> {
+/// How many of the held lines, at their head, `Factory::createComposer`
+/// writes (the root-version warning, the ignored-lock warning): the lines
+/// Composer writes again each time it creates a `Composer`.
+static FACTORY_HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds a line `Factory::createComposer` writes ([`hold`] otherwise). It
+/// counts as one only while nothing else is held before it.
+pub fn hold_factory(level: Verbosity, line: String) {
+    if !shows(level) {
+        return;
+    }
+    let mut slot = held();
+    if slot.len() == FACTORY_HELD.load(Ordering::Acquire) {
+        FACTORY_HELD.fetch_add(1, Ordering::AcqRel);
+    }
+    slot.push(line);
+    HOLDING.store(true, Ordering::Release);
+}
+
+/// The held lines `Factory` wrote, in order, left held — Composer writes
+/// them again on each `Composer` it creates after a failed one.
+pub fn factory_held() -> Vec<String> {
     if !HOLDING.load(Ordering::Acquire) {
         return Vec::new();
     }
-    held().clone()
+    let slot = held();
+    let n = FACTORY_HELD.load(Ordering::Acquire).min(slot.len());
+    slot[..n].to_vec()
+}
+
+/// Holds lines of the same `Factory` run (the plugins it loads): after its
+/// lines already held, before those the command held since.
+pub fn hold_after_factory(level: Verbosity, lines: &[String]) {
+    if !shows(level) || lines.is_empty() {
+        return;
+    }
+    let mut slot = held();
+    let at = FACTORY_HELD.load(Ordering::Acquire).min(slot.len());
+    for (i, line) in lines.iter().enumerate() {
+        slot.insert(at + i, line.clone());
+    }
+    HOLDING.store(true, Ordering::Release);
 }
 
 /// Writes the held lines on stderr, once, in order. Called by every writing
@@ -192,6 +227,7 @@ pub fn release_held() {
     }
     let mut slot = held();
     let lines: Vec<String> = slot.drain(..).collect();
+    FACTORY_HELD.store(0, Ordering::Release);
     HOLDING.store(false, Ordering::Release);
     drop(slot);
     if DEFERRING.load(Ordering::Acquire) {
@@ -219,6 +255,7 @@ pub fn drop_held() {
         return;
     }
     held().clear();
+    FACTORY_HELD.store(0, Ordering::Release);
     HOLDING.store(false, Ordering::Release);
 }
 

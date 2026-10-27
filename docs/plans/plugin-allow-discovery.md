@@ -244,6 +244,30 @@ avant d'être pris.
     jugement précède `merge_plugin`. Sous `-v`, l'encadré ajoute la classe
     de l'exception ; le harnais compare le texte extrait.
 
+## Revue indépendante (sous-agent frais) et ce qui change
+
+Deux majeurs, cinq mineurs, six détails ; vérifiés, puis :
+
+1. **symfony/flex < 1.9.8** : le saut de `registerPackage` lit
+   `getVersion()`, la version normalisée (`1.9.7.0` pour `v1.9.7`) ; le
+   port lisait la version écrite et refusait là où Composer réussit.
+   Corrigé (`version_normalized`, sinon normalisée) ; cas `old-flex-dump`.
+2. **Root sans `COMPOSER_ALLOW_SUPERUSER`** : Composer coupe alors les
+   plugins (Application.php:232-320) et ne juge rien ; vivacity ne modélise
+   pas cette règle (écart préexistant). Un refus ou un rendu dans cette
+   situation part à Composer, nommé.
+3. **Ordre avec l'environnement** (`COMPOSER_IGNORE_PLATFORM_REQ(S)`,
+   imprimé par `initialize` après le premier chargement) : les
+   avertissements se placent juste après les lignes de `Factory`
+   (`io::hold_factory`, `hold_after_factory`), et seules ces lignes se
+   répètent sur un refus. Cas `env-gone-update-dry`,
+   `env-gone-then-blocked-install`.
+4. yii2-composer chargé avant le refus écrit extensions.php (`activate`) :
+   reproduit. discovery antérieur à 1.15 (simple bibliothèque) : plus de
+   rendu. Tests indépendants de `COMPOSER_HOME` (règles globales
+   injectées). Le `type` de la racine lu en minuscules ; deux noms de
+   tests rectifiés ; `remove` décide d'un rendu avant d'imprimer.
+
 ## Fichiers
 
 1. `harness/allow-plugins.sh` (nouveau, ajouté à `ci.yml`) : les rouges
@@ -308,5 +332,17 @@ interdit (dit dans le Résultat, avec les relances restreintes), plus
 - Le mode interactif (la question `[y,n,d,?]` et l'écriture
   d'`allow-plugins`) : vivacity n'est jamais interactif.
 - symfony/flex < 1.9.8 sauté avant le jugement (avertissement « not
-  compatible with Composer 2+ ») : non porté.
+  compatible with Composer 2+ ») : son avertissement n'est pas porté ; non
+  autorisé, il est rendu à Composer (revue, point 1).
 - L'issue réseau de l'update imbriqué de discovery : rendu à Composer.
+- Root sans `COMPOSER_ALLOW_SUPERUSER` (« Do not run Composer as root »,
+  plugins coupés) : non modélisé, préexistant ; seuls les refus y sont
+  rendus.
+- Lancer vivacity depuis `COMPOSER_HOME` même (`isGlobal`) ; le Composer
+  global que `initialize` crée après un premier chargement refusé (ses
+  propres avertissements) ; les erreurs d'arguments imprimées avant le
+  chargement (`install --no-install`, `remove` sans paquet), sans ses
+  avertissements.
+- Un plugin autorisé dont l'API ne correspond pas (Composer l'ignore avec
+  un avertissement) ; `scope::active_plugins`, qui lit le dépôt global sans
+  les conditions du Composer global.

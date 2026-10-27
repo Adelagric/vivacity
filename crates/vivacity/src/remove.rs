@@ -64,7 +64,10 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         }
         // `--unused` asks for the `Composer` before the edit.
         if load.refusal.is_some() && args.unused {
-            return Ok(crate::plugin_allow::refuse(load, 2));
+            if let Some(issue) = crate::plugin_allow::root_issue() {
+                return crate::delegate_resolution(&[issue], args.no_fallback);
+            }
+            return crate::plugin_allow::refuse(&project, &manifest, load, 2);
         }
         crate::plugin_allow::hold_warnings(load);
     }
@@ -220,19 +223,23 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .into_iter()
         .flatten()
         .collect();
+    let second_load = (!args.no_plugins).then(|| crate::plugin_allow::load_for(&project, &updated));
+    if let Some(load) = &second_load {
+        let issue = match &load.hand_over {
+            Some(name) => Some(crate::plugin_allow::hand_over_issue(name)),
+            None if load.refusal.is_some() => crate::plugin_allow::root_issue(),
+            None => None,
+        };
+        if let Some(issue) = issue {
+            std::fs::write(&file, &backup)
+                .with_context(|| format!("cannot restore {}", file.display()))?;
+            return crate::delegate_resolution(&[issue], args.no_fallback);
+        }
+    }
     for line in &held {
         vivacity_core::say!("{line}");
     }
-    if !args.no_plugins {
-        let load = crate::plugin_allow::load_for(&project, &updated);
-        if let Some(name) = &load.hand_over {
-            std::fs::write(&file, &backup)
-                .with_context(|| format!("cannot restore {}", file.display()))?;
-            return crate::delegate_resolution(
-                &[crate::plugin_allow::hand_over_issue(name)],
-                args.no_fallback,
-            );
-        }
+    if let Some(load) = &second_load {
         for attempt in 0..if first_refused { 2 } else { 1 } {
             if attempt > 0 {
                 for line in &held {
@@ -244,6 +251,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
             }
         }
         if let Some(refusal) = &load.refusal {
+            crate::plugin_allow::activate_before_refusal(&project, &updated, load)?;
             vivacity_core::io::github_action_error(refusal);
             for line in &held {
                 vivacity_core::say!("{line}");

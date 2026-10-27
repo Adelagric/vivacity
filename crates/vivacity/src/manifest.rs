@@ -185,7 +185,7 @@ pub(crate) fn hold_root_version_warning(project: &std::path::Path) -> Option<Str
     let text = std::fs::read_to_string(project.join("composer.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
     let line = vivacity_resolver::root::undetected_version_warning(&manifest, project)?;
-    vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, line.clone());
+    vivacity_core::io::hold_factory(vivacity_core::io::Verbosity::Normal, line.clone());
     Some(line)
 }
 
@@ -260,7 +260,7 @@ pub(crate) fn hold_ignored_lock_warning(project: &std::path::Path) -> Option<Str
     }
     let line = "./composer.lock is present but ignored as the \"lock\" config option is disabled."
         .to_owned();
-    vivacity_core::io::hold(vivacity_core::io::Verbosity::Normal, line.clone());
+    vivacity_core::io::hold_factory(vivacity_core::io::Verbosity::Normal, line.clone());
     Some(line)
 }
 

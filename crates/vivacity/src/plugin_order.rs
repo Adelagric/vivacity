@@ -62,7 +62,7 @@ pub(crate) struct InstalledPlugin {
     pub(crate) composer_plugin: bool,
     /// Its `composer-plugin-api` requirement, as written.
     pub(crate) plugin_api: Option<String>,
-    /// Its version, as written.
+    /// Its normalized version (`getVersion()`).
     pub(crate) version: String,
 }
 
@@ -115,10 +115,15 @@ pub(crate) fn sorted_plugins(packages: &[Value], composer_dir: &Path) -> Vec<Ins
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             version: obj
-                .get("version")
+                .get("version_normalized")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+                .map(str::to_owned)
+                .or_else(|| {
+                    obj.get("version")
+                        .and_then(Value::as_str)
+                        .and_then(|v| vivacity_resolver::version::normalize(v, None).ok())
+                })
+                .unwrap_or_default(),
         });
         // The branch alias: the same links once more in the usage table;
         // never registered (`CompleteAliasPackage` is no `CompletePackage`).
