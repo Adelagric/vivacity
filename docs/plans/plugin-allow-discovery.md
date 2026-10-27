@@ -1,0 +1,225 @@
+# `allow-plugins` au chargement des plugins, et php-http/discovery à `POST_UPDATE_CMD` — plan
+
+> Suite des « Restent » de HANDOVER (bullet « Ordre et lignes des écouteurs
+> de plugins ») et des non-objectifs de `docs/plans/no-install-listeners.md` :
+> deux écarts **silencieux** — Composer refuse ou réécrit, vivacity finit en
+> 0 sans rien dire. Niveau 2 : parité à l'octet du code de sortie, des
+> fichiers et des sorties ; ce qui n'est pas reproductible part à Composer,
+> nommé, avant toute écriture. Méta-analyse et revue par sous-agents frais.
+
+## Le problème
+
+1. **Un plugin installé que `allow-plugins` ne couvre pas.** Composer le
+   juge au chargement des plugins (`Factory::createComposer` →
+   `PluginManager::loadInstalledPlugins`), donc **pour toute commande** :
+   `install`, `update`, `require`, `remove`, `dump-autoload`, dry run et
+   `-q` compris. Requis par la racine (directement ou non), il lève
+   `PluginBlockedException` : code 1, rien d'écrit. vivacity installe,
+   résout, écrit le lock et l'autoloader, code 0 — mesuré sur les cinq
+   commandes (matrice ci-dessous). HANDOVER ne le notait que pour les
+   commandes de résolution ; `install` et `dump-autoload` sont touchées
+   aussi. Deux variantes voisines, mêmes conséquences : un lock antérieur à
+   l'API de plugins 2.2.0 sans `allow-plugins` (`RuntimeException`), un
+   plugin global non couvert par la configuration globale.
+2. **Les à-côtés du même code.** Un plugin installé, non couvert et **plus
+   requis** par la racine n'est pas chargé : Composer l'écrit (« The "x"
+   plugin was not loaded as it is not listed in allow-plugins and is not
+   required by the root package anymore. »), vivacity non. Et un plugin
+   non couvert que la **transaction** installe ou met à jour arrête
+   Composer en pleine installation (`PluginInstaller::prepare`), les paquets
+   précédents posés, code 1 ; vivacity installe tout.
+3. **php-http/discovery à `POST_UPDATE_CMD` avec installation.** Son
+   `postUpdate` (1.20.0) cherche dans le dépôt local les implémentations des
+   abstractions PSR exigées ; s'il en manque une, ou si l'implémentation
+   d'un projet n'est qu'en dev, il édite composer.json et relance un
+   `Installer`. Mesuré : `update` d'un projet dont guzzle n'est qu'en
+   `require-dev`, ou dont l'abstraction est fournie par un paquet qu'il ne
+   connaît pas — composer.json et le lock réécrits, update imbriqué ;
+   vivacity : rien, code 0. Le chantier `--no-install` le rendait à Composer
+   **dès qu'il surveille une abstraction**, ce qui est exact mais large ; le
+   même calcul porté sert les deux.
+
+## Environnement de mesure
+
+Celui de `docs/plans/no-install-listeners.md` : Linux x86_64, PHP 8.5.12,
+Composer 2.10.3, harnais lancés par un utilisateur non root (en root,
+Composer ajoute « Plugins have been disabled automatically… » à toute
+exception sous `--no-plugins`), cache de fichiers amorcé par `git archive`
+(api.github.com refusé par le proxy de la session). Conséquence ici : un
+update imbriqué de discovery qui doit télécharger un paquet neuf échoue en
+100 chez Composer — le comportement à reproduire est l'édition et le
+relancement, pas leur issue réseau ; vivacity les rend à Composer.
+
+## Références (Composer 2.10.3, phar extrait ; plugins par git)
+
+- `Plugin/PluginManager.php:90-91` : règles du projet
+  (`parseAllowedPlugins(config allow-plugins, locker)`) et du global
+  (`globalComposer` → sa config, sans locker) ; `:690-711`
+  `parseAllowedPlugins` : `[]` + lock présent + `plugin-api-version` < 2.2.0
+  → `null` ; `true` → tout ; `false` → rien ; sinon motifs
+  (`packageNameToRegexp`).
+- `:734-825` `isPluginAllowed($package, $isGlobal, $optional, $prompt)` :
+  règles `null` et non interactif → `RuntimeException` (« Your
+  composer.lock was generated before the allow-plugins security feature was
+  introduced… ») ; première règle qui correspond → `$allow === true` ;
+  `composer/package-versions-deprecated` → faux ; interactif → question
+  (vivacity n'est jamais interactif) ; `$optional` → faux ;
+  sinon `PluginBlockedException` (« <nom>[ (installed globally)] contains a
+  Composer plugin which is blocked by your allow-plugins config. … You can
+  run "composer [global ]config --no-plugins allow-plugins.<nom>
+  [true|false]" … See https://getcomposer.org/allow-plugins »).
+- `:102-112` `loadInstalledPlugins` : dépôt local (installed.json **avant**
+  la purge, Factory.php:448/457), puis global ; `:490-540` `loadRepository` :
+  ordre `PackageSorter` (poids -10000), `CompletePackage` de type
+  `composer-plugin` / `composer-installer` seulement ; pour le dépôt local,
+  `RepositoryUtils::filterRequiredPackages($packages, $root, true)` — un
+  plugin hors de cet ensemble et non autorisé (`isPluginAllowed(…, true,
+  false)`) imprime l'avertissement et n'est pas chargé ; sinon
+  `registerPackage` → `:208` `isPluginAllowed(…, plugin-optional)` (refus
+  silencieux, ou exception).
+- `Repository/RepositoryUtils.php:36-56` `filterRequiredPackages` :
+  `require` + `require-dev` de la racine, puis récursivement le `require`
+  de chaque paquet atteint, par `getNames()` (nom, `provide`, `replace`).
+- `Config.php:41` (`allow-plugins` vaut `[]` par défaut), `:207-210` (fusion
+  des tableaux, clés du projet d'abord).
+- `Installer/PluginInstaller.php:55-62` `prepare` : avant d'installer ou de
+  mettre à jour un plugin, `isPluginAllowed(…, plugin-optional)`.
+- `Console/Application.php` : l'exception rendue en encadré + synopsis,
+  code 1 ; vivacity imprime le texte seul (déviation assumée pour les refus
+  de `RootPackageLoader`, `harness/root-manifest.sh`) et l'annotation
+  GitHub Actions.
+- `RequireCommand.php:193` et `:409-410`, `RemoveCommand.php:96` et
+  `:221-222` : deux `Composer` créés, donc deux chargements (l'avertissement
+  deux fois, mesuré) ; le second sur le manifeste édité, avec les
+  `allow-plugins` d'avant l'édition pour `remove` (:242-252).
+- php-http/discovery `src/Composer/Plugin.php` (1.20.0) : `:46-90`
+  `PROVIDE_RULES`, `:105-122` `INTERFACE_MAP`, `:145-176` `postUpdate`
+  (épinglage par `extra.discovery`, puis `getMissingRequires`, puis
+  `array_filter` : rien à faire → retour), `:243-366` `getMissingRequires`.
+  Identiques (règles, `getMissingRequires`, `postUpdate`) de 1.19.0 à
+  1.20.0 (diff git) ; 1.15.0–1.18.1 diffèrent. `extra.plugin-optional:
+  true` : non couvert, il n'est simplement pas chargé.
+
+## Matrice mesurée (Composer 2.10.3 contre vivacity 0.24.0+, f3f5524)
+
+Projet phpstan/extension-installer 1.4.3 installé, puis `allow-plugins`
+modifié (hors content-hash : le lock reste à jour).
+
+| état | commande | Composer | vivacity (main) |
+|---|---|---|---|
+| requis, `allow-plugins` absent | install, update, update --no-install, update --dry-run, require x, require x --no-install, dump-autoload | encadré `PluginBlockedException`, code 1, rien d'écrit | natif, code 0, lock / vendor / autoloader écrits |
+| idem | `-q` | l'encadré (niveau d'erreur), code 1 | rien, code 0 |
+| idem | `--no-plugins` | natif, 0 | natif, 0 (identique) |
+| requis, `{"other/x": true}` | les mêmes | les mêmes | les mêmes |
+| requis, son répertoire supprimé | install | refus (chargé avant la purge) | réinstalle le plugin, 0 |
+| requis seulement par un paquet (dealerdirect via phpcsutils) | install, update --no-install | refus | natif, 0 |
+| plus requis, absent ou `false` | install, update, update --no-install, dump-autoload | « The "phpstan/extension-installer" plugin was not loaded as it is not listed in allow-plugins and is not required by the root package anymore. » en tête, puis la commande | la commande sans la ligne |
+| idem | require x, remove y --no-install | la ligne **deux fois** (avant et après « ./composer.json has been updated ») | aucune |
+| idem | `-q` | aucune | aucune |
+| requis, `false` | install | natif (non chargé, rien d'imprimé) | identique |
+| lock `plugin-api-version` 2.1.0, `allow-plugins` absent ou `{}` | install, update --no-install | `RuntimeException` « Your composer.lock was generated before… », code 1 | natif, 0 |
+| plugin global, `allow-plugins` global absent | install, update --no-install | refus « (installed globally) », « composer global config » | install natif 0 ; update --no-install rendu (plugin global, chantier précédent) |
+| vendor vierge, plugin dans le lock | install | « Installing phpstan/phpstan », puis refus au plugin, code 1, phpstan posé | tout installé, 0 |
+| idem | update | lock écrit, puis le même refus, code 1 | tout installé, 0 |
+| idem | update --no-install | rien de chargé : natif, 0 | identique |
+| php-http/discovery non couvert (`plugin-optional`) | install, update --no-install | natif, 0 | identique |
+| composer/package-versions-deprecated non couvert | install, update --no-install, dump-autoload | natif (refus silencieux) | identique |
+| discovery, racine `project`, guzzle en `require-dev` seulement | update (avec installation) | « Nothing to modify », l'installation, puis composer.json et lock réécrits, update imbriqué (guzzle 7.10 → 8.3.1) | rien, 0 |
+| discovery, abstraction fournie par php-http/mock-client | update | composer.json réécrit, update imbriqué (nyholm/psr7, symfony/http-client…) | rien, 0 |
+| discovery, guzzle en `require` | update | rien | identique |
+| le cas mock-client | update --no-install | réécriture, update imbriqué | rendu (chantier précédent) |
+
+## Le modèle porté
+
+**A. Au chargement** (`plugin_allow::load`, toutes les commandes, plugins
+actifs) : les règles — `allow-plugins` du projet fusionné au global
+(`Config::merge`) ; `[]` (absent ou objet vide) + lock présent dont
+`plugin-api-version` (défaut `1.1.0`) < 2.2.0 → règles nulles ; pour le
+global, la config globale (`config.json` puis le `config` de
+`COMPOSER_HOME/composer.json`). Puis le dépôt local tel qu'écrit, trié
+comme `loadRepository` (plugins seulement), et l'ensemble requis par la
+racine (`filterRequiredPackages`, dev compris). Pour chaque plugin, dans
+l'ordre : hors de l'ensemble et non autorisé → l'avertissement (niveau
+normal, stderr), suivant ; sinon autorisé → chargé ; bloqué, package-
+versions, `plugin-optional` → ignoré ; non couvert → refus ; règles nulles
+→ `RuntimeException` au premier plugin jugé. Puis les plugins globaux,
+mêmes jugements (sans l'avertissement). Le premier refus : son texte, code
+1, rien d'écrit. Appelé juste après le refus de `RootPackageLoader` (le
+paquet racine est chargé avant les plugins), dans `install`,
+`dump-autoload`, `update`, `require` et `remove` ; pour ces deux derniers,
+le second chargement (manifeste édité, règles du chargement pour `remove`)
+imprime ses avertissements ; un refus qui n'apparaîtrait qu'au second
+chargement rend la commande à Composer (non mesuré, voir non-objectifs).
+
+**B. À l'installation** : une opération qui installe ou met à jour un
+plugin non couvert (ni `plugin-optional`, ni package-versions) — Composer
+s'arrête au milieu de la transaction. Rendu à Composer, nommé : à
+`install` avant d'écrire (la transaction est connue), à
+`update`/`require`/`remove` sur le lock résolu, avant de l'écrire.
+
+**C. php-http/discovery** : `getMissingRequires` porté (1.19.0–1.20.0) en
+prédicat « agirait » (au moins une des trois listes non vide après
+`array_filter`), épinglage `INTERFACE_MAP` compris. Entrées : le dépôt
+local au moment de `POST_UPDATE_CMD` — avec installation, le lock résolu
+(paquets voulus, alias de branche et en ligne, noms dev du lock) ; sans
+installation, installed.json purgé et ses `dev-package-names` —, la racine
+(`require`, `require-dev`, `type`, `extra.discovery`). Agirait → rendu,
+nommé, avant l'écriture du lock ; version hors 1.19.0–1.20.0 → rendu dès
+qu'il surveille une abstraction (règle actuelle). La règle `--no-install`
+actuelle (rendu dès qu'il surveille) devient ce prédicat : plus étroite,
+exacte. Phalcon (`class_exists(Phalcon\Http\Message\RequestFactory)`) ne
+peut que supprimer une action : ignoré, au pire un rendu de trop.
+
+## Fichiers
+
+1. `harness/allow-plugins.sh` (nouveau, ajouté à `ci.yml`) : les rouges
+   d'abord.
+2. `crates/vivacity/src/plugin_allow.rs` (nouveau) : règles, ensemble
+   requis, jugement, messages ; tests unitaires.
+3. `crates/vivacity-core/src/layout.rs` : la configuration globale lue
+   aussi dans `COMPOSER_HOME/composer.json` pour les plugins globaux.
+4. `crates/vivacity-core/src/discovery.rs` (nouveau) : le prédicat porté ;
+   tests sur les cas mesurés.
+5. `crates/vivacity/src/{install,dump,update,require,remove}.rs` : les
+   appels ; `no_install.rs` : le prédicat au lieu de « surveille ».
+6. Docs : CHANGELOG (`[Unreleased]` → `### Fixed`), DECISIONS, HANDOVER
+   (le « Restent » corrigé, compteurs), README si la description des
+   plugins change, ce plan.
+
+## Cas de harnais
+
+`harness/allow-plugins.sh` : projets en ligne, versions exactes, lock écrit
+par Composer `--no-plugins`, vendor posé par chaque outil plugin autorisé,
+puis `allow-plugins` modifié. Par cas : code, texte (encadré extrait côté
+Composer, comme `root-manifest.sh`) ou sortie fusionnée entière, et rien
+d'écrit (`find -newer`) pour un refus.
+
+- refus : `none-{install,update,update-ni,update-dry,require,require-ni,remove-ni,dump,quiet}`,
+  `other-install`, `dir-gone-install`, `transitive-install`,
+  `old-lock-install`, `old-lock-empty-install`, `global-install` ;
+  `GITHUB_ACTIONS=true` sur un cas (l'annotation) ;
+- avertissement : `gone-{install,update,update-ni,dump,require,remove-ni,quiet}`,
+  `false-gone-install` ;
+- garde-fous : `no-plugins`, `false-required-install`, `discovery-optional`,
+  `package-versions`, `bare-update-ni` ;
+- rendu à Composer : `bare-install`, `bare-update` (code 3 sous
+  `--no-fallback`, raison, rien d'écrit) ;
+- discovery : `disc-dev-update`, `disc-unknown-update` (rendus),
+  `disc-plain-update` (natif, comparé), `disc-unknown-update-ni` (rendu),
+  `disc-plain-update-ni` (natif — rendu aujourd'hui).
+
+## Critère « vert »
+
+Rouges verts, garde-fous verts ; `cargo fmt --all -- --check`, clippy
+`-D warnings` (Linux et `x86_64-pc-windows-gnu`), `cargo test --workspace` ;
+tous les harnais de `ci.yml` à 0 sauf ce que le réseau de la session
+interdit (dit dans le Résultat, avec les relances restreintes), plus
+`root-manifest.sh` et le nouveau.
+
+## Non-objectifs (vus, laissés)
+
+- Le mode interactif (la question `[y,n,d,?]` et l'écriture
+  d'`allow-plugins`) : vivacity n'est jamais interactif.
+- symfony/flex < 1.9.8 sauté avant le jugement (avertissement « not
+  compatible with Composer 2+ ») : non porté.
+- L'issue réseau de l'update imbriqué de discovery : rendu à Composer.
