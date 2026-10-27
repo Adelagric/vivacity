@@ -190,8 +190,7 @@ ergebnis/composer-normalize have no listener and add nothing.
 does not reproduce; so does `-v` with symfony/flex, dealerdirect,
 composer-merge-plugin, yii2-composer, symfony/thanks or the licence-check
 plugin, with any other plugin or version, with a plugin installed
-globally, under `--run-scripts`, and with phpstan, rector or c3 under
-`--no-install` (vivacity does not play their effect there); a plugin that
+globally, and under `--run-scripts`; a plugin that
 a resolution would bring in is judged on the solved lock, before it is
 written, and the delegation line names the reason. The level is
 read as Symfony Console reads it (`SHELL_VERBOSITY`, then `-q`, then

@@ -399,22 +399,19 @@ pub(crate) fn after_update_line(args: &UpdateArgs) -> Vec<std::ffi::OsString> {
 /// those lines for the plugins of `verbose_listeners::VERBOSE_PLUGINS`, in
 /// the versions read; any other plugin Composer would load — installed
 /// (project or `COMPOSER_HOME`) or locked, and allowed — hands the run
-/// over, named (docs/plans/verbose-plugins.md). `no_install`: a resolution
-/// command without install phase (not a dry run). `None` under
+/// over, named (docs/plans/verbose-plugins.md). `None` under
 /// `--no-plugins`, or without a readable composer.json (the command
 /// reports that itself).
 pub(crate) fn active_plugin(
     project: &std::path::Path,
     plugins_enabled: bool,
     run_scripts: bool,
-    no_install: bool,
 ) -> Option<String> {
     crate::verbose_listeners::issue(
         project,
         crate::plugin_order::global_composer_dir().as_deref(),
         plugins_enabled,
         run_scripts,
-        no_install,
     )
 }
 

@@ -457,8 +457,16 @@ ONLINE_CASES=(
   "pv|install @vendor:plugins @levels:-v"
   "phpstan|install @levels:-v @expect:^>.post-install-cmd:.PHPStan"
   "phpstan|install @vendor:plugins @levels:-v"
-  # Sous --no-install, l'effet de son écouteur n'est pas joué par vivacity.
-  "phpstan|update --no-install @vendor:plugins @levels:-v @delegates:phpstan/extension-installer.*--no-install"
+  # Sous --no-install, `post-update-cmd` part quand même : la ligne de
+  # chaque écouteur, aussitôt suivie de ce qu'il écrit (phpstan : « Extensions
+  # installed » ; GeneratedConfig.php perdu : réécrit et listé ; c3.php
+  # perdu : recopié), dans l'ordre d'activation.
+  "phpstan|update --no-install @vendor:plugins @levels:normal,-v @expect:Plugin->process$"
+  "phpstan|update --no-install @vendor:plugins @rm:vendor/phpstan/extension-installer/src/GeneratedConfig.php @levels:-v @expect:^>.phpstan/phpstan-strict-rules:.installed$"
+  "phpstan|require psr/clock:1.0.0 --no-install @vendor:plugins @levels:-v @expect:Plugin_composer_tmp0->process$"
+  "rector|update --no-install @vendor:plugins @rm:vendor/rector/extension-installer/src/GeneratedConfig.php @levels:-v @expect:^rector/rector-installer:.Extensions.installed$"
+  "c3|update --no-install @vendor:plugins @rm:c3.php @levels:-v @expect:Copying.c3.php"
+  "combo|update --no-install @vendor:plugins @rm:c3.php @levels:-v @expect:Installer->askForUpdateV2$"
   "rector|install @levels:-v @expect:Rector.RectorInstaller.Plugin->process$"
   "rector|install --no-dev @vendor:plugins @levels:-v"
   "c3|install @levels:-v @expect:Installer->copyC3V2$"

@@ -207,21 +207,8 @@ fn version_read(p: &VerbosePlugin, version: &str) -> bool {
     vivacity_core::constraint::satisfies(version, p.versions).unwrap_or(false)
 }
 
-/// The plugins whose `post-update-cmd` listener does something vivacity
-/// does not play under `--no-install` (docs/plans/plugin-lines.md,
-/// non-goals): phpstan prints "Extensions installed", rector and c3 write
-/// their files. At the normal level that gap exists already; under `-v` the
-/// run goes to Composer instead of adding the listener's line to it.
-const UNPLAYED_WITHOUT_INSTALL: &[&str] = &[
-    "phpstan/extension-installer",
-    "rector/extension-installer",
-    "codeception/c3",
-];
-
 /// Why the `-v` output of one allowed plugin is not reproduced, or `None`.
-/// `no_install`: the command resolves without installing
-/// (`update`/`require`/`remove --no-install`, not `--dry-run`).
-fn plugin_issue(name: &str, version: &str, run_scripts: bool, no_install: bool) -> Option<String> {
+fn plugin_issue(name: &str, version: &str, run_scripts: bool) -> Option<String> {
     if let Some((_, why)) = VERBOSE_DELEGATED.iter().find(|(n, _)| *n == name) {
         return Some((*why).to_owned());
     }
@@ -236,12 +223,6 @@ fn plugin_issue(name: &str, version: &str, run_scripts: bool, no_install: bool) 
     }
     if run_scripts && !entry.listeners.is_empty() {
         return Some("composer run-script replays them under --run-scripts".to_owned());
-    }
-    if no_install && UNPLAYED_WITHOUT_INSTALL.contains(&name) {
-        return Some(
-            "its post-update-cmd listener runs under --no-install, where vivacity does not play it"
-                .to_owned(),
-        );
     }
     None
 }
@@ -274,9 +255,9 @@ fn allowed(manifest: &Value, name: &str) -> bool {
 /// globally (the emulations play the project's plugins only, and Composer
 /// judges those by the global `allow-plugins`); `--run-scripts` is not
 /// asked while one of them has listeners (`composer run-script` replays
-/// them); and under `--no-install` none of them has a `post-update-cmd`
-/// effect vivacity does not play ([`UNPLAYED_WITHOUT_INSTALL`]). A plugin
-/// the resolution brings in is checked on the solved lock
+/// them). Under `--no-install` their `post-update-cmd` listeners are played
+/// like the others (`no_install::post_update_listeners`). A plugin the
+/// resolution brings in is checked on the solved lock
 /// ([`resolved_issue`]). `None` under `--no-plugins` or without a readable
 /// composer.json (the command reports that itself).
 pub(crate) fn issue(
@@ -284,7 +265,6 @@ pub(crate) fn issue(
     global: Option<&Path>,
     plugins_enabled: bool,
     run_scripts: bool,
-    no_install: bool,
 ) -> Option<String> {
     if !plugins_enabled {
         return None;
@@ -326,7 +306,7 @@ pub(crate) fn issue(
         .into_iter()
         .filter(|(name, _)| allowed(&manifest, name))
         .find_map(|(name, version)| {
-            plugin_issue(&name, &version, run_scripts, no_install).map(|why| {
+            plugin_issue(&name, &version, run_scripts).map(|why| {
                 format!("-v while {name} {version} is active (its listeners' lines: {why})")
             })
         })
@@ -354,7 +334,7 @@ pub(crate) fn resolved_issue(
         .filter_map(name_version)
         .filter(|(name, _)| allowed(manifest, name))
         .find_map(|(name, version)| {
-            plugin_issue(&name, &version, false, false).map(|why| {
+            plugin_issue(&name, &version, false).map(|why| {
                 (
                     name.clone(),
                     format!("{version} would be activated by this run, and its -v lines are not reproduced ({why})"),
@@ -671,16 +651,16 @@ mod tests {
                 plugin("php-http/discovery", "1.20.0")
             ]),
         );
-        assert_eq!(issue(tmp.path(), None, true, false, false), None);
-        assert_eq!(issue(tmp.path(), None, false, false, false), None);
-        assert!(issue(tmp.path(), None, true, true, false)
+        assert_eq!(issue(tmp.path(), None, true, false), None);
+        assert_eq!(issue(tmp.path(), None, false, false), None);
+        assert!(issue(tmp.path(), None, true, true)
             .expect("run-scripts")
             .contains("--run-scripts"));
         write(
             allow(&["php-http/discovery"]),
             json!([plugin("php-http/discovery", "1.15.0")]),
         );
-        assert!(issue(tmp.path(), None, true, false, false)
+        assert!(issue(tmp.path(), None, true, false)
             .expect("old")
             .starts_with(
                 "-v while php-http/discovery 1.15.0 is active (its listeners' lines: 1.15.0 is not among"
@@ -689,20 +669,16 @@ mod tests {
             allow(&["symfony/flex"]),
             json!([plugin("symfony/flex", "v2.11.0")]),
         );
-        assert!(issue(tmp.path(), None, true, false, false)
+        assert!(issue(tmp.path(), None, true, false)
             .expect("flex")
             .starts_with(
                 "-v while symfony/flex v2.11.0 is active (its listeners' lines: it listens"
             ));
-        // phpstan's post-update-cmd effect is not played under --no-install.
         write(
             allow(&["phpstan/extension-installer"]),
             json!([plugin("phpstan/extension-installer", "1.4.3")]),
         );
-        assert_eq!(issue(tmp.path(), None, true, false, false), None);
-        assert!(issue(tmp.path(), None, true, false, true)
-            .expect("no-install")
-            .contains("--no-install"));
+        assert_eq!(issue(tmp.path(), None, true, false), None);
         let lock = json!({"packages": [plugin("php-http/discovery", "1.15.0")], "packages-dev": [plugin("symfony/flex", "v2.11.0")]});
         let manifest = allow(&["php-http/discovery", "symfony/flex"]);
         assert_eq!(
@@ -720,12 +696,12 @@ mod tests {
             json!({"config": {"allow-plugins": {"symfony/flex": false}}}),
             json!([plugin("symfony/flex", "v2.11.0")]),
         );
-        assert_eq!(issue(tmp.path(), None, true, false, false), None);
+        assert_eq!(issue(tmp.path(), None, true, false), None);
         write(
             allow(&["acme/unknown"]),
             json!([plugin("acme/unknown", "1.0.0")]),
         );
-        assert!(issue(tmp.path(), None, true, false, false)
+        assert!(issue(tmp.path(), None, true, false)
             .expect("unknown")
             .contains("not on vivacity's -v list"));
     }

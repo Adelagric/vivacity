@@ -4070,7 +4070,9 @@ revue).
   autre plugin, un plugin global (Composer le juge par l'`allow-plugins`
   global), `--run-scripts`, et phpstan / rector / c3 sous `--no-install`
   (Composer joue leur effet, vivacity non : la ligne `>` seule aurait
-  aggravé l'écart — méta-analyse, point 2).
+  aggravé l'écart — méta-analyse, point 2). *(Levé le 2026-10-27 : les
+  écouteurs sont joués sous `--no-install` depuis la 0.24.0, et la ligne
+  de chacun précède désormais ce qu'il écrit — entrée du 2026-10-27.)*
 - **Délégation après résolution, sans doublon** (revue, point 1). Sous
   `-v`, un `update`/`require`/`remove` qui installe garde ses lignes
   (`vivacity_core::io::defer`, les deux flux dans l'ordre) jusqu'au lock
@@ -4120,4 +4122,23 @@ reste rouge ; le coût n'est payé que sur panne. Vérifié sur quatre harnais
 simulés sous le bash 3.2 de macOS : réseau puis vert (deux passages, 0),
 différence sans réseau (un passage, 1), réseau deux fois (deux passages, 1),
 vert (un passage, 0).
+
+## 2026-10-27 — `-v` sous `--no-install` : la ligne de chaque écouteur avant ce qu'il écrit
+
+Contexte : `docs/plans/verbose-plugins.md` rendait `-v` à Composer pour
+phpstan, rector et c3 sous `--no-install`, faute d'y jouer leurs écouteurs ;
+`docs/plans/no-install-listeners.md` les joue depuis la 0.24.0, mais
+`print_post_update` écrivait d'abord toutes les lignes `>`, puis les
+écouteurs — l'ordre de Composer est l'inverse de cette séparation
+(`EventDispatcher::doDispatch` écrit la ligne juste avant l'appel,
+EventDispatcher.php:230), d'où la délégation maintenue.
+
+- **Décision** : `no_install::post_update_listeners` parcourt les plugins
+  chargés dans l'ordre d'activation et, pour chacun, écrit sa ligne `-v`
+  puis joue son émulation ; `UNPLAYED_WITHOUT_INSTALL` et le paramètre
+  `no_install` de la décision `-v` disparaissent.
+- **Harnais** : `harness/verbosity.sh`, six cas `-v` (phpstan `update
+  --no-install` avec et sans GeneratedConfig.php, `require --no-install`,
+  rector, c3 avec c3.php perdu, la combinaison) — rouges sur `main`
+  (f3f5524 : délégation, ou lignes dans le mauvais ordre), verts ensuite.
 

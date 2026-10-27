@@ -292,7 +292,9 @@ cette section l'emporte.
    Composer, donc la sortie est juste ; native, elle porterait la ligne `>`
    de phpstan sans « Extensions installed » (écart du niveau normal).
    **Adopté** : sous `-v` et `--no-install` (sans `--dry-run`), phpstan,
-   rector et c3 rendent la commande, raison nommée (`UNPLAYED_WITHOUT_INSTALL`) ;
+   rector et c3 rendent la commande, raison nommée (`UNPLAYED_WITHOUT_INSTALL` ;
+   levé le 2026-10-27, les écouteurs étant joués sous `--no-install` depuis
+   la 0.24.0 — DECISIONS) ;
    cas `phpstan update --no-install` → `@delegates`. discovery,
    recipe-unpack et bamarni n'ont pas d'effet là : natifs.
 3. **Majeur — les plugins qu'amène la résolution.** Le contrôle de `run_once`

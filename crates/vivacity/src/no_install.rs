@@ -260,15 +260,21 @@ pub(crate) fn post_update_listeners(
         vivacity_core::c3_plugin::PLUGIN_NAME,
         "symfony/flex",
     ];
-    // Only the plugins Composer loaded: `listeners_in_order` would also
-    // append the emulated names it did not find.
-    let order: Vec<&str> = plugin_order::listeners_in_order(&repo.listeners, &emulated)
-        .into_iter()
-        .filter(|p| repo.listeners.iter().any(|l| l == p))
-        .collect();
     let mut layout: Option<vivacity_core::layout::Layout> = None;
     let mut flex_printed = false;
-    for plugin in order {
+    // Every plugin Composer loaded, in activation order: under -v its
+    // listener's line (`EventDispatcher::doDispatch`, written right before
+    // the call), then what the emulated listener does — the two
+    // interleaved, as Composer writes them.
+    for plugin in repo.listeners.iter().map(String::as_str) {
+        crate::verbose_listeners::announce(
+            plugin,
+            crate::verbose_listeners::POST_UPDATE_CMD,
+            manifest,
+        );
+        if !emulated.contains(&plugin) {
+            continue;
+        }
         if plugin == "symfony/flex" {
             if let Some(print) = flex {
                 print()?;

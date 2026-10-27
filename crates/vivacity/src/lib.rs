@@ -590,12 +590,8 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     }
     if requested == 2 && !check_scope {
         if let Ok(project) = project_dir(cli.working_dir()) {
-            if let Some(reason) = active_plugin(
-                &project,
-                cli.plugins_enabled(),
-                cli.run_scripts(),
-                cli.resolves_without_install(),
-            ) {
+            if let Some(reason) = active_plugin(&project, cli.plugins_enabled(), cli.run_scripts())
+            {
                 return delegate_for_verbosity(tail, &reason, "drop -v");
             }
         }
@@ -736,18 +732,6 @@ impl Cli {
             Cli::Update(a) => a.working_dir.as_deref(),
             Cli::Remove(a) => a.working_dir.as_deref(),
             Cli::Require(a) => a.working_dir.as_deref(),
-        }
-    }
-
-    /// `update`, `require` or `remove` with `--no-install` and without
-    /// `--dry-run` (which dispatches no script event): `POST_UPDATE_CMD`
-    /// still runs its listeners (Installer.php:440).
-    fn resolves_without_install(&self) -> bool {
-        match self {
-            Cli::Update(a) => a.no_install && !a.dry_run,
-            Cli::Require(a) => a.no_install && !a.no_update && !a.dry_run,
-            Cli::Remove(a) => a.no_install && !a.no_update && !a.dry_run,
-            Cli::Install(_) | Cli::DumpAutoload(_) => false,
         }
     }
 

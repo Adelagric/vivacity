@@ -6,6 +6,14 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Changed
+- **`-v` stays native under `--no-install` with phpstan, rector and
+  codeception/c3.** `update`, `require` and `remove --no-install` play the
+  plugins' `post-update-cmd` listeners since 0.24.0, but printed all the
+  `-v` listener lines before what the listeners write, so a run whose
+  listener printed went to Composer. Each line now comes right before its
+  listener, in the plugins' activation order, as Composer writes them.
+
 ## [0.24.0] — 2026-10-23
 
 ### Changed

@@ -449,13 +449,10 @@ pub(crate) fn hand_resolution_over(
 /// no install phase (`--no-install`): the precomputed lines, the funding
 /// count, then `POST_UPDATE_CMD` (Installer.php:438-441) — dispatched
 /// without an install too, not under `--dry-run`, which dispatches no
-/// script event (Installer.php:292-294). Under -v, first the line of each
-/// loaded plugin's listener, in the order the plugins were loaded; then the
-/// emulated listeners run on the local repository, in their plugins'
-/// activation order, Flex's output at its rank (`no_install`,
-/// docs/plans/no-install-listeners.md). The two do not interleave: a -v run
-/// whose `--no-install` listeners print (phpstan, rector, c3, Flex) is
-/// handed to Composer before resolving (docs/plans/verbose-plugins.md).
+/// script event (Installer.php:292-294): the loaded plugins' listeners in
+/// their activation order, each one's -v line right before what its
+/// emulation does, Flex's output at its rank (`no_install`,
+/// docs/plans/no-install-listeners.md, docs/plans/verbose-plugins.md).
 /// With an install phase, that phase prints it (`run_install`).
 pub(crate) fn print_post_update(
     resolved: &Resolved,
@@ -469,21 +466,6 @@ pub(crate) fn print_post_update(
     print_funding(project, &resolved.manifest);
     if args.dry_run {
         return Ok(());
-    }
-    if !args.no_plugins {
-        // -v: `EventDispatcher` writes each listener's line before calling it
-        // (`manifest`: the rules the plugins were loaded with).
-        let composer_dir = composer_dir_of(project, &manifest);
-        let loaded = crate::plugin_order::loaded_plugins(
-            &crate::plugin_order::installed_json_packages(&composer_dir),
-            &composer_dir,
-            crate::plugin_order::global_composer_dir().as_deref(),
-        );
-        crate::announce_in_order(
-            &loaded,
-            crate::verbose_listeners::POST_UPDATE_CMD,
-            &manifest,
-        );
     }
     let flex = || print_flex_post_update(&resolved.manifest, resolved.thanks_reminder, None);
     crate::no_install::post_update_listeners(
