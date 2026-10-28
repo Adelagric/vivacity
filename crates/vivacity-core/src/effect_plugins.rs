@@ -1,0 +1,745 @@
+//! The second round of emulated plugins (docs/plans/plugins-round2.md):
+//! plugins that write or delete files at script events, or print lines,
+//! rather than choose install paths. This module decides, before anything
+//! is written, whether a run is reproduced: the versions read, the
+//! configurations ported, the cases handed to Composer. The effects
+//! themselves are in [`crate::composer_cleaner`], [`crate::vendor_cleaner`],
+//! [`crate::cakephp_plugins`] and [`laminas_skeleton_rewrite`]; three
+//! plugins are reproduced by staying inert:
+//!
+//! - `spiral/composer-publish-plugin` (`PublishPlugin::publishFiles`,
+//!   `POST_AUTOLOAD_DUMP`) runs the root's `extra.publish-cmd` for each
+//!   package of the local repository with a non-empty `extra.publish`:
+//!   without both, it does nothing.
+//! - `sculpin/sculpin-theme-composer-plugin` (package events) copies the
+//!   files of a `sculpin-theme` package, or of one with
+//!   `extra.sculpin-theme`, under the theme directory: without such a
+//!   package, nothing.
+//! - `laminas/laminas-component-installer` (package events) returns at once
+//!   outside dev mode (`if (! $event->isDevMode()) return;`), and in dev
+//!   mode finds nothing to inject into without one of the configuration
+//!   files `ConfigDiscovery` looks for.
+
+use crate::cakephp_plugins;
+use crate::composer_cleaner;
+use crate::error::{Error, Result};
+use crate::vendor_cleaner;
+use serde_json::{Map, Value};
+use std::path::Path;
+
+pub const SPIRAL: &str = "spiral/composer-publish-plugin";
+pub const SCULPIN: &str = "sculpin/sculpin-theme-composer-plugin";
+pub const LAMINAS_COMPONENT: &str = "laminas/laminas-component-installer";
+pub const LAMINAS_SKELETON: &str = "laminas/laminas-skeleton-installer";
+pub const DG_CLEANER: &str = composer_cleaner::PLUGIN_NAME;
+pub const VENDOR_CLEANER: &str = vendor_cleaner::PLUGIN_NAME;
+pub const CAKEPHP: &str = cakephp_plugins::PLUGIN_NAME;
+
+/// The seven plugins and the versions whose source was read (normalized):
+/// another version goes to Composer, named. Tags with identical sources
+/// (`git diff --quiet <tag> <tag> -- src`) are read too.
+pub const READ_VERSIONS: &[(&str, &[&str], &str)] = &[
+    (
+        SPIRAL,
+        &["1.1.1.0", "1.1.2.0"],
+        "v1.1.0 and earlier read the lock differently",
+    ),
+    (
+        SCULPIN,
+        &["1.0.3.0"],
+        "earlier versions handle the theme files differently",
+    ),
+    (
+        LAMINAS_COMPONENT,
+        &["3.5.0.0", "3.6.0.0", "3.7.0.0", "3.8.0.0"],
+        "other versions were not read",
+    ),
+    (
+        LAMINAS_SKELETON,
+        &["1.2.0.0", "1.3.0.0"],
+        "other versions were not read",
+    ),
+    (DG_CLEANER, &["2.2.2.0"], "other versions clean differently"),
+    (VENDOR_CLEANER, &["1.7.1.0"], "other versions were not read"),
+    (
+        CAKEPHP,
+        &["2.0.2.0"],
+        "other versions discover the plugins differently",
+    ),
+];
+
+/// The configuration files `ConfigDiscovery` (laminas-component-installer
+/// 3.5.0–3.8.0) and its discovery chains look for, relative to the working
+/// directory.
+const LAMINAS_CONFIG_FILES: [&str; 5] = [
+    "config/application.config.php",
+    "config/modules.config.php",
+    "config/development.config.php.dist",
+    "config/development.config.php",
+    "config/config.php",
+];
+
+/// The command whose listeners run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Install,
+    Update,
+    Require,
+    Remove,
+    /// `update` / `require` / `remove` with `--no-install`: no operation,
+    /// no dump, `POST_UPDATE_CMD` on the installed packages.
+    UpdateNoInstall,
+    DumpAutoload,
+}
+
+/// What one run's listeners see.
+pub struct Context<'a> {
+    pub project: &'a Path,
+    /// The root package as Composer holds it.
+    pub manifest: &'a Value,
+    /// The local repository the listeners read: the packages the run leaves
+    /// installed (the lock's, after an install or update), installed.json
+    /// for `dump-autoload` and `--no-install`.
+    pub local: Vec<&'a Map<String, Value>>,
+    /// installed.json as the command found it (the plugins loaded at its
+    /// start).
+    pub installed: &'a [Value],
+    pub dev_mode: bool,
+    pub command: Command,
+    /// Composer's IO is interactive (a terminal on stdin, no `-n`, no
+    /// `COMPOSER_NO_INTERACTION`).
+    pub interactive: bool,
+    pub no_autoloader: bool,
+    pub plugins_enabled: bool,
+    /// The packages installed in COMPOSER_HOME.
+    pub global: &'a [Value],
+}
+
+fn name_of(p: &Map<String, Value>) -> &str {
+    p.get("name").and_then(Value::as_str).unwrap_or_default()
+}
+
+fn allowed(manifest: &Value, name: &str) -> bool {
+    matches!(
+        crate::layout::plugin_allowed(manifest, name),
+        crate::layout::PluginVerdict::Allowed
+    )
+}
+
+impl Context<'_> {
+    /// The plugin's listeners run in this command: plugins on, allowed, in
+    /// the local repository the command ends with.
+    pub fn active(&self, plugin: &str) -> bool {
+        self.plugins_enabled
+            && allowed(self.manifest, plugin)
+            && self.local.iter().any(|p| name_of(p) == plugin)
+    }
+
+    fn installed_entry(&self, plugin: &str) -> Option<&Map<String, Value>> {
+        self.installed
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|p| name_of(p) == plugin)
+    }
+
+    fn local_entry(&self, plugin: &str) -> Option<&Map<String, Value>> {
+        self.local.iter().copied().find(|p| name_of(p) == plugin)
+    }
+}
+
+/// Why this run is not reproduced, one line per reason; empty when it is.
+pub fn issues(ctx: &Context<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    if !ctx.plugins_enabled {
+        return out;
+    }
+    for (plugin, _, _) in READ_VERSIONS {
+        let globally = ctx.global.iter().any(|p| {
+            p.get("name").and_then(Value::as_str) == Some(*plugin)
+                && p.get("type").and_then(Value::as_str) == Some("composer-plugin")
+        });
+        if globally {
+            out.push(format!(
+                "plugin {plugin} is installed globally (COMPOSER_HOME): its listeners run on this project (not emulated)"
+            ));
+        }
+    }
+    // The versions: the one the command ends with, and for the commands
+    // that install nothing, the one loaded.
+    for (plugin, read, why) in READ_VERSIONS {
+        if !allowed(ctx.manifest, plugin) {
+            continue;
+        }
+        for entry in [ctx.local_entry(plugin)].into_iter().flatten() {
+            let version = entry
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let normalized = crate::version::normalize_pretty(version).unwrap_or_default();
+            if !read.contains(&normalized.as_str()) {
+                out.push(format!(
+                    "plugin {plugin} {version} is not emulated in this version (versions read: {}; {why})",
+                    read.iter()
+                        .map(|v| v.strip_suffix(".0").unwrap_or(v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    spiral_issues(ctx, &mut out);
+    sculpin_issues(ctx, &mut out);
+    laminas_component_issues(ctx, &mut out);
+    laminas_skeleton_issues(ctx, &mut out);
+    dg_issues(ctx, &mut out);
+    vendor_cleaner_issues(ctx, &mut out);
+    cakephp_issues(ctx, &mut out);
+    out
+}
+
+/// PHP's `empty()` of a decoded (assoc) value.
+fn php_empty(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => !b,
+        Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+        Some(Value::String(s)) => s.is_empty() || s == "0",
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
+    }
+}
+
+fn spiral_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(SPIRAL) || matches!(ctx.command, Command::UpdateNoInstall) {
+        return;
+    }
+    let cmd = ctx.manifest.get("extra").and_then(|e| e.get("publish-cmd"));
+    if cmd.is_none_or(Value::is_null) {
+        return;
+    }
+    if let Some(p) = ctx
+        .local
+        .iter()
+        .find(|p| !php_empty(p.get("extra").and_then(|e| e.get("publish"))))
+    {
+        out.push(format!(
+            "plugin {SPIRAL} would run extra.publish-cmd for {} (not emulated)",
+            name_of(p)
+        ));
+    }
+}
+
+fn sculpin_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(SCULPIN)
+        || matches!(
+            ctx.command,
+            Command::UpdateNoInstall | Command::DumpAutoload
+        )
+    {
+        return;
+    }
+    let theme = |p: &Map<String, Value>| {
+        p.get("type").and_then(Value::as_str) == Some("sculpin-theme")
+            || p.get("extra")
+                .and_then(|e| e.get("sculpin-theme"))
+                .is_some_and(|t| !t.is_null())
+    };
+    let installed = ctx.installed.iter().filter_map(Value::as_object);
+    if let Some(p) = ctx
+        .local
+        .iter()
+        .copied()
+        .chain(installed)
+        .find(|p| theme(p))
+    {
+        out.push(format!(
+            "plugin {SCULPIN} would copy the theme files of {} (not emulated)",
+            name_of(p)
+        ));
+    }
+}
+
+fn laminas_component_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(LAMINAS_COMPONENT)
+        || !ctx.dev_mode
+        || matches!(
+            ctx.command,
+            Command::UpdateNoInstall | Command::DumpAutoload
+        )
+    {
+        return;
+    }
+    if let Some(f) = LAMINAS_CONFIG_FILES
+        .iter()
+        .find(|f| ctx.project.join(f).is_file())
+    {
+        out.push(format!(
+            "plugin {LAMINAS_COMPONENT} would inject the components into {f} in dev mode (not emulated)"
+        ));
+    }
+}
+
+/// laminas-skeleton-installer's optional packages
+/// (`OptionalPackagesInstaller::getOptionalDependencies` filtered by
+/// `OptionalPackage::isValidSpec`): `Ok(true)` when there is at least one,
+/// `Err` when an entry is not an array (a TypeError under `strict_types`).
+pub fn laminas_skeleton_configured(manifest: &Value) -> std::result::Result<bool, String> {
+    let extra = manifest.get("extra");
+    let list = ["laminas-skeleton-installer", "zend-skeleton-installer"]
+        .iter()
+        .find_map(|k| {
+            extra
+                .and_then(|e| e.get(*k))
+                .filter(|v| v.is_array() || v.is_object())
+        });
+    let entries: Vec<&Value> = match list {
+        Some(Value::Array(a)) => a.iter().collect(),
+        Some(Value::Object(o)) => o.values().collect(),
+        _ => return Ok(false),
+    };
+    let mut valid = false;
+    for e in entries {
+        match e {
+            // `array_key_exists` of the three keys; a list has none.
+            Value::Object(o) => {
+                if ["name", "constraint", "prompt"].iter().all(|k| o.contains_key(*k)) {
+                    valid = true;
+                }
+            }
+            Value::Array(_) => {}
+            _ => {
+                return Err(format!(
+                    "plugin {LAMINAS_SKELETON}: an optional package that is not an object (TypeError in the plugin)"
+                ))
+            }
+        }
+    }
+    Ok(valid)
+}
+
+fn laminas_skeleton_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.plugins_enabled || !allowed(ctx.manifest, LAMINAS_SKELETON) {
+        return;
+    }
+    // `Plugin::uninstall` runs `Uninstaller`, which uninstalls the plugin
+    // through the installation manager again: `PluginManager::
+    // uninstallPackage` calls `uninstall` once more, without end (measured:
+    // `composer remove` loops).
+    let loaded = ctx.installed_entry(LAMINAS_SKELETON).is_some();
+    let stays = ctx.local_entry(LAMINAS_SKELETON).is_some();
+    if loaded
+        && !stays
+        && !matches!(
+            ctx.command,
+            Command::UpdateNoInstall | Command::DumpAutoload
+        )
+    {
+        out.push(format!(
+            "plugin {LAMINAS_SKELETON} uninstalls itself again from its uninstall hook (Composer loops; not emulated)"
+        ));
+        return;
+    }
+    if !ctx.active(LAMINAS_SKELETON) || matches!(ctx.command, Command::DumpAutoload) {
+        return;
+    }
+    match laminas_skeleton_configured(ctx.manifest) {
+        Err(e) => out.push(e),
+        Ok(false) => {}
+        Ok(true) => {
+            let why = match ctx.command {
+                _ if ctx.interactive => Some("would ask which optional packages to install (interactive)"),
+                Command::Require | Command::Remove => Some(
+                    "rewrites composer.json, which the command reads again for the lock's hash (not emulated)",
+                ),
+                Command::UpdateNoInstall => {
+                    Some("rewrites composer.json at post-update-cmd without an install (not emulated)")
+                }
+                _ => None,
+            };
+            if let Some(why) = why {
+                out.push(format!("plugin {LAMINAS_SKELETON} {why}"));
+            }
+        }
+    }
+}
+
+fn dg_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(DG_CLEANER) || matches!(ctx.command, Command::DumpAutoload) {
+        return;
+    }
+    if matches!(ctx.command, Command::UpdateNoInstall) {
+        out.push(format!(
+            "plugin {DG_CLEANER} cleans the vendor directory at post-update-cmd without an install (not emulated)"
+        ));
+        return;
+    }
+    if let Err(e) = composer_cleaner::ignore_paths(ctx.manifest) {
+        out.push(format!("plugin {DG_CLEANER}: {e}"));
+        return;
+    }
+    for p in &ctx.local {
+        if let Some(e) = composer_cleaner::shape_issue(p) {
+            out.push(e);
+            return;
+        }
+    }
+}
+
+fn vendor_cleaner_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(VENDOR_CLEANER) {
+        return;
+    }
+    let config = match vendor_cleaner::Config::read(ctx.manifest) {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            out.push(format!("plugin {VENDOR_CLEANER}: {e}"));
+            return;
+        }
+    };
+    if config.no_dev_only && ctx.dev_mode {
+        return;
+    }
+    let reason = |why: &str| format!("plugin {VENDOR_CLEANER} {why}");
+    if matches!(ctx.command, Command::UpdateNoInstall) {
+        out.push(reason(
+            "cleans the packages at post-update-cmd without an install (not emulated)",
+        ));
+        return;
+    }
+    if ctx.no_autoloader {
+        out.push(reason(
+            "prints its summary from its destructor under --no-autoloader (not emulated)",
+        ));
+        return;
+    }
+    for p in &ctx.local {
+        let name = name_of(p);
+        let version = p.get("version").and_then(Value::as_str).unwrap_or_default();
+        let dist_type = p
+            .get("dist")
+            .and_then(|d| d.get("type"))
+            .and_then(Value::as_str);
+        let source_only = p.get("dist").is_none_or(Value::is_null);
+        let from_source = ctx.installed.iter().filter_map(Value::as_object).any(|i| {
+            name_of(i) == name
+                && i.get("installation-source").and_then(Value::as_str) == Some("source")
+        });
+        if dist_type == Some("path") || source_only || from_source {
+            out.push(reason(&format!(
+                "with {name} installed from a path or a source checkout (not emulated)"
+            )));
+            return;
+        }
+        // An alias in the local repository (a dev version's branch alias,
+        // or the default-branch one) is a package of its own for the
+        // plugin's count.
+        if version.starts_with("dev-") || version.ends_with("-dev") {
+            out.push(reason(&format!(
+                "with {name} {version} (an alias in the local repository; not emulated)"
+            )));
+            return;
+        }
+        if let Some(why) = vendor_cleaner::touches_bin(&config, p) {
+            out.push(why);
+            return;
+        }
+    }
+}
+
+fn cakephp_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    if !ctx.active(CAKEPHP) || matches!(ctx.command, Command::UpdateNoInstall) || ctx.no_autoloader
+    {
+        return;
+    }
+    let reason = |why: String| format!("plugin {CAKEPHP}: {why}");
+    let paths = match cakephp_plugins::plugin_paths(ctx.manifest) {
+        Ok(p) => p,
+        Err(e) => {
+            out.push(reason(e));
+            return;
+        }
+    };
+    for p in &ctx.local {
+        if p.get("type").and_then(Value::as_str) == Some("cakephp-plugin") {
+            match cakephp_plugins::primary_namespace(p) {
+                Ok(ns) if cakephp_plugins::numeric_name(&ns) => {
+                    out.push(reason(format!(
+                        "the namespace of {} is numeric (TypeError in the plugin)",
+                        name_of(p)
+                    )));
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    out.push(reason(e));
+                    return;
+                }
+            }
+        }
+    }
+    let Ok(dirs) = crate::dirs::Dirs::resolve(ctx.manifest) else {
+        return;
+    };
+    let vendor = dirs.vendor_dir(ctx.project);
+    if matches!(ctx.command, Command::DumpAutoload) && !vendor.is_dir() {
+        out.push(reason(
+            "dump-autoload without a vendor directory (realpath fails; TypeError in the plugin)"
+                .to_owned(),
+        ));
+        return;
+    }
+    // The application plugins, as both listeners will find them (the
+    // parent of the vendor directory, which exists before the install).
+    let Some(base) = vendor.parent() else {
+        return;
+    };
+    let base = crate::pathutil::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let base = base.to_string_lossy();
+    let default = vec!["plugins".to_owned()];
+    for rel in paths.as_ref().unwrap_or(&default) {
+        let dir = format!("{base}/{}", rel.strip_prefix("./").unwrap_or(rel));
+        if !Path::new(&dir).is_dir() {
+            continue;
+        }
+        match cakephp_plugins::find_app_plugins(&dir, true) {
+            Ok(found) => {
+                if let Some((name, _)) =
+                    found.iter().find(|(n, _)| cakephp_plugins::numeric_name(n))
+                {
+                    out.push(reason(format!("the application plugin `{name}` has a numeric name (TypeError in the plugin)")));
+                    return;
+                }
+            }
+            Err(e) => {
+                out.push(reason(e.to_string()));
+                return;
+            }
+        }
+    }
+}
+
+/// The two lines laminas-skeleton-installer prints, non-interactively
+/// (`requestMinimalInstall` answers its default `y`:
+/// `removeOptionalPackages` → `updateComposerJson`).
+pub const SKELETON_LINES: [&str; 2] = [
+    "    Removing optional packages from composer.json",
+    "    Updating composer.json",
+];
+
+/// `OptionalPackagesInstaller::updateComposerJson` with no package: the
+/// project's composer.json read by `JsonFile` (`json_decode` as arrays,
+/// the indentation detected), the two keys unset, an `extra` left empty
+/// unset, written back by `JsonFile::write` (its encoding, a final `\n`,
+/// only when the bytes change — in place, as `file_put_contents` writes).
+pub fn laminas_skeleton_rewrite(composer_json: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(composer_json).map_err(Error::io(composer_json))?;
+    let mut value: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::Unsupported(format!("{}: {e}", composer_json.display())))?;
+    if let Some(root) = value.as_object_mut() {
+        if let Some(Value::Object(extra)) = root.get_mut("extra") {
+            extra.shift_remove("laminas-skeleton-installer");
+            extra.shift_remove("zend-skeleton-installer");
+        }
+        if php_empty(root.get("extra")) {
+            root.shift_remove("extra");
+        }
+    }
+    let mut out = crate::phpjson::php_json_encode_with(&value, crate::phpjson::FLAGS_JSONFILE)?;
+    let indent = detect_indenting(&text);
+    if indent != "    " {
+        out = reindent(&out, &indent);
+    }
+    out.push('\n');
+    if out != text {
+        std::fs::write(composer_json, out).map_err(Error::io(composer_json))?;
+    }
+    Ok(())
+}
+
+/// `JsonFile::detectIndenting`: the whitespace before the first `"` that
+/// starts a line (`#^([ \t]+)"#m`), else four spaces.
+fn detect_indenting(json: &str) -> String {
+    for line in json.split('\n') {
+        let ws = line.len() - line.trim_start_matches([' ', '\t']).len();
+        if ws > 0 && line[ws..].starts_with('"') {
+            return line[..ws].to_owned();
+        }
+    }
+    "    ".to_owned()
+}
+
+/// `JsonFile::encode`'s re-indentation: `#^ {4,}#m` replaced by the indent
+/// once per four spaces.
+fn reindent(text: &str, indent: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+        if spaces >= 4 {
+            out.push_str(&indent.repeat(spaces / 4));
+            out.push_str(&line[spaces..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx<'a>(
+        project: &'a Path,
+        manifest: &'a Value,
+        local: Vec<&'a Map<String, Value>>,
+        installed: &'a [Value],
+        command: Command,
+    ) -> Context<'a> {
+        Context {
+            project,
+            manifest,
+            local,
+            installed,
+            dev_mode: true,
+            command,
+            interactive: false,
+            no_autoloader: false,
+            plugins_enabled: true,
+            global: &[],
+        }
+    }
+
+    #[test]
+    fn versions_and_inert_plugins() {
+        let d = tempfile::tempdir().unwrap();
+        let m = json!({"extra": {"publish-cmd": "php app.php publish"}, "config": {"allow-plugins": true}});
+        let plugin = json!({"name": SPIRAL, "version": "v1.1.2", "type": "composer-plugin"});
+        let lib = json!({"name": "a/b", "version": "1.0.0"});
+        let pubd =
+            json!({"name": "a/c", "version": "1.0.0", "extra": {"publish": {"x": "replace"}}});
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![plugin.as_object().unwrap(), lib.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        assert!(issues(&c).is_empty());
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![plugin.as_object().unwrap(), pubd.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        assert_eq!(issues(&c).len(), 1);
+        let old = json!({"name": SPIRAL, "version": "v1.1.0", "type": "composer-plugin"});
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![old.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        assert!(issues(&c)[0].contains("v1.1.0 is not emulated"));
+        // Under --no-plugins, nothing.
+        let mut c = ctx(
+            d.path(),
+            &m,
+            vec![old.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        c.plugins_enabled = false;
+        assert!(issues(&c).is_empty());
+    }
+
+    #[test]
+    fn laminas_component_in_dev_with_a_config_file() {
+        let d = tempfile::tempdir().unwrap();
+        let m = json!({"config": {"allow-plugins": true}});
+        let plugin = json!({"name": LAMINAS_COMPONENT, "version": "3.8.0"});
+        let mk = |dev| {
+            let mut c = ctx(
+                d.path(),
+                &m,
+                vec![plugin.as_object().unwrap()],
+                &[],
+                Command::Install,
+            );
+            c.dev_mode = dev;
+            issues(&c).len()
+        };
+        assert_eq!(mk(true), 0);
+        std::fs::create_dir_all(d.path().join("config")).unwrap();
+        std::fs::write(d.path().join("config/config.php"), "<?php").unwrap();
+        assert_eq!(mk(true), 1);
+        assert_eq!(mk(false), 0);
+    }
+
+    #[test]
+    fn skeleton_configuration_and_its_hand_overs() {
+        let valid = json!({"extra": {"laminas-skeleton-installer": [{"name": "a/b", "constraint": "^1", "prompt": "?"}]}});
+        assert_eq!(laminas_skeleton_configured(&valid), Ok(true));
+        assert_eq!(
+            laminas_skeleton_configured(
+                &json!({"extra": {"zend-skeleton-installer": [{"name": "a/b"}]}})
+            ),
+            Ok(false)
+        );
+        assert!(laminas_skeleton_configured(
+            &json!({"extra": {"laminas-skeleton-installer": ["a/b"]}})
+        )
+        .is_err());
+        let d = tempfile::tempdir().unwrap();
+        let mut m = valid.clone();
+        m["config"] = json!({"allow-plugins": true});
+        let plugin = json!({"name": LAMINAS_SKELETON, "version": "1.3.0"});
+        let installed = [plugin.clone()];
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![plugin.as_object().unwrap()],
+            &installed,
+            Command::Require,
+        );
+        assert_eq!(issues(&c).len(), 1);
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![plugin.as_object().unwrap()],
+            &installed,
+            Command::Update,
+        );
+        assert!(issues(&c).is_empty());
+        let c = ctx(d.path(), &m, vec![], &installed, Command::Install);
+        assert!(issues(&c)[0].contains("uninstalls itself"));
+    }
+
+    #[test]
+    fn rewrites_composer_json_like_jsonfile() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("composer.json");
+        std::fs::write(
+            &f,
+            "{\n  \"name\": \"a/b\",\n  \"extra\": {\n    \"laminas-skeleton-installer\": [],\n    \"x\": {\"e\": {}, \"s\": \"a/é\"}\n  }\n}\n",
+        )
+        .unwrap();
+        laminas_skeleton_rewrite(&f).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "{\n  \"name\": \"a/b\",\n  \"extra\": {\n    \"x\": {\n      \"e\": [],\n      \"s\": \"a/é\"\n    }\n  }\n}\n"
+        );
+        std::fs::write(&f, "{\n\t\"extra\": {\"zend-skeleton-installer\": []}\n}").unwrap();
+        laminas_skeleton_rewrite(&f).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "[]\n");
+    }
+}
