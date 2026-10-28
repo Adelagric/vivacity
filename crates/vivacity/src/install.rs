@@ -335,6 +335,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         args.no_fallback,
         !args.dry_run,
         !args.dry_run,
+        !(args.no_dev || env_no_dev()),
     )? {
         return Ok(code);
     }
@@ -943,6 +944,7 @@ fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
             no_autoloader: args.no_autoloader,
             plugins_enabled: !args.no_plugins,
             global: &global,
+            aliases: !run.lock.aliases.is_empty(),
         };
         report.issues.extend(
             vivacity_core::effect_plugins::issues(&ctx)

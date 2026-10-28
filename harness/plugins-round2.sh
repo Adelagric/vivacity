@@ -312,9 +312,11 @@ relock sk-a sk-old laminas/laminas-skeleton-installer 1.1.0
 handed sk-old sk-old 'laminas/laminas-skeleton-installer 1\.1\.0' "${I[@]}"
 
 # --- dg/composer-cleaner v2.2.2 ----------------------------------------------
-DG_CFG='"config": {"allow-plugins": {"dg/composer-cleaner": true}}'
+# Avec codeception/c3 (ses lignes à post-install-cmd, et un paquet de plus
+# à nettoyer).
+DG_CFG='"config": {"allow-plugins": {"dg/composer-cleaner": true, "codeception/c3": true}}'
 DG_EXTRA='"extra": {"cleaner-ignore": {"acme/dg-ign": true, "acme/dg-part": ["doc*"]}}'
-DG_PKGS='"acme/dg-psr0": "1.0.0", "acme/dg-root": "1.0.0", "acme/dg-noauto": "1.0.0", "acme/dg-type": "1.0.0", "acme/dg-ign": "1.0.0", "acme/dg-part": "1.0.0", "acme/dg-dot": "1.0.0", "acme/dg-unknown": "1.0.0"'
+DG_PKGS='"codeception/c3": "2.9.0", "acme/dg-psr0": "1.0.0", "acme/dg-root": "1.0.0", "acme/dg-noauto": "1.0.0", "acme/dg-type": "1.0.0", "acme/dg-ign": "1.0.0", "acme/dg-part": "1.0.0", "acme/dg-dot": "1.0.0", "acme/dg-unknown": "1.0.0"'
 lock dg-a "{\"require\": {\"dg/composer-cleaner\": \"v2.2.2\", \"acme/dg-lib\": \"1.0.0\", $DG_PKGS}, $DG_EXTRA, $DG_CFG}"
 lock dg-b "{\"require\": {\"dg/composer-cleaner\": \"v2.2.2\", \"acme/dg-lib\": \"1.0.1\", $DG_PKGS}, $DG_EXTRA, $DG_CFG}"
 lock dg-c "{\"require\": {\"dg/composer-cleaner\": \"v2.2.2\", \"acme/dg-lib\": \"1.0.1\", \"acme/dg-root\": \"1.0.0\", \"acme/dg-part\": \"1.0.0\"}, $DG_EXTRA, $DG_CFG}"
@@ -337,6 +339,10 @@ lock dg-bad "{\"require\": {\"dg/composer-cleaner\": \"v2.2.2\", \"acme/dg-lib\"
 handed dg-bad dg-bad 'dg/composer-cleaner' "${I[@]}"
 relock dg-a dg-old dg/composer-cleaner v2.2.1
 handed dg-old dg-old 'dg/composer-cleaner v2\.2\.1' "${I[@]}"
+# Une version non lue chargée au début (installed.json), le lock à v2.2.2.
+PACKAGIST_ONLY=1 lock dg-v1 "{\"require\": {\"dg/composer-cleaner\": \"v2.2.1\", \"psr/log\": \"3.0.2\"}, $DG_CFG}"
+fresh dg-v1 "$WORK/dg-v1-ref"; (cd "$WORK/dg-v1-ref" && composer install --no-scripts --no-plugins --no-interaction --no-ansi -q)
+handed_on "$WORK/dg-v1-ref" dg-up dg-loaded-old 'dg/composer-cleaner v2\.2\.1' "${I[@]}"
 
 # --- liborm85/composer-vendor-cleaner 1.7.1 ---------------------------------
 # Avec codeception/c3 (lignes à post-install-cmd) et l'autoloader optimisé :
@@ -375,6 +381,14 @@ handed lv-binproxy lv-binproxy 'liborm85/composer-vendor-cleaner' "${I[@]}"
 handed lv-a lv-verbose 'liborm85/composer-vendor-cleaner' "${I[@]}" -v
 handed lv-a lv-no-autoloader 'liborm85/composer-vendor-cleaner' "${I[@]}" --no-autoloader
 handed_on "$WORK/lv-up-ref" - lv-no-install 'liborm85/composer-vendor-cleaner' "${U[@]}" --no-install
+# Un alias en ligne : un paquet de plus dans le dépôt local.
+lock lv-alias "{\"require\": {\"liborm85/composer-vendor-cleaner\": \"1.7.1\", \"acme/lib\": \"1.0.0 as 1.5.0\"}, \"extra\": {$LV_FILES}, \"config\": {\"allow-plugins\": {\"liborm85/composer-vendor-cleaner\": true}}}"
+handed lv-alias lv-alias 'liborm85/composer-vendor-cleaner with inline aliases' "${I[@]}"
+# `--no-install --no-dev` avec `no-dev-only` : le plugin nettoie à
+# post-update-cmd (mode non dev).
+PACKAGIST_ONLY=1 lock lv-ndo-up "{\"require\": {\"liborm85/composer-vendor-cleaner\": \"1.7.1\", \"psr/log\": \"3.0.2\"}, \"extra\": {\"dev-files\": {\"/\": [\"*.md\"]}}, \"config\": {\"dev-files\": {\"no-dev-only\": true}, \"allow-plugins\": {\"liborm85/composer-vendor-cleaner\": true}}}"
+fresh lv-ndo-up "$WORK/lv-ndo-up-ref"; (cd "$WORK/lv-ndo-up-ref" && composer install --no-scripts --no-plugins --no-interaction --no-ansi -q)
+handed_on "$WORK/lv-ndo-up-ref" - lv-no-install-no-dev 'liborm85/composer-vendor-cleaner' "${U[@]}" --no-install --no-dev
 relock lv-a lv-old liborm85/composer-vendor-cleaner 1.7.0
 handed lv-old lv-old 'liborm85/composer-vendor-cleaner 1\.7\.0' "${I[@]}"
 
@@ -403,7 +417,9 @@ fresh ck-a "$WORK/ck-v-ref" "$WORK/ck-v-viv"; step "$WORK/ck-v-ref" "$WORK/ck-v-
 lock ck-paths "{\"require\": {\"cakephp/plugin-installer\": \"2.0.2\", \"acme/ck-plug\": \"1.0.0\"}, \"extra\": {\"plugin-paths\": [\"plugins/Vendor\", \"./plugins\"]}, $CK}"
 fresh ck-paths "$WORK/ck-paths-ref" "$WORK/ck-paths-viv"; step "$WORK/ck-paths-ref" "$WORK/ck-paths-viv" ck-paths "${I[@]}"
 lock ck-vdir "{\"require\": {\"cakephp/plugin-installer\": \"2.0.2\", \"acme/ck-plug\": \"1.0.0\"}, \"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}, \"config\": {\"vendor-dir\": \"lib/vendor\", \"allow-plugins\": {\"cakephp/plugin-installer\": true}}}"
-fresh ck-vdir "$WORK/ck-vdir-ref" "$WORK/ck-vdir-viv"; VENDOR_REL=lib/vendor step "$WORK/ck-vdir-ref" "$WORK/ck-vdir-viv" ck-vdir "${I[@]}"
+# Les plugins applicatifs sous `dirname(vendor-dir)` : lib/plugins.
+ck_vtree() { mkdir -p "$1/src" "$1/lib/plugins/Foo/src" "$1/plugins/Bar/src"; }
+TREE=ck_vtree fresh ck-vdir "$WORK/ck-vdir-ref" "$WORK/ck-vdir-viv"; VENDOR_REL=lib/vendor step "$WORK/ck-vdir-ref" "$WORK/ck-vdir-viv" ck-vdir "${I[@]}"
 ck_num() { ck_tree "$1"; mkdir -p "$1/plugins/7/src"; }
 TREE=ck_num handed ck-a ck-num 'cakephp/plugin-installer' "${I[@]}"
 lock ck-nons "{\"require\": {\"cakephp/plugin-installer\": \"2.0.2\", \"acme/ck-nons\": \"1.0.0\"}, $CK}"

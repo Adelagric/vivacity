@@ -116,6 +116,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         args.no_fallback,
         !args.no_install && !args.dry_run,
         !args.dry_run,
+        !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
     )? {
         return Ok(code);
     }

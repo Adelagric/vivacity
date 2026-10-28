@@ -30,11 +30,13 @@ pub fn plugin_paths(manifest: &Value) -> std::result::Result<Option<Vec<String>>
         Some(Value::String(s)) if s.is_empty() || s == "0" => return Ok(None),
         Some(Value::Array(a)) if a.is_empty() => return Ok(None),
         Some(Value::Object(o)) if o.is_empty() => return Ok(None),
-        Some(Value::Array(a)) => a,
+        Some(Value::Array(a)) => a.clone(),
+        // `foreach` over an array with string keys: its values.
+        Some(Value::Object(o)) => o.values().cloned().collect(),
         Some(_) => return Err("extra.plugin-paths is not a list (the plugin throws)".to_owned()),
     };
     let mut out = Vec::new();
-    for p in list {
+    for p in &list {
         let Some(s) = p.as_str() else {
             return Err("extra.plugin-paths holds a value that is not a string".to_owned());
         };
@@ -116,10 +118,43 @@ pub fn primary_namespace(package: &Map<String, Value>) -> std::result::Result<St
     }
 }
 
-/// A plugin name PHP would make an integer or compare as a number in
-/// `ksort` (a `str_replace` on it then throws under `strict_types`).
+/// A plugin name PHP would make an integer key (a `str_replace` on it then
+/// throws under `strict_types`) or compare as a number in `ksort`
+/// (`is_numeric`: optional whitespace, sign, digits with a dot and an
+/// exponent).
 pub fn numeric_name(name: &str) -> bool {
-    crate::vendor_cleaner::php_int_key(name) || name.parse::<f64>().is_ok()
+    crate::vendor_cleaner::php_int_key(name) || php_is_numeric(name)
+}
+
+fn php_is_numeric(s: &str) -> bool {
+    const WS: [char; 6] = [' ', '\t', '\n', '\r', '\x0B', '\x0C'];
+    let t = s.trim_matches(WS);
+    let b = t.strip_prefix(['+', '-']).unwrap_or(t).as_bytes();
+    let int = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    let mut i = int;
+    let mut frac = 0;
+    if b.get(i) == Some(&b'.') {
+        frac = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        i += 1 + frac;
+    }
+    if int + frac == 0 {
+        return false;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(b.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        let exp = b
+            .get(j..)
+            .map(|r| r.iter().take_while(|c| c.is_ascii_digit()).count())
+            .unwrap_or(0);
+        if exp == 0 {
+            return false;
+        }
+        i = j + exp;
+    }
+    i == b.len()
 }
 
 /// `findAppPlugins($path, $keepLegacyDirectories)`: `(name, path)` in
@@ -370,6 +405,17 @@ mod tests {
         assert_eq!(psr4["Acme\\Plug\\"], "plugins/Acme/Plug/src");
         assert_eq!(psr4["Vendor\\Bar\\"], "plugins/Vendor/Bar/src");
         assert!(psr4.get("Legacy\\").is_none());
+    }
+
+    #[test]
+    fn numeric_names_like_php() {
+        // `php -r 'var_dump(is_numeric($n));'`
+        for n in ["7", "-3", "1.5", "1e3", " 2", ".5", "1."] {
+            assert!(numeric_name(n), "{n}");
+        }
+        for n in ["Foo", "inf", "NaN", "1e", "e3", "", "0x1A", "1_000"] {
+            assert!(!numeric_name(n), "{n}");
+        }
     }
 
     #[test]

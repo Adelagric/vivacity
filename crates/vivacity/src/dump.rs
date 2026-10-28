@@ -357,6 +357,7 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             no_autoloader: false,
             plugins_enabled: true,
             global: &global,
+            aliases: false,
         };
         let issues = vivacity_core::effect_plugins::issues(&ctx);
         if !issues.is_empty() {
@@ -426,15 +427,26 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     // liborm85/composer-vendor-cleaner (all three of its steps: no
     // `pre-install-cmd` came) and cakephp/plugin-installer, on every
     // installed package, at their install paths.
-    let all_layout = vivacity_core::layout::Layout::resolve(
+    let all_layout = match vivacity_core::layout::Layout::resolve(
         &project,
         &local_all,
         &manifest,
         true,
         !args.no_plugins,
-    )
-    .ok();
-    let paths_layout = all_layout.as_ref().unwrap_or(&layout);
+    ) {
+        Ok(l) => l,
+        Err(issues) => {
+            vivacity_core::say_always!(
+                "vivacity: this lock is outside what vivacity handles natively:"
+            );
+            for i in &issues {
+                vivacity_core::say_always!("  - {i}");
+            }
+            vivacity_core::say_always!("Run `composer dump-autoload` instead.");
+            return Ok(3);
+        }
+    };
+    let paths_layout = &all_layout;
     let all_packages: Vec<&vivacity_core::lock::LockPackage> = local_all.packages.iter().collect();
     let (root, _) = crate::effect_plugins::pre_autoload_dump(
         &manifest,

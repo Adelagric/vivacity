@@ -172,6 +172,7 @@ pub(crate) fn discovery_issue(
 pub(crate) fn issues_before_resolution(
     project: &std::path::Path,
     manifest: &serde_json::Value,
+    with_dev: bool,
 ) -> Vec<vivacity_core::scope::ScopeIssue> {
     use vivacity_core::scope::{ScopeIssue, BENIGN_PLUGINS, EMULATED_PLUGINS, RESOLUTION_INERT};
     let mut issues = Vec::new();
@@ -225,12 +226,13 @@ pub(crate) fn issues_before_resolution(
             .filter_map(serde_json::Value::as_object)
             .collect(),
         installed: &installed,
-        dev_mode: true,
+        dev_mode: with_dev,
         command: vivacity_core::effect_plugins::Command::UpdateNoInstall,
         interactive: false,
         no_autoloader: false,
         plugins_enabled: true,
         global: &global,
+        aliases: false,
     };
     issues.extend(
         vivacity_core::effect_plugins::issues(&ctx)
@@ -445,7 +447,7 @@ mod tests {
             &[],
         );
         let manifest = json!({"config": {"allow-plugins": {"cweagans/composer-patches": true}}});
-        let issues: Vec<String> = issues_before_resolution(tmp.path(), &manifest)
+        let issues: Vec<String> = issues_before_resolution(tmp.path(), &manifest, true)
             .iter()
             .map(ToString::to_string)
             .collect();

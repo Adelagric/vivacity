@@ -15,11 +15,20 @@
 use std::io::IsTerminal as _;
 use vivacity_core::effect_plugins as fx;
 
-/// Composer's IO is interactive: stdin is a terminal and neither `-n` nor
-/// `COMPOSER_NO_INTERACTION` says otherwise (`Application::doRun`).
+/// Composer's IO is interactive: stdin is a terminal (`Application::doRun`),
+/// neither `-n` nor a truthy `COMPOSER_NO_INTERACTION` (PHP's `"0"` is
+/// false), and the output not quiet — Symfony's `configureIO` makes the
+/// input non-interactive at `-q` or `SHELL_VERBOSITY=-1`.
 pub(crate) fn interactive(no_interaction: bool) -> bool {
+    let env_true = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+    };
     !no_interaction
-        && std::env::var_os("COMPOSER_NO_INTERACTION").is_none_or(|v| v.is_empty())
+        && !env_true("COMPOSER_NO_INTERACTION")
+        && vivacity_core::io::level() != vivacity_core::io::Verbosity::Quiet
+        && std::env::var("SHELL_VERBOSITY").ok().as_deref() != Some("-1")
         && std::io::stdin().is_terminal()
 }
 

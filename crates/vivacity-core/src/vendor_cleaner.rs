@@ -188,9 +188,10 @@ impl Config {
         let hit = |rs: &[pcre2::bytes::Regex], e: &str| {
             rs.iter().any(|r| r.is_match(e.as_bytes()).unwrap_or(false))
         };
+        let mut seen = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
         for e in entries {
-            if hit(&includes, e) && !hit(&excludes, e) && !out.contains(e) {
+            if hit(&includes, e) && !hit(&excludes, e) && seen.insert(e.as_str()) {
                 out.push(e.clone());
             }
         }

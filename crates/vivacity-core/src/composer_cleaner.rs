@@ -139,7 +139,7 @@ pub fn shape_issue(package: &Map<String, Value>) -> Option<String> {
                 let ok = match ty.as_str() {
                     "psr-0" | "psr-4" => match items {
                         Value::Object(m) => m.values().all(string_or_list),
-                        Value::Array(a) => a.is_empty(),
+                        Value::Array(a) => a.iter().all(string_or_list),
                         _ => false,
                     },
                     "classmap" | "files" | "exclude-from-classmap" => string_or_list(items),
@@ -407,9 +407,10 @@ pub fn fnmatch_portable(mask: &str) -> bool {
     while i < b.len() {
         match b[i] {
             b'\\' => i += 2,
+            // A `\` inside a bracket expression: the C libraries differ.
             b'[' => match bracket_end(b, i) {
-                Some(end) => i = end + 1,
-                None => return false,
+                Some(end) if !b[i..end].contains(&b'\\') => i = end + 1,
+                _ => return false,
             },
             _ => i += 1,
         }
@@ -558,6 +559,8 @@ mod tests {
         assert!(!fnmatch_portable("a\\"));
         assert!(!fnmatch_portable("[[:alpha:]]"));
         assert!(fnmatch_portable("doc*"));
+        assert!(!fnmatch_portable("[\\]*"));
+        assert!(fnmatch_portable("[a-c]*"));
         assert!(fnmatch_portable("a\\\\"));
     }
 

@@ -13,6 +13,7 @@ use super::*;
 /// command dispatches `POST_UPDATE_CMD` (not a dry run) — without an
 /// install, to the plugins loaded from installed.json
 /// (docs/plans/no-install-listeners.md).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolution_fallback(
     project: &std::path::Path,
     manifest: &serde_json::Value,
@@ -21,6 +22,7 @@ pub(crate) fn resolution_fallback(
     no_fallback: bool,
     with_install: bool,
     post_update_cmd: bool,
+    with_dev: bool,
 ) -> anyhow::Result<Option<i32>> {
     let mut issues = vivacity_core::scope::resolution_issues(
         project,
@@ -55,7 +57,7 @@ pub(crate) fn resolution_fallback(
     // there goes to Composer now, before anything is written.
     if !with_install && post_update_cmd && !no_plugins {
         issues.extend(crate::no_install::issues_before_resolution(
-            project, manifest,
+            project, manifest, with_dev,
         ));
     }
     // Flex emulated for this command: its file-writing behaviours are

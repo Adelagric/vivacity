@@ -4,8 +4,12 @@
 //! is written, whether a run is reproduced: the versions read, the
 //! configurations ported, the cases handed to Composer. The effects
 //! themselves are in [`crate::composer_cleaner`], [`crate::vendor_cleaner`],
-//! [`crate::cakephp_plugins`] and [`laminas_skeleton_rewrite`]; three
-//! plugins are reproduced by staying inert:
+//! [`crate::cakephp_plugins`] and [`laminas_skeleton_rewrite`]
+//! (laminas-skeleton-installer, docs/reference/plugins/
+//! laminas-skeleton-installer/, BSD-3-Clause); three plugins are reproduced
+//! by staying inert (their sources in docs/reference/plugins/
+//! spiral-composer-publish-plugin/, sculpin-theme-composer-plugin/ — MIT —
+//! and laminas-component-installer/ — BSD-3-Clause):
 //!
 //! - `spiral/composer-publish-plugin` (`PublishPlugin::publishFiles`,
 //!   `POST_AUTOLOAD_DUMP`) runs the root's `extra.publish-cmd` for each
@@ -113,6 +117,9 @@ pub struct Context<'a> {
     pub plugins_enabled: bool,
     /// The packages installed in COMPOSER_HOME.
     pub global: &'a [Value],
+    /// The lock has inline aliases (`aliases`): the install adds an alias
+    /// package to the local repository for each (`MarkAliasInstalled`).
+    pub aliases: bool,
 }
 
 fn name_of(p: &Map<String, Value>) -> &str {
@@ -164,13 +171,18 @@ pub fn issues(ctx: &Context<'_>) -> Vec<String> {
             ));
         }
     }
-    // The versions: the one the command ends with, and for the commands
-    // that install nothing, the one loaded.
+    // The versions: the one the command ends with, and the one loaded at
+    // its start — a plugin upgraded in the run keeps classes of the old
+    // version (liborm85's `Cleaner` is built in `activate`).
     for (plugin, read, why) in READ_VERSIONS {
         if !allowed(ctx.manifest, plugin) {
             continue;
         }
-        for entry in [ctx.local_entry(plugin)].into_iter().flatten() {
+        let local = ctx.local_entry(plugin);
+        let loaded = ctx
+            .installed_entry(plugin)
+            .filter(|i| local.is_none_or(|l| l.get("version") != i.get("version")));
+        for entry in [local, loaded].into_iter().flatten() {
             let version = entry
                 .get("version")
                 .and_then(Value::as_str)
@@ -272,6 +284,19 @@ fn laminas_component_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     {
         return;
     }
+    // A package with metadata to inject (`getExtraMetadata`: an
+    // `extra.laminas` or `extra.zf` array).
+    let metadata = |p: &Map<String, Value>| {
+        p.get("extra").is_some_and(|e| {
+            ["laminas", "zf"]
+                .iter()
+                .any(|k| e.get(*k).is_some_and(|v| v.is_object() || v.is_array()))
+        })
+    };
+    let installed = ctx.installed.iter().filter_map(Value::as_object);
+    if !ctx.local.iter().copied().chain(installed).any(metadata) {
+        return;
+    }
     if let Some(f) = LAMINAS_CONFIG_FILES
         .iter()
         .find(|f| ctx.project.join(f).is_file())
@@ -320,6 +345,17 @@ pub fn laminas_skeleton_configured(manifest: &Value) -> std::result::Result<bool
     Ok(valid)
 }
 
+/// The plugins with file effects were measured on Linux and macOS only.
+fn windows_issue(ctx: &Context<'_>, plugin: &str, out: &mut Vec<String>) -> bool {
+    if cfg!(windows) && ctx.active(plugin) {
+        out.push(format!(
+            "plugin {plugin} is not emulated on Windows (paths and removals not measured there)"
+        ));
+        return true;
+    }
+    false
+}
+
 fn laminas_skeleton_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     if !ctx.plugins_enabled || !allowed(ctx.manifest, LAMINAS_SKELETON) {
         return;
@@ -345,6 +381,11 @@ fn laminas_skeleton_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     if !ctx.active(LAMINAS_SKELETON) || matches!(ctx.command, Command::DumpAutoload) {
         return;
     }
+    if laminas_skeleton_configured(ctx.manifest) == Ok(true)
+        && windows_issue(ctx, LAMINAS_SKELETON, out)
+    {
+        return;
+    }
     match laminas_skeleton_configured(ctx.manifest) {
         Err(e) => out.push(e),
         Ok(false) => {}
@@ -367,7 +408,10 @@ fn laminas_skeleton_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
 }
 
 fn dg_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
-    if !ctx.active(DG_CLEANER) || matches!(ctx.command, Command::DumpAutoload) {
+    if !ctx.active(DG_CLEANER)
+        || matches!(ctx.command, Command::DumpAutoload)
+        || windows_issue(ctx, DG_CLEANER, out)
+    {
         return;
     }
     if matches!(ctx.command, Command::UpdateNoInstall) {
@@ -403,7 +447,19 @@ fn vendor_cleaner_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     if config.no_dev_only && ctx.dev_mode {
         return;
     }
+    if windows_issue(ctx, VENDOR_CLEANER, out) {
+        return;
+    }
     let reason = |why: &str| format!("plugin {VENDOR_CLEANER} {why}");
+    if ctx.aliases
+        && !matches!(
+            ctx.command,
+            Command::DumpAutoload | Command::UpdateNoInstall
+        )
+    {
+        out.push(reason("with inline aliases in the lock (alias packages in the local repository; not emulated)"));
+        return;
+    }
     if matches!(ctx.command, Command::UpdateNoInstall) {
         out.push(reason(
             "cleans the packages at post-update-cmd without an install (not emulated)",
@@ -451,7 +507,10 @@ fn vendor_cleaner_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
 }
 
 fn cakephp_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
-    if !ctx.active(CAKEPHP) || matches!(ctx.command, Command::UpdateNoInstall) || ctx.no_autoloader
+    if !ctx.active(CAKEPHP)
+        || matches!(ctx.command, Command::UpdateNoInstall)
+        || ctx.no_autoloader
+        || windows_issue(ctx, CAKEPHP, out)
     {
         return;
     }
@@ -614,6 +673,7 @@ mod tests {
             no_autoloader: false,
             plugins_enabled: true,
             global: &[],
+            aliases: false,
         }
     }
 
@@ -667,22 +727,52 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let m = json!({"config": {"allow-plugins": true}});
         let plugin = json!({"name": LAMINAS_COMPONENT, "version": "3.8.0"});
-        let mk = |dev| {
-            let mut c = ctx(
-                d.path(),
-                &m,
-                vec![plugin.as_object().unwrap()],
-                &[],
-                Command::Install,
-            );
+        let module =
+            json!({"name": "a/m", "version": "1.0.0", "extra": {"laminas": {"module": "A"}}});
+        let mk = |dev, with_module: bool| {
+            let mut local = vec![plugin.as_object().unwrap()];
+            if with_module {
+                local.push(module.as_object().unwrap());
+            }
+            let mut c = ctx(d.path(), &m, local, &[], Command::Install);
             c.dev_mode = dev;
             issues(&c).len()
         };
-        assert_eq!(mk(true), 0);
+        assert_eq!(mk(true, true), 0);
         std::fs::create_dir_all(d.path().join("config")).unwrap();
         std::fs::write(d.path().join("config/config.php"), "<?php").unwrap();
-        assert_eq!(mk(true), 1);
-        assert_eq!(mk(false), 0);
+        assert_eq!(mk(true, true), 1);
+        assert_eq!(mk(false, true), 0);
+        // Nothing to inject: no package with metadata.
+        assert_eq!(mk(true, false), 0);
+    }
+
+    #[test]
+    fn the_loaded_version_and_the_aliases() {
+        let d = tempfile::tempdir().unwrap();
+        let m =
+            json!({"extra": {"dev-files": {"/": ["tests/"]}}, "config": {"allow-plugins": true}});
+        let new = json!({"name": VENDOR_CLEANER, "version": "1.7.1", "dist": {"type": "zip", "url": "x"}});
+        let old = json!({"name": VENDOR_CLEANER, "version": "1.7.0"});
+        let installed = [old];
+        let c = ctx(
+            d.path(),
+            &m,
+            vec![new.as_object().unwrap()],
+            &installed,
+            Command::Install,
+        );
+        assert!(issues(&c)[0].contains("1.7.0 is not emulated"));
+        let mut c = ctx(
+            d.path(),
+            &m,
+            vec![new.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        assert!(issues(&c).is_empty());
+        c.aliases = true;
+        assert!(issues(&c)[0].contains("inline aliases"));
     }
 
     #[test]

@@ -241,6 +241,7 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
+                !(args.no_dev || env_no_dev()),
             )? {
                 return Ok(code);
             }
@@ -816,6 +817,7 @@ pub(crate) fn resolve_and_lock(
                     no_autoloader: args.no_autoloader,
                     plugins_enabled: true,
                     global: &global,
+                    aliases: !parsed.aliases.is_empty(),
                 };
                 vivacity_core::effect_plugins::issues(&ctx)
                     .into_iter()
