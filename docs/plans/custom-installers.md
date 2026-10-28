@@ -281,3 +281,31 @@ concernées : natives, 0 diff.
   que l'arbre de l'autoload) : l'entrée reste en repli.
 - roots/wordpress-core-installer et mnsami n'ont pas de garde de version
   (préexistant) : vu, laissé.
+
+## Matrice mesurée (harnais, Composer 2.10.3, PHP 8.5.12)
+
+`harness/custom-installers.sh` sur le binaire 0.24.0 (08b309c) : tous les
+cas natifs en repli (code 3 contre 0), les garde-fous déjà verts
+(`--no-plugins` des sept projets, les rendus `kirby-dot`, `cc-nodir`,
+`oo-nopath`, `cr-plugin`). Ce que Composer imprime en plus, mesuré :
+
+- composer/installers v1.12.0 (jp) : les deux lignes de dépréciation
+  **juste après** « - Installing composer/installers (v1.12.0) » sur un
+  vendor vierge, **en tête** (avant « Installing dependencies from lock
+  file ») quand le plugin est chargé depuis installed.json (no-op, mise à
+  jour, retrait).
+- Le retrait d'un paquet que pose composer/installers (ou un installeur qui
+  en hérite) écrit sur **stdout** « Deleting <chemin> - deleted »
+  (`Installer::uninstall`) : chemin **relatif** tel que `templatePath` le
+  rend en 1.12.0 et chez oomphinc (`web/plugins/wp-plug/`, `public/libs/np/`),
+  **absolu** en 2.x (`getcwd() . '/' . chemin` — `…/vendor/acme/modules/
+  Cheque`). vivacity ne l'imprime pas aujourd'hui, 2.x compris : défaut
+  préexistant, levé ici.
+- davidbarratt, contao-components, kirby, neos, thelia (gabarits) :
+  aucune ligne propre.
+- Défauts vus en construisant le banc, laissés : vivacity n'imprime pas
+  « Skipped installation of bin … file not found in package » pour un
+  binaire déclaré absent du paquet ; son store sert un zip `artifact`
+  remplacé à nom et version égaux (la dist n'a pas de `reference`, le
+  `shasum` du lock n'entre pas dans l'identité) — zone de l'extraction,
+  laissée au chantier voisin.
