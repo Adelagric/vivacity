@@ -170,9 +170,13 @@ compare_git_dirs() {
       if ! diff -r --exclude=packs "$a/objects/info" "$b/objects/info" >/dev/null 2>&1; then
         echo "$g/objects/info diffère"; diff -r --exclude=packs "$a/objects/info" "$b/objects/info" 2>&1 | head -4
       fi
-      if ! diff <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$a/objects/info/packs" 2>&1) \
-          <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$b/objects/info/packs" 2>&1) >/dev/null; then
-        echo "$g/objects/info/packs diffère (noms de packs masqués)"
+      if [ -f "$a/objects/info/packs" ] || [ -f "$b/objects/info/packs" ]; then
+        if [ ! -f "$a/objects/info/packs" ] || [ ! -f "$b/objects/info/packs" ]; then
+          echo "$g/objects/info/packs présent d'un seul côté"
+        elif ! diff <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$a/objects/info/packs") \
+            <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$b/objects/info/packs") >/dev/null; then
+          echo "$g/objects/info/packs diffère (noms de packs masqués)"
+        fi
       fi
     fi
     # L'ensemble des objets, quel que soit leur rangement.

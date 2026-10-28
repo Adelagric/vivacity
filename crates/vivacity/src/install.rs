@@ -1940,7 +1940,12 @@ pub(crate) fn download_lines(
         // repository is remote is synced into the VCS cache, in the same
         // pass as the dists are downloaded (docs/plans/git-sources.md).
         if locked.dist_kind() == vivacity_core::lock::DistKind::Missing {
-            if let Some(source) = package.source.as_ref().filter(|s| s.kind == "git") {
+            // `MetapackageInstaller::download` does nothing.
+            if let Some(source) = package
+                .source
+                .as_ref()
+                .filter(|s| s.kind == "git" && package.package_type != "metapackage")
+            {
                 if !vivacity_core::git_source::is_local_path(&source.url) {
                     lines.push(vivacity_core::git_source::syncing_line(
                         &package.name,

@@ -90,13 +90,18 @@ pub fn plan(
         .get("reference")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !plain_ref(reference) {
-        return Err(format!("source reference `{reference}`"));
+    // `VcsDownloader::install`: `!$package->getSourceReference()` throws,
+    // and PHP reads "0" as false.
+    if !plain_ref(reference) || reference == "0" {
+        return Err(format!("source reference `{}`", printable(reference)));
     }
     let pretty_version = p.version();
     let branch = derived_branch(pretty_version);
     if !plain_ref(&branch) {
-        return Err(format!("version `{pretty_version}` (as a branch name)"));
+        return Err(format!(
+            "version `{}` (as a branch name)",
+            printable(pretty_version)
+        ));
     }
     // `getSourceUrls()` adds the mirrors, tried in turn on failure.
     if source
@@ -121,6 +126,12 @@ pub fn plan(
         Some(_) => {}
     }
     let timeout = process_timeout(root_manifest)?;
+    // `doInstall` without the cache throws under COMPOSER_DISABLE_NETWORK,
+    // and a local repository is never cached: any git source is Composer's
+    // then.
+    if network_disabled() {
+        return Err("COMPOSER_DISABLE_NETWORK is set".to_owned());
+    }
     let (url, cache_path) = if is_local_path(source_url) {
         (local_url(source_url, project_dir)?, None)
     } else {
@@ -129,9 +140,6 @@ pub fn plan(
                 "source url {} (only https:// without credentials, or a local path)",
                 sanitize_for_message(source_url)
             ));
-        }
-        if network_disabled() {
-            return Err("COMPOSER_DISABLE_NETWORK is set".to_owned());
         }
         for key in ["github-protocols", "github-domains"] {
             if config_value(root_manifest, key).is_some() {
@@ -260,9 +268,11 @@ pub fn sync(src: &GitSource, project_dir: &Path) -> std::result::Result<(), Stri
 }
 
 /// `GitDownloader::doInstall` then `updateToCommit`, into `path` (a
-/// directory that does not exist yet). `cached`: the mirror was synced by
-/// [`sync`] (`cachedPackages`). Every command is the one Composer runs, in
-/// its order, so the repository written is the one it would write.
+/// directory that does not exist yet), from the cache for a remote
+/// repository ([`sync`] made sure it holds the reference:
+/// `cachedPackages`), from the repository itself for a local one. Every
+/// command is the one Composer runs, in its order, so the repository
+/// written is the one it would write.
 pub fn clone_into(
     src: &GitSource,
     path: &Path,
@@ -597,9 +607,10 @@ fn parse_git_version(text: &str) -> Option<(u32, u32, u32)> {
 /// pretty version: `preg_replace('{(?:^dev-|(?:\.x)?-dev$)}i', '', …)`.
 pub fn derived_branch(pretty_version: &str) -> String {
     let mut s = pretty_version;
-    if s.len() >= 4 && s[..4].eq_ignore_ascii_case("dev-") {
+    if s.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("dev-")) {
         s = &s[4..];
     }
+    // ASCII suffixes: the cut points are character boundaries.
     let lower = s.to_ascii_lowercase();
     if lower.ends_with(".x-dev") {
         s = &s[..s.len() - 6];
@@ -654,9 +665,25 @@ fn strip_credentials(url: &str) -> String {
     url.to_owned()
 }
 
-/// For a message: the URL without its user information.
+/// For a message: `Url::sanitize`'s masking (no user information, an
+/// `access_token` query value hidden), control characters made visible.
 fn sanitize_for_message(url: &str) -> String {
-    strip_credentials(url)
+    let mut out = strip_credentials(url);
+    for marker in ["?access_token=", "&access_token="] {
+        if let Some(start) = out.find(marker) {
+            let value = start + marker.len();
+            let end = out[value..].find('&').map_or(out.len(), |i| value + i);
+            out.replace_range(value..end, "***");
+        }
+    }
+    printable(&out)
+}
+
+/// A lock value in a message: control characters replaced.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 /// The cache directory name: `preg_replace('{[^a-z0-9.]}i', '-', $url)`
@@ -677,14 +704,17 @@ fn cache_key(url: &str) -> String {
 /// `realpath` from Composer's working directory, `file://` put back.
 fn local_url(url: &str, project_dir: &Path) -> std::result::Result<String, String> {
     if url.contains('%') {
-        return Err(format!("local source url {url} (percent-encoded)"));
+        return Err(format!(
+            "local source url {} (percent-encoded)",
+            printable(url)
+        ));
     }
     let (prefix, path) = match url.strip_prefix("file://") {
         Some(p) => ("file://", p),
         None => ("", url),
     };
     let resolved = std::fs::canonicalize(project_dir.join(path))
-        .map_err(|_| format!("local git repository {url} does not exist"))?;
+        .map_err(|_| format!("local git repository {} does not exist", printable(url)))?;
     let resolved = resolved
         .to_str()
         .ok_or_else(|| format!("local git repository {url} (non UTF-8 path)"))?;
@@ -747,6 +777,13 @@ fn cache_vcs_dir(root_manifest: &Value) -> std::result::Result<String, String> {
     for key in ["cache-dir", "cache-vcs-dir"] {
         if config_value(root_manifest, key).is_some() {
             return Err(format!("config {key}"));
+        }
+    }
+    // Set but empty, `Config::get('cache-dir')` takes "" (the project
+    // directory) where `Factory::getCacheDir` moves on: handed over.
+    for key in ["COMPOSER_CACHE_DIR", "COMPOSER_HOME"] {
+        if std::env::var_os(key).is_some_and(|v| v.is_empty()) {
+            return Err(format!("{key} is set and empty"));
         }
     }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());

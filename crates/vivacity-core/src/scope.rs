@@ -999,8 +999,20 @@ fn classify_package(
         // (docs/plans/git-sources.md). A dist of another type is tried
         // first by Composer, with its own fallback to the source: handed
         // over as before.
-        DistKind::Missing if p.raw.get("source").is_some_and(|s| !s.is_null()) => {
-            if let Err(why) = crate::git_source::plan(p, project_dir, root_manifest) {
+        // (`dist` absent or null: a `dist` without `type` is
+        // `ArrayLoader`'s error, handed over below.)
+        DistKind::Missing
+            if p.raw.get("dist").is_none_or(Value::is_null)
+                && p.raw.get("source").is_some_and(|s| !s.is_null()) =>
+        {
+            // `SymfonyPackInstaller` lays a pack out as a metapackage when
+            // Flex is active: no clone, no line — not reproduced here.
+            if p.package_type() == "symfony-pack" {
+                report.issues.push(ScopeIssue::GitSource(
+                    p.name().to_owned(),
+                    "a symfony-pack".to_owned(),
+                ));
+            } else if let Err(why) = crate::git_source::plan(p, project_dir, root_manifest) {
                 report
                     .issues
                     .push(ScopeIssue::GitSource(p.name().to_owned(), why));

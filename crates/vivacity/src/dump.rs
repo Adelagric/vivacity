@@ -232,6 +232,26 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         lock.packages.retain(keep);
         lock.packages_dev.retain(keep);
     }
+    // `installation-source` lives in installed.json, not in the lock: a
+    // package installed from source (a git checkout) must not be mapped to
+    // a store entry by the classmap cache — it is not that dist.
+    let from_source: Vec<String> = kept
+        .iter()
+        .filter(|p| {
+            p.get("installation-source")
+                .and_then(serde_json::Value::as_str)
+                == Some("source")
+        })
+        .filter_map(name_of)
+        .collect();
+    for p in lock.packages.iter_mut().chain(lock.packages_dev.iter_mut()) {
+        if from_source.contains(&p.name().to_ascii_lowercase()) {
+            p.raw.insert(
+                "installation-source".to_owned(),
+                serde_json::Value::String("source".to_owned()),
+            );
+        }
+    }
     let installed_dev = installed_json
         .as_ref()
         .and_then(|v| v.get("dev").and_then(serde_json::Value::as_bool))

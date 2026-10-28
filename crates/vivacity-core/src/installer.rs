@@ -268,6 +268,23 @@ pub fn source_install_issues(
         .map(|p| (p.name(), p))
         .collect();
     let mut issues = Vec::new();
+    // The `.git` of a clone is compared under the vendor directory only
+    // (harness/lib/compare.sh): an installer path elsewhere (composer/
+    // installers, wordpress-core-installer) is not claimed.
+    let vendor = layout.vendor_dir();
+    for p in wanted.values() {
+        if p.dist_kind() == DistKind::Missing
+            && p.raw.get("source").is_some_and(|s| !s.is_null())
+            && layout
+                .abs(p.name())
+                .is_some_and(|d| !d.starts_with(&vendor))
+        {
+            issues.push(crate::scope::ScopeIssue::GitSource(
+                p.name().to_owned(),
+                "an install path outside the vendor directory".to_owned(),
+            ));
+        }
+    }
     for (name, installed) in &previous {
         let changed = wanted
             .get(name.as_str())
@@ -304,7 +321,6 @@ pub async fn install(
     let project_dir = layout.root();
     let vendor = layout.vendor_dir();
     let bin_dir = layout.bin_dir();
-    std::fs::create_dir_all(&vendor).map_err(Error::io(&vendor))?;
 
     let mut report = InstallReport::default();
     let wanted: Vec<&LockPackage> = lock.wanted_packages(opts.with_dev).collect();
@@ -392,6 +408,11 @@ pub async fn install(
             ))
         })?;
     }
+
+    // Nothing was written to the project before this point: a hand-over
+    // above leaves it as it was (vendor/ included).
+    let vendor_existed = vendor.is_dir();
+    std::fs::create_dir_all(&vendor).map_err(Error::io(&vendor))?;
 
     // Fetch + extraction into the store, with bounded parallelism. Packages to
     // "warm" only use the local cache (never the network) and their failure
@@ -485,15 +506,35 @@ pub async fn install(
         )
     };
     let mut git_clones: BTreeMap<&str, std::path::PathBuf> = BTreeMap::new();
-    if let Some(work) = &git_work {
+    if let Some(work) = git_work.as_ref() {
+        let mut failure = None;
         for (i, (name, src)) in git_sources.iter().enumerate() {
             let staged = work.path().join(i.to_string());
-            crate::git_source::clone_into(src, &staged, project_dir).map_err(|why| {
-                Error::Unsupported(format!(
+            let cloned = crate::git_source::clone_into(src, &staged, project_dir).and_then(|()| {
+                // The rename below must stay on one filesystem.
+                let dest = layout.abs(name).unwrap_or_default();
+                if same_device(work.path(), &dest) {
+                    Ok(())
+                } else {
+                    Err("its install path is on another filesystem than vendor/".to_owned())
+                }
+            });
+            if let Err(why) = cloned {
+                failure = Some(format!(
                     "package {name}: git source not installed natively ({why})"
-                ))
-            })?;
+                ));
+                break;
+            }
             git_clones.insert(name, staged);
+        }
+        if let Some(why) = failure {
+            // Back to the project as it was: the work directory, and a
+            // vendor/ this run created.
+            drop(git_work);
+            if !vendor_existed {
+                let _ = std::fs::remove_dir(&vendor);
+            }
+            return Err(Error::Unsupported(why));
         }
     }
 
@@ -692,6 +733,29 @@ pub async fn install(
     report.local_repository = Some(local);
 
     Ok(report)
+}
+
+/// Whether `dest` (or the nearest of its ancestors that exists) lives on the
+/// filesystem of `work`, so that a `rename` from one to the other succeeds.
+#[cfg(unix)]
+fn same_device(work: &Path, dest: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(w) = std::fs::metadata(work) else {
+        return false;
+    };
+    let mut probe = Some(dest);
+    while let Some(p) = probe {
+        if let Ok(m) = std::fs::metadata(p) {
+            return m.dev() == w.dev();
+        }
+        probe = p.parent();
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn same_device(_work: &Path, _dest: &Path) -> bool {
+    false
 }
 
 /// `LibraryInstaller::uninstall`: the parent directory of the removed package

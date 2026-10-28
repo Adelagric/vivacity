@@ -125,6 +125,19 @@ seed mixed "{\"type\": \"package\", \"package\": {\"name\": \"acme/aa\", \"versi
   '{"acme/aa": "1.0.0", "acme/lib": "1.0.0", "acme/zz": "1.0.0", "acme/loc": "1.0.0"}'
 seed no-dev "$(pkg acme/lib 1.0.0 "$REPO" "$TAG_REF"), $(pkg acme/dev dev-master "$REMOTE_URL" "$HEAD_REF")" \
   '{"acme/lib": "1.0.0"}' '{"acme/dev": "dev-master"}'
+seed meta "{\"type\": \"package\", \"package\": {\"name\": \"acme/meta\", \"version\": \"1.0.0\", \"type\": \"metapackage\", \"source\": {\"type\": \"git\", \"url\": \"$REMOTE_URL\", \"reference\": \"$TAG_REF\"}}}, $(pkg acme/lib 1.0.0 "$REPO" "$TAG_REF")" \
+  '{"acme/meta": "1.0.0", "acme/lib": "1.0.0"}'
+# Relatif au projet : les deux côtés vivent à la même profondeur
+# (cases/<nom>/{ref,viv}) ; `realpath` le rend absolu, et l'URL du paquet
+# reste celle du lock (`updateOriginUrl`).
+seed relative "$(pkg acme/lib 1.0.0 ../../../repos/lib.git "$TAG_REF")" '{"acme/lib": "1.0.0"}'
+seed file-url "$(pkg acme/lib 1.0.0 "file://$REPO" "$TAG_REF")" '{"acme/lib": "1.0.0"}'
+seed shared "$(pkg acme/one 1.0.0 "$REMOTE_URL" "$TAG_REF"), $(pkg acme/two dev-master "$REMOTE_URL" "$HEAD_REF")" \
+  '{"acme/one": "1.0.0", "acme/two": "dev-master"}'
+# Une version qu'aucune branche ni aucun tag ne nomme : sur un cache chaud,
+# `fetchRefOrSyncMirror` resynchronise le miroir.
+seed resync "$(pkg acme/lib 2.0.0 "$REMOTE_URL" "$TAG_REF")" '{"acme/lib": "2.0.0"}'
+seed bad-local "$(pkg acme/lib 1.0.0 "$REPO" 0123456789abcdef0123456789abcdef01234567)" '{"acme/lib": "1.0.0"}'
 seed empty "{\"type\": \"package\", \"package\": {\"name\": \"acme/aa\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"$WORK/zips/zz.zip\"}}}" '{"acme/aa": "1.0.0"}'
 seed gone "$(pkg acme/lib 1.0.0 "$REMOTE_URL" 0123456789abcdef0123456789abcdef01234567)" '{"acme/lib": "1.0.0"}'
 if [ -z "${GIT_SOURCES_OFFLINE:-}" ]; then
@@ -266,6 +279,45 @@ expect_line mixed ref "  - Syncing acme/lib (1.0.0) into cache"
 run_case no-dev no-dev froid --no-dev
 SECOND="dump-autoload -o" run_case dump cache-dev froid
 
+run_case meta meta froid
+run_case relative relative froid
+if wanted relative && ! grep -q 'url = ../../../repos/lib.git' "$WORK/cases/relative/ref/vendor/acme/lib/.git/config"; then
+  echo "FAIL relative : Composer n'a pas remis l'URL du lock sur origin (cas mal construit)"; status=1
+fi
+run_case file-url file-url froid
+run_case shared shared froid
+run_case resync resync chaud
+
+# fallback_case <nom> <seed> <motif> [VAR=valeur…] : `--no-fallback` sort en
+# 3 avec le motif, sans rien laisser dans le projet (pas même vendor/) ; le
+# repli par défaut finit comme Composer (même code, même projet).
+fallback_case() {
+  local name="$1" seedname="$2" motif="$3"; shift 3
+  wanted "$name" || return 0
+  local c="$WORK/cases/$name" who code
+  mkdir -p "$c/ref" "$c/viv"
+  for who in ref viv; do cp "$WORK/seeds/$seedname/composer.json" "$WORK/seeds/$seedname/composer.lock" "$c/$who/"; done
+  rm -rf "$CACHE"
+  ( cd "$c/viv" && env "$@" COMPOSER_CACHE_DIR="$CACHE" "$VIVACITY" install --no-scripts --no-fallback >"$c/nofb.out" 2>"$c/nofb.err" ); code=$?
+  if [ "$code" != 3 ] || ! grep -qF -- "$motif" "$c/nofb.err" || [ -e "$c/viv/vendor" ]; then
+    echo "FAIL $name : --no-fallback attendu en 3, motif « $motif », rien d'écrit (code $code ; vendor/ $( [ -e "$c/viv/vendor" ] && echo présent || echo absent))"
+    tail -4 "$c/nofb.err"; status=1; return
+  fi
+  rm -rf "$CACHE"; ( cd "$c/ref" && env "$@" COMPOSER_CACHE_DIR="$CACHE" COMPOSER_TESTS_ARE_RUNNING=1 composer install --no-scripts --no-ansi >"$c/ref.out" 2>"$c/ref.err" ); echo $? > "$c/ref.code"
+  rm -rf "$CACHE"; ( cd "$c/viv" && env "$@" COMPOSER_CACHE_DIR="$CACHE" "$VIVACITY" install --no-scripts >"$c/viv.out" 2>"$c/viv.err" ); echo $? > "$c/viv.code"
+  if [ "$(cat "$c/ref.code")" = "$(cat "$c/viv.code")" ] && compare_vendor "$c/ref" "$c/viv" "$c/project.diff" >/dev/null; then
+    echo "OK   $name (repli nommé ; Composer en $(cat "$c/ref.code") des deux côtés)"
+  else
+    echo "FAIL $name : après repli, codes $(cat "$c/ref.code") / $(cat "$c/viv.code")"; head -6 "$c/project.diff"; tail -3 "$c/viv.err"; status=1
+  fi
+}
+fallback_case network-off local-tag "acme/lib: git source not installed natively (COMPOSER_DISABLE_NETWORK is set)" COMPOSER_DISABLE_NETWORK=1
+fallback_case bad-local bad-local "acme/lib: git source not installed natively (git checkout"
+fallback_case gone-ref gone "acme/lib: git source not installed natively (reference"
+if wanted bad-local && [ -n "$(find "$WORK/cases/bad-local/viv" -name '.vivacity-git-*' 2>/dev/null | head -1)" ]; then
+  echo "FAIL bad-local : répertoire de travail laissé"; status=1
+fi
+
 # Repli : un paquet installé depuis la source que le lock retire. Le
 # projet de départ est celui de Composer (des deux côtés) ; vivacity rend
 # la main avant toute écriture.
@@ -286,27 +338,6 @@ if wanted remove; then
       echo "OK   remove (repli nommé, projet de Composer)"
     else
       echo "FAIL remove : après repli"; head -8 "$c/project.diff"; status=1
-    fi
-  fi
-fi
-
-# Repli : une référence absente du dépôt. Rien n'est écrit dans le projet,
-# Composer rejoue et échoue de lui-même.
-if wanted gone; then
-  c="$WORK/cases/gone"; mkdir -p "$c/ref" "$c/viv"
-  for who in ref viv; do cp "$WORK/seeds/gone/composer.json" "$WORK/seeds/gone/composer.lock" "$c/$who/"; done
-  rm -rf "$CACHE"
-  ( cd "$c/viv" && COMPOSER_CACHE_DIR="$CACHE" "$VIVACITY" install --no-scripts --no-fallback >"$c/nofb.out" 2>"$c/nofb.err" ); code=$?
-  leftovers="$(cd "$c/viv" && find vendor -mindepth 1 2>/dev/null | head -3)"
-  if [ "$code" != 3 ] || ! grep -q "acme/lib: git source not installed natively" "$c/nofb.err" || [ -n "$leftovers" ]; then
-    echo "FAIL gone : --no-fallback attendu en 3, motif nommé, vendor vide (code $code ; reste : $leftovers)"; tail -4 "$c/nofb.err"; status=1
-  else
-    rm -rf "$CACHE"; side ref "$c/ref" install --no-scripts
-    rm -rf "$CACHE"; side viv "$c/viv" install --no-scripts
-    if [ "$(cat "$c/ref.code")" = "$(cat "$c/viv.code")" ] && [ "$(cat "$c/ref.code")" != 0 ]; then
-      echo "OK   gone (repli nommé ; Composer échoue en $(cat "$c/ref.code") des deux côtés)"
-    else
-      echo "FAIL gone : codes $(cat "$c/ref.code") / $(cat "$c/viv.code")"; tail -3 "$c/viv.err"; status=1
     fi
   fi
 fi
