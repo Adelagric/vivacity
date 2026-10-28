@@ -41,7 +41,7 @@ Also `cargo install vivacity` (crates.io), `cargo binstall vivacity`, or
 GitHub Actions:
 
 ```yaml
-- uses: Adelagric/vivacity@v0.24.0
+- uses: Adelagric/vivacity@v0.25.0
 - run: vivacity install
 ```
 
@@ -90,8 +90,8 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 106 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (main after
-0.24.0), against Composer 2.10.3 `--no-scripts` with its
+committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (vivacity
+0.25.0), against Composer 2.10.3 `--no-scripts` with its
 plugins active, `vivacity install` laid out **85 of 106 projects (80 %)
 natively with `--no-dev`** and 83 of 106 (78 %) with the dev packages,
 byte-identical down to file modes and link targets (`.git` directories
@@ -537,7 +537,7 @@ runtime. Such a host selects the provider-agnostic backend instead and
 installs its own process-wide default provider before the first request:
 
 ```toml
-vivacity = { version = "0.24", default-features = false, features = ["rustls-tls-no-provider"] }
+vivacity = { version = "0.25", default-features = false, features = ["rustls-tls-no-provider"] }
 ```
 
 vivacity's regular expressions run on PCRE2 (Composer's patterns need it:

@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
 # and runs composer.json's scripts through it with --run-scripts.
 COPY --from=composer:2.10.3 /usr/bin/composer /usr/local/bin/composer
 RUN curl -fsSL https://raw.githubusercontent.com/Adelagric/vivacity/main/install.sh \
-  | VIVACITY_VERSION=v0.24.0 VIVACITY_INSTALL_DIR=/usr/local/bin sh
+  | VIVACITY_VERSION=v0.25.0 VIVACITY_INSTALL_DIR=/usr/local/bin sh
 
 WORKDIR /app
 ENV COMPOSER_CACHE_DIR=/cache/composer

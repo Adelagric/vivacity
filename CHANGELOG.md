@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-10-28
+
 ### Added
 - **Native layout for eight custom installer plugins.**
   getkirby/composer-installer 1.2.1, neos/composer-plugin 2.1.1–2.1.3,
