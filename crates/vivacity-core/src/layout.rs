@@ -971,8 +971,12 @@ impl Layout {
                     }
                     // LibraryInstaller::updateCode renames the previous
                     // install path to the new one (removes and reinstalls
-                    // when one contains the other): not emulated.
-                    if placers.any() {
+                    // when one contains the other): not emulated. Only an
+                    // update runs it: an unchanged package whose path moved
+                    // is not found by `isInstalled` at the new path and is
+                    // installed there afresh, the old directory left alone,
+                    // which the transaction already does.
+                    if placers.any() && !unchanged(p) {
                         let before = previous
                             .iter()
                             .find(|e| e["name"].as_str() == Some(p.name()))
