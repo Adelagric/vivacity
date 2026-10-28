@@ -1359,7 +1359,11 @@ mod tests {
             r.issues[0],
             ScopeIssue::GitSource(
                 "a/src-only".into(),
-                "source type `svn` (only git is installed natively)".into()
+                if cfg!(windows) {
+                    "git sources are installed by Composer on Windows".into()
+                } else {
+                    "source type `svn` (only git is installed natively)".into()
+                }
             )
         );
         assert!(matches!(&r.issues[1], ScopeIssue::Layout(m) if m.contains("allow-plugins")));

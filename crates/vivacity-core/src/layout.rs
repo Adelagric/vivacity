@@ -1891,6 +1891,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn several_installers_on_one_type() {
         let allow = json!({"config": {"allow-plugins": true}});
         // kirby and composer/installers 1.x agree on a pluginkit's path, but
@@ -2012,16 +2013,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn installers_one_x_is_handed_over_on_windows() {
+        let allow = json!({"config": {"allow-plugins": true}});
+        let lock = lock_with(json!([
+            pkg("composer/installers", "composer-plugin", "v1.12.0"),
+            pkg("a/b", "wordpress-plugin", "1.0")
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("windows");
+        assert!(err.iter().any(|e| e.contains("1.x on Windows")), "{err:?}");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
     fn installers_one_x_alone_only() {
         let allow = json!({"config": {"allow-plugins": true}});
         let one = pkg("composer/installers", "composer-plugin", "v1.12.0");
         let lock = lock_with(json!([one.clone(), pkg("a/b", "wordpress-plugin", "1.0")]));
-        if cfg!(windows) {
-            assert!(Layout::resolve(&root(), &lock, &allow, true, true).is_err());
-        } else {
-            let l = Layout::resolve(&root(), &lock, &allow, true, true).expect("1.12");
-            assert_eq!(l.rel("a/b"), Some("wp-content/plugins/b"));
-        }
+        let l = Layout::resolve(&root(), &lock, &allow, true, true).expect("1.12");
+        assert_eq!(l.rel("a/b"), Some("wp-content/plugins/b"));
         // Another plugin could raise the first deprecation.
         let lock = lock_with(json!([
             one.clone(),

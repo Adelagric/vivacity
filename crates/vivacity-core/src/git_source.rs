@@ -919,6 +919,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn plan_hands_every_source_over_on_windows() {
+        let mut raw = serde_json::Map::new();
+        raw.insert("name".into(), "a/b".into());
+        raw.insert("version".into(), "1.0.0".into());
+        raw.insert(
+            "source".into(),
+            serde_json::json!({"type": "git", "url": "https://github.com/a/b.git", "reference": "abc"}),
+        );
+        let err = plan(
+            &LockPackage { raw },
+            std::path::Path::new("C:/nonexistent-vivacity-git"),
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert!(err.contains("on Windows"), "{err}");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
     fn plan_refuses_what_is_not_ported() {
         let manifest = serde_json::json!({});
         let pkg = |source: Value| {
