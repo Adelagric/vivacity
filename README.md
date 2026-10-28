@@ -90,17 +90,18 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 106 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (vivacity
+committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (after
 0.25.0), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **85 of 106 projects (80 %)
-natively with `--no-dev`** and 83 of 106 (78 %) with the dev packages,
+plugins active, `vivacity install` laid out **92 of 106 projects (87 %)
+natively with `--no-dev`** and 90 of 106 (85 %) with the dev packages,
 byte-identical down to file modes and link targets (`.git` directories
 of git-only packages included), and **no diff in either mode**: every
 other project was handed to Composer before any write, for reasons the
 report ranks — the Drupal plugins (the scaffold is GPL, not ported),
-mautic's and silverstripe's own logic, then plugins one by one. On
-2026-10-21 it was 76 and 74: eight custom installer plugins and git-only
-packages make up the difference. The
+mautic's and silverstripe's own logic, then plugins one by one. Earlier
+that day (0.25.0) it was 85 and 83, the seven plugins that act at script
+events making the difference; on 2026-10-21, 76 and 74, before eight
+custom installer plugins and git-only packages. The
 reasons that headed that list three days earlier (`symfony/thanks`,
 `yiisoft/yii2-composer`, asset-packagist's tarballs,
 `bamarni/composer-bin-plugin`, `roots/wordpress-core-installer`,
@@ -247,7 +248,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Twenty-two plugins are emulated and checked against the
+Twenty-nine plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 1.12.0 and 2.0.0–2.3.0, frameworks that only use the plugin's path table —
 WordPress and Drupal included; 1.12.0's PHP 8.4 deprecation lines
@@ -289,7 +290,19 @@ differs, the command goes to Composer — and
 from the lock at autoload-dump time — the shipped file is a stub), and
 `symfony/flex` at install time (`.env` copied from `.env.dist`, its own
 lines, `symfony-pack` packages laid out as metapackages; what it does
-when resolving is described below). The lines these plugins print are
+when resolving is described below), and seven that act at script events
+(`docs/plans/plugins-round2.md`): `dg/composer-cleaner` v2.2.2 and
+`liborm85/composer-vendor-cleaner` 1.7.1 (the files they delete from
+vendor/, their lines), `cakephp/plugin-installer` 2.0.2
+(`vendor/cakephp-plugins.php` and the application plugins' autoload),
+`laminas/laminas-skeleton-installer` 1.2.0–1.3.0 (the non-interactive
+minimal install: composer.json rewritten), and, where they do nothing,
+`spiral/composer-publish-plugin` v1.1.1–v1.1.2,
+`sculpin/sculpin-theme-composer-plugin` 1.0.3 and
+`laminas/laminas-component-installer` 3.5.0–3.8.0 — a publish command, a
+theme, a configuration file to inject into, the skeleton installer's
+removal (Composer loops on it), and the other cases the plan names go to
+Composer. The lines these plugins print are
 printed too, in the order Composer calls their listeners (the order it
 activated the plugins: installed.json sorted by `PackageSorter`, then those
 the command installs) — on `update`, `require` and `remove` with

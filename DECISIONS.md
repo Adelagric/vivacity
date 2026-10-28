@@ -4387,3 +4387,53 @@ plugins et leurs répertoires `path` absents. `harness/git-sources.sh` :
 25 cas, rouges sur 0.24.0 (code 3, ou motif de repli absent), verts
 ensuite ; `compare-selftest.sh` : 8 cas `.git`, dont 3 rouges avec le
 `compare.sh` de 0.24.0 (qui ignorait tout `.git`).
+
+## 2026-10-28 — Plugins à effets de bord : sept portés, six rendus (docs/plans/plugins-round2.md)
+
+Douze entrées du corpus ne tenaient plus qu'à un ou deux plugins qui
+écrivent ou suppriment des fichiers à des événements de script.
+
+- **Portés** (sources lues aux versions verrouillées, tags aux sources
+  identiques admis, toute autre version rendue nommée — chargée au début
+  de la commande comprise) : dg/composer-cleaner v2.2.2 (`Cleaner::clean`
+  sur l'arbre réel, `fnmatch` POSIX porté), liborm85/composer-vendor-cleaner
+  1.7.1 (deux temps, `Glob::toRegex($g, false)` sur PCRE2),
+  cakephp/plugin-installer 2.0.2 (autoload racine au `pre-autoload-dump`,
+  `cakephp-plugins.php` au `post-autoload-dump`, `-v` reproduit),
+  laminas/laminas-skeleton-installer 1.2.0–1.3.0 (installation minimale
+  non interactive, priorité 1000, composer.json réécrit en place par
+  l'encodage de `JsonFile`) ; inertes là où ils ne font rien :
+  spiral/composer-publish-plugin, sculpin/sculpin-theme-composer-plugin,
+  laminas/laminas-component-installer.
+- **Rendus** : drupol/composer-packages (`GENERATED_AT = time()` dans cinq
+  classes ; le reste est déterministe mais lourd — Twig, `var_export` du
+  lock, chemins absolus), ondrejmirtes/composer-attribute-collector (durée
+  sur stdout, analyse PHP), typo3/class-alias-loader (suffixe aléatoire sur
+  vendor vierge, cartes d'alias PHP exécutées), mlocati/composer-patcher
+  (`patch`/`git apply`, installed.json réécrit), contao/manager-plugin et
+  typo3/cms-composer-installers (code des paquets exécuté).
+- **Le retrait de laminas-skeleton-installer est rendu** : `uninstall`
+  rappelle l'installation manager sur lui-même, Composer boucle (mesuré par
+  la méta-analyse). `require`/`remove` avec la configuration présente aussi
+  (`RequireCommand` relit composer.json pour le hash).
+- **Le cache de classmap par entrée du store** suppose une copie intacte.
+  Un nettoyeur la contredit : l'enregistrement n'est plus écrit que d'une
+  copie qui a exactement les fichiers de l'entrée (un second parcours, sans
+  lecture, du répertoire du store à chaque enregistrement froid), et il
+  n'est servi, quand liborm85 est configuré, verrouillé ou installé, que si
+  chacun de ses fichiers existe encore. Alternative mesurée et écartée :
+  vérifier chaque répertoire de chaque enregistrement à chaque install,
+  +8 % sur un no-op d'invoiceninja en `-o` (72 430 classes, 0,28 → 0,30 s,
+  MacStudio M-series 14 cœurs, trois séries de dix). Risque assumé : un
+  vendor nettoyé par liborm85 dont le plugin et la configuration ont
+  disparu, paquets non réinstallés depuis, peut encore recevoir les classes
+  de fichiers supprimés (classmap ou `-o` seulement).
+- **Hors du sujet, corrigés parce que le banc et le corpus les ont
+  montrés** : la ligne `Downloading` d'un métapaquet à dist ; la violation
+  PSR qu'une règle suivante lève (`ClassMap::addClass`, owncloud-core en
+  dev) ; `Glob::toRegex` élargissait en Latin-1 les octets non ASCII.
+- **Vus, laissés** : `vendor/bin` vide que Composer recrée quand une mise à
+  jour sans binaire suit le retrait qui l'a vidé (vivacity le supprime :
+  l'ordre des `removeBinaries` n'est pas rejoué ; le banc l'évite) ;
+  `update`/`require` sur un dépôt `artifact` s'arrêtent en erreur au lieu
+  de partir à Composer.

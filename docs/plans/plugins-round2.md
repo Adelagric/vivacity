@@ -371,3 +371,120 @@ stderr comparés à la main).
   enregistrement du store (B2) ; `plan_autoload_early` coupé pour liborm85
   et cakephp.
 - Les sept : repli s'ils sont installés globalement (M8).
+
+## Matrice mesurée (harnais, Composer 2.10.3)
+
+`harness/plugins-round2.sh` : 104 cas (sept projets, 66 étapes comparées à
+Composer, 38 rendus vérifiés). Ce que le banc a appris en se construisant :
+
+- cakephp : un plugin applicatif à nom numérique (`plugins/7/src`) fait
+  planter Composer (`str_replace` sur une clé entière, `strict_types`) →
+  rendu (`ck-num`).
+- APFS est insensible à la casse : `docs/` et `Docs/` dans un même zip font
+  poser une question à `unzip` chez Composer — le cas de casse de liborm85
+  est dans un autre paquet.
+- vivacity imprimait `Downloading` pour un métapaquet dont l'entrée du lock
+  porte une dist (dépôt `artifact`) → corrigé.
+- `update`/`require` de vivacity s'arrêtent en erreur sur un dépôt
+  `artifact` (« repository type "artifact" is not supported ») au lieu de
+  partir à Composer : les étapes `update` du banc utilisent des paquets de
+  Packagist (défaut préexistant, laissé).
+- spiral v1.1.1 exige spiral/code-style (php-cs-fixer, des binaires) : son
+  retrait vide `vendor/bin`, que Composer recrée à l'opération suivante
+  (`initializeBinDir` d'une mise à jour sans binaire) et que vivacity
+  supprime — défaut préexistant de l'ordre des `removeBinaries`, laissé ; le
+  banc garde spiral/code-style.
+
+## Revue indépendante (sous-agent frais, `git diff d2b294c`)
+
+3 bloquants, 2 majeurs, 9 mineurs, mesurés contre Composer ; ce qui a
+changé :
+
+- **B1** un alias en ligne du lock (`1.0.0 as 1.5.0`) ajoute un paquet au
+  dépôt local : liborm85 compte « from 3 packages » où vivacity disait 2 →
+  rendu (`lv-alias`).
+- **B2** `--no-install --no-dev` avec `no-dev-only` : le mode dev était
+  figé à vrai, le nettoyage passait inaperçu → le vrai mode descend jusqu'à
+  `issues_before_resolution` (`lv-no-install-no-dev`).
+- **B3** la version chargée au début n'était pas gardée (liborm85 1.7.0
+  installé, 1.7.1 au lock : Composer lève une `ValueError` avec la classe
+  `Cleaner` de 1.7.0) → les sept gardent aussi la version d'installed.json
+  (`dg-loaded-old`).
+- **M4** cakephp sous Windows (`dirname` à `/` seulement) → les quatre
+  plugins à effets de fichiers sont rendus sous Windows (non mesurés).
+- **M5** copies de référence, NOTICE, docs : faits.
+- Mineurs corrigés : interactivité (`-q`, `SHELL_VERBOSITY=-1`,
+  `COMPOSER_NO_INTERACTION=0` faux en PHP) ; `\` dans un crochet de
+  `fnmatch` refusé ; dédoublonnage quadratique de liborm85 ; listes psr
+  acceptées par dg ; échec de la disposition au `dump-autoload` rendu au
+  lieu d'un repli silencieux ; `is_numeric` de PHP pour les noms cakephp,
+  `plugin-paths` objet accepté ; laminas-component inerte sans paquet à
+  métadonnées ; banc : cakephp à `vendor-dir` avec plugins sous `lib/`, dg
+  avec codeception/c3 (ordre des lignes). Laissés : spiral ignore
+  `requiresUpdate` (repli plus large que nécessaire) ; le second parcours
+  du store à chaque enregistrement froid de classmap (non mesuré, sans
+  lecture de fichier).
+
+## Résultat (session de travail, macOS)
+
+`uname -a` : `Darwin MacStudio-de-Adel-5.local 25.6.0 Darwin Kernel Version
+25.6.0: Fri Jul 31 19:17:26 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6041
+arm64` ; PHP 8.5.12 et 8.4.27, Composer 2.10.3, bash 3.2.
+
+**Commits** (branche `plugins-round2`, depuis main d2b294c) : 37fb1f7
+(plan), 2d71839 (méta-analyse, modèle révisé), b82199f (harnais rouge,
+ci.yml), 6332b34 (ports, cœur), 09f5f0c (branchement, ligne `Downloading`
+des métapaquets, corpus sur le projet entier), 7ad09d2 (enregistrement
+du store seulement depuis une copie intacte), 90bf316 (vérification par
+fichier seulement avec liborm85 en vue), b100b70 (violation PSR levée par
+une règle suivante), 1f234c6 (retours de la revue), 3fb53b3 (copies de
+référence, NOTICE), puis les docs et ce résultat.
+
+**Classement** : fidèles et déterministes — spiral, sculpin, laminas
+component (inertes dans les cas portés), laminas-skeleton-installer, dg,
+cakephp, liborm85 ; non reproductibles à l'octet — drupol (horodatage),
+attribute-collector (durée), class-alias-loader (suffixe aléatoire sur
+vendor vierge, cartes PHP) ; hors de portée — composer-patcher,
+contao/manager-plugin, typo3/cms-composer-installers.
+
+**Portés** : dg/composer-cleaner v2.2.2, liborm85/composer-vendor-cleaner
+1.7.1, cakephp/plugin-installer 2.0.2, laminas-skeleton-installer
+1.2.0–1.3.0 ; inertes : spiral v1.1.1–v1.1.2, sculpin 1.0.3,
+laminas-component-installer 3.5.0–3.8.0. **Replis** : les six plugins
+ci-dessus, et pour les sept toute autre version (au lock ou chargée), un
+plugin global, Windows (les quatre à effets de fichiers), `-v` (six sur
+sept), et les cas nommés par le modèle, la méta-analyse et la revue.
+Écart au plan : les décisions sont dans `effect_plugins.rs` (cœur et
+crate `vivacity`) au lieu de `inert_plugins.rs` / `laminas_skeleton.rs`.
+
+**Corpus** : les sept entrées visées natives, 0 diff, dans les deux modes
+(`--only`, puis le corpus complet). stdout et stderr comparés par script
+(`composer install` contre `vivacity install`, même copie, mêmes
+options) : identiques pour les quatorze passages, après la correction de
+la violation PSR (owncloud-core, dev). Corpus complet
+(`docs/corpus/2026-10-28-plugins-round2.md`) : **92/106 natifs en
+`--no-dev`, 90/106 en dev, 0 diff, 0 indisponible** (85 et 83 avant).
+
+**Harnais** `plugins-round2.sh` : 104 cas ; sur d2b294c, 75 rouges et 29
+verts (les `--no-plugins` sur vendor vierge, et les rendus que d2b294c
+rend aussi, le plugin lui étant inconnu) ; 104 verts sous PHP 8.5 et sous
+8.4.
+
+**Barrières** : `cargo fmt --all -- --check` 0 ; clippy `-D warnings` hôte
+0 et `x86_64-pc-windows-gnu` 0 ; `fixtures/make.sh` 0 puis `cargo test
+--workspace` 0 (421 tests, 0 échec) ; les 33 lancements de harnais de
+`ci.yml` (`diff-vendor.sh` trois fois) et `root-manifest.sh` à 0 sous
+PHP 8.5, chacun par `net-retry.sh`, répertoire supprimé après ;
+`plugins-round2.sh`, `custom-installers.sh`, `plugin-lines.sh` à 0 sous
+PHP 8.4. Les journaux par harnais n'ont pas été gardés (seuls les codes) :
+qu'un second passage réseau ait servi n'est pas connu. Non exécuté :
+`windows.yml` (pas de machine Windows) ; `bench.yml` (mesure manuelle du
+no-op d'invoiceninja à la place : 0,28 s des deux côtés).
+
+**Défauts vus, laissés** : `vendor/bin` vide que Composer recrée après le
+retrait qui l'a vidé ; `update`/`require` sur un dépôt `artifact` en
+erreur au lieu du repli ; spiral rendu sans regarder `requiresUpdate` ;
+lignes stderr de dg dans l'ordre `readdir` ; un composer.json de dist qui
+diffère du lock ; un vendor nettoyé par liborm85 dont plugin et
+configuration ont disparu (cache de classmap) ; second parcours du store
+par enregistrement froid, non mesuré.
