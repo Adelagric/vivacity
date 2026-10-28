@@ -937,6 +937,12 @@ impl Scanner {
                         entry.push(file_path.to_string());
                     }
                 } else {
+                    // `ClassMap::addClass` forgets the violations an earlier
+                    // scan recorded for this file (another namespace's rule
+                    // rejected it before this one took it).
+                    self.class_map
+                        .psr_violations
+                        .retain(|(_, _, p)| p.as_str() != file_path.as_ref());
                     self.class_map.map.insert(class, file_path.to_string());
                 }
             }
@@ -1231,6 +1237,27 @@ mod cache_tests {
         assert_eq!(direct.0.len(), 4);
         assert!(direct.0.contains_key(&vec![0x7fu8]));
         assert_eq!(direct.1.len(), 1, "the Acme\\A ambiguity must be replayed");
+    }
+
+    #[test]
+    fn a_class_found_valid_later_clears_its_violation() {
+        // owncloud-core's `Tests\\ => tests/` then `Test\\ => tests/lib/`
+        // (krsort): the first rejects tests/lib/TestCase.php, the second
+        // takes it, and Composer prints no warning.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tests = tmp.path().join("tests");
+        write(
+            &tests.join("lib/TestCase.php"),
+            b"<?php\nnamespace Test;\nclass TestCase {}\n",
+        );
+        let mut s = Scanner::new().expect("scanner");
+        s.scan_path_cached(&tests, None, AutoloadType::Psr4, "Tests\\", None)
+            .expect("scan");
+        assert_eq!(s.class_map.psr_violations.len(), 1);
+        s.scan_path_cached(&tests.join("lib"), None, AutoloadType::Psr4, "Test\\", None)
+            .expect("scan");
+        assert!(s.class_map.psr_violations.is_empty());
+        assert_eq!(s.class_map.map.len(), 1);
     }
 
     #[test]
