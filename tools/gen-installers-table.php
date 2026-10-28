@@ -50,7 +50,10 @@ foreach ($supported as $key => $class) {
     }
     $pkg = new \Composer\Package\Package('dummy/pkg', '1.0.0.0', '1.0.0');
     $obj = new $fqcn($pkg, $composer, new \Composer\IO\NullIO());
-    $locations = $obj->getLocations((string) $key);
+    // 1.x: `getLocations()` takes no framework type.
+    $locations = $rc->getMethod('getLocations')->getNumberOfParameters() === 0
+        ? $obj->getLocations()
+        : $obj->getLocations((string) $key);
     ksort($locations, SORT_STRING);
     $out[] = ['key' => (string) $key, 'class' => $class, 'custom' => $custom, 'locations' => $locations];
 }
