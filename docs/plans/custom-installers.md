@@ -382,11 +382,77 @@ cas natifs en repli (code 3 contre 0), les garde-fous déjà verts
   décision ouverte ; copies de référence et lignes NOTICE ajoutées pour les
   nouvelles origines MIT/Apache.
 
-## Résultat (2026-10-28)
+## Résultat (session de travail, Linux)
 
-La session de travail s'est arrêtée après le commit de documentation
-(e57a73b), sans écrire cette section ni pousser la branche finale ; la
-vérification a été refaite sur `Darwin MacStudio-de-Adel-5.local 25.6.0
+`uname -a` : `Linux vm 6.18.44-fc-v180 #1 SMP PREEMPT_DYNAMIC @0 x86_64 x86_64 x86_64 GNU/Linux` ; `nproc` : 4.
+
+**Commits** (branche `custom-installers`, depuis main 8a48734) : 0804904
+(début du plan, générateur de table pour 1.x), e1e4606 (plan), 06f92ae
+(harnais rouge, ci.yml, matrice), a4fff97 (code), ea0f2ad (versions en
+forme de date, corpus sur le projet entier), 26ed8fd (retours de la
+revue), e57a73b (docs, copies de référence), 67f31ce (règle de
+déplacement), puis ce résultat.
+
+**Classement** : correspondance pure — neos, davidbarratt, johnpbloch,
+composer/installers 1.12.0 (plus deux lignes de dépréciation), thelia,
+contao-components, oomphinc, omeka, simplesamlphp module-installer
+(imbrication) ; chemin et effets — getkirby (`vendor/` retiré),
+craftcms (`plugins.php`), simplesamlphp xmlprovider (liens durs nommés par
+le chemin absolu), contao/manager-plugin ; hors de portée — silverstripe,
+mautic, composer/installers à logique propre.
+
+**Portés** : getkirby 1.2.1, neos 2.1.1–2.1.3, davidbarratt 1.1.0,
+johnpbloch 2.0.0, thelia 1.6, contao-components 1.4.0–1.4.1, oomphinc
+2.0.0–2.0.1, craftcms 1.6.0 (inerte), composer/installers v1.12.0.
+**Replis** : simplesamlphp ×2 (imbrication, liens durs), contao/
+manager-plugin, silverstripe, mautic, `plugins.php` de craftcms, omeka
+(GPL-3.0, paquet `path` absent de la fixture, 0 entrée) ; et les cas
+nommés par la méta-analyse et la revue (sections ci-dessus).
+
+**Corpus** (`harness/corpus.sh --only …`, dev et no-dev) : craftcms-craft,
+getkirby-plainkit, neos-base-distribution, phplist-phplist3, themosis,
+thelia-project — **natives, 0 diff** (projet entier), 12/12 ; stdout et
+stderr comparés à la main : identiques, hors la ligne d'échec réseau de
+wpackagist.org (hôte refusé ici, libellé différent) chez themosis.
+phplist a d'abord montré un diff (`v2021-04` normalisé `2021.0.0.0`),
+corrigé dans `version.rs`.
+
+**Harnais** `custom-installers.sh` : 64 cas, 64 verts ; sur 0.24.0, 53
+rouges et 11 déjà verts (les `--no-plugins` sur vendor vierge et les
+rendus `kirby-dot`, `cc-nodir`, `oo-nopath`, `cr-plugin`).
+
+**Barrières** : `cargo fmt --all -- --check` ; clippy `-D warnings` Linux et
+`x86_64-pc-windows-gnu` ; `cargo test --workspace` 393 tests, 0 échec
+(`fixtures/make.sh` sort en 100 : la fixture wordpress demande
+downloads.wordpress.org, refusé ; les autres fixtures sont faites).
+Harnais de `ci.yml` (utilisateur non root, cache amorcé par `git
+archive`) : verts — transitions, path-repos, scripts, tar-dist,
+bin-plugin, custom-dirs, custom-installers, package-versions,
+plugin-lines, allow-plugins, flex-install, flex-update, flex-recipes,
+artifact-repo, compare-selftest, two-stage, transport-exit, verbosity,
+fallback-args, root-scan, drift-reference, et root-manifest.sh. Bloqués
+par le réseau de la session, relancés restreints et verts : diff-vendor
+(×3), update, steps, removal, vendor-dir, boot (sans wordpress/drupal).
+Non exécutables ici : wp-core (downloads.wordpress.org), merge-plugin
+(authentification github.com), yii2-composer (asset-packagist.org : seule
+la ligne d'échec réseau diffère), download-lines (cache froid impossible
+sans api.github.com) — les deux derniers échouent à l'identique avec le
+binaire de main. Le passage complet a tourné sur 26ed8fd ; après 67f31ce,
+les passages touchés par la disposition (custom-dirs, custom-installers,
+transitions, path-repos, vendor-dir, removal) ont été relancés, verts.
+
+**Défauts vus, laissés** : la licence de roots/wordpress-core-installer
+(GPL-2.0-or-later, NOTICE corrigé ; tranchée ensuite, voir la section suivante) ; « Skipped
+installation of bin … » non imprimé ; un zip `artifact` remplacé à nom et
+version égaux resservi par le store ; `lock.rs::target_dir` sans la
+réécriture des `..` ; plugin au répertoire absent, fork au même tag,
+binaire symlink d'une archive sous un chemin relatif (HANDOVER).
+
+## Vérification locale et fusion (2026-10-28)
+
+La fusion dans main a d'abord été faite depuis e57a73b, avant que la
+session ne pousse 67f31ce et la section ci-dessus ; la vérification a été
+refaite sur `Darwin MacStudio-de-Adel-5.local 25.6.0
 arm64` (`sysctl -n hw.ncpu` : 14), PHP 8.5.12, Composer 2.10.3, bash 3.2.
 
 - **Harnais** : `harness/custom-installers.sh` 64/64 sous `/bin/bash` 3.2 ;
@@ -395,7 +461,12 @@ arm64` (`sysctl -n hw.ncpu` : 14), PHP 8.5.12, Composer 2.10.3, bash 3.2.
   (`installer-paths` vidé puis `install`), natif sur main, partait à
   Composer : le refus « moves … » visait tout paquet dont le chemin
   change, alors que seul `updateCode` (une mise à jour) renomme. Restreint
-  aux paquets mis à jour (94ea424) ; `custom-dirs.sh` 4/4.
+  aux paquets mis à jour (94ea424) ; `custom-dirs.sh` 4/4. La session a
+  corrigé la même régression de son côté (67f31ce : ancien chemin recalculé
+  par les installeurs actuels) ; à la fusion, le commentaire de 67f31ce est
+  gardé avec la condition de 94ea424, plus prudente : une mise à jour qui
+  change aussi de chemin par la configuration n'a pas de cas de harnais,
+  elle part à Composer.
 - **Licence** : roots/wordpress-core-installer (GPL-2.0-or-later) — copie
   retirée de `docs/reference/`, `layout::wp_core_dir` récrite depuis le
   comportement mesuré (7cf1646 ; DECISIONS 2026-10-28) ; `wp-core.sh` 5/5,

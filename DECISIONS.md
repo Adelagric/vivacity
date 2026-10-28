@@ -4258,8 +4258,13 @@ et revue).
   vide que le téléchargement laisse au chemin de LibraryInstaller
   (l'installeur est capturé au téléchargement, `cleanup` ne retire que ce
   chemin et `vendor/<vendeur>`).
-- **Rendus, nommés** : un paquet que la mise à jour déplace
-  (`updateCode` renomme) ; une `target-dir` que l'installeur n'ajoute pas
+- **Rendus, nommés** : un paquet que ses propres métadonnées déplacent à
+  la mise à jour (`installer-name` changé : `updateCode` renomme le chemin
+  initial vers le nouveau ; un chemin que la configuration déplace sur
+  un paquet inchangé est, lui, une installation neuve au nouveau chemin,
+  l'ancien répertoire laissé, émulée — `custom-dirs.sh` `unmapped`, qu'une
+  première version trop large de la règle rendait ; le même déplacement
+  sur un paquet mis à jour, sans cas de harnais, est rendu aussi) ; une `target-dir` que l'installeur n'ajoute pas
   au chemin (l'autoloader de Composer en retranche la longueur quand même —
   il la retranche désormais une seule fois chez vivacity, comme `substr`) ;
   un paquet `path` à binaires posé à un chemin relatif (`realpath` du

@@ -948,17 +948,6 @@ impl Layout {
         let vendor_composer =
             normalize_path(&format!("{}/{vendor}/composer", root.to_string_lossy()));
         let root_norm = normalize_path(&root.to_string_lossy());
-        // installed.json's `install-path` of a package, project-relative.
-        let old_rel_of = |entry: &Value| -> Option<String> {
-            let ip = entry.get("install-path").and_then(Value::as_str)?;
-            let abs = if crate::pathutil::is_absolute_path(ip) {
-                normalize_path(ip)
-            } else {
-                normalize_path(&format!("{vendor_composer}/{ip}"))
-            };
-            abs.strip_prefix(&format!("{root_norm}/"))
-                .map(str::to_owned)
-        };
         for p in &wanted {
             if p.is_virtual(flex_packs) {
                 continue;
@@ -969,21 +958,47 @@ impl Layout {
                     if placed.rel != default {
                         customs.insert(p.name().to_owned());
                     }
-                    // LibraryInstaller::updateCode renames the previous
-                    // install path to the new one (removes and reinstalls
-                    // when one contains the other): not emulated. Only an
-                    // update runs it: an unchanged package whose path moved
-                    // is not found by `isInstalled` at the new path and is
-                    // installed there afresh, the old directory left alone,
-                    // which the transaction already does.
+                    // LibraryInstaller::updateCode renames the install path
+                    // of the initial package to the target's, both computed
+                    // by the current installers: a package whose own
+                    // metadata moves it (`installer-name`, its autoload for
+                    // neos) — not emulated. A path that moves because the
+                    // configuration did, on a package left unchanged, is a
+                    // fresh install (`isInstalled` misses it, the old
+                    // directory stays), which the transaction does. The same
+                    // configuration move on a package that is also updated
+                    // has no harness case: handed over too.
                     if placers.any() && !unchanged(p) {
-                        let before = previous
+                        let entry = previous
                             .iter()
-                            .find(|e| e["name"].as_str() == Some(p.name()))
-                            .and_then(old_rel_of);
-                        if let Some(before) = before.filter(|b| *b != placed.rel) {
+                            .find(|e| e["name"].as_str() == Some(p.name()));
+                        // The initial package's path under the current
+                        // installers, then where installed.json says it is.
+                        let recomputed = entry
+                            .and_then(Value::as_object)
+                            .and_then(|e| place(&vendor, &placers, root_extra, e).ok())
+                            .map(|b| b.rel);
+                        let recorded = entry
+                            .and_then(|e| e.get("install-path"))
+                            .and_then(Value::as_str)
+                            .map(|ip| {
+                                if crate::pathutil::is_absolute_path(ip) {
+                                    normalize_path(ip)
+                                } else {
+                                    normalize_path(&format!("{vendor_composer}/{ip}"))
+                                }
+                            })
+                            .and_then(|abs| {
+                                abs.strip_prefix(&format!("{root_norm}/"))
+                                    .map(str::to_owned)
+                            });
+                        if let Some(before) = recomputed
+                            .into_iter()
+                            .chain(recorded)
+                            .find(|b| *b != placed.rel)
+                        {
                             issues.push(format!(
-                                "installed package {} moves from `{before}` to `{}`: let Composer handle this move",
+                                "installed package {} moves from `{before}` to `{}` on update: let Composer handle this move",
                                 p.name(),
                                 placed.rel
                             ));
