@@ -677,6 +677,18 @@ mod tests {
         }
     }
 
+    /// A configuration emulated natively: no issue, or only the Windows
+    /// hand-over there.
+    fn assert_native(c: &Context<'_>) {
+        let found = issues(c);
+        if cfg!(windows) {
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].contains("not emulated on Windows"), "{found:?}");
+        } else {
+            assert!(found.is_empty(), "{found:?}");
+        }
+    }
+
     #[test]
     fn versions_and_inert_plugins() {
         let d = tempfile::tempdir().unwrap();
@@ -770,9 +782,14 @@ mod tests {
             &[],
             Command::Install,
         );
-        assert!(issues(&c).is_empty());
+        assert_native(&c);
         c.aliases = true;
-        assert!(issues(&c)[0].contains("inline aliases"));
+        let expected = if cfg!(windows) {
+            "on Windows"
+        } else {
+            "inline aliases"
+        };
+        assert!(issues(&c)[0].contains(expected));
     }
 
     #[test]
@@ -809,7 +826,7 @@ mod tests {
             &installed,
             Command::Update,
         );
-        assert!(issues(&c).is_empty());
+        assert_native(&c);
         let c = ctx(d.path(), &m, vec![], &installed, Command::Install);
         assert!(issues(&c)[0].contains("uninstalls itself"));
     }
