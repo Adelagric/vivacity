@@ -133,15 +133,23 @@ chaque entrée (dépôt git, comme `harness/corpus.sh`), dev et `--no-dev`,
 
 - **drupol/composer-packages** : cinq classes générées sous
   `vendor/drupol/composer-packages/build/` contiennent `GENERATED_AT =
-  time()` : deux runs de Composer diffèrent entre eux.
+  time()` : deux runs de Composer diffèrent entre eux. Révisé après la
+  méta-analyse (M10) : c'est le seul aléa (comme le préfixe APCu que
+  `compare.sh` tolère déjà) ; le reste — cinq gabarits Twig à échappement
+  HTML, `var_export` des entrées du lock (dev comprises), chemins
+  d'installation absolus — est déterministe mais lourd, et la comparaison
+  du corpus devrait masquer l'horodatage et le chemin. Pas porté à ce
+  tour.
 - **ondrejmirtes/composer-attribute-collector** : « `Generated attributes
   file in <durée> ms` » sur stdout (`microtime`), et l'analyse PHP des
   sources par nikic/php-parser.
 - **typo3/class-alias-loader** : sur un vendor vierge, `vendor/autoload.php`
   n'existe pas encore au `pre-autoload-dump` : le suffixe vient de
-  `md5(uniqid())` et entre dans deux fichiers générés ; il `require` aussi
-  les cartes d'alias PHP des paquets. Les deux entrées l'activent
-  (`always-add-alias-loader`, cartes de typo3/cms-*).
+  `md5(uniqid())` (sauf `config.autoloader-suffix`) et entre dans deux
+  fichiers générés ; une fois autoload.php écrit, il est déterministe. Mais
+  il `require` les cartes d'alias PHP des paquets (code des paquets), et
+  les deux entrées l'activent (`always-add-alias-loader`, cartes de
+  typo3/cms-*) à côté de cms-composer-installers.
 
 **Hors de portée** :
 
@@ -287,3 +295,79 @@ stderr comparés à la main).
   laminas-component-installer, les commandes de spiral : portables pour la
   première, mais aucune entrée ne les exige.
 - Les six plugins non reproductibles ou hors de portée ci-dessus.
+
+## Méta-analyse (sous-agent frais, plan et code, sans mes conclusions)
+
+2 bloquants, 10 majeurs, 7 mineurs ; ce qui change :
+
+- **B1, retrait de laminas-skeleton-installer** : `Plugin::uninstall` lance
+  `Uninstaller`, qui rappelle `InstallationManager::uninstall` sur le même
+  paquet, donc `PluginManager::uninstallPackage`, donc de nouveau
+  `uninstall` — mesuré : `composer remove` boucle sans fin (41 262 lignes
+  « Removing … » avant d'être tué). → repli nommé dès qu'une transaction
+  retire ce plugin alors qu'il est chargé et autorisé ; le cas retrait du
+  harnais ne vérifie que le code 3.
+- **B2, cache de classmap** : liborm85 supprime aussi dans les répertoires
+  autoloadés (`tests/` → `src/x/tests/…`) ; le cache par entrée du store
+  sert alors des classes de fichiers supprimés, y compris aux runs
+  suivants (plugin retiré, `--no-plugins`, `dump-autoload`), et le plan
+  anticipé du dump (`plan_autoload_early`) parcourt l'arbre avant
+  `pre-autoload-dump`. → un enregistrement du store n'est servi que si
+  chaque fichier qu'il liste existe encore (un `stat` par fichier, sinon
+  parcours réel) ; plan anticipé coupé quand liborm85 ou cakephp sont
+  actifs ; cas de harnais en `-o` rejoué après le retrait du plugin et
+  sous `--no-plugins`.
+- **M3** un motif liborm85 qui supprime la cible d'un `bin` déclaré :
+  Composer écrit ensuite « Skipped installation of bin … » (stderr,
+  `ensureBinariesPresence` après le dump) — vivacity ne l'écrit pas
+  (défaut préexistant). → repli quand un motif touche un `bin` déclaré.
+- **M4** `dump-autoload --no-dev` : cakephp, liborm85 et spiral lisent le
+  dépôt local entier (installed.json), paquets dev compris.
+- **M5** cakephp : `Test\` vers `tests/` en dev ; racine
+  `dirname(realpath(vendor-dir))` ; chemin des paquets
+  `realpath(vendor)/prettyName` quel que soit l'installeur ; répertoires
+  sans `src` gardés au `post-autoload-dump` seulement ; `+=` (un paquet
+  l'emporte) ; `ksort` SORT_REGULAR ; `dump-autoload` sans vendor/ →
+  TypeError (repli).
+- **M6** dg : paquet sans autoload ou à source `""`/`.`/`./` intact ; `bin`
+  protège seulement avec un autoload ; `ltrim('.')` ; deux lignes stderr
+  (`unknown autoload type`, `Invalid <chemin>`) ; parcours de l'arbre réel
+  (orphelins, `vendor/composer/*`) ; `cleaner-ignore` `null` dans `extra`
+  → config ; objet de chaînes valide.
+- **M7** harnais : `update` (post-update-cmd, priorité 1000), plugin
+  installé, mis à jour, retiré dans le run, combinaisons avec les
+  émulations existantes (ordre des lignes), paquet `path`, `-o` ; stdout et
+  stderr du corpus comparés par script.
+- **M8** un des sept installé globalement → repli nommé.
+- **M9** liborm85 et un paquet installé depuis la source (`.git` vide
+  compté) → repli comme `path`.
+- **M10** classement de drupol et de class-alias-loader corrigé (ci-dessus).
+- **M11** `require`/`remove` avec skeleton configuré : `RequireCommand`
+  relit composer.json réécrit pour le hash du lock → repli.
+- **M12** `dump-autoload` : le bloc liborm85 entre « Generating » et
+  « Generated » (stdout tous deux).
+- Mineurs : `(bool)` de PHP sur `config.dev-files` ; liste ou valeur non
+  tableau et glob invalide → repli ; métapaquets comptés ; `target-dir`
+  dans le chemin ; « Cleaning vendor binary directory » seulement si
+  bin-dir existe ; l'analyse des motifs inutilisés est inatteignable (le
+  plugin chargé au début n'est jamais dans `changedPackages`) → pas de
+  garde ; `glob_to_regex` poussait les octets ≥ 0x80 comme du Latin-1 et
+  taisait les regex invalides → corrigé ; `fnmatch` de la libc diffère
+  (crochet non fermé, `\` final) → repli sur ces formes ; composer.json
+  écrit en place (inode et mode gardés) ; le verdict inerte de mezzio en
+  dev tient à la fixture sans `config/` (documenté) ; spiral gardé aussi
+  au `dump-autoload`.
+
+### Le modèle, révisé
+
+- skeleton : repli au retrait (B1), sur `require`/`remove` (M11) et sans
+  installation ; natif à `install` et `update`.
+- liborm85 : plus repli si un motif touche un `bin` déclaré (M3), paquet
+  installé depuis la source (M9) ; `dump-autoload` lit installed.json
+  entier (M4).
+- cakephp : comportements de M5 ; `dump-autoload` sur installed.json
+  entier.
+- vivacity-autoload : vérification d'existence des fichiers d'un
+  enregistrement du store (B2) ; `plan_autoload_early` coupé pour liborm85
+  et cakephp.
+- Les sept : repli s'ils sont installés globalement (M8).
