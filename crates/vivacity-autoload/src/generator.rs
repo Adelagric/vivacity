@@ -78,6 +78,11 @@ pub struct DumpOptions {
 pub struct ClassmapCacheConfig {
     pub store_root: PathBuf,
     pub cache_root: PathBuf,
+    /// Before serving a store entry's record, check each file it lists
+    /// still exists under vendor/, not only each directory: a plugin that
+    /// deletes single files there (liborm85/composer-vendor-cleaner) is or
+    /// was configured.
+    pub verify_files: bool,
 }
 
 #[derive(Debug, Default)]
@@ -331,11 +336,10 @@ pub fn plan(
                     .strip_prefix(&se.install)
                     .unwrap_or("")
                     .trim_start_matches('/');
-                Some(ScanSlot::Store(crate::classmap::CacheSlot::new(
-                    &cfg.cache_root,
-                    &se.entry,
-                    Path::new(rel),
-                )))
+                let mut slot =
+                    crate::classmap::CacheSlot::new(&cfg.cache_root, &se.entry, Path::new(rel));
+                slot.verify_files = cfg.verify_files;
+                Some(ScanSlot::Store(slot))
             }
             None => Some(ScanSlot::Files(crate::classmap::FileCacheSlot::new(
                 &cfg.cache_root,

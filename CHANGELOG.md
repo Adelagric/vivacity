@@ -6,6 +6,48 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Added
+- **Seven plugins that act at script events are emulated.**
+  dg/composer-cleaner v2.2.2 (its clean of vendor/ at post-install-cmd and
+  post-update-cmd, `cleaner-ignore`, its one line), liborm85/composer-vendor-cleaner
+  1.7.1 (`extra.dev-files`: the packages cleaned at pre-autoload-dump, the
+  bin directory and the summary after, every empty directory removed; on
+  `dump-autoload` all at once), cakephp/plugin-installer 2.0.2
+  (`vendor/cakephp-plugins.php` and the application plugins' autoload, at
+  install and `dump-autoload`, `-v` lines included),
+  laminas/laminas-skeleton-installer 1.2.0–1.3.0 (non-interactively, the
+  minimal install: its two lines and composer.json rewritten as `JsonFile`
+  writes it, before the other post-install-cmd listeners), and, where they
+  do nothing, spiral/composer-publish-plugin v1.1.1–v1.1.2 (no package to
+  publish), sculpin/sculpin-theme-composer-plugin 1.0.3 (no theme) and
+  laminas/laminas-component-installer 3.5.0–3.8.0 (`--no-dev`, or no
+  configuration file to inject into). Another version, an interactive
+  prompt, a theme, a publish command, a configuration file to inject into,
+  the removal of laminas-skeleton-installer (Composer loops on it),
+  `require`/`remove` with it configured, the cleaners without an install,
+  a liborm85 pattern that touches a binary, inline aliases, `path` or
+  source packages under liborm85, `-v` for six of them, Windows for the
+  four with file effects, and the other cases named in
+  `docs/plans/plugins-round2.md` go to Composer before anything is
+  written. Seven corpus entries become native (cakephp-app, fossbilling,
+  laminas-mvc-skeleton, mezzio-skeleton, owncloud-core, sculpin,
+  spiral-app).
+
+### Fixed
+- **A class map record of the store is no longer built from a cleaned
+  copy.** A scan of a vendor/ package a cleaner had pruned was stored as
+  the record of the immutable store entry, which other projects then
+  reused; the record is written only from a copy holding exactly the
+  entry's files, and, with liborm85/composer-vendor-cleaner in sight,
+  served only while every file it lists is still there.
+- **A PSR violation is forgotten when a later rule takes the class**
+  (`ClassMap::addClass`): owncloud-core in dev mode printed a warning
+  Composer does not.
+- **No `Downloading` line for a metapackage** whose lock entry carries a
+  dist (an `artifact` repository gives one to every package).
+- `Glob::toRegex` keeps bytes outside ASCII as they are (the `.gitattributes`
+  patterns of a `path` package with such a pattern got another regex).
+
 ## [0.25.0] — 2026-10-28
 
 ### Added

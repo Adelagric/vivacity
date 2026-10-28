@@ -375,6 +375,10 @@ const CACHE_FORMAT: &str = "v3";
 /// key = entry (name/version/ref) + relative subdirectory + format version.
 pub struct CacheSlot {
     file: PathBuf,
+    /// The store entry's own copy of the scanned directory.
+    entry_dir: PathBuf,
+    /// Check every listed file (not only their directories) before serving.
+    pub verify_files: bool,
 }
 
 impl CacheSlot {
@@ -389,7 +393,43 @@ impl CacheSlot {
         let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         CacheSlot {
             file: cache_root.join("classmap").join(format!("{key}.bin")),
+            entry_dir: store_entry.join(rel_subdir),
+            verify_files: false,
         }
+    }
+
+    /// Whether the files a record lists are all still under `base`, when
+    /// `verify_files` asks (a cleaner that deletes files there is or was
+    /// configured). Otherwise the copy is trusted, as before: a check of
+    /// every directory of every record cost 8 % of a no-op install of
+    /// invoiceninja (`-o`, 72 430 classes), measured.
+    fn still_present(&self, base: &Path, entries: &[(PathBuf, Vec<Vec<u8>>)]) -> bool {
+        !self.verify_files
+            || entries
+                .iter()
+                .all(|(rel, _)| std::fs::symlink_metadata(base.join(rel)).is_ok())
+    }
+
+    /// Whether a scan of `base` (a copy of the store entry under vendor/)
+    /// saw exactly the files of the store entry itself: only then may it be
+    /// recorded for the entry — a copy a plugin has cleaned (or anything
+    /// else changed the file set of) would otherwise give every project that
+    /// uses the entry a record without the deleted files.
+    fn matches_entry(&self, base: &Path, files: &[(PathBuf, PathBuf, Vec<Vec<u8>>)]) -> bool {
+        let Ok((entry_files, _)) = Scanner::collect_files(&self.entry_dir) else {
+            return false;
+        };
+        let mut scanned: Vec<PathBuf> = files
+            .iter()
+            .filter_map(|(f, _, _)| f.strip_prefix(base).ok().map(Path::to_path_buf))
+            .collect();
+        let mut entry: Vec<PathBuf> = entry_files
+            .iter()
+            .filter_map(|(f, _)| f.strip_prefix(&self.entry_dir).ok().map(Path::to_path_buf))
+            .collect();
+        scanned.sort();
+        entry.sort();
+        scanned.len() == files.len() && scanned == entry
     }
 
     /// Entries (relative path, raw classes) in walk order.
@@ -743,7 +783,16 @@ impl Scanner {
         // (path, real path, raw classes) in walk order.
         let mut scanned_files: ScannedFiles = Vec::new();
 
-        let cached = cache.and_then(|c| c.load());
+        // A store entry is immutable, its copy under vendor/ is not: a
+        // plugin may have deleted files there since (liborm85/
+        // composer-vendor-cleaner removes test directories inside the
+        // autoloaded ones, docs/plans/plugins-round2.md). With such a
+        // plugin in sight, a record whose files are not all still there is
+        // not served: the directory is scanned as it is.
+        let cached = cache
+            .and_then(|c| c.load().map(|e| (c, e)))
+            .filter(|(c, entries)| c.still_present(path, entries))
+            .map(|(_, e)| e);
         if let Some(entries) = cached {
             let base_real =
                 vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -765,7 +814,7 @@ impl Scanner {
                 scanned_files.push((file, real, classes));
             }
             if let Some(c) = cache {
-                if !saw_symlink {
+                if !saw_symlink && c.matches_entry(path, &scanned_files) {
                     c.store(path, &scanned_files);
                 }
             }
@@ -888,6 +937,12 @@ impl Scanner {
                         entry.push(file_path.to_string());
                     }
                 } else {
+                    // `ClassMap::addClass` forgets the violations an earlier
+                    // scan recorded for this file (another namespace's rule
+                    // rejected it before this one took it).
+                    self.class_map
+                        .psr_violations
+                        .retain(|(_, _, p)| p.as_str() != file_path.as_ref());
                     self.class_map.map.insert(class, file_path.to_string());
                 }
             }
@@ -1182,6 +1237,81 @@ mod cache_tests {
         assert_eq!(direct.0.len(), 4);
         assert!(direct.0.contains_key(&vec![0x7fu8]));
         assert_eq!(direct.1.len(), 1, "the Acme\\A ambiguity must be replayed");
+    }
+
+    #[test]
+    fn a_class_found_valid_later_clears_its_violation() {
+        // owncloud-core's `Tests\\ => tests/` then `Test\\ => tests/lib/`
+        // (krsort): the first rejects tests/lib/TestCase.php, the second
+        // takes it, and Composer prints no warning.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tests = tmp.path().join("tests");
+        write(
+            &tests.join("lib/TestCase.php"),
+            b"<?php\nnamespace Test;\nclass TestCase {}\n",
+        );
+        let mut s = Scanner::new().expect("scanner");
+        s.scan_path_cached(&tests, None, AutoloadType::Psr4, "Tests\\", None)
+            .expect("scan");
+        assert_eq!(s.class_map.psr_violations.len(), 1);
+        s.scan_path_cached(&tests.join("lib"), None, AutoloadType::Psr4, "Test\\", None)
+            .expect("scan");
+        assert!(s.class_map.psr_violations.is_empty());
+        assert_eq!(s.class_map.map.len(), 1);
+    }
+
+    #[test]
+    fn a_cleaned_copy_neither_feeds_nor_reads_the_store_record() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/pkg");
+        write(&entry.join("A.php"), b"<?php\nclass A {}\n");
+        write(&entry.join("tests/B.php"), b"<?php\nclass B {}\n");
+        let cleaned = tmp.path().join("cleaned");
+        write(&cleaned.join("A.php"), b"<?php\nclass A {}\n");
+        let pristine = tmp.path().join("pristine");
+        write(&pristine.join("A.php"), b"<?php\nclass A {}\n");
+        write(&pristine.join("tests/B.php"), b"<?php\nclass B {}\n");
+        let mut slot = CacheSlot::new(tmp.path(), &entry, Path::new(""));
+        slot.verify_files = true;
+        let classes = |dir: &Path| {
+            let mut s = Scanner::new().expect("scanner");
+            s.scan_path_cached(
+                dir,
+                None,
+                AutoloadType::ClassMap,
+                "",
+                Some(ScanCache::Store(&slot)),
+            )
+            .expect("scan");
+            s.class_map.map.len()
+        };
+        // A cleaned copy is scanned as it is, and not recorded.
+        assert_eq!(classes(&cleaned), 1);
+        assert!(
+            !slot.file.exists(),
+            "a cleaned copy must not feed the record"
+        );
+        // A pristine copy is recorded; the cleaned one does not read it.
+        assert_eq!(classes(&pristine), 2);
+        assert!(slot.file.is_file());
+        assert_eq!(classes(&cleaned), 1);
+        assert_eq!(classes(&pristine), 2);
+        // A single file gone from a directory still there: seen only when
+        // every file is checked.
+        std::fs::remove_file(pristine.join("tests/B.php")).expect("rm");
+        write(&pristine.join("tests/C.txt"), b"x");
+        let mut full = CacheSlot::new(tmp.path(), &entry, Path::new(""));
+        full.verify_files = true;
+        let mut s = Scanner::new().expect("scanner");
+        s.scan_path_cached(
+            &pristine,
+            None,
+            AutoloadType::ClassMap,
+            "",
+            Some(ScanCache::Store(&full)),
+        )
+        .expect("scan");
+        assert_eq!(s.class_map.map.len(), 1);
     }
 
     #[test]

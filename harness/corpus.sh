@@ -163,11 +163,12 @@ run_one() { # nom, mode, ligne JSON du scan
   else
     # Projet entier dès qu'un fichier peut atterrir hors vendor/ : un plugin
     # de disposition autorisé (composer/installers, les installeurs
-    # personnalisés émulés), ou un `vendor-dir` / `bin-dir` configuré
+    # personnalisés émulés, laminas-skeleton-installer qui réécrit
+    # composer.json, sculpin qui copie des thèmes), ou un `vendor-dir` / `bin-dir` configuré
     # (compare.sh cherche alors ses fichiers tolérés sous VENDOR_REL).
     local scope_ref="$ref/vendor" scope_viv="$viv/vendor" vrel
     vrel="$(jq -r '.config["vendor-dir"] // "vendor" | sub("/+$"; "") | sub("^\\./"; "")' "$ref/composer.json" 2>/dev/null || echo vendor)"
-    if jq -e '(.config["allow-plugins"] as $a | ($a == true) or (($a | type) == "object" and ($a | to_entries | any(.value == true and (.key | test("^(composer/installers|roots/wordpress-core-installer|mnsami/composer-custom-directory-installer|getkirby/composer-installer|neos/composer-plugin|davidbarratt/custom-installer|johnpbloch/wordpress-core-installer|thelia/installer|contao-components/installer|oomphinc/composer-installers-extender|craftcms/plugin-installer)$")))))) or (.config["vendor-dir"] != null) or (.config["bin-dir"] != null)' "$ref/composer.json" >/dev/null 2>&1; then scope_ref="$ref"; scope_viv="$viv"; fi
+    if jq -e '(.config["allow-plugins"] as $a | ($a == true) or (($a | type) == "object" and ($a | to_entries | any(.value == true and (.key | test("^(composer/installers|roots/wordpress-core-installer|mnsami/composer-custom-directory-installer|getkirby/composer-installer|neos/composer-plugin|davidbarratt/custom-installer|johnpbloch/wordpress-core-installer|thelia/installer|contao-components/installer|oomphinc/composer-installers-extender|craftcms/plugin-installer|laminas/laminas-skeleton-installer|sculpin/sculpin-theme-composer-plugin)$")))))) or (.config["vendor-dir"] != null) or (.config["bin-dir"] != null)' "$ref/composer.json" >/dev/null 2>&1; then scope_ref="$ref"; scope_viv="$viv"; fi
     if ! VENDOR_REL="$vrel" compare_vendor "$scope_ref" "$scope_viv" "$WORK/$n.$mode.diff" >/dev/null; then
       # L'ordre de `files` (et de la classmap statique) chez Composer dépend
       # de l'ordre de son dépôt local quand des paquets se requièrent en

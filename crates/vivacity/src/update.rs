@@ -241,6 +241,7 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
+                !(args.no_dev || env_no_dev()),
             )? {
                 return Ok(code);
             }
@@ -786,7 +787,43 @@ pub(crate) fn resolve_and_lock(
                     .iter()
                     .map(|(n, o)| (n.as_str(), *o)),
             )
-            .or_else(|| crate::discovery::resolved_issue(m, &lock, installer_dev_mode));
+            .or_else(|| crate::discovery::resolved_issue(m, &lock, installer_dev_mode))
+            .or_else(|| {
+                // The second round of emulated plugins
+                // (docs/plans/plugins-round2.md), on the packages the
+                // install will leave.
+                let installed = vivacity_core::layout::installed_packages_of(&project, m);
+                let global = crate::effect_plugins::global_packages();
+                let command = match args.resolution_command {
+                    Some(vivacity_core::scope::ResolutionCommand::Require) => {
+                        vivacity_core::effect_plugins::Command::Require
+                    }
+                    Some(vivacity_core::scope::ResolutionCommand::Remove) => {
+                        vivacity_core::effect_plugins::Command::Remove
+                    }
+                    _ => vivacity_core::effect_plugins::Command::Update,
+                };
+                let ctx = vivacity_core::effect_plugins::Context {
+                    project: &project,
+                    manifest: m,
+                    local: parsed
+                        .wanted_packages(installer_dev_mode)
+                        .map(|p| &p.raw)
+                        .collect(),
+                    installed: &installed,
+                    dev_mode: installer_dev_mode,
+                    command,
+                    interactive: crate::effect_plugins::interactive(args.compat.no_interaction),
+                    no_autoloader: args.no_autoloader,
+                    plugins_enabled: true,
+                    global: &global,
+                    aliases: !parsed.aliases.is_empty(),
+                };
+                vivacity_core::effect_plugins::issues(&ctx)
+                    .into_iter()
+                    .next()
+                    .map(vivacity_core::scope::ScopeIssue::Layout)
+            });
             if let Some(issue) = issue {
                 return Ok(Resolved {
                     hand_over: Some(issue),

@@ -94,8 +94,8 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     let layout = proceed!(native_layout(&run, scope)?);
     let installed = proceed!(execute_operations(&run, &tx, &layout)?);
     // `Installer::run`, after `doInstall`.
-    let autoload_note = if args.no_autoloader {
-        String::new()
+    let (autoload_note, cleaner_counts) = if args.no_autoloader {
+        (String::new(), None)
     } else {
         proceed!(dump_autoloader(
             &run,
@@ -109,7 +109,8 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         &run,
         &layout,
         &installed.report,
-        &tx.listeners
+        &tx.listeners,
+        cleaner_counts.as_ref()
     )?);
     say_summary(&run, &installed.report, &autoload_note);
     Ok(0)
@@ -334,6 +335,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         args.no_fallback,
         !args.dry_run,
         !args.dry_run,
+        !(args.no_dev || env_no_dev()),
     )? {
         return Ok(code);
     }
@@ -375,6 +377,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         command_dispatched: false,
         lockless_install: Some(line),
         allow_plugins_at_load: None,
+        resolution_command: None,
     };
     let options = vivacity_resolver::session::UpdateOptions {
         no_blocking: args.no_blocking || args.no_security_blocking,
@@ -914,6 +917,40 @@ fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
                     !args.no_plugins,
                 ));
         }
+        // The second round of emulated plugins (docs/plans/
+        // plugins-round2.md): what their listeners would do that vivacity
+        // does not reproduce. The install that follows an update was
+        // checked on the solved lock already, its interactivity included.
+        let installed =
+            plugin_order::installed_json_packages(&composer_dir_of(&run.project, &run.manifest));
+        let global = crate::effect_plugins::global_packages();
+        let ctx = vivacity_core::effect_plugins::Context {
+            project: &run.project,
+            manifest: &run.manifest,
+            local: run
+                .lock
+                .wanted_packages(run.with_dev)
+                .map(|p| &p.raw)
+                .collect(),
+            installed: &installed,
+            dev_mode: run.with_dev,
+            command: if args.after_update() {
+                vivacity_core::effect_plugins::Command::Update
+            } else {
+                vivacity_core::effect_plugins::Command::Install
+            },
+            interactive: !args.after_update()
+                && crate::effect_plugins::interactive(args.compat.no_interaction),
+            no_autoloader: args.no_autoloader,
+            plugins_enabled: !args.no_plugins,
+            global: &global,
+            aliases: !run.lock.aliases.is_empty(),
+        };
+        report.issues.extend(
+            vivacity_core::effect_plugins::issues(&ctx)
+                .into_iter()
+                .map(vivacity_core::scope::ScopeIssue::Layout),
+        );
         Some(report)
     };
 
@@ -934,11 +971,18 @@ fn plan_autoload_early(
     scope: Option<&vivacity_core::scope::ScopeReport>,
 ) -> Option<anyhow::Result<PlannedDump>> {
     let args = run.args;
+    // liborm85/composer-vendor-cleaner and cakephp/plugin-installer change
+    // the tree or the root's autoload at PRE_AUTOLOAD_DUMP: not before.
     let early_dump: Option<anyhow::Result<PlannedDump>> = if args.dry_run
         || args.no_autoloader
         || run.runner.is_some()
         || !tx.transaction.operations.is_empty()
-    {
+        || crate::effect_plugins::dump_depends_on_listeners(
+            &run.lock,
+            &run.manifest,
+            run.with_dev,
+            !args.no_plugins,
+        ) {
         None
     } else {
         scope
@@ -1315,14 +1359,15 @@ fn execute_operations(
 /// `Installer::run`'s dump, after `doInstall`: the "Generating autoload
 /// files" line, pre-autoload-dump, the autoloader (the plan made during the
 /// network wait, or made now), the emulated post-autoload-dump plugins,
-/// post-autoload-dump. Returns the closing line's autoloader note.
+/// post-autoload-dump. Returns the closing line's autoloader note, and the
+/// counts liborm85/composer-vendor-cleaner reports at post-install-cmd.
 fn dump_autoloader(
     run: &Run<'_>,
     tx: &LocalTransaction,
     layout: &vivacity_core::layout::Layout,
     report: &vivacity_core::installer::InstallReport,
     early_dump: Option<anyhow::Result<PlannedDump>>,
-) -> anyhow::Result<Flow<String>> {
+) -> anyhow::Result<Flow<(String, Option<vivacity_core::vendor_cleaner::Counts>)>> {
     let args = run.args;
     // `Installer::run` (Installer.php:377-381), before
     // `AutoloadGenerator::dump` dispatches PRE_AUTOLOAD_DUMP: "optimized"
@@ -1351,16 +1396,30 @@ fn dump_autoloader(
             &run.manifest,
         );
     }
+    // `AutoloadGenerator::dump($localRepo)`: the local repository, not
+    // the lock (they differ for an unchanged package whose lock entry
+    // moved).
+    let local = report.local_repository.as_ref().unwrap_or(&run.lock);
+    // The listeners that act there (liborm85 cleans the packages, cakephp
+    // extends the root's autoload), before the scripts.
+    let packages: Vec<&vivacity_core::lock::LockPackage> =
+        local.wanted_packages(run.with_dev).collect();
+    let (root, cleaner_counts) = crate::effect_plugins::pre_autoload_dump(
+        &run.manifest,
+        layout,
+        local,
+        &packages,
+        run.with_dev,
+        !args.no_plugins,
+        &tx.listeners,
+        false,
+    )?;
     if let Some(r) = &run.runner {
         let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
         if code != 0 {
             return Ok(Flow::Break(code));
         }
     }
-    // `AutoloadGenerator::dump($localRepo)`: the local repository, not
-    // the lock (they differ for an unchanged package whose lock entry
-    // moved).
-    let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     let planned = match early_dump {
         // Planned during the network wait: the install placed nothing,
         // the inputs are what they were.
@@ -1368,7 +1427,7 @@ fn dump_autoloader(
         None => dump_autoload_plan(
             &run.project,
             local,
-            &run.manifest,
+            &root,
             layout,
             run.with_dev,
             args.optimize_autoloader || args.classmap_authoritative,
@@ -1387,7 +1446,7 @@ fn dump_autoloader(
     };
     let dumped = planned.finish(&run.project, &run.manifest, layout)?;
     let autoload_note = format!(", autoloader with {} classes", dumped.classes);
-    post_autoload_dump_plugins(run, tx, local)?;
+    post_autoload_dump_plugins(run, tx, local, layout)?;
     // `AutoloadGenerator::dump`: post-autoload-dump once the files are
     // written (the emulated post-autoload-dump plugins included).
     if let Some(r) = &run.runner {
@@ -1397,7 +1456,7 @@ fn dump_autoloader(
         }
     }
     trace("autoload dump", run.t0);
-    Ok(Flow::Continue(autoload_note))
+    Ok(Flow::Continue((autoload_note, cleaner_counts)))
 }
 
 /// Plugins listening to post-autoload-dump, emulated: the local
@@ -1407,6 +1466,7 @@ fn post_autoload_dump_plugins(
     run: &Run<'_>,
     tx: &LocalTransaction,
     local: &vivacity_core::lock::Lock,
+    layout: &vivacity_core::layout::Layout,
 ) -> anyhow::Result<()> {
     use vivacity_resolver::transaction::Operation;
     let args = run.args;
@@ -1450,6 +1510,17 @@ fn post_autoload_dump_plugins(
         run.with_dev,
         &order,
         &touched,
+        !args.no_plugins,
+    )?;
+    // cakephp/plugin-installer's `cakephp-plugins.php` (silent).
+    let packages: Vec<&vivacity_core::lock::LockPackage> =
+        local.wanted_packages(run.with_dev).collect();
+    crate::effect_plugins::post_autoload_dump(
+        &run.manifest,
+        layout,
+        local,
+        &packages,
+        run.with_dev,
         !args.no_plugins,
     )?;
     // The two that print, in their plugins' activation order.
@@ -1529,17 +1600,23 @@ fn post_install(
     layout: &vivacity_core::layout::Layout,
     report: &vivacity_core::installer::InstallReport,
     listeners: &[String],
+    cleaner_counts: Option<&vivacity_core::vendor_cleaner::Counts>,
 ) -> anyhow::Result<Flow> {
     let args = run.args;
     print_funding(&run.project, &run.manifest);
     let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     if !args.no_plugins {
+        // laminas/laminas-skeleton-installer listens at priority 1000
+        // (`Plugin::getSubscribedEvents`): before every listener at 0.
+        crate::effect_plugins::skeleton(&run.project, &run.manifest, local, run.with_dev, true)?;
         let mut emulated = vec![
             vivacity_core::phpcs_installer::PLUGIN_NAME,
             extension_installers::PHPSTAN,
             extension_installers::RECTOR,
             vivacity_core::c3_plugin::PLUGIN_NAME,
             "symfony/flex",
+            vivacity_core::effect_plugins::DG_CLEANER,
+            vivacity_core::effect_plugins::VENDOR_CLEANER,
         ];
         // `Installer::run` (Installer.php:440): POST_UPDATE_CMD after an
         // update, POST_INSTALL_CMD otherwise. Under -v each listener's line
@@ -1558,7 +1635,7 @@ fn post_install(
             if listeners.iter().any(|n| n == plugin) {
                 crate::verbose_listeners::announce(plugin, event, &run.manifest);
             }
-            post_install_listener(run, layout, local, plugin)?;
+            post_install_listener(run, layout, local, plugin, cleaner_counts)?;
         }
     }
     if let Some(r) = &run.runner {
@@ -1577,9 +1654,27 @@ fn post_install_listener(
     layout: &vivacity_core::layout::Layout,
     local: &vivacity_core::lock::Lock,
     plugin: &str,
+    cleaner_counts: Option<&vivacity_core::vendor_cleaner::Counts>,
 ) -> anyhow::Result<()> {
     let args = run.args;
     match plugin {
+        vivacity_core::effect_plugins::DG_CLEANER => crate::effect_plugins::composer_cleaner(
+            &run.manifest,
+            layout,
+            local,
+            run.with_dev,
+            !args.no_plugins,
+        )?,
+        vivacity_core::effect_plugins::VENDOR_CLEANER => {
+            crate::effect_plugins::vendor_cleaner_finish(
+                &run.manifest,
+                layout,
+                local,
+                run.with_dev,
+                !args.no_plugins,
+                cleaner_counts,
+            )?
+        }
         vivacity_core::phpcs_installer::PLUGIN_NAME => {
             emulate_phpcs(&run.project, layout, local, &run.manifest, run.with_dev)?;
         }
@@ -1961,6 +2056,12 @@ pub(crate) fn download_lines(
         let Some(locked) = by_name.get(package.name.as_str()) else {
             continue;
         };
+        // `MetapackageInstaller::download` does nothing, whatever the
+        // metapackage's lock entry says (an `artifact` repository gives
+        // every package a zip dist).
+        if locked.is_metapackage() {
+            continue;
+        }
         // `GitDownloader::doDownload`: a package without dist whose git
         // repository is remote is synced into the VCS cache, in the same
         // pass as the dists are downloaded (docs/plans/git-sources.md).

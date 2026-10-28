@@ -1,0 +1,490 @@
+# Plugins à effets de bord, second tour — plan
+
+> Suite de `docs/corpus/2026-10-28.md` : 85 entrées natives sur 106 en
+> `--no-dev`, 0 diff. Parmi les 21 autres, douze ne sont bloquées que par un
+> ou deux plugins qui ne sont pas des installeurs de chemin : ils écrivent ou
+> suppriment des fichiers dans vendor/ et le projet, ou impriment des lignes,
+> à des événements de script. Niveau 2 : parité à l'octet de vendor/, du
+> lock, de stdout, de stderr, du code de sortie et des fichiers que les
+> plugins émulés écrivent ; ce qui n'est pas reproductible part à Composer,
+> nommé, avant toute écriture. Méta-analyse et revue par sous-agents frais.
+> Même méthode que `docs/plans/custom-installers.md`.
+
+## Le problème
+
+Bloqueurs **complets** (`--no-dev`, run du 2026-10-28) des entrées visées :
+
+| entrée | bloqueurs |
+|---|---|
+| bolt-project | drupol/composer-packages 2.0.0 |
+| cakephp-app | cakephp/plugin-installer 2.0.2 |
+| concretecms | mlocati/composer-patcher 1.2.6 |
+| contao-managed-edition | contao/manager-plugin 2.13.6 |
+| fossbilling | liborm85/composer-vendor-cleaner 1.7.1 |
+| mezzio-skeleton | laminas/laminas-component-installer 3.8.0 |
+| owncloud-core | dg/composer-cleaner v2.2.2 |
+| phpstan-src | ondrejmirtes/composer-attribute-collector 1.2.0 |
+| sculpin | sculpin/sculpin-theme-composer-plugin 1.0.3 |
+| spiral-app | spiral/composer-publish-plugin v1.1.2 |
+| typo3, typo3-cms-base-distribution | typo3/class-alias-loader v2.0.1 + typo3/cms-composer-installers v5.0.2 |
+| laminas-mvc-skeleton | laminas-component-installer 3.8.0 + laminas/laminas-skeleton-installer 1.3.0 |
+
+Hors champ (consigne) : Drupal, mautic, silverstripe, ilias, omeka-s.
+
+## Environnement de mesure
+
+`Darwin MacStudio-de-Adel-5.local 25.6.0 arm64`, PHP 8.5.12 (8.4.27 pour
+la double passe des harnais), Composer 2.10.3, bash 3.2. Réseau ouvert
+(Packagist, GitHub). Binaire de référence : main d2b294c (« Release
+0.25.0 »).
+
+## Références (sources lues aux versions verrouillées)
+
+Sources extraites des dists du lock (`dist.url`), tags comparés dans les
+dépôts git (`git diff --quiet <tag lu> <tag> -- src`) : « = » marque les
+tags aux sources identiques, les seuls que le garde de version admet.
+
+| plugin | version (=) | licence | lu |
+|---|---|---|---|
+| spiral/composer-publish-plugin | v1.1.2 (= v1.1.1) | MIT | `PublishPlugin`, `Command`, `Downloader` |
+| sculpin/sculpin-theme-composer-plugin | 1.0.3 | MIT | `SculpinThemePlugin` |
+| laminas/laminas-component-installer | 3.8.0 (= 3.5.0, 3.6.0, 3.7.0) | BSD-3-Clause | `ComponentInstaller`, `ConfigDiscovery` et ses découvertes |
+| laminas/laminas-skeleton-installer | 1.3.0 (= 1.2.0) | BSD-3-Clause | `Plugin`, `OptionalPackagesInstaller`, `OptionalPackage`, `ComposerJsonRetrievalTrait` |
+| dg/composer-cleaner | v2.2.2 | BSD-3-Clause (composer.json ; pas de fichier de licence au tag) | `Plugin`, `Cleaner` |
+| liborm85/composer-vendor-cleaner | 1.7.1 | MIT (+ `Finder/Glob.php` de Symfony, MIT) | tout `src/` |
+| cakephp/plugin-installer | 2.0.2 | MIT | `Plugin` |
+| drupol/composer-packages | 2.0.0 | MIT | `Plugin`, `ClassGenerator`, exportateurs, gabarits Twig |
+| ondrejmirtes/composer-attribute-collector | 1.2.0 | BSD-3-Clause | `Plugin` |
+| mlocati/composer-patcher | 1.2.6 | MIT | `Plugin` (et le reste survolé) |
+| typo3/class-alias-loader | v2.0.1 | MIT | `Plugin`, `ClassAliasMapGenerator`, `Config`, `IncludeFile` |
+| typo3/cms-composer-installers | v5.0.2 | GPL-2.0-or-later | `Installer\Plugin`, `PluginImplementation`, `ScriptDispatcher`, `IncludeFile`, `EntryPoint` (lus, rien copié) |
+| contao/manager-plugin | 2.13.6 | LGPL-3.0-or-later | `ManagerPluginInstaller` (lu, rien copié) |
+
+Copies de référence (`docs/reference/plugins/<nom>/`, licence ou note de
+licence, ligne NOTICE) : les sept plugins portés, tous MIT ou BSD-3-Clause.
+Rien n'est copié des sources GPL/LGPL.
+
+## Classement mesuré
+
+Mesures : `composer install --no-scripts --no-interaction
+--ignore-platform-req='ext-*' --ignore-platform-req=php` sur une copie de
+chaque entrée (dépôt git, comme `harness/corpus.sh`), dev et `--no-dev`,
+`git status` après.
+
+**Fidèles et déterministes** :
+
+- **spiral/composer-publish-plugin** : `post-autoload-dump` →
+  `publishFiles` ; sans `extra.publish-cmd` racine, ou sans paquet du dépôt
+  local (canonique) à `extra.publish` non vide (`empty()` de PHP), rien.
+  Sinon un `Process` lance la commande de publication (code du projet) :
+  hors de portée. spiral-app : `publish-cmd` présent, aucun paquet
+  `publish` → inerte (mesuré : aucune ligne, aucun fichier).
+- **sculpin/sculpin-theme-composer-plugin** : événements de paquet ; un
+  paquet de type `sculpin-theme` ou à `extra.sculpin-theme` est copié sous
+  `config.theme-dir` (défaut `source/themes`)/<nom>, et retiré au retrait.
+  Portable (copie déterministe, `Finder` ignorant VCS et fichiers cachés),
+  mais aucune entrée ne l'exige. sculpin : aucun thème → inerte.
+- **laminas/laminas-component-installer** : événements de paquet ;
+  `if (! $event->isDevMode()) return;` en tête des trois écouteurs → inerte
+  en `--no-dev`. En dev, `getAvailableConfigOptions` ne trouve rien si aucun
+  des fichiers `config/application.config.php`, `config/modules.config.php`,
+  `config/development.config.php.dist`, `config/development.config.php`,
+  `config/config.php` n'existe (relatifs au répertoire courant) → inerte
+  (mesuré en dev sur mezzio-skeleton et laminas-mvc-skeleton : aucune ligne,
+  aucun fichier). Avec un fichier de configuration : injection, invites
+  (`ask`) → repli.
+- **laminas/laminas-skeleton-installer** : `post-install-cmd` /
+  `post-update-cmd` **à la priorité 1000** (avant les écouteurs de priorité
+  0) ; avec `extra.laminas-skeleton-installer` (ou `zend-…`) tableau
+  non vide d'entrées valides (`name`, `constraint`, `prompt`) et sans
+  interaction, la question « minimal install » prend sa valeur par défaut
+  `y` : deux lignes sur stdout (« `    Removing optional packages from
+  composer.json` », « `    Updating composer.json` ») et composer.json
+  réécrit par `JsonFile` (indentation détectée, clés retirées, `extra` vide
+  retiré, `\n` final, écriture seulement si le contenu change). Mesuré sur
+  laminas-mvc-skeleton (dev et `--no-dev`) : exactement cela.
+- **dg/composer-cleaner** : `post-install-cmd` / `post-update-cmd` →
+  `Cleaner::clean(vendor-dir)` : pour chaque `vendor/<a>/<b>` (répertoire,
+  pas un lien), lit son composer.json ; type `library`, `composer-plugin`
+  ou absent : supprime les `exclude-from-classmap` (comptés même absents),
+  puis les entrées de premier niveau qui ne sont ni sources de l'autoload
+  (premier segment), ni `bin`, ni `composer.json`/`license*`/`LICENSE*`/
+  `.phpstorm.meta.php`, ni `extra.cleaner-ignore` (`fnmatch`) ; une ligne
+  stdout « `Composer cleaner: Removed N files or directories.` ».
+  Mesuré : owncloud-core 202 (`--no-dev`), 285 (dev). Les lignes `-v` sont
+  dans l'ordre de `readdir` → repli sous `-v`.
+- **liborm85/composer-vendor-cleaner** : avec `extra.dev-files` (objet
+  motif-de-paquet → motifs), `pre-autoload-dump` nettoie chaque paquet du
+  dépôt local (motifs glob → regex `Glob::toRegex`, tri décroissant,
+  répertoire supprimé seulement vide), puis tous les répertoires vides de
+  tous les paquets ; `post-install-cmd` nettoie `bin-dir` et imprime le
+  bilan. Mesuré fossbilling `--no-dev` : « » / « `Composer vendor
+  cleaner: Cleaning packages in vendor directory` » au dump, « `…Cleaning
+  vendor binary directory` » / « `…Removed 111 files and 42 (of which 4 are
+  empty) directories from 91 packages` » / « » à la fin.
+- **cakephp/plugin-installer** : `pre-autoload-dump` ajoute à l'autoload
+  racine les plugins applicatifs (`plugins/<Nom>/src`, `plugins/<V>/<Nom>/
+  src`) ; `post-autoload-dump` écrit `vendor/cakephp-plugins.php` (paquets
+  `cakephp-plugin` du dépôt local + plugins applicatifs, `ksort`, racine
+  remplacée par `$baseDir . '`). Mesuré cakephp-app : `Migrations` seul en
+  `--no-dev`, quatre en dev.
+
+**Effets non reproductibles à l'octet** :
+
+- **drupol/composer-packages** : cinq classes générées sous
+  `vendor/drupol/composer-packages/build/` contiennent `GENERATED_AT =
+  time()` : deux runs de Composer diffèrent entre eux. Révisé après la
+  méta-analyse (M10) : c'est le seul aléa (comme le préfixe APCu que
+  `compare.sh` tolère déjà) ; le reste — cinq gabarits Twig à échappement
+  HTML, `var_export` des entrées du lock (dev comprises), chemins
+  d'installation absolus — est déterministe mais lourd, et la comparaison
+  du corpus devrait masquer l'horodatage et le chemin. Pas porté à ce
+  tour.
+- **ondrejmirtes/composer-attribute-collector** : « `Generated attributes
+  file in <durée> ms` » sur stdout (`microtime`), et l'analyse PHP des
+  sources par nikic/php-parser.
+- **typo3/class-alias-loader** : sur un vendor vierge, `vendor/autoload.php`
+  n'existe pas encore au `pre-autoload-dump` : le suffixe vient de
+  `md5(uniqid())` (sauf `config.autoloader-suffix`) et entre dans deux
+  fichiers générés ; une fois autoload.php écrit, il est déterministe. Mais
+  il `require` les cartes d'alias PHP des paquets (code des paquets), et
+  les deux entrées l'activent (`always-add-alias-loader`, cartes de
+  typo3/cms-*) à côté de cms-composer-installers.
+
+**Hors de portée** :
+
+- **mlocati/composer-patcher** : applique des correctifs par `patch` ou
+  `git apply` (processus externes) et réécrit installed.json
+  (`patches_applied`).
+- **contao/manager-plugin** : instancie les classes de plugin des paquets
+  (code des paquets) pour ordonner et générer son fichier.
+- **typo3/cms-composer-installers** : exécute au `post-autoload-dump` les
+  `InstallerScripts` déclarés par les paquets (code des paquets) ; GPL.
+
+## Rang : entrées levées par unité de travail
+
+Une entrée n'est native que si tous ses bloqueurs le sont.
+
+| port | travail | entrées levées (`--no-dev`) |
+|---|---|---|
+| spiral (garde d'inertie) | très faible | spiral-app |
+| sculpin (garde d'inertie) | très faible | sculpin |
+| laminas-component-installer (inerte en `--no-dev`, et en dev sans fichier de config) | faible | mezzio-skeleton |
+| laminas-skeleton-installer (deux lignes, composer.json réécrit) | moyen | laminas-mvc-skeleton (avec le précédent) |
+| dg/composer-cleaner | moyen (fnmatch, parcours) | owncloud-core |
+| cakephp/plugin-installer | moyen (fichier, autoload racine) | cakephp-app |
+| liborm85/composer-vendor-cleaner | élevé (globs, deux temps, comptes) | fossbilling |
+| drupol, attribute-collector, class-alias-loader, patcher, contao, typo3 installers | — | repli (aucune) |
+
+Attendu : sept entrées natives en `--no-dev` (92/106), et les mêmes en dev
+si rien d'autre ne les bloque (le scan dev ne les liste qu'avec ces mêmes
+plugins).
+
+## Le modèle porté
+
+Commun à tous :
+
+1. **Garde de version** : `scope::EMULATED_VERSIONS` reçoit les sept plugins
+   et leurs versions « = » ; un plugin autorisé dans une autre version, au
+   lock ou à installed.json (version chargée au début de la commande), →
+   repli nommé avant toute écriture.
+2. **Activation** comme les émulations existantes : paquet voulu ou
+   installé, **autorisé** (`allow-plugins`), plugins actifs ; rien sous
+   `--no-plugins` (bibliothèques ordinaires).
+3. **Ordre des lignes** : les écouteurs de priorité 0 dans l'ordre
+   d'activation (`plugin_order`), skeleton-installer avant eux (priorité
+   1000).
+4. **`-v`** : cakephp ajouté à `verbose_listeners::VERBOSE_PLUGINS` (aucune
+   écriture verbeuse propre) ; les six autres dans `VERBOSE_DELEGATED`, avec
+   leur raison (événements de paquet ou `pre-install-cmd` que vivacity ne
+   place pas, lignes verbeuses dans l'ordre de `readdir`).
+5. **Commandes de résolution** : inertes à la résolution (`RESOLUTION_INERT`)
+   — leurs effets sont ceux de l'installation qui suit, émulée là ; sans
+   installation (`--no-install`), `post-update-cmd` est quand même
+   distribué : les deux nettoyeurs et skeleton-installer configuré → repli
+   nommé.
+6. **Le cache de classmap par entrée du store** suppose un répertoire de
+   paquet intact : quand un nettoyeur est actif, il est contourné (le cache
+   par fichier, mtime et taille, reste).
+
+Par plugin :
+
+- **spiral** : actif et racine à `extra.publish-cmd` non nul et un paquet
+  (lock voulu ou installed.json) à `extra.publish` non vide → repli
+  « would run its publish-cmd » ; sinon rien (install et dump-autoload).
+- **sculpin** : un paquet (lock ou installed.json) `sculpin-theme` ou à
+  `extra.sculpin-theme` non nul → repli « theme files not emulated » ;
+  sinon rien.
+- **laminas-component-installer** : dev et l'un des cinq fichiers de
+  configuration présent → repli « would inject into config » ; sinon rien.
+- **laminas-skeleton-installer** : configuré (tableau non vide après le
+  filtre `isValidSpec`), une entrée qui n'est pas un objet/tableau (TypeError
+  chez le plugin) → repli ; stdin terminal sans `-n` ni
+  `COMPOSER_NO_INTERACTION` → repli (invite) ; sinon, au
+  `post-install-cmd`/`post-update-cmd`, les deux lignes et la réécriture
+  `JsonFile` (`phpjson`, `detectIndenting`).
+- **dg/composer-cleaner** : port de `Cleaner::clean` (fnmatch POSIX sans
+  drapeau porté en Rust : `*`, `?`, crochets, `\`), sur l'arbre réel ;
+  `cleaner-ignore` de `extra` sinon de `config` ; `true`, chaîne ou liste de
+  chaînes, autre → repli ; `-v` → repli ; `--no-install` → repli.
+- **liborm85** : port de `Cleaner`/`DevFilesFinder`/`GlobFilter`/
+  `Directory` (`Glob::toRegex` généralisé à `strictLeadingDot = false`,
+  regex PCRE2 de vivacity, drapeau `i` pour `match-case: false`) ; deux
+  temps (`pre-autoload-dump` : paquets ; `post-install-cmd` : bin et bilan) ;
+  `dump-autoload` : tout au `pre-autoload-dump`. Repli : `dev-files`
+  chaîne (fichier externe) ou hors schéma, `config.dev-files` global,
+  dépôt local à alias (version dev ou `aliases` du lock), paquet `path`,
+  analyse des motifs inutilisés (commande `install`, plugin chargé au début
+  et chaque paquet réinstallé), `--no-autoloader` (le bilan passe par le
+  destructeur), `-v`, `--no-install`.
+- **cakephp** : `pre-autoload-dump` : psr-4 des plugins applicatifs ajoutés
+  au manifeste racine du dump ; `post-autoload-dump` : `cakephp-plugins.php`
+  (dépôt local : lock voulu à l'install, installed.json au dump-autoload).
+  Repli : `plugin-paths` hors schéma ou absolu, paquet `cakephp-plugin` sans
+  espace de noms primaire (RuntimeException), valeur psr-4 non chaîne quand
+  le paquet en a plusieurs.
+
+## Replis nommés (avant toute écriture)
+
+Une version non lue de chacun ; les conditions ci-dessus ; drupol,
+attribute-collector, class-alias-loader, cms-composer-installers, patcher,
+contao/manager-plugin (inchangé : « not on vivacity's known-plugin list »).
+
+## Fichiers
+
+1. `harness/plugins-round2.sh` (nouveau, dans `ci.yml` par `net-retry.sh`).
+2. `crates/vivacity-core/src/` : un module par plugin porté
+   (`cakephp_plugins.rs`, `composer_cleaner.rs`, `vendor_cleaner.rs`,
+   `laminas_skeleton.rs`) et les gardes d'inertie (`inert_plugins.rs`) ;
+   `scope.rs` (listes, versions, gardes) ; `path_install.rs`
+   (`glob_to_regex` paramétré).
+3. `crates/vivacity/src/` : `install.rs` (écouteurs, ordre, priorité 1000),
+   `dump.rs` (cakephp, liborm85), `verbose_listeners.rs`, `no_install.rs` /
+   `scope.rs` (`--no-install`) ; `vivacity-autoload` (contournement du
+   cache du store).
+4. `harness/corpus.sh` : projet entier pour skeleton-installer (composer.json)
+   et sculpin.
+5. Docs : CHANGELOG `[Unreleased]`, DECISIONS (entrée datée), HANDOVER,
+   README (liste des plugins émulés), NOTICE (sept copies), ce plan.
+
+## Cas de harnais
+
+`harness/plugins-round2.sh` : par plugin, un projet qui exige le vrai plugin
+à sa version exacte (Packagist) et des paquets synthétiques servis par un
+dépôt `artifact` (zips ZipArchive) ; locks écrits par Composer
+`--no-plugins`. Étapes : install (vendor vierge), no-op, mise à jour d'un
+paquet (second lock), retrait (troisième lock), `--no-plugins` ; dump-autoload
+pour cakephp et liborm85 ; par étape : code, stdout, stderr, projet entier
+(fichiers, modes, liens, installed.json). Plus, sous `--no-fallback` :
+version non lue, chaque condition de repli → code 3, la raison, rien
+d'écrit. Rouges sur d2b294c, verts après. Chaque harnais touché passe sous
+PHP 8.4 et 8.5.
+
+## Critère « vert »
+
+Les cas verts sous les deux PHP ; `cargo fmt --all -- --check` ; clippy
+`-D warnings` (hôte et `x86_64-pc-windows-gnu`) ; `fixtures/make.sh` puis
+`cargo test --workspace` ; tous les harnais de `ci.yml` et
+`root-manifest.sh` à 0 ; corpus complet, rapport si le compte change ;
+`--only` sur les sept entrées : natives, 0 diff (projet entier ; stdout et
+stderr comparés à la main).
+
+## Non-objectifs (vus, laissés)
+
+- La copie de thème de sculpin, l'injection de configuration de
+  laminas-component-installer, les commandes de spiral : portables pour la
+  première, mais aucune entrée ne les exige.
+- Les six plugins non reproductibles ou hors de portée ci-dessus.
+
+## Méta-analyse (sous-agent frais, plan et code, sans mes conclusions)
+
+2 bloquants, 10 majeurs, 7 mineurs ; ce qui change :
+
+- **B1, retrait de laminas-skeleton-installer** : `Plugin::uninstall` lance
+  `Uninstaller`, qui rappelle `InstallationManager::uninstall` sur le même
+  paquet, donc `PluginManager::uninstallPackage`, donc de nouveau
+  `uninstall` — mesuré : `composer remove` boucle sans fin (41 262 lignes
+  « Removing … » avant d'être tué). → repli nommé dès qu'une transaction
+  retire ce plugin alors qu'il est chargé et autorisé ; le cas retrait du
+  harnais ne vérifie que le code 3.
+- **B2, cache de classmap** : liborm85 supprime aussi dans les répertoires
+  autoloadés (`tests/` → `src/x/tests/…`) ; le cache par entrée du store
+  sert alors des classes de fichiers supprimés, y compris aux runs
+  suivants (plugin retiré, `--no-plugins`, `dump-autoload`), et le plan
+  anticipé du dump (`plan_autoload_early`) parcourt l'arbre avant
+  `pre-autoload-dump`. → un enregistrement du store n'est servi que si
+  chaque fichier qu'il liste existe encore (un `stat` par fichier, sinon
+  parcours réel) ; plan anticipé coupé quand liborm85 ou cakephp sont
+  actifs ; cas de harnais en `-o` rejoué après le retrait du plugin et
+  sous `--no-plugins`.
+- **M3** un motif liborm85 qui supprime la cible d'un `bin` déclaré :
+  Composer écrit ensuite « Skipped installation of bin … » (stderr,
+  `ensureBinariesPresence` après le dump) — vivacity ne l'écrit pas
+  (défaut préexistant). → repli quand un motif touche un `bin` déclaré.
+- **M4** `dump-autoload --no-dev` : cakephp, liborm85 et spiral lisent le
+  dépôt local entier (installed.json), paquets dev compris.
+- **M5** cakephp : `Test\` vers `tests/` en dev ; racine
+  `dirname(realpath(vendor-dir))` ; chemin des paquets
+  `realpath(vendor)/prettyName` quel que soit l'installeur ; répertoires
+  sans `src` gardés au `post-autoload-dump` seulement ; `+=` (un paquet
+  l'emporte) ; `ksort` SORT_REGULAR ; `dump-autoload` sans vendor/ →
+  TypeError (repli).
+- **M6** dg : paquet sans autoload ou à source `""`/`.`/`./` intact ; `bin`
+  protège seulement avec un autoload ; `ltrim('.')` ; deux lignes stderr
+  (`unknown autoload type`, `Invalid <chemin>`) ; parcours de l'arbre réel
+  (orphelins, `vendor/composer/*`) ; `cleaner-ignore` `null` dans `extra`
+  → config ; objet de chaînes valide.
+- **M7** harnais : `update` (post-update-cmd, priorité 1000), plugin
+  installé, mis à jour, retiré dans le run, combinaisons avec les
+  émulations existantes (ordre des lignes), paquet `path`, `-o` ; stdout et
+  stderr du corpus comparés par script.
+- **M8** un des sept installé globalement → repli nommé.
+- **M9** liborm85 et un paquet installé depuis la source (`.git` vide
+  compté) → repli comme `path`.
+- **M10** classement de drupol et de class-alias-loader corrigé (ci-dessus).
+- **M11** `require`/`remove` avec skeleton configuré : `RequireCommand`
+  relit composer.json réécrit pour le hash du lock → repli.
+- **M12** `dump-autoload` : le bloc liborm85 entre « Generating » et
+  « Generated » (stdout tous deux).
+- Mineurs : `(bool)` de PHP sur `config.dev-files` ; liste ou valeur non
+  tableau et glob invalide → repli ; métapaquets comptés ; `target-dir`
+  dans le chemin ; « Cleaning vendor binary directory » seulement si
+  bin-dir existe ; l'analyse des motifs inutilisés est inatteignable (le
+  plugin chargé au début n'est jamais dans `changedPackages`) → pas de
+  garde ; `glob_to_regex` poussait les octets ≥ 0x80 comme du Latin-1 et
+  taisait les regex invalides → corrigé ; `fnmatch` de la libc diffère
+  (crochet non fermé, `\` final) → repli sur ces formes ; composer.json
+  écrit en place (inode et mode gardés) ; le verdict inerte de mezzio en
+  dev tient à la fixture sans `config/` (documenté) ; spiral gardé aussi
+  au `dump-autoload`.
+
+### Le modèle, révisé
+
+- skeleton : repli au retrait (B1), sur `require`/`remove` (M11) et sans
+  installation ; natif à `install` et `update`.
+- liborm85 : plus repli si un motif touche un `bin` déclaré (M3), paquet
+  installé depuis la source (M9) ; `dump-autoload` lit installed.json
+  entier (M4).
+- cakephp : comportements de M5 ; `dump-autoload` sur installed.json
+  entier.
+- vivacity-autoload : vérification d'existence des fichiers d'un
+  enregistrement du store (B2) ; `plan_autoload_early` coupé pour liborm85
+  et cakephp.
+- Les sept : repli s'ils sont installés globalement (M8).
+
+## Matrice mesurée (harnais, Composer 2.10.3)
+
+`harness/plugins-round2.sh` : 104 cas (sept projets, 66 étapes comparées à
+Composer, 38 rendus vérifiés). Ce que le banc a appris en se construisant :
+
+- cakephp : un plugin applicatif à nom numérique (`plugins/7/src`) fait
+  planter Composer (`str_replace` sur une clé entière, `strict_types`) →
+  rendu (`ck-num`).
+- APFS est insensible à la casse : `docs/` et `Docs/` dans un même zip font
+  poser une question à `unzip` chez Composer — le cas de casse de liborm85
+  est dans un autre paquet.
+- vivacity imprimait `Downloading` pour un métapaquet dont l'entrée du lock
+  porte une dist (dépôt `artifact`) → corrigé.
+- `update`/`require` de vivacity s'arrêtent en erreur sur un dépôt
+  `artifact` (« repository type "artifact" is not supported ») au lieu de
+  partir à Composer : les étapes `update` du banc utilisent des paquets de
+  Packagist (défaut préexistant, laissé).
+- spiral v1.1.1 exige spiral/code-style (php-cs-fixer, des binaires) : son
+  retrait vide `vendor/bin`, que Composer recrée à l'opération suivante
+  (`initializeBinDir` d'une mise à jour sans binaire) et que vivacity
+  supprime — défaut préexistant de l'ordre des `removeBinaries`, laissé ; le
+  banc garde spiral/code-style.
+
+## Revue indépendante (sous-agent frais, `git diff d2b294c`)
+
+3 bloquants, 2 majeurs, 9 mineurs, mesurés contre Composer ; ce qui a
+changé :
+
+- **B1** un alias en ligne du lock (`1.0.0 as 1.5.0`) ajoute un paquet au
+  dépôt local : liborm85 compte « from 3 packages » où vivacity disait 2 →
+  rendu (`lv-alias`).
+- **B2** `--no-install --no-dev` avec `no-dev-only` : le mode dev était
+  figé à vrai, le nettoyage passait inaperçu → le vrai mode descend jusqu'à
+  `issues_before_resolution` (`lv-no-install-no-dev`).
+- **B3** la version chargée au début n'était pas gardée (liborm85 1.7.0
+  installé, 1.7.1 au lock : Composer lève une `ValueError` avec la classe
+  `Cleaner` de 1.7.0) → les sept gardent aussi la version d'installed.json
+  (`dg-loaded-old`).
+- **M4** cakephp sous Windows (`dirname` à `/` seulement) → les quatre
+  plugins à effets de fichiers sont rendus sous Windows (non mesurés).
+- **M5** copies de référence, NOTICE, docs : faits.
+- Mineurs corrigés : interactivité (`-q`, `SHELL_VERBOSITY=-1`,
+  `COMPOSER_NO_INTERACTION=0` faux en PHP) ; `\` dans un crochet de
+  `fnmatch` refusé ; dédoublonnage quadratique de liborm85 ; listes psr
+  acceptées par dg ; échec de la disposition au `dump-autoload` rendu au
+  lieu d'un repli silencieux ; `is_numeric` de PHP pour les noms cakephp,
+  `plugin-paths` objet accepté ; laminas-component inerte sans paquet à
+  métadonnées ; banc : cakephp à `vendor-dir` avec plugins sous `lib/`, dg
+  avec codeception/c3 (ordre des lignes). Laissés : spiral ignore
+  `requiresUpdate` (repli plus large que nécessaire) ; le second parcours
+  du store à chaque enregistrement froid de classmap (non mesuré, sans
+  lecture de fichier).
+
+## Résultat (session de travail, macOS)
+
+`uname -a` : `Darwin MacStudio-de-Adel-5.local 25.6.0 Darwin Kernel Version
+25.6.0: Fri Jul 31 19:17:26 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6041
+arm64` ; PHP 8.5.12 et 8.4.27, Composer 2.10.3, bash 3.2.
+
+**Commits** (branche `plugins-round2`, depuis main d2b294c) : 37fb1f7
+(plan), 2d71839 (méta-analyse, modèle révisé), b82199f (harnais rouge,
+ci.yml), 6332b34 (ports, cœur), 09f5f0c (branchement, ligne `Downloading`
+des métapaquets, corpus sur le projet entier), 7ad09d2 (enregistrement
+du store seulement depuis une copie intacte), 90bf316 (vérification par
+fichier seulement avec liborm85 en vue), b100b70 (violation PSR levée par
+une règle suivante), 1f234c6 (retours de la revue), 3fb53b3 (copies de
+référence, NOTICE), puis les docs et ce résultat.
+
+**Classement** : fidèles et déterministes — spiral, sculpin, laminas
+component (inertes dans les cas portés), laminas-skeleton-installer, dg,
+cakephp, liborm85 ; non reproductibles à l'octet — drupol (horodatage),
+attribute-collector (durée), class-alias-loader (suffixe aléatoire sur
+vendor vierge, cartes PHP) ; hors de portée — composer-patcher,
+contao/manager-plugin, typo3/cms-composer-installers.
+
+**Portés** : dg/composer-cleaner v2.2.2, liborm85/composer-vendor-cleaner
+1.7.1, cakephp/plugin-installer 2.0.2, laminas-skeleton-installer
+1.2.0–1.3.0 ; inertes : spiral v1.1.1–v1.1.2, sculpin 1.0.3,
+laminas-component-installer 3.5.0–3.8.0. **Replis** : les six plugins
+ci-dessus, et pour les sept toute autre version (au lock ou chargée), un
+plugin global, Windows (les quatre à effets de fichiers), `-v` (six sur
+sept), et les cas nommés par le modèle, la méta-analyse et la revue.
+Écart au plan : les décisions sont dans `effect_plugins.rs` (cœur et
+crate `vivacity`) au lieu de `inert_plugins.rs` / `laminas_skeleton.rs`.
+
+**Corpus** : les sept entrées visées natives, 0 diff, dans les deux modes
+(`--only`, puis le corpus complet). stdout et stderr comparés par script
+(`composer install` contre `vivacity install`, même copie, mêmes
+options) : identiques pour les quatorze passages, après la correction de
+la violation PSR (owncloud-core, dev). Corpus complet
+(`docs/corpus/2026-10-28-plugins-round2.md`) : **92/106 natifs en
+`--no-dev`, 90/106 en dev, 0 diff, 0 indisponible** (85 et 83 avant).
+
+**Harnais** `plugins-round2.sh` : 104 cas ; sur d2b294c, 75 rouges et 29
+verts (les `--no-plugins` sur vendor vierge, et les rendus que d2b294c
+rend aussi, le plugin lui étant inconnu) ; 104 verts sous PHP 8.5 et sous
+8.4.
+
+**Barrières** : `cargo fmt --all -- --check` 0 ; clippy `-D warnings` hôte
+0 et `x86_64-pc-windows-gnu` 0 ; `fixtures/make.sh` 0 puis `cargo test
+--workspace` 0 (421 tests, 0 échec) ; les 33 lancements de harnais de
+`ci.yml` (`diff-vendor.sh` trois fois) et `root-manifest.sh` à 0 sous
+PHP 8.5, chacun par `net-retry.sh`, répertoire supprimé après ;
+`plugins-round2.sh`, `custom-installers.sh`, `plugin-lines.sh` à 0 sous
+PHP 8.4. Les journaux par harnais n'ont pas été gardés (seuls les codes) :
+qu'un second passage réseau ait servi n'est pas connu. Non exécuté :
+`windows.yml` (pas de machine Windows) ; `bench.yml` (mesure manuelle du
+no-op d'invoiceninja à la place : 0,28 s des deux côtés).
+
+**Défauts vus, laissés** : `vendor/bin` vide que Composer recrée après le
+retrait qui l'a vidé ; `update`/`require` sur un dépôt `artifact` en
+erreur au lieu du repli ; spiral rendu sans regarder `requiresUpdate` ;
+lignes stderr de dg dans l'ordre `readdir` ; un composer.json de dist qui
+diffère du lock ; un vendor nettoyé par liborm85 dont plugin et
+configuration ont disparu (cache de classmap) ; second parcours du store
+par enregistrement froid, non mesuré.

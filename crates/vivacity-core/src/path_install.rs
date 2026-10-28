@@ -264,18 +264,27 @@ fn generate_pattern(rule: &str) -> Option<ExcludePattern> {
 /// Symfony `Finder\Glob::toRegex($glob)` with the defaults
 /// (`strictLeadingDot`, `strictWildcardSlash`, delimiter `#`).
 pub fn glob_to_regex(glob: &str) -> String {
+    glob_to_regex_with(glob, true)
+}
+
+/// `Glob::toRegex($glob, $strictLeadingDot)` (`strictWildcardSlash` true,
+/// delimiter `#`). The glob is read byte by byte, as PHP indexes a string:
+/// a byte outside ASCII is copied as it is (the regex is then matched
+/// without the `u` flag, byte against byte), never widened to a character.
+pub fn glob_to_regex_with(glob: &str, strict_leading_dot: bool) -> String {
     let bytes = glob.as_bytes();
     let mut first_byte = true;
     let mut escaping = false;
     let mut in_curlies = 0usize;
-    let mut regex = String::new();
+    let mut regex: Vec<u8> = Vec::new();
+    let push = |r: &mut Vec<u8>, s: &str| r.extend_from_slice(s.as_bytes());
     let mut i = 0;
     while i < bytes.len() {
-        let car = bytes[i] as char;
-        if first_byte && car != '.' {
-            regex.push_str("(?=[^\\.])");
+        let car = bytes[i];
+        if first_byte && strict_leading_dot && car != b'.' {
+            push(&mut regex, "(?=[^\\.])");
         }
-        first_byte = car == '/';
+        first_byte = car == b'/';
         if first_byte
             && i + 2 < bytes.len()
             && bytes[i + 1] == b'*'
@@ -286,40 +295,42 @@ pub fn glob_to_regex(glob: &str) -> String {
             if i + 3 >= bytes.len() {
                 piece.push('?');
             }
-            let piece = format!("(?=[^\\.]){piece}");
-            regex.push_str(&format!("/(?:{piece})*"));
+            if strict_leading_dot {
+                piece = format!("(?=[^\\.]){piece}");
+            }
+            push(&mut regex, &format!("/(?:{piece})*"));
             i += 2 + usize::from(i + 3 < bytes.len());
             i += 1;
             escaping = false;
             continue;
         }
         match car {
-            '#' | '.' | '(' | ')' | '|' | '+' | '^' | '$' => {
-                regex.push('\\');
+            b'#' | b'.' | b'(' | b')' | b'|' | b'+' | b'^' | b'$' => {
+                regex.push(b'\\');
                 regex.push(car);
             }
-            '*' => regex.push_str(if escaping { "\\*" } else { "[^/]*" }),
-            '?' => regex.push_str(if escaping { "\\?" } else { "[^/]" }),
-            '{' => {
+            b'*' => push(&mut regex, if escaping { "\\*" } else { "[^/]*" }),
+            b'?' => push(&mut regex, if escaping { "\\?" } else { "[^/]" }),
+            b'{' => {
                 if escaping {
-                    regex.push_str("\\{");
+                    push(&mut regex, "\\{");
                 } else {
-                    regex.push('(');
+                    regex.push(b'(');
                     in_curlies += 1;
                 }
             }
-            '}' if in_curlies > 0 => {
+            b'}' if in_curlies > 0 => {
                 if escaping {
-                    regex.push('}');
+                    regex.push(b'}');
                 } else {
-                    regex.push(')');
+                    regex.push(b')');
                     in_curlies -= 1;
                 }
             }
-            ',' if in_curlies > 0 => regex.push(if escaping { ',' } else { '|' }),
-            '\\' => {
+            b',' if in_curlies > 0 => regex.push(if escaping { b',' } else { b'|' }),
+            b'\\' => {
                 if escaping {
-                    regex.push_str("\\\\");
+                    push(&mut regex, "\\\\");
                     escaping = false;
                 } else {
                     escaping = true;
@@ -332,7 +343,9 @@ pub fn glob_to_regex(glob: &str) -> String {
         escaping = false;
         i += 1;
     }
-    format!("#^{regex}$#")
+    // Only ASCII is inserted, around the glob's own bytes in their order:
+    // the result is valid UTF-8 whenever the glob is.
+    format!("#^{}$#", String::from_utf8_lossy(&regex))
 }
 
 /// One entry the finder yields: its path under the source and what it is.
@@ -525,6 +538,13 @@ mod tests {
         ] {
             assert_eq!(glob_to_regex(glob), regex, "{glob}");
         }
+        // `Glob::toRegex($g, false)`, and a byte outside ASCII kept as is.
+        assert_eq!(
+            glob_to_regex_with("/**/tests/**", false),
+            "#^/(?:[^/]++/)*tests/(?:[^/]++/?)*$#"
+        );
+        assert_eq!(glob_to_regex_with("été/*", false), "#^été/[^/]*$#");
+        assert_eq!(glob_to_regex("é"), "#^(?=[^\\.])é$#");
     }
 
     #[test]

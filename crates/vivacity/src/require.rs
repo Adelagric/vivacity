@@ -422,6 +422,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
+                !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
             )? {
                 return Ok(code);
             }
@@ -788,6 +789,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         prefer_dist: args.prefer_dist,
         prefer_install: args.prefer_install.clone(),
         command_dispatched: true,
+        resolution_command: Some(vivacity_core::scope::ResolutionCommand::Require),
         lockless_install: None,
         allow_plugins_at_load: None,
     };

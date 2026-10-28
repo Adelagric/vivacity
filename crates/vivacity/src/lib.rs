@@ -23,6 +23,7 @@ use dump::*;
 mod remove;
 use remove::*;
 mod discovery;
+mod effect_plugins;
 mod flex;
 mod flex_recipes;
 mod no_install;
@@ -365,6 +366,10 @@ struct UpdateArgs {
     /// too while another package keeps it installed.
     #[arg(skip)]
     allow_plugins_at_load: Option<serde_json::Value>,
+    /// Internal: the command this resolution runs for, when it is not
+    /// `update` (`require`, `remove`): some plugins act differently.
+    #[arg(skip)]
+    resolution_command: Option<vivacity_core::scope::ResolutionCommand>,
 }
 
 #[derive(clap::Args, Debug)]

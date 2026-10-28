@@ -54,6 +54,16 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     crate::custom_installers::THELIA,
     crate::custom_installers::CONTAO_COMPONENTS,
     crate::custom_installers::OOMPHINC,
+    // Plugins with effects at script events (docs/plans/plugins-round2.md),
+    // in the versions of `effect_plugins::READ_VERSIONS`, decided by
+    // `effect_plugins::issues`.
+    crate::effect_plugins::SPIRAL,
+    crate::effect_plugins::SCULPIN,
+    crate::effect_plugins::LAMINAS_COMPONENT,
+    crate::effect_plugins::LAMINAS_SKELETON,
+    crate::effect_plugins::DG_CLEANER,
+    crate::effect_plugins::VENDOR_CLEANER,
+    crate::effect_plugins::CAKEPHP,
 ];
 
 /// The versions of the listeners vivacity reproduces whose code changed
@@ -390,6 +400,17 @@ pub const RESOLUTION_INERT: &[&str] = &[
     crate::custom_installers::JOHNPBLOCH,
     crate::custom_installers::THELIA,
     crate::custom_installers::CONTAO_COMPONENTS,
+    // docs/plans/plugins-round2.md: nothing at resolution. Their effects
+    // belong to the install that follows (or, without one, to
+    // `POST_UPDATE_CMD`), checked on the solved lock by
+    // `effect_plugins::issues`.
+    crate::effect_plugins::SPIRAL,
+    crate::effect_plugins::SCULPIN,
+    crate::effect_plugins::LAMINAS_COMPONENT,
+    crate::effect_plugins::LAMINAS_SKELETON,
+    crate::effect_plugins::DG_CLEANER,
+    crate::effect_plugins::VENDOR_CLEANER,
+    crate::effect_plugins::CAKEPHP,
 ];
 
 /// A resolution command, for the per-plugin rules below.

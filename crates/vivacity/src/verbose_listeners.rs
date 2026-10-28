@@ -166,10 +166,45 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
             (POST_AUTOLOAD_DUMP, "onPostAutoloadDump"),
         ],
     },
+    // Both listeners write nothing (docs/plans/plugins-round2.md).
+    VerbosePlugin {
+        name: "cakephp/plugin-installer",
+        versions: ">=2.0.2 <=2.0.2",
+        class: "Cake\\Composer\\Plugin",
+        listeners: &[
+            (POST_AUTOLOAD_DUMP, "postAutoloadDump"),
+            (PRE_AUTOLOAD_DUMP, "preAutoloadDump"),
+        ],
+    },
 ];
 
 /// Plugins whose `-v` output is not reproduced, and why.
 pub(crate) const VERBOSE_DELEGATED: &[(&str, &str)] = &[
+    // docs/plans/plugins-round2.md.
+    (
+        "spiral/composer-publish-plugin",
+        "it listens to pre-install-cmd and pre-update-cmd, which vivacity does not place",
+    ),
+    (
+        "sculpin/sculpin-theme-composer-plugin",
+        "it listens to the package events, dispatched between the operations",
+    ),
+    (
+        "laminas/laminas-component-installer",
+        "it listens to the package events, dispatched between the operations",
+    ),
+    (
+        "laminas/laminas-skeleton-installer",
+        "its post-install-cmd listener runs at priority 1000, before the others' lines",
+    ),
+    (
+        "dg/composer-cleaner",
+        "it writes one line per package and per removal at -v, in readdir order",
+    ),
+    (
+        "liborm85/composer-vendor-cleaner",
+        "it listens to command, pre-install-cmd and the package events, and writes one line per removal at -v",
+    ),
     (
         "symfony/flex",
         "it listens to pre-pool-create, pre-operations-exec and the package events, and its configurators write at -v",

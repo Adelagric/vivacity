@@ -3,11 +3,14 @@
 pub mod bamarni_bin;
 pub mod binproxy;
 pub mod c3_plugin;
+pub mod cakephp_plugins;
 pub mod clone;
+pub mod composer_cleaner;
 pub mod constraint;
 pub mod content_hash;
 pub mod custom_installers;
 pub mod dirs;
+pub mod effect_plugins;
 pub mod error;
 pub mod extract;
 pub mod fetch;
@@ -33,6 +36,7 @@ pub mod runtime_stub;
 pub mod scope;
 pub mod state;
 pub mod store;
+pub mod vendor_cleaner;
 pub mod version;
 pub mod yii2_composer;
 

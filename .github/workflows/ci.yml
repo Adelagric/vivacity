@@ -101,6 +101,8 @@ jobs:
         run: harness/net-retry.sh harness/custom-dirs.sh
       - name: Custom installers (kirby, neos, davidbarratt, johnpbloch + installers 1.12, thelia, contao-components, oomphinc, craftcms)
         run: harness/net-retry.sh harness/custom-installers.sh
+      - name: Plugins with effects at script events (spiral, sculpin, laminas component and skeleton installers, dg and liborm85 cleaners, cakephp)
+        run: harness/net-retry.sh harness/plugins-round2.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
         run: harness/net-retry.sh harness/package-versions.sh
       - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)
