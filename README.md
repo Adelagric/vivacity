@@ -46,7 +46,8 @@ GitHub Actions:
 ```
 
 In a Docker image build: [docs/docker.md](docs/docker.md). Deploying with
-Capistrano: [docs/capistrano.md](docs/capistrano.md).
+Capistrano: [docs/capistrano.md](docs/capistrano.md); with Deployer:
+[docs/deployer.md](docs/deployer.md).
 
 ## How it is checked
 

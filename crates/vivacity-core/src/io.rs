@@ -40,8 +40,19 @@
 //! (docs/plans/verbose-plugins.md): the lines already printed would
 //! otherwise come twice.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+/// One line on stderr in one write, as PHP's `fwrite` sends Composer's.
+/// `eprintln!` writes the unbuffered stderr piece by piece (the text around
+/// each argument, then the newline): a reader of the pipe that shows each
+/// read as a line (Deployer prefixes every chunk) splits the line there.
+fn err_line(line: impl std::fmt::Display) {
+    let text = format!("{line}\n");
+    // Composer ignores a failed write to stderr too.
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+}
 
 /// A run's verbosity, or the level of a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,7 +127,7 @@ pub fn release_deferred() {
         if stdout {
             println!("{line}");
         } else {
-            eprintln!("{line}");
+            err_line(line);
         }
     }
 }
@@ -147,7 +158,7 @@ pub fn emit(stdout: bool, line: std::fmt::Arguments<'_>) {
     if stdout {
         println!("{line}");
     } else {
-        eprintln!("{line}");
+        err_line(line);
     }
 }
 
@@ -238,12 +249,12 @@ pub fn release_held() {
         }
         drop(d);
         for line in lines {
-            eprintln!("{line}");
+            err_line(line);
         }
         return;
     }
     for line in lines {
-        eprintln!("{line}");
+        err_line(line);
     }
 }
 

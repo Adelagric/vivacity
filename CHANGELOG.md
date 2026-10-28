@@ -47,6 +47,20 @@ byte-identical-output promise are the public API.
   dist (an `artifact` repository gives one to every package).
 - `Glob::toRegex` keeps bytes outside ASCII as they are (the `.gitattributes`
   patterns of a `path` package with such a pattern got another regex).
+- **Each stderr line goes out in one write**, as Composer's do. The lines
+  were written piece by piece (the text around each value, then the
+  newline): the bytes were the same, but a reader of the pipe that shows
+  each read on its own line (Deployer prefixes every chunk) cut
+  `Dependency resolution completed in` from its duration. Measured with a
+  pipe reader on a Laravel install at `-v --no-progress`: 5 to 15 reads
+  ended mid-line, Composer 0, now 0.
+
+### Documentation
+- **[docs/deployer.md](docs/deployer.md)**: vivacity as Deployer's
+  `bin/composer`, the options to pass, what `dep -v`/`-vv` do to the
+  install, the Symfony recipe's `dump-env`. Run with Deployer 7.5.12's
+  Laravel recipe on localhost: the releases' `vendor/` identical to
+  Composer's.
 
 ## [0.25.0] — 2026-10-28
 

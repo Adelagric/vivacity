@@ -4437,3 +4437,31 @@ Douze entrées du corpus ne tenaient plus qu'à un ou deux plugins qui
   l'ordre des `removeBinaries` n'est pas rejoué ; le banc l'évite) ;
   `update`/`require` sur un dépôt `artifact` s'arrêtent en erreur au lieu
   de partir à Composer.
+
+## 2026-10-28 — Une ligne de stderr, une écriture
+
+Contexte : un vrai déploiement Deployer 7.5.12 (recette Laravel, localhost)
+affichait `Dependency resolution completed in` et sa durée sur deux lignes.
+`eprintln!` écrit le stderr non tamponné morceau par morceau (le texte
+autour de chaque valeur, puis le saut de ligne) ; Deployer préfixe chaque
+lecture du pipe. Les octets étaient ceux de Composer, leur découpage non :
+PHP envoie chaque ligne en un `fwrite`.
+
+- **Décision** : les lignes de stderr du module `io` (émises, différées,
+  retenues) sont formatées puis écrites d'un `write_all`. Un échec
+  d'écriture est ignoré, comme Composer l'ignore (avant : panique
+  d'`eprintln!`). Risque assumé (relevé par la revue) : un stderr que le
+  parent a mis en non bloquant peut perdre la fin d'une ligne sans bruit,
+  comme sous PHP ; un stdout fermé panique encore (`println!`).
+- **Mesure** (lecteur de pipe qui compte les lectures qui ne finissent pas
+  une ligne, install Laravel 13 `-v --no-progress`, MacStudio M4 Max) :
+  avant 5 à 15 lectures coupées par run, Composer 0 sur 3 runs, après 0 sur
+  5 runs.
+- **Laissé** : stdout reste sur `println!` (tamponné par ligne) ; les traces
+  `VIVACITY_TRACE` gardent `eprintln!` (diagnostic, pas de pendant
+  Composer).
+- **Vu, laissé** : la durée de la ligne `Dependency resolution completed`
+  mesure, chez vivacity, toute la vérification du lock jusqu'à la jointure
+  de son fil (0,08–0,11 s sur ce projet) ; celle de Composer ne mesure que
+  `Solver::solve` (0,000 s). Les octets diffèrent par la valeur, que les
+  harnais masquent.
