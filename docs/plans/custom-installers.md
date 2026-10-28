@@ -37,3 +37,247 @@ native que si tous le sont :
 
 En gras : des bloqueurs qui ne sont pas des installeurs de chemin et que ce
 chantier ne lève pas.
+
+## Environnement de mesure
+
+Linux x86_64 (conteneur), PHP 8.5.12, Composer 2.10.3, utilisateur non
+root. api.github.com refuse les zipballs dans cette session : le cache de
+fichiers est amorcé par `git archive` du commit verrouillé (même archive
+pour les deux outils, `/opt/harness-shim/seed-dists.sh`) ; wordpress.org,
+wpackagist.org, packages.drupal.org et asset-packagist.org sont refusés
+(themosis imprime en tête « Filter list data could not be fetched … » — une
+ligne de cet environnement, pas du plugin).
+
+## Références (sources lues aux versions verrouillées, clones git)
+
+| plugin | version | licence | lu |
+|---|---|---|---|
+| getkirby/composer-installer | 1.2.1 | MIT | `Plugin`, `Installer::postInstall`, `CmsInstaller`, `PluginInstaller` |
+| craftcms/plugin-installer | 1.6.0 | MIT | `Plugin::activate`, `Installer` (`addPlugin`, `savePlugins`) |
+| neos/composer-plugin | 2.1.3 (= 2.1.1, 2.1.2) | MIT | `Installer` (préfixes, `deriveFlowPackageName`) |
+| davidbarratt/custom-installer | 1.1.0 | Apache-2.0 | `CustomInstaller`, `Configuration`, `ConfigurationAlpha1` |
+| johnpbloch/wordpress-core-installer | 2.0.0 | GPL-2.0-or-later | comparé ligne à ligne à roots v4.0.0 (MIT, déjà émulé) : une seule différence, la règle de conflit |
+| composer/installers | v1.12.0 | MIT | `Installer`, `BaseInstaller`, table par réflexion (`tools/gen-installers-table.php`) |
+| thelia/installer | 1.6 | LGPL-3.0-or-later | `TheliaInstaller` (deux dispositions) |
+| contao-components/installer | 1.4.1 (= 1.4.0) | LGPL-3.0-or-later | `Plugin`, `LibraryInstaller`, `NoopInstaller` |
+| oomphinc/composer-installers-extender | 2.0.1 (= 2.0.0) | MIT | `Installer`, `CustomInstaller` (sur `BaseInstaller` de composer/installers) |
+| omeka/composer-addon-installer | « 2.0 » (paquet `path`, omeka-s 95d7f4b) | GPL-3.0 | `AddonInstaller` |
+| simplesamlphp/composer-module-installer | v1.4.0 | LGPL-2.1-only | `ModuleInstaller` |
+| simplesamlphp/composer-xmlprovider-installer | v1.0.2 | LGPL-2.1-only | `XMLProviderInstaller` |
+| contao/manager-plugin | 2.13.6 | LGPL-3.0-or-later | `ManagerPluginInstaller`, `AppAutoloadPlugin`, `ArtifactsPlugin` |
+
+Rien n'est copié des sources GPL (johnpbloch, omeka) : leur comportement
+est décrit ici et réimplémenté. Les copies de référence
+(`docs/reference/plugins/`) ne prennent que les sources MIT et Apache-2.0.
+« = » : tags dont les sources lues sont identiques (`git diff --quiet`) ;
+le garde de version n'admet que ceux-là.
+
+## Classement mesuré
+
+**Correspondance de chemin pure** (un type → un répertoire, éventuellement
+d'après `extra`) :
+
+- **neos/composer-plugin** : types `typo3-flow-*` et `neos-*` ;
+  `package` → `Packages/Application/{nom}`, `plugin` → `Packages/Plugins/`,
+  `site` → `Packages/Sites/`, `boilerplate` → `Packages/Boilerplates/`,
+  `build` → `Build/`, `package-collection` → `Packages/`, tout autre →
+  `Packages/{TypeEnCamelCase}/`. Le nom : `extra.installer-name`, sinon la
+  première clé `psr-0` (`\` → `.`), sinon la première clé `psr-4` (sans le
+  `.` final), sinon `extra.neos.package-key` valide ou le nom du paquet
+  (`foo/bar-baz` → `Foo.Bar.Baz`).
+- **davidbarratt/custom-installer** : `extra.custom-installer` de la racine,
+  `{motif: [spécifications]}` — `type:X` pour un type, sinon un nom de
+  paquet ; forme héritée (alpha1, toutes les valeurs scalaires) : `{type:
+  motif}`. `supports` : un type nommé (jamais `metapackage` ni
+  `composer-plugin`) ; le motif : par nom (`getName`, puis `getPrettyName`),
+  sinon par type ; `strtr` de `{$type}`, `{$vendor}`, `{$name}` ; puis
+  `/target-dir`. Mesuré sur phplist : les `library` vont à
+  `vendor/{$vendor}/{$name}/` (le chemin même de LibraryInstaller), quatre
+  paquets nommés hors de vendor/.
+- **johnpbloch/wordpress-core-installer** : `wordpress-core` →
+  `extra.wordpress-install-dir` (chaîne, ou carte par nom), défaut
+  `wordpress` — la fonction de roots (`layout::wp_core_dir`).
+- **composer/installers v1.12.0** : la même logique que 2.x pour ce que
+  vivacity porte (`supports`, `BaseInstaller::getInstallPath`, la ligne
+  « Deleting … » de `uninstall`), une table de 99 frameworks (39 à logique
+  propre → repli, comme en 2.x). **Plus deux lignes** : sur PHP ≥ 8.4, le
+  chargement d'`Installer.php` émet deux dépréciations de compilation
+  (« Implicitly marking parameter $filesystem/$binaryInstaller as nullable
+  ») ; l'`ErrorHandler` de Composer écrit la première avec le chemin absolu
+  du fichier, puis « More deprecation notices were hidden, run again with
+  `-v` to show them. » (une fois par processus), et sous `-v` des piles
+  d'appels. Mesuré sur themosis : juste après « - Installing
+  composer/installers (v1.12.0): Extracting archive ».
+- **thelia/installer** : disposition Thelia 3 si `extra.installer-paths` de
+  la racine contient `type:thelia-module` (gabarits `templates/frontOffice|
+  backOffice|email|pdf/`, `thelia-local` → `local/`), Thelia 2 sinon (plus
+  `thelia-module` → `local/modules/`, `thelia-core` → racine) ; nom =
+  `extra.installer-name` non vide ou la partie après `/`. Mesuré : 4
+  gabarits et 2 `local/` posés par lui, 13 modules sous
+  `vendor/thelia/modules/` par composer/installers (`installer-paths`).
+- **contao-components/installer** : `contao-component` →
+  `extra.contao-component-dir` + `/` + `basename(nom)`.
+- **oomphinc/composer-installers-extender** : les types de
+  `extra.installer-types`, posés par l'entrée `installer-paths` qui les
+  nomme (code de `BaseInstaller` de composer/installers) ; sans entrée,
+  `InvalidArgumentException` (« Package type … is not supported »).
+- **omeka/composer-addon-installer** : `omeka-s-theme` → `themes/{nom}`,
+  `omeka-s-module` → `modules/{nom}`, nom = `extra.install-name` ou la
+  partie après `/`.
+- **simplesamlphp/composer-module-installer** : `simplesamlphp-module|
+  assets` → **dans le répertoire d'un autre paquet**
+  (`<vendor>/simplesamlphp/simplesamlphp/modules|public/assets/<x>`, ou `.`
+  si la racine est simplesamlphp) : l'ordre de la transaction décide de qui
+  écrase qui.
+
+**Chemin et effets de bord** :
+
+- **getkirby/composer-installer** : `kirby-cms` → `extra.kirby-cms-path`
+  (chaîne ; non-chaîne → vendor/), défaut `kirby` ; `kirby-plugin` →
+  `extra.kirby-plugin-path` (défaut `site/plugins`) + `/{nom}`, seulement
+  si le paquet exige l'installeur (sinon vendor/). Effet : après
+  l'installation ou la mise à jour d'un paquet pris en charge, son
+  sous-répertoire `vendor/` est supprimé. Mesuré : la dist de getkirby/cms
+  5.5.3 porte 300 entrées sous `vendor/` ; Composer les supprime, l'autoload
+  n'y renvoie pas.
+- **craftcms/plugin-installer** : rien ne change de chemin (vendor/), mais
+  chaque paquet `craft-plugin` installé, mis à jour ou retiré réécrit
+  `vendor/craftcms/plugins.php` (`var_export`, alias calculés depuis
+  `getcwd()`), et une racine `craft-plugin` s'y inscrit à l'activation.
+  Sans aucun paquet `craft-plugin` (craftcms-craft), il ne fait rien.
+- **simplesamlphp/composer-xmlprovider-installer** : à chaque install
+  (`ensureBinariesPresence`), un lien dur
+  `…/composer-xmlprovider-installer/classes/element.registry.<sha1 du chemin
+  absolu>.php` : un nom de fichier qui dépend du chemin du projet.
+- **contao/manager-plugin** : classe générée à `post-install-cmd` (deux
+  lignes « Dumping generated plugins file… »), autoload `App\` ajouté à la
+  racine, dépôt d'artefacts.
+
+**Hors de portée de ce chantier** : silverstripe/vendor-plugin (expose des
+ressources par liens ou copies dans le projet), silverstripe/recipe-plugin
+(copie des fichiers de recettes), composer/installers `mautic` et
+`silverstripe` (logique propre).
+
+## Rang : entrées débloquées par unité de travail
+
+Mesure de Composer seul sur les six entrées que les ports peuvent lever
+(`--no-dev`, `--ignore-platform-req=ext-* php`, code 0 partout) : les
+chemins ci-dessus, et aucune autre ligne d'un plugin que les deux de
+dépréciation de themosis.
+
+| port | travail | entrées levées (tous leurs bloqueurs) |
+|---|---|---|
+| craftcms (inerte sans paquet `craft-plugin`) | très faible : un garde | craftcms-craft |
+| johnpbloch + table installers v1.12.0 + deux lignes de dépréciation | faible (fonction de roots, table générée) + moyen (lignes) | themosis |
+| neos | faible | neos-base-distribution |
+| davidbarratt (+ cible sous vendor/ égale au chemin par défaut) | faible | phplist-phplist3 |
+| getkirby (+ suppression de `<chemin>/vendor`) | moyen | getkirby-plainkit |
+| thelia (+ cibles sous vendor/ hors de tout paquet, + priorité entre installeurs) | moyen | thelia-project |
+| contao-components | faible | aucune (contao/manager-plugin) |
+| oomphinc | faible | aucune (friendica/json-ld sans dist — chantier git-sources) |
+| omeka | faible (garde par contenu) | aucune (le paquet `path` manque à la fixture) |
+| simplesamlphp module + xmlprovider | élevé | ilias — **repli** (imbrication dans un autre paquet, liens durs nommés d'après le chemin absolu) |
+
+Attendu : six entrées natives (craftcms-craft, getkirby-plainkit,
+neos-base-distribution, phplist-phplist3, themosis, thelia-project), si
+le double install du corpus ne révèle rien d'autre.
+
+## Le modèle porté
+
+1. **Un placeur par installeur** (`crates/vivacity-core/src/
+   custom_installers.rs`) : `supports(type, paquet)` et
+   `install_path(paquet) -> Result<Option<chemin>>` (`None` : le chemin de
+   LibraryInstaller), chacun commenté avec la méthode du plugin qu'il
+   reproduit. Activation comme les placeurs existants : verrouillé,
+   **autorisé** (`allow-plugins` ; non couvert, le chargement l'a déjà
+   refusé), plugins actifs, installed.json et lock d'accord quand un paquet
+   d'un type pris en charge existe, **version lue** (sinon repli nommé,
+   avant toute écriture).
+2. **La priorité** : `getInstaller` rend le dernier installeur activé qui
+   prend le type. vivacity ne calcule pas l'ordre d'activation pour cela :
+   si plusieurs placeurs actifs prennent le type d'un paquet, tous ses
+   chemins sont calculés ; égaux, c'est celui-là ; différents, repli nommé
+   (« the installer precedence follows the plugins' activation order »).
+   La règle existante composer/installers + mnsami reste.
+3. **Cibles sous vendor/** : admises si elles ne sont ni le chemin d'un
+   autre paquet, ni dans lui, ni au-dessus de lui, ni sous `vendor/composer`
+   ou `bin-dir` ; la cible égale au chemin de LibraryInstaller est ce
+   chemin. Le plan de suppression suit `getPackageBasePath` : le chemin
+   moins `target-dir` (aujourd'hui `vendor/<nom>` pour tout chemin sous
+   vendor/).
+4. **getkirby** : après les opérations, pour chaque paquet `kirby-cms`, ou
+   `kirby-plugin` qui exige l'installeur, installé ou mis à jour **par ce
+   run**, `<chemin>/vendor` supprimé (Composer : `postInstall` dans la
+   promesse de l'installation, avant le dump).
+5. **craftcms** : actif sans aucun paquet `craft-plugin` (lock voulu,
+   installed.json) et racine d'un autre type → rien ; sinon repli nommé
+   (`plugins.php` non émulé).
+6. **composer/installers v1.12.0** : sa table ; sur PHP ≥ 8.4 (version du
+   `php` que la sonde de plateforme lit), les deux lignes, au niveau normal,
+   là où Composer charge `Installer.php` : à la tête de la commande
+   (plugin chargé depuis installed.json, avec les avertissements de
+   chargement) ou juste après la ligne d'installation du plugin ; une mise à
+   jour du plugin, `-v` et au-delà → repli nommé.
+7. **contao-components** : `extra.contao-component-dir` chaîne → le chemin ;
+   `config.component-dir` (avertissement), `config.contao-component-dir`
+   (exception), ni l'un ni l'autre (NoopInstaller : rien posé) → repli.
+8. **omeka** : garde par contenu (empreinte des deux fichiers sources du
+   paquet `path`, au commit lu), à défaut de tag.
+9. Rien n'est émulé sous `--no-plugins` (tout dans vendor/, comme Composer).
+
+## Replis nommés (avant toute écriture)
+
+Une version non lue de chaque plugin porté ; craftcms avec un paquet
+`craft-plugin` ; kirby, neos, davidbarratt, thelia avec une configuration
+hors schéma (non-chaîne là où PHP lèverait ou convertirait) ; oomphinc sans
+entrée `installer-paths` (Composer lève) ; contao-components sans
+`extra.contao-component-dir` ; deux installeurs aux chemins différents pour
+un même paquet ; simplesamlphp/composer-module-installer et
+composer-xmlprovider-installer (inconnus, inchangé) ; contao/manager-plugin,
+silverstripe, mautic (inchangé).
+
+## Fichiers
+
+1. `harness/custom-installers.sh` (nouveau, dans `ci.yml`).
+2. `crates/vivacity-core/src/custom_installers.rs` (nouveau) ;
+   `layout.rs` (placeurs, priorité, cibles sous vendor/, suppression) ;
+   `scope.rs` (`EMULATED_PLUGINS`) ; `installers.rs` + `assets/installers/
+   v1.12.0.json` (`tools/gen-installers-table.php`).
+3. `crates/vivacity/src/` : la suppression de kirby après les opérations ;
+   les lignes de dépréciation (installation et chargement).
+4. Docs : CHANGELOG `[Unreleased]`, DECISIONS (entrée datée), HANDOVER,
+   README (liste des plugins émulés), NOTICE (copies de référence MIT et
+   Apache-2.0), ce plan.
+
+## Cas de harnais
+
+`harness/custom-installers.sh` : par plugin, un projet qui exige le vrai
+plugin à sa version exacte (Packagist) et des paquets synthétiques de ses
+types servis par un dépôt `artifact` (zips fabriqués par ZipArchive, comme
+`artifact-repo.sh`) ; lock écrit par Composer `--no-plugins`. Étapes :
+install (vendor vierge), no-op, mise à jour d'un paquet placé (second lock),
+retrait d'un paquet placé, `--no-plugins` ; par étape : code, projet entier
+(fichiers, modes, liens, installed.json), stdout et stderr. Plus, sous
+`--no-fallback` : une version non lue, chaque configuration hors schéma →
+code 3, la raison, rien d'écrit. Rouges sur 0.24.0 (08b309c), verts après.
+
+## Critère « vert »
+
+Les cas du harnais verts ; `cargo fmt --all -- --check` ; clippy
+`-D warnings` (Linux et `x86_64-pc-windows-gnu`) ; `cargo test --workspace`
+(après `fixtures/make.sh`) ; tous les harnais de `ci.yml` et
+`root-manifest.sh` à 0, sauf ce que le réseau de la session interdit (dit,
+avec les relances restreintes) ; `harness/corpus.sh --only` sur les entrées
+concernées : natives, 0 diff.
+
+## Non-objectifs (vus, laissés)
+
+- `vendor/craftcms/plugins.php` (paquets `craft-plugin`) : génération
+  `var_export` portable, mais aucune entrée du corpus ne l'exige.
+- simplesamlphp (ilias) : imbrication et liens durs ; contao/manager-plugin ;
+  silverstripe ; mautic.
+- La fixture omeka-s n'a pas le paquet `path`
+  `application/data/composer-addon-installer` (tools/corpus-add.sh ne copie
+  que l'arbre de l'autoload) : l'entrée reste en repli.
+- roots/wordpress-core-installer et mnsami n'ont pas de garde de version
+  (préexistant) : vu, laissé.
