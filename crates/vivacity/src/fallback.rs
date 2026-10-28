@@ -30,6 +30,26 @@ pub(crate) fn resolution_fallback(
         with_install,
         post_update_cmd,
     );
+    // laminas-skeleton-installer, configured, rewrites composer.json at
+    // `POST_UPDATE_CMD`; `require` and `remove` read the file again for the
+    // lock's hash afterwards (docs/plans/plugins-round2.md). Decided now,
+    // before the command edits composer.json.
+    if !no_plugins
+        && matches!(
+            command,
+            vivacity_core::scope::ResolutionCommand::Require
+                | vivacity_core::scope::ResolutionCommand::Remove
+        )
+        && vivacity_core::scope::active_plugins(project, manifest, true)
+            .iter()
+            .any(|p| p == vivacity_core::effect_plugins::LAMINAS_SKELETON)
+        && vivacity_core::effect_plugins::laminas_skeleton_configured(manifest) == Ok(true)
+    {
+        issues.push(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+            vivacity_core::effect_plugins::LAMINAS_SKELETON.to_owned(),
+            "rewrites composer.json, which the command reads again for the lock's hash (not emulated)".to_owned(),
+        ));
+    }
     // Without an install, `POST_UPDATE_CMD` still runs the loaded plugins'
     // listeners on the local repository: what vivacity cannot reproduce
     // there goes to Composer now, before anything is written.

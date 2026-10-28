@@ -743,7 +743,17 @@ impl Scanner {
         // (path, real path, raw classes) in walk order.
         let mut scanned_files: ScannedFiles = Vec::new();
 
-        let cached = cache.and_then(|c| c.load());
+        // A store entry is immutable, its copy under vendor/ is not: a
+        // plugin may have deleted files there since (liborm85/
+        // composer-vendor-cleaner removes test directories inside the
+        // autoloaded ones, docs/plans/plugins-round2.md). A record whose
+        // files are not all still there is not served: the directory is
+        // scanned as it is.
+        let cached = cache.and_then(|c| c.load()).filter(|entries| {
+            entries
+                .iter()
+                .all(|(rel, _)| std::fs::symlink_metadata(path.join(rel)).is_ok())
+        });
         if let Some(entries) = cached {
             let base_real =
                 vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

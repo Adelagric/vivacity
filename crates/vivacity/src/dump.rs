@@ -320,6 +320,39 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             return Ok(3);
         }
     }
+    // The local repository the listeners read: installed.json as purged,
+    // dev packages included whatever `--no-dev` says (`dump-autoload` does
+    // not uninstall them).
+    let local_all = vivacity_core::lock::Lock::from_value(
+        &serde_json::json!({"packages": kept, "packages-dev": []}),
+    );
+    // The second round of emulated plugins (docs/plans/plugins-round2.md).
+    if !args.no_plugins {
+        let global = crate::effect_plugins::global_packages();
+        let ctx = vivacity_core::effect_plugins::Context {
+            project: &project,
+            manifest: &manifest,
+            local: local_all.packages.iter().map(|p| &p.raw).collect(),
+            installed: &installed_entries,
+            dev_mode,
+            command: vivacity_core::effect_plugins::Command::DumpAutoload,
+            interactive: false,
+            no_autoloader: false,
+            plugins_enabled: true,
+            global: &global,
+        };
+        let issues = vivacity_core::effect_plugins::issues(&ctx);
+        if !issues.is_empty() {
+            vivacity_core::say_always!(
+                "vivacity: this lock is outside what vivacity handles natively:"
+            );
+            for i in &issues {
+                vivacity_core::say_always!("  - {i}");
+            }
+            vivacity_core::say_always!("Run `composer dump-autoload` instead.");
+            return Ok(3);
+        }
+    }
     let installed_order: Vec<String> = installed_packages(&project, &manifest)
         .iter()
         .filter_map(|p| {
@@ -373,6 +406,29 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         crate::verbose_listeners::PRE_AUTOLOAD_DUMP,
         &manifest,
     );
+    // liborm85/composer-vendor-cleaner (all three of its steps: no
+    // `pre-install-cmd` came) and cakephp/plugin-installer, on every
+    // installed package, at their install paths.
+    let all_layout = vivacity_core::layout::Layout::resolve(
+        &project,
+        &local_all,
+        &manifest,
+        true,
+        !args.no_plugins,
+    )
+    .ok();
+    let paths_layout = all_layout.as_ref().unwrap_or(&layout);
+    let all_packages: Vec<&vivacity_core::lock::LockPackage> = local_all.packages.iter().collect();
+    let (root, _) = crate::effect_plugins::pre_autoload_dump(
+        &manifest,
+        paths_layout,
+        &local_all,
+        &all_packages,
+        dev_mode,
+        !args.no_plugins,
+        &listeners,
+        true,
+    )?;
     if let Some(r) = &runner {
         let code = r.run(scripts::PRE_AUTOLOAD_DUMP)?;
         if code != 0 {
@@ -382,7 +438,7 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     let report = dump_autoload(
         &project,
         &lock,
-        &manifest,
+        &root,
         &layout,
         dev_mode,
         args.optimize || args.classmap_authoritative,
@@ -404,6 +460,14 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &order,
             !args.no_plugins,
             previously_present,
+        )?;
+        crate::effect_plugins::post_autoload_dump(
+            &manifest,
+            paths_layout,
+            &local_all,
+            &all_packages,
+            dev_mode,
+            !args.no_plugins,
         )?;
         // yii2-composer's `activate` alone: no installer operation on a dump.
         emulate_yii2_composer(

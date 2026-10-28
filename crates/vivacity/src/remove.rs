@@ -365,6 +365,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         prefer_dist: false,
         prefer_install: None,
         command_dispatched: true,
+        resolution_command: Some(vivacity_core::scope::ResolutionCommand::Remove),
         lockless_install: None,
         allow_plugins_at_load,
     };
