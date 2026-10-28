@@ -46,6 +46,8 @@ pub struct InstallReport {
     pub store_hits: usize,
     /// Unchanged packages extracted into the store (pre-existing vendor).
     pub store_warmed: usize,
+    /// Packages cloned from their git source (no dist).
+    pub from_git: usize,
     /// The local repository after the transaction: the lock's entries for
     /// the packages installed or updated, the previous installed.json
     /// entries for the unchanged ones (Composer keeps the loaded objects and
@@ -141,6 +143,7 @@ fn local_repository(
     previous: &BTreeMap<String, Installed>,
     unchanged_names: &std::collections::BTreeSet<&str>,
     flex_ready: bool,
+    from_source: &std::collections::BTreeSet<&str>,
 ) -> Lock {
     let mut local = lock.clone();
     for p in local
@@ -169,9 +172,15 @@ fn local_repository(
         // out afterwards by Flex's metapackage installer.
         p.raw.remove("installation-source");
         if !p.is_virtual(flex_ready) {
+            // `VcsDownloader::getInstallationSource` for a git clone.
+            let source = if from_source.contains(p.name()) {
+                "source"
+            } else {
+                "dist"
+            };
             p.raw.insert(
                 "installation-source".to_owned(),
-                serde_json::Value::String("dist".to_owned()),
+                serde_json::Value::String(source.to_owned()),
             );
         }
     }
@@ -199,7 +208,86 @@ pub fn local_repository_if_unchanged(lock: &Lock, layout: &Layout, with_dev: boo
         unchanged.insert(p.name());
     }
     // Every package is unchanged here, so the flag is not consulted.
-    Some(local_repository(lock, &previous, &unchanged, false))
+    Some(local_repository(
+        lock,
+        &previous,
+        &unchanged,
+        false,
+        &std::collections::BTreeSet::new(),
+    ))
+}
+
+/// `Factory::purgePackages`: the installed.json entries whose install path
+/// is still there (a metapackage or a package laid out nowhere is never
+/// purged).
+fn present_packages(layout: &Layout) -> BTreeMap<String, Installed> {
+    let mut previous = installed_packages(&layout.composer_dir());
+    previous.retain(|name, installed| {
+        // `MetapackageInstaller::isInstalled` answers from the repository
+        // alone: there is no path to look at.
+        if installed
+            .raw
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("metapackage")
+            || layout.install_path(name).is_none()
+        {
+            return true;
+        }
+        layout
+            .abs(name)
+            .or_else(|| layout.removals().find(|(n, _)| n == name).map(|(_, d)| d))
+            .is_some_and(|d| d.exists())
+    });
+    previous
+}
+
+fn installed_from_source(installed: &Installed) -> bool {
+    installed
+        .raw
+        .get("installation-source")
+        .and_then(Value::as_str)
+        == Some("source")
+}
+
+/// The transaction's operations on source checkouts that vivacity hands to
+/// Composer (docs/plans/git-sources.md): the update or removal of a package
+/// installed from source (`VcsDownloader::prepare` → `cleanChanges` reads
+/// the clone's local changes and unpushed commits, and may ask), and the
+/// update of an installed package to a version that only has a git source
+/// (`DownloadManager::update` between two downloader types). Only a fresh
+/// install of a git-only package, or leaving one untouched, is native.
+pub fn source_install_issues(
+    lock: &Lock,
+    layout: &Layout,
+    with_dev: bool,
+) -> Vec<crate::scope::ScopeIssue> {
+    let previous = present_packages(layout);
+    let wanted: BTreeMap<&str, &LockPackage> = lock
+        .wanted_packages(with_dev)
+        .map(|p| (p.name(), p))
+        .collect();
+    let mut issues = Vec::new();
+    for (name, installed) in &previous {
+        let changed = wanted
+            .get(name.as_str())
+            .is_none_or(|p| identity(p) != installed.identity);
+        if !changed {
+            continue;
+        }
+        if installed_from_source(installed) {
+            issues.push(crate::scope::ScopeIssue::SourceInstalled(name.clone()));
+        } else if wanted
+            .get(name.as_str())
+            .is_some_and(|p| p.dist_kind() == DistKind::Missing)
+        {
+            issues.push(crate::scope::ScopeIssue::GitSource(
+                name.clone(),
+                "an update of the installed version".to_owned(),
+            ));
+        }
+    }
+    issues
 }
 
 pub async fn install(
@@ -224,26 +312,7 @@ pub async fn install(
     // `Factory::purgePackages`: a package of installed.json whose install
     // path is gone is not installed at all (a fresh install, not an
     // update — no `removeBinaries`, no removal of the old path).
-    let mut previous = installed_packages(&layout.composer_dir());
-    previous.retain(|name, installed| {
-        // `purgePackages` asks the installer: `MetapackageInstaller::
-        // isInstalled` answers from the repository alone, so a package
-        // nothing is laid out for (a metapackage, a Flex pack) is never
-        // purged — there is no path to look at.
-        if installed
-            .raw
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            == Some("metapackage")
-            || layout.install_path(name).is_none()
-        {
-            return true;
-        }
-        layout
-            .abs(name)
-            .or_else(|| layout.removals().find(|(n, _)| n == name).map(|(_, d)| d))
-            .is_some_and(|d| d.exists())
-    });
+    let previous = present_packages(layout);
 
     // To lay out: changed identity, or missing directory. Unchanged packages
     // whose store entry is missing (vendor/ laid out by Composer before vivacity)
@@ -268,7 +337,10 @@ pub async fn install(
         if unchanged {
             unchanged_names.insert(p.name());
             report.unchanged += 1;
+            // A checkout Composer made from source is not its dist: no
+            // store entry stands for it.
             if matches!(p.dist_kind(), DistKind::Zip | DistKind::Tar)
+                && !previous.get(p.name()).is_some_and(installed_from_source)
                 && !store.contains(p.name(), p.version(), p.store_reference().as_deref())
             {
                 to_warm.push(p);
@@ -287,6 +359,40 @@ pub async fn install(
         }
     }
 
+    // Packages without dist: installed from their git source
+    // (`GitDownloader`). The scope analysis accepted them; a plan refused
+    // here (the environment changed in between) is handed over all the same.
+    let mut git_sources: BTreeMap<&str, crate::git_source::GitSource> = BTreeMap::new();
+    for p in &to_install {
+        if p.dist_kind() != DistKind::Missing {
+            continue;
+        }
+        let plan = crate::git_source::plan(p, project_dir, root_manifest).map_err(|why| {
+            Error::Unsupported(format!(
+                "package {}: git source not installed natively ({why})",
+                p.name()
+            ))
+        })?;
+        if opts.offline && plan.is_remote() {
+            return Err(Error::Unsupported(format!(
+                "package {}: git source not installed natively (--offline, and its mirror must be synced)",
+                p.name()
+            )));
+        }
+        git_sources.insert(p.name(), plan);
+    }
+    // `GitDownloader::doDownload`, in the download phase as Composer runs
+    // it: the mirrors of the remote repositories synced into the VCS cache.
+    // A failure is Composer's to report, before anything is written here.
+    for src in git_sources.values() {
+        crate::git_source::sync(src, project_dir).map_err(|why| {
+            Error::Unsupported(format!(
+                "package {}: git source not installed natively ({why})",
+                src.name
+            ))
+        })?;
+    }
+
     // Fetch + extraction into the store, with bounded parallelism. Packages to
     // "warm" only use the local cache (never the network) and their failure
     // is silent: it is an optimisation, not an obligation.
@@ -294,7 +400,7 @@ pub async fn install(
     let mut tasks = tokio::task::JoinSet::new();
     let warm_names: std::collections::BTreeSet<&str> = to_warm.iter().map(|p| p.name()).collect();
     for p in to_install.iter().chain(to_warm.iter()) {
-        if p.dist_kind() == DistKind::Path {
+        if matches!(p.dist_kind(), DistKind::Path | DistKind::Missing) {
             continue;
         }
         if store.contains(p.name(), p.version(), p.store_reference().as_deref()) {
@@ -364,6 +470,33 @@ pub async fn install(
     }
     report.store_warmed = to_warm.len();
 
+    // `GitDownloader::doInstall` + `updateToCommit` for every git package,
+    // before the first removal: each clone is made in a work directory under
+    // vendor/ and only renamed into place below, so a failing checkout
+    // leaves the project as it was and the run goes to Composer.
+    let git_work = if git_sources.is_empty() {
+        None
+    } else {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".vivacity-git-")
+                .tempdir_in(&vendor)
+                .map_err(Error::io(&vendor))?,
+        )
+    };
+    let mut git_clones: BTreeMap<&str, std::path::PathBuf> = BTreeMap::new();
+    if let Some(work) = &git_work {
+        for (i, (name, src)) in git_sources.iter().enumerate() {
+            let staged = work.path().join(i.to_string());
+            crate::git_source::clone_into(src, &staged, project_dir).map_err(|why| {
+                Error::Unsupported(format!(
+                    "package {name}: git source not installed natively ({why})"
+                ))
+            })?;
+            git_clones.insert(name, staged);
+        }
+    }
+
     // Removals: present before, no longer wanted, at the path validated by the
     // layout (old install-path = recomputed path, like LibraryInstaller).
     for name in previous.keys() {
@@ -416,6 +549,13 @@ pub async fn install(
         // Always start again from an empty package root (target-dir included).
         if std::fs::symlink_metadata(&pkg_root).is_ok() {
             crate::path_install::remove_path(&pkg_root)?;
+        }
+        if let Some(staged) = git_clones.get(p.name()) {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(Error::io(parent))?;
+            }
+            std::fs::rename(staged, &dest).map_err(Error::io(&dest))?;
+            return Ok(true);
         }
         let src = store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
         crate::clone::clone_tree(&src, &dest)?;
@@ -535,7 +675,11 @@ pub async fn install(
             crate::layout::plugin_allowed(root_manifest, "symfony/flex"),
             crate::layout::PluginVerdict::Allowed
         );
-    let local = local_repository(lock, &previous, &unchanged_names, flex_ready);
+    // The work directory is empty now; removing it is all that is left.
+    drop(git_work);
+    report.from_git = git_clones.len();
+    let from_source: std::collections::BTreeSet<&str> = git_clones.keys().copied().collect();
+    let local = local_repository(lock, &previous, &unchanged_names, flex_ready, &from_source);
     let root = RootPackage::detect(root_manifest, project_dir, opts.with_dev);
     crate::state::write_state_files(
         &layout.composer_dir(),

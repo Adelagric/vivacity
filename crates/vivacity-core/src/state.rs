@@ -248,13 +248,29 @@ pub fn installed_php(
     for p in &packages {
         let name = p.name().to_owned();
         let is_dev = dev_names.contains(name.as_str());
-        let reference = p
-            .dist_reference()
+        // `FilesystemRepository::dumpInstalledVersions`: the reference of
+        // the installation source, the other one when it has none.
+        // `$reference = installation-source 'source' ? source ref : dist
+        // ref; if (null === $reference) $reference = (source ?: dist) ?: null`.
+        let source_reference = p
+            .raw
+            .get("source")
+            .and_then(|s| s.get("reference"))
+            .and_then(Value::as_str);
+        let dist_reference = p.dist_reference();
+        let from_source =
+            p.raw.get("installation-source").and_then(Value::as_str) == Some("source");
+        let truthy = |r: &&str| !r.is_empty() && *r != "0";
+        let primary = if from_source {
+            source_reference
+        } else {
+            dist_reference
+        };
+        let reference = primary
             .or_else(|| {
-                p.raw
-                    .get("source")
-                    .and_then(|s| s.get("reference"))
-                    .and_then(Value::as_str)
+                source_reference
+                    .filter(truthy)
+                    .or(dist_reference.filter(truthy))
             })
             .map(str::to_owned);
         let entry = versions.entry(name.clone()).or_default();

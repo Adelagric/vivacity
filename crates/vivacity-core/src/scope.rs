@@ -588,8 +588,17 @@ pub enum ScopeIssue {
     /// listener vivacity does not reproduce for this project (a plugin
     /// version not read, an aliased extension, a message to print).
     Layout(String),
-    /// Package without a usable zip dist (source-only, exotic dist).
+    /// Package without a usable zip dist (exotic dist, no dist nor source).
     NoUsableDist(String),
+    /// A `path` package whose directory is not there (name, url).
+    MissingPathSource(String, String),
+    /// A package without dist whose source is not installed natively
+    /// (name, reason): docs/plans/git-sources.md.
+    GitSource(String, String),
+    /// A package installed from its source (a git checkout) that the
+    /// transaction updates or removes: Composer asks the clone for local
+    /// changes and unpushed commits first (`GitDownloader::cleanChanges`).
+    SourceInstalled(String),
     /// A `config` key vivacity does not read and that changes the layout
     /// (`vendor-dir`, `bin-dir`, `preferred-install: source`): Composer's
     /// output would differ, so the lock is handed over.
@@ -618,6 +627,17 @@ impl std::fmt::Display for ScopeIssue {
                     "package {p} has no usable dist (no zip or tar dist, no path source)"
                 )
             }
+            ScopeIssue::MissingPathSource(p, url) => write!(
+                f,
+                "package {p} is a path package whose directory {url} does not exist"
+            ),
+            ScopeIssue::GitSource(p, why) => {
+                write!(f, "package {p}: git source not installed natively ({why})")
+            }
+            ScopeIssue::SourceInstalled(p) => write!(
+                f,
+                "package {p} is installed from source (a git checkout): its update or removal checks the clone for local changes (not emulated)"
+            ),
             ScopeIssue::Config(why) => write!(f, "config {why} is not supported natively"),
             ScopeIssue::MergePlugin(why) => write!(f, "wikimedia/composer-merge-plugin: {why}"),
         }
@@ -652,7 +672,7 @@ pub fn analyze(
     let mut report = ScopeReport::default();
 
     for p in lock.wanted_packages(with_dev) {
-        classify_package(project_dir, p, plugins_enabled, &mut report);
+        classify_package(project_dir, root_manifest, p, plugins_enabled, &mut report);
     }
     // yii2-composer's installer writes three `Yii.php` shims for
     // `yiisoft/yii2-dev` (`linkBaseYiiFiles`): not emulated.
@@ -738,7 +758,14 @@ pub fn analyze(
             .map(ScopeIssue::Config),
     );
     match Layout::resolve(project_dir, lock, root_manifest, with_dev, plugins_enabled) {
-        Ok(layout) => report.layout = Some(layout),
+        Ok(layout) => {
+            report
+                .issues
+                .extend(crate::installer::source_install_issues(
+                    lock, &layout, with_dev,
+                ));
+            report.layout = Some(layout);
+        }
         Err(issues) => report
             .issues
             .extend(issues.into_iter().map(ScopeIssue::Layout)),
@@ -920,8 +947,11 @@ pub fn config_issues(root_manifest: &Value, lock: &Lock, with_dev: bool) -> Vec<
     };
     let mut out = Vec::new();
     if let Some(v) = value("preferred-install") {
+        // A package without dist comes from its source whatever the
+        // preference (`getAvailableSources` has nothing else to offer).
         if lock
             .wanted_packages(with_dev)
+            .filter(|p| p.dist_kind() != DistKind::Missing)
             .any(|p| prefers_source(&v, p.name(), is_dev_version(p.version())))
         {
             out.push(format!("preferred-install {v}"));
@@ -932,6 +962,7 @@ pub fn config_issues(root_manifest: &Value, lock: &Lock, with_dev: bool) -> Vec<
 
 fn classify_package(
     project_dir: &Path,
+    root_manifest: &Value,
     p: &LockPackage,
     plugins_enabled: bool,
     report: &mut ScopeReport,
@@ -945,18 +976,39 @@ fn classify_package(
     if p.is_metapackage() {
         return;
     }
-    let usable = match p.dist_kind() {
-        DistKind::Zip | DistKind::Tar => true,
+    match p.dist_kind() {
+        DistKind::Zip | DistKind::Tar => {}
         // A `path` package is laid out natively (symlink or mirror) on
         // Linux/macOS when its source directory is there; Windows
         // (junctions) is left to Composer.
-        DistKind::Path => cfg!(unix) && p.dist_url().is_some_and(|u| project_dir.join(u).is_dir()),
-        DistKind::Other | DistKind::Missing => false,
-    };
-    if !usable {
-        report
+        DistKind::Path => {
+            let url = p.dist_url().unwrap_or("");
+            if cfg!(unix) && !url.is_empty() && !project_dir.join(url).is_dir() {
+                report.issues.push(ScopeIssue::MissingPathSource(
+                    p.name().to_owned(),
+                    url.to_owned(),
+                ));
+            } else if !cfg!(unix) || url.is_empty() {
+                report
+                    .issues
+                    .push(ScopeIssue::NoUsableDist(p.name().to_owned()));
+            }
+        }
+        // No dist at all: `DownloadManager::getAvailableSources` leaves
+        // only the source, installed by `GitDownloader` when it is git
+        // (docs/plans/git-sources.md). A dist of another type is tried
+        // first by Composer, with its own fallback to the source: handed
+        // over as before.
+        DistKind::Missing if p.raw.get("source").is_some_and(|s| !s.is_null()) => {
+            if let Err(why) = crate::git_source::plan(p, project_dir, root_manifest) {
+                report
+                    .issues
+                    .push(ScopeIssue::GitSource(p.name().to_owned(), why));
+            }
+        }
+        DistKind::Other | DistKind::Missing => report
             .issues
-            .push(ScopeIssue::NoUsableDist(p.name().to_owned()));
+            .push(ScopeIssue::NoUsableDist(p.name().to_owned())),
     }
 }
 
@@ -1230,7 +1282,7 @@ mod tests {
     fn installers_without_allow_plugins_and_sourceless_dist_are_out_of_scope() {
         let lock = lock_with(json!([
             {"name": "a/src-only", "version": "1.0.0", "type": "library",
-             "source": {"type": "git", "url": "https://g/x.git", "reference": "r"}},
+             "source": {"type": "svn", "url": "https://g/x", "reference": "r"}},
             {"name": "a/meta", "version": "1.0.0", "type": "metapackage"},
             zip_pkg("composer/installers", "composer-plugin"),
         ]));
@@ -1239,7 +1291,14 @@ mod tests {
         let manifest = json!({"extra": {"installer-paths": {"web/modules/{$name}": []}}});
         let r = analyze(&proj(), &lock, &manifest, true, true);
         assert_eq!(r.issues.len(), 2, "{:?}", r.issues);
-        assert_eq!(r.issues[0], ScopeIssue::NoUsableDist("a/src-only".into()));
+        // Only a git source is installed natively (docs/plans/git-sources.md).
+        assert_eq!(
+            r.issues[0],
+            ScopeIssue::GitSource(
+                "a/src-only".into(),
+                "source type `svn` (only git is installed natively)".into()
+            )
+        );
         assert!(matches!(&r.issues[1], ScopeIssue::Layout(m) if m.contains("allow-plugins")));
     }
 
@@ -1255,7 +1314,10 @@ mod tests {
         ]));
         let r = analyze(tmp.path(), &lock, &json!({}), true, true);
         let expected = if cfg!(unix) {
-            vec![ScopeIssue::NoUsableDist("a/gone".into())]
+            vec![ScopeIssue::MissingPathSource(
+                "a/gone".into(),
+                "packages/gone".into(),
+            )]
         } else {
             vec![
                 ScopeIssue::NoUsableDist("a/here".into()),
