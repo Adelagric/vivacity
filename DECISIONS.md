@@ -4215,3 +4215,73 @@ faisait rien.
   préexistant de `scope::active_plugins`, qui lit le dépôt global sans les
   conditions du Composer global ; un plugin autorisé dont l'API ne
   correspond pas (Composer l'ignore avec un avertissement).
+
+## 2026-10-28 — Les paquets sans dist servis par git, installés comme Composer les installe
+
+Le corpus du 2026-10-21 rendait six entrées pour « no usable dist ». Le
+classement (`docs/plans/git-sources.md`) : trois paquets git seuls
+(ampache, kovah-linkace, friendica) et trois paquets `path` dont la
+fixture du corpus n'a pas le répertoire (mautic, drupal, omeka-s) — le
+message les confondait, il les nomme désormais.
+
+- **Le binaire `git`, les commandes de `GitDownloader`, rien d'autre.**
+  Un `.git` ne peut être celui de Composer que par construction : même
+  binaire, mêmes commandes, même ordre, mêmes arguments (le chemin du
+  cache avec sa barre finale, `--` devant chaque URL), même environnement
+  (`Git::cleanEnv`), même `process-timeout`. Écartées : une bibliothèque
+  git en Rust (une dépendance, et un autre `.git` : packs, config,
+  reflogs) ; une extraction de l'arbre sans `.git` (ce n'est pas ce que
+  laisse Composer).
+- **Ce que « identique à l'octet » veut dire pour un `.git`.** Mesuré :
+  deux installs de Composer à une seconde d'écart ne diffèrent que par
+  `index` (cache stat) et les horodatages des reflogs ; la méta-analyse a
+  montré un troisième écart, les packs refaits par `clone --dissociate`
+  d'un miroir à objets libres (`repack` en plusieurs threads : trois noms
+  de pack pour trois clones). Décision : tout `.git` sous le vendor
+  comparé à l'octet sauf ces trois familles, comparées par ce qu'elles
+  signifient (`ls-files --stage` et `status`, reflogs horodatage masqué,
+  ensemble des objets) ; `objects/info/` à l'octet hors noms de packs (un
+  `alternates` vers le cache serait une vraie différence). Les modes
+  aussi. Le banc donne à chaque côté son cache VCS au même chemin (le
+  reflog du clone le porte).
+- **Tout ce qui peut échouer passe avant la première écriture.** La
+  synchronisation du miroir (phase de téléchargement), puis le clone et
+  `updateToCommit` dans un répertoire de travail sous vendor/ ; le
+  placement n'est qu'un `rename`, vérifié sur un seul système de
+  fichiers. Un échec rend la main à Composer, qui produit sa propre
+  erreur, sans rien laisser (pas même un vendor/ créé par le run) — la
+  revue a trouvé que vendor/ était créé trop tôt. Écarté : reproduire les
+  erreurs de git et la boucle d'authentification/protocoles de
+  `Git::runCommand`.
+- **Natif seulement là où le banc compare.** `https://` sans
+  identifiants, chemin local (`isLocalPath`, `realpath`, `file://`),
+  Linux/macOS, cache non configuré, réseau permis, installation neuve
+  sous le vendor ou paquet laissé tel quel. Rendus, nommés, avant toute
+  écriture : autres VCS et schémas, `github-protocols`/`github-domains`,
+  `cache-dir`/`cache-vcs-dir`/`COMPOSER_CACHE_VCS_DIR`,
+  `COMPOSER_DISABLE_NETWORK`/`--offline`, `single_use_clone`, `mirrors`,
+  références et branches dérivées hors `[A-Za-z0-9._/-]` (une version
+  `dev---detach` deviendrait une option de `git checkout`), métapaquet
+  et `symfony-pack` git seuls, chemin d'installation hors du vendor, et
+  la mise à jour ou la suppression d'un paquet installé depuis la source
+  (`cleanChanges` interroge le clone et peut poser une question) — vue
+  par `--check-scope`.
+- **`--prefer-source` / `preferred-install: source` restent rendus.** Ce
+  n'est pas le même travail : passer en source des paquets qui ont une
+  dist, c'est cloner Packagist depuis GitHub (authentification, `mirrors`,
+  repli source → dist sur échec avec ses avertissements). Seul ajustement :
+  un paquet sans dist ne fait plus refuser la préférence (il vient de la
+  source quoi qu'elle dise).
+- **Laissés** : un dépassement de `process-timeout` ne tue que `git`, pas
+  `git-remote-https` (tuer le groupe demanderait `unsafe`, ou un groupe de
+  processus à part qui couperait le Ctrl-C) ; un `vendor/.vivacity-git-*`
+  après un arrêt brutal ; Windows.
+
+Mesures, machine : macOS 26 (Apple Silicon, 14 cœurs), git 2.54.0,
+Composer 2.10.3. Corpus rejoué sur les six entrées : ampache et
+kovah-linkace natives en 0 diff (dev et `--no-dev`), friendica ne garde
+que oomphinc/composer-installers-extender, mautic, drupal et omeka-s leurs
+plugins et leurs répertoires `path` absents. `harness/git-sources.sh` :
+25 cas, rouges sur 0.24.0 (code 3, ou motif de repli absent), verts
+ensuite ; `compare-selftest.sh` : 8 cas `.git`, dont 3 rouges avec le
+`compare.sh` de 0.24.0 (qui ignorait tout `.git`).

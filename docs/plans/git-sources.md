@@ -189,19 +189,23 @@ kovah-linkace peuvent devenir natives.
    `Unsupported` nommé, donc Composer (sa logique `cleanChanges` interroge
    le clone et peut poser une question). Seule l'installation **neuve**
    d'un paquet source est native ; un paquet source inchangé reste intact.
-3. **Phase réseau, avant toute écriture** : pour chaque paquet source à
-   installer, dans l'ordre du lock, `fetchRefOrSyncMirror` porté
+3. **Phase réseau, avant toute écriture** (vendor/ compris) : pour chaque
+   paquet source à installer, par nom (l'ordre est sans effet visible : les
+   lignes, elles, suivent les opérations), `fetchRefOrSyncMirror` porté
    (`rev-parse --git-dir`, `rev-parse --quiet --verify <ref>^{commit}`,
    `branch`, `tag`, `clone --mirror` ou `remote update --prune` + `gc
    --auto`, `remote set-url` encadrant). Échec, ou référence absente après
    synchronisation → `Unsupported` → Composer rejoue et produit sa propre
-   erreur. Source locale : la référence est vérifiée dans le dépôt source
-   (`rev-parse --verify`) avant toute écriture, pour la même raison.
+   erreur. Une source locale n'a pas de phase réseau : une référence
+   absente fait échouer la préparation (point 4), avant toute écriture
+   elle aussi.
 4. **Préparation puis placement** : la suite exacte de `doInstall` +
    `updateToCommit` tourne avant la première suppression, dans un
    répertoire de travail sous vendor/ ; un échec l'efface et rend la main
-   à Composer ; le placement n'est qu'un `rename` ( aucun chemin de destination n'est écrit
-   dans `.git`, vérifié : ni la config ni les reflogs ne le portent).
+   à Composer (et retire un vendor/ que le run a créé) ; le placement
+   n'est qu'un `rename`, vérifié sur un seul système de fichiers pendant
+   la préparation (aucun chemin de destination n'est écrit dans `.git`,
+   vérifié : ni la config ni les reflogs ne le portent).
    Arguments en tableau (jamais de shell), `--` devant chaque URL comme
    Composer, environnement de `cleanEnv`. Aucune récursion de sous-module,
    aucun crochet, aucune config lue du dépôt cloné : ce que fait Composer,
@@ -277,11 +281,57 @@ toutes examinées :
     **Corrigé** : pas de réchauffage ni d'association au store pour une
     entrée `installation-source: source`.
 
-Notés aussi et retenus : `process-timeout` (300 s par défaut,
-`COMPOSER_PROCESS_TIMEOUT`, config) appliqué à chaque commande git, un
-dépassement rendant la main à Composer ; synchronisation dans l'ordre des
-opérations plutôt que du lock (sans effet visible, mais c'est l'ordre de
-Composer).
+Notés aussi : `process-timeout` (300 s par défaut,
+`COMPOSER_PROCESS_TIMEOUT`, config) **retenu**, appliqué à chaque commande
+git, un dépassement rendant la main à Composer ; l'ordre de
+synchronisation (opérations plutôt que lock) **non retenu** : sans effet
+visible, les lignes suivent déjà les opérations.
+
+Un écart avec ce plan, trouvé à l'exécution : `config_issues` ne compte
+plus les paquets **sans dist** (point 7), mais garde ceux qui n'ont
+qu'une dist — un test existant (`unread_config_keys_are_scope_issues`)
+tient ce refus large, sans danger, et le changer n'est pas ce chantier.
+
+## Revue indépendante (sous-agent frais, `git diff main`) et ce qui change
+
+Le relecteur a construit le binaire dans un répertoire à part, rejoué le
+banc et des cas à lui contre Composer :
+
+- **Bloquant** — `compare.sh` comparait `objects/info/packs` même absent
+  des deux côtés : l'erreur de `sed`, qui contient le chemin de chaque
+  côté, entrait dans le diff, et tout clone local sortait « différent »
+  (introduit par le masquage des noms de packs, ajouté après le dernier
+  passage complet du banc). Comparé seulement quand il existe.
+- **Majeur** — un métapaquet git-seul imprimait `Syncing` (Composer : rien,
+  `MetapackageInstaller::download`) ; un `symfony-pack` git-seul aurait eu
+  `: Cloning` : rendu à Composer. Cas `meta`.
+- **Majeur** — `COMPOSER_DISABLE_NETWORK` n'était refusé que pour une URL
+  distante, alors que `doInstall` sans cache lève l'exception pour toute
+  source — et une source locale n'est jamais en cache (reproduit :
+  Composer 1, vivacity 0). Cas `network-off`.
+- **Majeur** — vendor/ était créé avant la synchronisation : un repli
+  laissait un vendor/ vide, malgré « no partial vendor/ was written ». La
+  synchronisation passe avant, une préparation ratée retire un vendor/
+  créé par le run ; les cas de repli exigent qu'aucun vendor/ ne reste.
+- Mineurs retenus : `rename` vérifié sur un seul système de fichiers ; un
+  paquet git-seul installé hors du vendor (installer-paths), dont le
+  `.git` n'est pas comparé, rendu ; `dump-autoload` lit
+  `installation-source` dans installed.json pour le cache de classmap
+  (le point 10 de la méta n'était tenu qu'à l'install) ; messages :
+  `access_token` masqué, caractères de contrôle remplacés ; référence
+  `"0"`, `COMPOSER_CACHE_DIR`/`COMPOSER_HOME` vides, dist sans `type`
+  rendus ; plus de panique sur une version non ASCII à l'octet 4.
+- Cas ajoutés à sa demande : URL locale relative (`updateOriginUrl`) et
+  `file://`, deux paquets sur un même miroir, resynchronisation d'un
+  miroir chaud, référence absente en local (répertoire de travail
+  effacé).
+- **Laissés, consignés** : un dépassement de `process-timeout` ne tue que
+  `git`, pas ses enfants (`git-remote-https`) — tuer le groupe demanderait
+  `unsafe` ou un changement de groupe de processus qui couperait le
+  Ctrl-C de l'utilisateur ; Composer (Symfony Process) ne tue pas non plus
+  les petits-enfants. Un `vendor/.vivacity-git-*` reste après un arrêt
+  brutal (rien ne le balaie). Les appels git bloquent dans la fonction
+  `async` de l'installation, à des points où rien d'autre n'est en vol.
 
 ## Fichiers
 
@@ -302,7 +352,7 @@ Composer).
 Dépôt nu fabriqué par le banc (deux commits, tag `1.0.0`, un fichier
 exécutable, un `bin`) ; configuration git du banc avec `insteadOf` pour
 `https://git.example.invalid/acme/lib.git` et `https://github.com/acme/
-lib.git` ; cache VCS partagé, vidé avant chaque cas ; projet entier
+lib.git` ; un cache VCS par côté, au même chemin (méta, point 5) ; projet entier
 comparé (`compare_vendor`, `.git` compris), stdout et stderr entiers
 (ligne `vivacity:` exceptée), code de sortie.
 
@@ -314,8 +364,14 @@ comparé (`compare_vendor`, `.git` compris), stdout et stderr entiers
 - `verbose` (`-v`), `quiet` (`-q`), `no-op` (second install), `mixed`
   (dist zip locale + deux sources : ordre `Downloading`/`Syncing`),
   `no-dev` (source en require-dev), `dump` (`dump-autoload -o` après).
-- Replis nommés, Composer rejoue (vendor/ identique après) : `remove`
-  (paquet source retiré du lock), `unreachable` (référence absente).
+- `cache-stale` : cache réchauffé sur un état ancien du dépôt, que la
+  synchronisation complète (objets libres dans le miroir, réempaquetés
+  par `--dissociate`).
+- Après la revue : `meta`, `relative`, `file-url`, `shared`, `resync`.
+- Replis nommés (`--no-fallback` en 3 sans rien écrire, puis Composer
+  rejoue, même code et même projet) : `remove` (paquet source retiré du
+  lock), `gone-ref` (référence absente du dépôt distant), `bad-local`
+  (absente du dépôt local), `network-off`.
 - `real` (réseau) : krixon/xbmc-php-rpc et shaarli/netscape-bookmark-
   parser depuis github.com.
 
@@ -338,3 +394,63 @@ suppression d'un paquet installé depuis la source ; autres VCS (hg, svn,
 fossil, perforce) ; Windows ; `http://`, `git://`, ssh ; les URL à
 identifiants et l'authentification ; `cache-dir`/`cache-vcs-dir`
 configurés.
+
+## Résultat (2026-10-28)
+
+`Darwin MacStudio-de-Adel-5.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:17:26 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6041 arm64` — `sysctl -n hw.ncpu` : 14.
+PHP 8.5.12, Composer 2.10.3, git 2.54.0 ; github.com joignable.
+
+Commits sur `git-sources` (depuis main 8a48734) : le plan ; le banc et la
+comparaison des `.git` ; l'implémentation ; les corrections de la revue ;
+la documentation.
+
+- **Parité de `.git`** : à l'octet sauf `index`, horodatage des reflogs et
+  rangement des objets (voir « Décision de parité »), établie par mesure
+  (deux runs de Composer) et par la méta-analyse (packs non
+  reproductibles).
+- **Classement** : ampache, kovah-linkace, friendica = git seuls ; mautic,
+  drupal, omeka-s = paquets `path` dont la fixture n'a pas le répertoire
+  (nommés comme tels désormais).
+- **Corpus** (`corpus.sh --only` les six, dev et `--no-dev`) : **ampache
+  et kovah-linkace natives, 0 diff dans les deux modes** ; friendica ne
+  garde que oomphinc/composer-installers-extender (sa source git sur
+  git.friendi.ca passe désormais le classement) ; mautic, drupal, omeka-s
+  en repli avec leurs plugins et leurs répertoires `path` absents.
+- **Banc** `harness/git-sources.sh` : 25 cas, **tous rouges** avec le
+  binaire de main 8a48734 (code 3 sous `--no-fallback`, ou motif de repli
+  absent), **tous verts** ensuite. `compare-selftest.sh` : 8 cas `.git`,
+  3 rouges avec le `compare.sh` de main (`git-config`, `git-reflog`,
+  `git-object` — l'ancien ignorait tout `.git`), 19/19 verts. Mutation
+  vérifiée : sans `setPushUrl` ni `--dissociate`, `github` et `cache-tag`
+  passent au rouge (config, `alternates`, objets).
+- **Portes** : `cargo fmt --all -- --check` 0 ; `cargo clippy --workspace
+  --all-targets -- -D warnings` 0, et `--target x86_64-pc-windows-gnu` 0 ;
+  `fixtures/make.sh` 0 puis `cargo test --workspace` 0 (36 suites, 388
+  tests, 0 échec).
+- **Bancs de ci.yml**, chacun par `harness/net-retry.sh` (aucune relance
+  réseau n'a eu lieu), `VIVACITY_HARNESS_DIR` à part supprimé après : tous
+  à 0 — diff-vendor (sans autoloader, avec autoloader froid puis chaud),
+  update, steps, removal, transitions, path-repos, git-sources,
+  vendor-dir, merge-plugin, scripts, tar-dist, yii2-composer, bin-plugin,
+  wp-core, custom-dirs, package-versions, plugin-lines, allow-plugins
+  (58/58, le défaut macOS connu des cas `disc-*-update` ne s'est pas
+  reproduit), flex-install, flex-update, flex-recipes, download-lines,
+  artifact-repo, compare-selftest, two-stage, transport-exit, verbosity,
+  fallback-args, root-scan, boot, drift-reference ; plus
+  `harness/root-manifest.sh` 0 et `tools/check-clib-deps.sh` 0.
+  `tools/check-pcre2-symbols.sh` sort en 1 sur l'arbre `target/` entier, à
+  cause de l'archive de la cible `x86_64-pc-windows-gnu` laissée par le
+  clippy croisé (symboles `.refptr.*` de mingw) ; sur `target/release` et
+  `target/debug` (ce que la CI construit) : 0. Rien de PCRE2 n'a changé.
+  Non lancés ici : `windows.yml` (pas de Windows ; le code natif est
+  `cfg(unix)`, Windows rend la main), le corpus entier (seules les six
+  entrées concernées).
+- **Défauts vus, laissés** : la ligne « Skipped installation of bin … name
+  conflicts » est écrite par vivacity après toutes les opérations, par
+  Composer au milieu (ordre, indépendant de git) ; « Skipped installation
+  of bin … file not found in package » n'est pas écrit par vivacity, qui
+  crée en plus `vendor/bin` (vu avec un `bin` déclaré absent du paquet,
+  indépendant de git) ; un dépassement de `process-timeout` ne tue que
+  `git` ; un `vendor/.vivacity-git-*` survit à un arrêt brutal ;
+  `config_issues` refuse encore `preferred-install: source` pour un
+  paquet qui n'a qu'une dist (refus large, sans danger).

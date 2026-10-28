@@ -6,7 +6,34 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Added
+- **Packages that only have a git source are installed natively.** A
+  locked package with no dist at all and a `git` source went to Composer
+  ("no usable dist"). vivacity now runs the `git` binary with
+  `GitDownloader`'s commands, in its order and environment: the mirror
+  synced into Composer's VCS cache (`  - Syncing … into cache`), a clone
+  of it with its `.git` directory (`: Cloning <ref> from cache`, or
+  `: Cloning <ref>` from a local repository), the checkout of
+  `updateToCommit`, the GitHub push URL, `installation-source: source`.
+  For `https://` URLs without credentials and local paths, on Linux and
+  macOS. The mirror sync and the clone run before the first write to the
+  project, so a failure hands the run to Composer with nothing written.
+  Handed over with the reason: other VCS and URL schemes, a configured
+  cache or GitHub protocol list, network disabled, and the update or
+  removal of a package installed from source. Corpus: ampache and
+  kovah-linkace become native, 0 diff (`docs/plans/git-sources.md`).
+  `harness/lib/compare.sh` now compares the `.git` directories under the
+  vendor dir (byte for byte, except the index, the reflog timestamps and
+  how objects are packed, which two Composer runs do not reproduce either).
+
 ### Changed
+- **A `path` package whose directory is missing is named as such** in the
+  fallback reason, instead of "no usable dist".
+- **installed.php takes the reference of the installation source**
+  (`FilesystemRepository::dumpInstalledVersions`): the source reference
+  for a package installed from source, the dist one otherwise.
+- **`preferred-install` no longer hands over a package without dist**: it
+  comes from its source whatever the preference.
 - **`-v` stays native under `--no-install` with phpstan, rector and
   codeception/c3.** `update`, `require` and `remove --no-install` play the
   plugins' `post-update-cmd` listeners since 0.24.0, but printed all the
@@ -15,6 +42,12 @@ byte-identical-output promise are the public API.
   listener, in the plugins' activation order, as Composer writes them.
 
 ### Fixed
+- **A package Composer installed from source is not taken for its dist.**
+  An unchanged package whose installed.json entry says
+  `installation-source: source` was warmed into the store from its dist,
+  and the classmap cache mapped its directory to that store entry; a
+  checkout keeps files the dist leaves out and can change. Neither happens
+  now (install and `dump-autoload`).
 - **`require` exits 100 when a repository cannot be reached while it picks
   the version to write**, as Composer does for a `TransportException`; it
   exited 1 (the transport failure was turned into plain text on that path).
