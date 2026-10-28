@@ -59,6 +59,23 @@ pub(crate) fn dump_autoload_plan(
             Some(vivacity_autoload::ClassmapCacheConfig {
                 store_root: vivacity_core::platform::cache_dir().join("store"),
                 cache_root: vivacity_core::platform::cache_dir(),
+                // liborm85/composer-vendor-cleaner can delete single files
+                // inside autoloaded directories: configured, locked or still
+                // installed, every file of a record is checked.
+                verify_files: manifest
+                    .get("extra")
+                    .is_some_and(|e| e.get("dev-files").is_some())
+                    || lock
+                        .packages
+                        .iter()
+                        .chain(lock.packages_dev.iter())
+                        .any(|p| p.name() == vivacity_core::effect_plugins::VENDOR_CLEANER)
+                    || vivacity_core::layout::installed_packages_of(project, manifest)
+                        .iter()
+                        .any(|p| {
+                            p.get("name").and_then(serde_json::Value::as_str)
+                                == Some(vivacity_core::effect_plugins::VENDOR_CLEANER)
+                        }),
             })
         },
     };

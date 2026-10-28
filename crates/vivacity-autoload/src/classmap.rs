@@ -377,6 +377,8 @@ pub struct CacheSlot {
     file: PathBuf,
     /// The store entry's own copy of the scanned directory.
     entry_dir: PathBuf,
+    /// Check every listed file (not only their directories) before serving.
+    pub verify_files: bool,
 }
 
 impl CacheSlot {
@@ -392,7 +394,20 @@ impl CacheSlot {
         CacheSlot {
             file: cache_root.join("classmap").join(format!("{key}.bin")),
             entry_dir: store_entry.join(rel_subdir),
+            verify_files: false,
         }
+    }
+
+    /// Whether the files a record lists are all still under `base`, when
+    /// `verify_files` asks (a cleaner that deletes files there is or was
+    /// configured). Otherwise the copy is trusted, as before: a check of
+    /// every directory of every record cost 8 % of a no-op install of
+    /// invoiceninja (`-o`, 72 430 classes), measured.
+    fn still_present(&self, base: &Path, entries: &[(PathBuf, Vec<Vec<u8>>)]) -> bool {
+        !self.verify_files
+            || entries
+                .iter()
+                .all(|(rel, _)| std::fs::symlink_metadata(base.join(rel)).is_ok())
     }
 
     /// Whether a scan of `base` (a copy of the store entry under vendor/)
@@ -771,14 +786,13 @@ impl Scanner {
         // A store entry is immutable, its copy under vendor/ is not: a
         // plugin may have deleted files there since (liborm85/
         // composer-vendor-cleaner removes test directories inside the
-        // autoloaded ones, docs/plans/plugins-round2.md). A record whose
-        // files are not all still there is not served: the directory is
-        // scanned as it is.
-        let cached = cache.and_then(|c| c.load()).filter(|entries| {
-            entries
-                .iter()
-                .all(|(rel, _)| std::fs::symlink_metadata(path.join(rel)).is_ok())
-        });
+        // autoloaded ones, docs/plans/plugins-round2.md). With such a
+        // plugin in sight, a record whose files are not all still there is
+        // not served: the directory is scanned as it is.
+        let cached = cache
+            .and_then(|c| c.load().map(|e| (c, e)))
+            .filter(|(c, entries)| c.still_present(path, entries))
+            .map(|(_, e)| e);
         if let Some(entries) = cached {
             let base_real =
                 vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1230,7 +1244,8 @@ mod cache_tests {
         let pristine = tmp.path().join("pristine");
         write(&pristine.join("A.php"), b"<?php\nclass A {}\n");
         write(&pristine.join("tests/B.php"), b"<?php\nclass B {}\n");
-        let slot = CacheSlot::new(tmp.path(), &entry, Path::new(""));
+        let mut slot = CacheSlot::new(tmp.path(), &entry, Path::new(""));
+        slot.verify_files = true;
         let classes = |dir: &Path| {
             let mut s = Scanner::new().expect("scanner");
             s.scan_path_cached(
@@ -1254,6 +1269,22 @@ mod cache_tests {
         assert!(slot.file.is_file());
         assert_eq!(classes(&cleaned), 1);
         assert_eq!(classes(&pristine), 2);
+        // A single file gone from a directory still there: seen only when
+        // every file is checked.
+        std::fs::remove_file(pristine.join("tests/B.php")).expect("rm");
+        write(&pristine.join("tests/C.txt"), b"x");
+        let mut full = CacheSlot::new(tmp.path(), &entry, Path::new(""));
+        full.verify_files = true;
+        let mut s = Scanner::new().expect("scanner");
+        s.scan_path_cached(
+            &pristine,
+            None,
+            AutoloadType::ClassMap,
+            "",
+            Some(ScanCache::Store(&full)),
+        )
+        .expect("scan");
+        assert_eq!(s.class_map.map.len(), 1);
     }
 
     #[test]
