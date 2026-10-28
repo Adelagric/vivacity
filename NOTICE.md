@@ -16,6 +16,11 @@ to the Rust code ported from them.
 | [composer/class-map-generator](https://github.com/composer/class-map-generator) | MIT | Composer | `docs/reference/cmg-*.php` (`LICENSE.composer-class-map-generator`) | `vivacity-autoload` |
 | [composer/metadata-minifier](https://github.com/composer/metadata-minifier) | MIT | Composer | `docs/reference/resolver/MetadataMinifier.php` (`LICENSE.composer-metadata-minifier`) | `vivacity-resolver` (`loader`) |
 | [composer/installers](https://github.com/composer/installers) 2.0.0–2.3.0 | MIT | Kyle Robinson Young | `docs/reference/installers/` (`LICENSE`) | `vivacity-core` (`installers`, tables in `assets/installers/`) |
+| [composer/installers](https://github.com/composer/installers) v1.12.0 | MIT | Kyle Robinson Young | `docs/reference/installers-v1.12.0/` (`LICENSE`; `Installer.php`, `BaseInstaller.php` — no drift twin) | `vivacity-core` (`installers`, `assets/installers/v1.12.0.json`), `vivacity` (`plugin_allow::installers_deprecation`) |
+| [getkirby/composer-installer](https://github.com/getkirby/composer-installer) 1.2.1 | MIT (composer.json; no LICENSE file at that tag — `LICENSE-NOTE.md`) | Kirby Team | `docs/reference/plugins/kirby-composer-installer/` (`Plugin.php`, `Installer.php`, `CmsInstaller.php`, `PluginInstaller.php` — no drift twin) | `vivacity-core` (`custom_installers`: the kirby placer, `postInstall`) |
+| [neos/composer-plugin](https://github.com/neos/composer-plugin) 2.1.3 | MIT | Neos project contributors | `docs/reference/plugins/neos-composer-plugin/` (`LICENSE`; `Installer.php` — no drift twin) | `vivacity-core` (`custom_installers`: the neos placer) |
+| [davidbarratt/custom-installer](https://github.com/davidbarratt/custom-installer) 1.1.0 | Apache-2.0 | David Barratt | `docs/reference/plugins/davidbarratt-custom-installer/` (`LICENSE`; `CustomInstaller.php`, `Configuration.php`, `ConfigurationAlpha1.php` — no drift twin) | `vivacity-core` (`custom_installers`: the davidbarratt placer) |
+| [oomphinc/composer-installers-extender](https://github.com/oomphinc/composer-installers-extender) 2.0.1 | MIT | Oomph, Inc. | `docs/reference/plugins/composer-installers-extender/` (`LICENSE`; `Plugin.php`, `Installers/Installer.php`, `Installers/CustomInstaller.php` — no drift twin) | `vivacity-core` (`custom_installers`: the oomphinc placer) |
 | [composer/xdebug-handler](https://github.com/composer/xdebug-handler) | MIT | Composer | `docs/reference/resolver/xdebug-handler-*.php` (`LICENSE.composer-xdebug-handler`) | `vivacity-resolver` (`platform::ini_files`) |
 | [symfony/filesystem](https://github.com/symfony/filesystem), [symfony/finder](https://github.com/symfony/finder) | MIT | Fabien Potencier | `docs/reference/symfony-Filesystem.php`, `docs/reference/symfony-finder-Glob.php` (`LICENSE.symfony`) | `vivacity-core` (`path_install`: the mirror of a `path` package, `Glob::toRegex` of the `.gitattributes` patterns) |
 | [pestphp/pest-plugin](https://github.com/pestphp/pest-plugin) v5.0.0 | MIT | Nuno Maduro | `docs/reference/plugins/pest-plugin/` (`LICENSE.md`; `Manager.php`, `DumpCommand.php` — not in the phar, no drift twin) | `vivacity-core` (`pest_plugin`: `vendor/pest-plugins.json` at autoload-dump time) |
@@ -25,7 +30,7 @@ to the Rust code ported from them.
 | [yiisoft/yii2-composer](https://github.com/yiisoft/yii2-composer) 2.0.11 | BSD-3-Clause | Yii Software LLC | `docs/reference/plugins/yii2-composer/` (`LICENSE.md`; `Plugin.php`, `Installer.php` — no drift twin) | `vivacity-core` (`yii2_composer`: `vendor/yiisoft/extensions.php` at install and dump time) |
 | [codeception/c3](https://github.com/Codeception/c3) 2.9.0 | MIT (composer.json; no LICENSE file at that commit — `LICENSE-NOTE.md`) | Codeception | `docs/reference/plugins/codeception-c3/` (`Installer.php` — no drift twin) | `vivacity-core` (`c3_plugin`: `c3.php` at the project root after install) |
 | [bamarni/composer-bin-plugin](https://github.com/bamarni/composer-bin-plugin) 1.9.1 | MIT | Bilal Amarni | `docs/reference/plugins/composer-bin-plugin/` (`LICENSE`; `BamarniBinPlugin.php`, `Config.php`, `Logger.php` — no drift twin) | `vivacity-core` (`bamarni_bin`: the deprecation lines, the forwarding refused) |
-| [roots/wordpress-core-installer](https://github.com/roots/wordpress-core-installer) v4.0.0 | MIT | Roots | `docs/reference/plugins/wordpress-core-installer/` (`LICENSE.md`; `WordPressCoreInstaller.php`, `WordPressCorePlugin.php` — no drift twin) | `vivacity-core` (`layout::wp_core_dir`) |
+| [roots/wordpress-core-installer](https://github.com/roots/wordpress-core-installer) v4.0.0 | GPL-2.0-or-later (this row said MIT until 2026-10-28: see DECISIONS) | Roots | `docs/reference/plugins/wordpress-core-installer/` (`LICENSE.md`; `WordPressCoreInstaller.php`, `WordPressCorePlugin.php` — no drift twin) | `vivacity-core` (`layout::wp_core_dir`) |
 | [mnsami/composer-custom-directory-installer](https://github.com/mnsami/composer-custom-directory-installer) 2.0.0 | MIT | Mina Nabil Sami | `docs/reference/plugins/composer-custom-directory-installer/` (`LICENSE`; `PackageUtils.php`, `LibraryInstaller.php`, `LibraryPlugin.php`, `PluginInstaller.php`, `PluginPlugin.php` — no drift twin) | `vivacity-core` (`layout::custom_dir`) |
 | [composer/package-versions-deprecated](https://github.com/composer/package-versions-deprecated) 1.11.99.5 | MIT | Marco Pivetta, Jordi Boggiano | `docs/reference/plugins/package-versions-deprecated/` (`LICENSE`; `Installer.php` — no drift twin) and its generated-class template, verbatim, in `crates/vivacity-core/assets/package-versions-template.php` | `vivacity-core` (`package_versions`) |
 | [wikimedia/composer-merge-plugin](https://github.com/wikimedia/composer-merge-plugin) v2.1.0 | MIT | Bryan Davis, Wikimedia Foundation, and contributors | `docs/reference/plugins/composer-merge-plugin/` (`LICENSE`; `MergePlugin.php`, `ExtraPackage.php`, `PluginState.php`, `NestedArray.php`, `StabilityFlags.php`, `MultiConstraint.php`, `MissingFileException.php` — no drift twin) | `vivacity-resolver` (`merge_plugin`), `vivacity-core` (`glob::glob_plain`, `phparray`) |
@@ -38,7 +43,13 @@ crates; they are kept so that `harness/drift-reference.sh` can re-diff
 them against the phar and name the port that must be re-read when
 upstream moves.
 
-Nothing is ported from GPL-licensed software. Releases 0.3.0 to 0.5.0
+Nothing is ported from GPL-licensed software, with one exception under
+review: the roots/wordpress-core-installer row above (GPL-2.0-or-later, its
+`LICENSE.md` vendored next to it; DECISIONS 2026-10-28). The behaviour of
+johnpbloch/wordpress-core-installer (GPL-2.0-or-later), thelia/installer
+and contao-components/installer (LGPL-3.0-or-later) is reimplemented from
+what they do, measured against Composer; none of their source is copied or
+vendored. Releases 0.3.0 to 0.5.0
 shipped an emulation of `drupal/core-composer-scaffold` (GPL-2.0-or-later)
 ported from its source; it was removed in 0.6.0 for that reason, and the
 `vivace*` crates were deleted from crates.io (only 0.5.0 had been published).

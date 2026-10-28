@@ -230,10 +230,11 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Fourteen plugins are emulated and checked against the
+Twenty-two plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
-2.0.0–2.3.0, frameworks that only use the plugin's path table — WordPress
-and Drupal included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
+1.12.0 and 2.0.0–2.3.0, frameworks that only use the plugin's path table —
+WordPress and Drupal included; 1.12.0's PHP 8.4 deprecation lines
+included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
 `dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
 `installed_paths`, versions 1.0.0–1.2.1 but 1.1.0), `phpstan/extension-installer`
 (1.4.x) and `rector/extension-installer` (0.11.x, 1.0.0) (their
@@ -255,7 +256,18 @@ modified one, deleted when the plugin leaves), and
 Composer), `roots/wordpress-core-installer` (the `wordpress-core`
 package at `extra.wordpress-install-dir`, Bedrock's layout), and
 `mnsami/composer-custom-directory-installer` (a library named in
-`extra.installer-paths` laid out there), and
+`extra.installer-paths` laid out there), the custom installers
+`getkirby/composer-installer` 1.2.1 (Kirby and its plugins, the
+package's own `vendor/` removed as the plugin does),
+`neos/composer-plugin` 2.1.1–2.1.3 (Flow packages under `Packages/`),
+`davidbarratt/custom-installer` 1.1.0 (`extra.custom-installer`),
+`johnpbloch/wordpress-core-installer` 2.0.0, `thelia/installer` 1.6
+(Thelia 2 and 3 layouts), `contao-components/installer` 1.4.0–1.4.1
+(`extra.contao-component-dir`) and `oomphinc/composer-installers-extender`
+2.0.0–2.0.1 (`extra.installer-types`), and `craftcms/plugin-installer`
+1.6.0 when no `craft-plugin` package is involved — when two of these
+installers take one package type and what they do besides the path
+differs, the command goes to Composer — and
 `composer/package-versions-deprecated` (1.11.99.4/5: its own `Versions.php`, rewritten
 from the lock at autoload-dump time — the shipped file is a stub), and
 `symfony/flex` at install time (`.env` copied from `.env.dist`, its own

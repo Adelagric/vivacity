@@ -4215,3 +4215,77 @@ faisait rien.
   préexistant de `scope::active_plugins`, qui lit le dépôt global sans les
   conditions du Composer global ; un plugin autorisé dont l'API ne
   correspond pas (Composer l'ignore avec un avertissement).
+
+## 2026-10-28 — Installeurs personnalisés : les chemins portés, les effets reproduits ou rendus
+
+Contexte : 11 entrées du corpus (`docs/corpus/2026-10-21.md`) partaient à
+Composer à cause d'un plugin qui enregistre un installeur ; plan
+`docs/plans/custom-installers.md` (classement mesuré, matrice, méta-analyse
+et revue).
+
+- **Un placeur par installeur, gardé par version lue.** getkirby
+  1.2.1, neos 2.1.1–2.1.3, davidbarratt 1.1.0, johnpbloch 2.0.0, thelia 1.6,
+  contao-components 1.4.0–1.4.1, oomphinc 2.0.0–2.0.1 (tags aux sources
+  identiques, `git diff --quiet`), craftcms 1.6.0 inerte sans paquet ni
+  racine `craft-plugin`, et la table de composer/installers v1.12.0
+  (`tools/gen-installers-table.php`, qui lit aussi le `getLocations()` sans
+  argument de 1.x). Une autre version, des deux côtés de la transaction
+  (installed.json et lock), part à Composer, nommée, avant toute écriture —
+  aussi pour les commandes qui ne posent rien (`update --no-install`,
+  `remove --no-update`), où l'activation du plugin s'exécute quand même
+  (`config.component-dir` de contao-components, `installer-paths` scalaire
+  de thelia, oomphinc sur composer/installers 1.x).
+- **Plusieurs installeurs sur un type : le chemin seul ne suffit pas.**
+  Écarté (méta-analyse, bloquant) : « chemins égaux, peu importe lequel ».
+  Le gagnant de `getInstaller` suit l'ordre d'activation, et ce qui
+  accompagne le chemin diffère : kirby retire le `vendor/` du paquet,
+  composer/installers écrit « Deleting … » au retrait, johnpbloch refuse un
+  répertoire partagé. Retenu : chemins différents → rendu ; chemins égaux →
+  natif seulement quand ces effets ne dépendent pas du gagnant (pas de
+  kirby sur un paquet installé ou mis à jour, pas de johnpbloch, pas de
+  retrait par un installeur qui écrit). thelia-project reste natif : seuls
+  ses gabarits sont pris par deux installeurs, posés au même endroit, jamais
+  retirés.
+- **Les effets reproduits.** kirby : le `vendor/` du paquet supprimé après
+  la pose (`postInstall`) ; composer/installers et oomphinc : la ligne
+  « Deleting <chemin> - deleted » sur stdout (absolu en 2.x, relatif tel que
+  le gabarit le rend en 1.x et chez oomphinc — vivacity ne l'imprimait pas,
+  2.x compris) ; composer/installers 1.x sur PHP ≥ 8.4 : les deux lignes de
+  dépréciation de l'`ErrorHandler`, en tête quand le plugin est chargé
+  depuis installed.json, juste après sa ligne d'installation sinon, le
+  chemin sous `realpath(vendor-dir)` ; un paquet à `target-dir` posé
+  ailleurs par un installeur que la transaction installe : le répertoire
+  vide que le téléchargement laisse au chemin de LibraryInstaller
+  (l'installeur est capturé au téléchargement, `cleanup` ne retire que ce
+  chemin et `vendor/<vendeur>`).
+- **Rendus, nommés** : un paquet que la mise à jour déplace
+  (`updateCode` renomme) ; une `target-dir` que l'installeur n'ajoute pas
+  au chemin (l'autoloader de Composer en retranche la longueur quand même —
+  il la retranche désormais une seule fois chez vivacity, comme `substr`) ;
+  un paquet `path` à binaires posé à un chemin relatif (`realpath` du
+  binaire) ; un binaire dans le `vendor/` que kirby retire ; composer/
+  installers 1.x à côté d'un plugin qui pourrait émettre la première
+  dépréciation, sous `-v`, avec un refus, ou sous Windows ; un installeur
+  global (COMPOSER_HOME, enregistré après ceux du projet).
+- **`isInstalled` par le chemin recalculé.** Sous `--no-plugins` (ou un
+  plugin qui n'est plus actif), Composer cherche chaque paquet au chemin de
+  LibraryInstaller et réinstalle ceux qui n'y sont pas ; la transaction de
+  vivacity lisait l'`install-path` d'installed.json. Elle suit maintenant
+  le chemin que la disposition calcule.
+- **Cibles sous vendor/** : admises (les modules de thelia-project sous
+  `vendor/thelia/modules/`) hors de `vendor/composer`, du `bin-dir` et de
+  `vendor/autoload.php`, et sans recouvrir un autre paquet.
+- **Licences.** johnpbloch (GPL-2.0-or-later), thelia et contao-components
+  (LGPL-3.0-or-later) : comportement décrit et réimplémenté, aucune source
+  copiée ni vendue. Les sources MIT et Apache-2.0 lues sont vendues sous
+  `docs/reference/` avec leur licence (NOTICE.md). En vérifiant, la ligne
+  NOTICE de roots/wordpress-core-installer disait MIT : son `LICENSE.md` et
+  son composer.json disent GPL-2.0-or-later. Corrigé dans NOTICE ; ce que
+  le projet en fait (retirer l'émulation de roots et sa copie, ou la
+  récrire depuis le comportement seul) est une décision laissée ouverte
+  (HANDOVER). johnpbloch réutilise la fonction de chemin de vivacity
+  (`wp_core_dir`), mesurée identique à son comportement.
+- **Hors de portée** : simplesamlphp (modules imbriqués dans un autre
+  paquet, liens durs nommés d'après le chemin absolu), contao/manager-plugin,
+  silverstripe, mautic, `vendor/craftcms/plugins.php` ; omeka (paquet `path`
+  GPL-3.0 absent de la fixture : aucun gain mesurable).

@@ -6,6 +6,23 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Added
+- **Native layout for eight custom installer plugins.**
+  getkirby/composer-installer 1.2.1, neos/composer-plugin 2.1.1–2.1.3,
+  davidbarratt/custom-installer 1.1.0, johnpbloch/wordpress-core-installer
+  2.0.0, thelia/installer 1.6, contao-components/installer 1.4.0–1.4.1 and
+  oomphinc/composer-installers-extender 2.0.0–2.0.1 place their packages as
+  their installers do; craftcms/plugin-installer 1.6.0 is inert without a
+  `craft-plugin` package; composer/installers v1.12.0 is ported, with the
+  two PHP 8.4 deprecation lines Composer prints when it loads it. kirby's
+  removal of a package's own `vendor/` is reproduced. Another version, two
+  installers whose side effects would depend on their activation order, a
+  package moved by an update, and the other cases named in
+  `docs/plans/custom-installers.md` go to Composer before anything is
+  written. Six corpus entries become native (craftcms-craft,
+  getkirby-plainkit, neos-base-distribution, phplist-phplist3, themosis,
+  thelia-project).
+
 ### Changed
 - **`-v` stays native under `--no-install` with phpstan, rector and
   codeception/c3.** `update`, `require` and `remove --no-install` play the
@@ -15,6 +32,17 @@ byte-identical-output promise are the public API.
   listener, in the plugins' activation order, as Composer writes them.
 
 ### Fixed
+- **Removing a package composer/installers placed prints its
+  `Deleting <path> - deleted` line** on stdout, as `Installer::uninstall`
+  does (absolute path in 2.x).
+- **`install --no-plugins` over packages an installer plugin placed**
+  installs them again at `vendor/<name>`, as Composer does
+  (`LibraryInstaller::isInstalled` looks at the recomputed path); vivacity
+  reported nothing to install.
+- **Date-form versions are normalized as Composer does** (`v2021-04` is
+  `2021.04` in installed.json and installed.php, not `2021.0.0.0`).
+- **The autoloader cuts a package's `target-dir` once** from its install
+  path; a path ending twice with it lost two segments.
 - **`require` exits 100 when a repository cannot be reached while it picks
   the version to write**, as Composer does for a `TransportException`; it
   exited 1 (the transport failure was turned into plain text on that path).

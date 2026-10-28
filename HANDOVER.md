@@ -24,6 +24,7 @@ harness/yii2-composer.sh                 # yiisoft/yii2-composer + codeception/c
 harness/bin-plugin.sh                    # bamarni/composer-bin-plugin, 12 cas : lignes de dépréciation aux mêmes points (install, no-op, dump, --no-dev ; puis update, update --no-install, update --dry-run, require, remove, update partiel sans lock, Packagist en ligne ; stderr complète identique), forward-command → repli
 harness/wp-core.sh                       # roots/wordpress-core-installer : wordpress-core à wordpress-install-dir (chaîne, carte, défaut), --no-plugins, `.` refusé — projet identique
 harness/custom-dirs.sh                   # mnsami/composer-custom-directory-installer : bibliothèques nommées dans installer-paths (install, no-op, carte vidée, --no-plugins) — projet identique
+harness/custom-installers.sh             # kirby, neos, davidbarratt, johnpbloch + installers 1.12, thelia, contao-components, oomphinc, craftcms : install, no-op, mise à jour, retrait, --no-plugins (vierge et sur l'arbre posé), dump-autoload et remove --no-update (dépréciations en tête), les rendus (versions non lues, priorité, déplacement, target-dir) — projet, stdout, stderr identiques
 harness/flex-update.sh                   # `update` AVEC install sur un projet Flex (tranches B et C), 26 cas : natif quand aucun paquet enregistré n'a de recette dans l'index servi (`index-recipes.json`, sans fichiers de recette) — la classe de bundle lue dans le dist pour un paquet que l'install pose (`dist-bundle`, `dist-no-bundle`), dans vendor/ sinon, et depuis le chantier des configurateurs la recette auto-générée appliquée et comparée (`bundle-class`, `dist-bundle`, `real-lock-gap`) ; le rappel `symfony/thanks` sur une opération d'update (`thanks`) ; repli pour une recette dont le fichier n'est pas servi (`recipe-in-index`), une suppression (`remove-package`), symfony/flex installé par le run (`flex-installed`) ; le vrai `symfony.lock` de la fixture (30 entrées, 123 paquets enregistrés) natif, et le même moins une entrée à bundle (recette auto-générée appliquée) — la paire prouve que c'est ce fichier qui décide de l'ensemble enregistré, et les six cas `sync-*` du garde de synchronisation (importmap.php ou package.json sans paquet `symfony-ux` : natif ; paquet `symfony-ux`, assets/controllers.json, lien `file:` mort, fichier non normalisé : repli). ATTENTION : toute retouche de l'émulation de Flex doit aussi faire tourner flex-recipes.sh, transitions.sh et vendor-dir.sh, qui affirment ses motifs de repli
 harness/flex-recipes.sh                  # les recettes de Flex APPLIQUÉES par `update` (docs/plans/flex-configurators.md), 26 cas : les vrais index et fichiers de recette de symfony/recipes et recipes-contrib servis hors ligne (fixtures/flex/configurators/, PROVENANCE) ; bundles (existant, absent, auto-généré), copy-from-recipe (exécutable, fichier existant non écrasé, échange phpunit.xml.dist), gitignore (créé, ajouté), env (commentaires `#n`, guillemets, XML PHPUnit), dotenv, composer-scripts + réécriture du lock par `updateComposerLock`, add-lines (`after_target`, `requires`, `warn_if_missing` au niveau normal), docker à false, contrib, paquet posé par le run avec composer.lock réécrit (`install-recipe`), ordre de plusieurs recettes, `synchronize_package_json` à faux, -q ; sans recette : tout verrouillé, --no-dev, --no-plugins ; replis : docker non décidé, `%generate(secret)%`, contrib refusée, importmap.php créé avec paquets symfony-ux, bin-dir `bin`. Chaque cas affirme que l'oracle applique (ou n'applique pas) des recettes avant de comparer projet, composer.lock, symfony.lock, stdout et stderr (session normalisée) ; un repli exige l'arbre du projet et une empreinte de vendor/ inchangés
 harness/root-manifest.sh                 # les refus de `RootPackageLoader::load` (nom racine, auto-exigence, nom de lien) sur les cinq commandes, 35 cas (+1 : `config.lock: false` ne fait rien écrire avant le refus), plus 6 cas `run_lock` (lock sans `packages-dev` : l'en-tête puis le message, avant « Verifying… » ; `--no-dev`, après les opérations ; `update`, `require` — fichiers rétablis —, `remove`) et 2 sous `GITHUB_ACTIONS=true` (l'annotation `::error ::` comparée sur stdout, comme pour tous les cas quand le banc tourne sur le runner) : même code, même TEXTE de message (l'encadré de Symfony Console extrait côté Composer, COLUMNS large) et rien d'écrit — vérifié par `find -newer` sur un témoin, parce que `compare_vendor` ne compare pas les mtimes. Les codes de sortie et les fichiers sont couverts en plus par 9 lignes de steps.sh (`@nostderr` : aucune ancre de steps.sh ne décrit un encadré d'erreur)
@@ -166,7 +167,15 @@ dérivée incompatible avec la distribution MIT/Apache-2.0) a été retirée en
 0.6.0 avec sa source vendorée ; les versions 0.3.0 à 0.5.0 qui la
 contenaient ne sont plus distribuées sur crates.io (crates `vivace*`
 supprimés le 2026-09-15, ce qui libère aussi le nom pour svandragt/vivace).
-Rien n'est porté d'un logiciel GPL.
+Rien n'est porté d'un logiciel GPL — **à une exception près, à trancher**
+(2026-10-28) : la ligne NOTICE de roots/wordpress-core-installer disait MIT,
+son `LICENSE.md` vendoré et son composer.json disent GPL-2.0-or-later.
+NOTICE est corrigé ; reste à décider s'il faut retirer `layout::wp_core_dir`
+et `docs/reference/plugins/wordpress-core-installer/`, ou les récrire depuis
+le comportement seul (johnpbloch, GPL lui aussi, réutilise cette fonction :
+comportement mesuré, aucune source copiée). thelia/installer et
+contao-components/installer (LGPL-3.0-or-later) : réimplémentés depuis le
+comportement, non vendorés.
 
 ## Ce qui N'EST PAS couvert / testé (honnêtement)
 
@@ -245,6 +254,24 @@ Rien n'est porté d'un logiciel GPL.
   Composer sinon ; de même les avertissements des variables
   `COMPOSER_IGNORE_PLATFORM_REQ(S)` et la dépréciation `--no-suggest`,
   retenus avec lui.
+
+- **Installeurs personnalisés (2026-10-28, `docs/plans/custom-installers.md`)** :
+  l'ordre d'activation n'est pas rejoué — deux installeurs sur un type dont
+  les effets diffèrent partent à Composer ; un plugin présent dans
+  installed.json mais dont le répertoire manque (chargé par la transaction,
+  pas au démarrage) n'est pas distingué ; les gardes de version ne lisent
+  que la chaîne de version (un fork au même tag passerait, comme pour les
+  émulations existantes) ; les lignes de dépréciation de composer/installers
+  1.x ne sont exercées que sur PHP 8.5 dans cette session (CI : 8.4 ; sous
+  8.4 elles sont attendues identiques, non vérifié ici) ; un binaire
+  symlink dans une archive d'un paquet posé à un chemin relatif
+  (`realpath`) n'est pas vérifié ; simplesamlphp, contao/manager-plugin,
+  silverstripe, mautic, omeka, `vendor/craftcms/plugins.php` restent rendus.
+  Vus en construisant le banc, laissés : « Skipped installation of bin …
+  file not found in package » non imprimé ; le store sert un zip `artifact`
+  remplacé à nom et version égaux (dist sans `reference`, `shasum` hors
+  identité) ; `lock.rs::target_dir` ne réécrit pas les segments `..` comme
+  `Package::getTargetDir`.
 
 ## Pièges
 

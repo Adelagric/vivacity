@@ -56,7 +56,7 @@ ligne de cet environnement, pas du plugin).
 | craftcms/plugin-installer | 1.6.0 | MIT | `Plugin::activate`, `Installer` (`addPlugin`, `savePlugins`) |
 | neos/composer-plugin | 2.1.3 (= 2.1.1, 2.1.2) | MIT | `Installer` (préfixes, `deriveFlowPackageName`) |
 | davidbarratt/custom-installer | 1.1.0 | Apache-2.0 | `CustomInstaller`, `Configuration`, `ConfigurationAlpha1` |
-| johnpbloch/wordpress-core-installer | 2.0.0 | GPL-2.0-or-later | comparé ligne à ligne à roots v4.0.0 (MIT, déjà émulé) : une seule différence, la règle de conflit |
+| johnpbloch/wordpress-core-installer | 2.0.0 | GPL-2.0-or-later | comparé ligne à ligne à roots v4.0.0 (GPL-2.0-or-later lui aussi, déjà émulé — NOTICE le disait MIT : corrigé, décision ouverte, HANDOVER) : une seule différence, la règle de conflit |
 | composer/installers | v1.12.0 | MIT | `Installer`, `BaseInstaller`, table par réflexion (`tools/gen-installers-table.php`) |
 | thelia/installer | 1.6 | LGPL-3.0-or-later | `TheliaInstaller` (deux dispositions) |
 | contao-components/installer | 1.4.1 (= 1.4.0) | LGPL-3.0-or-later | `Plugin`, `LibraryInstaller`, `NoopInstaller` |
@@ -66,9 +66,11 @@ ligne de cet environnement, pas du plugin).
 | simplesamlphp/composer-xmlprovider-installer | v1.0.2 | LGPL-2.1-only | `XMLProviderInstaller` |
 | contao/manager-plugin | 2.13.6 | LGPL-3.0-or-later | `ManagerPluginInstaller`, `AppAutoloadPlugin`, `ArtifactsPlugin` |
 
-Rien n'est copié des sources GPL (johnpbloch, omeka) : leur comportement
-est décrit ici et réimplémenté. Les copies de référence
-(`docs/reference/plugins/`) ne prennent que les sources MIT et Apache-2.0.
+Rien n'est copié des sources GPL (johnpbloch, omeka) ni LGPL (thelia,
+contao-components) : leur comportement est décrit ici et réimplémenté. Les
+copies de référence (`docs/reference/plugins/`, `docs/reference/
+installers-v1.12.0/`) ne prennent que les sources MIT et Apache-2.0
+(kirby, neos, davidbarratt, oomphinc, composer/installers 1.12.0).
 « = » : tags dont les sources lues sont identiques (`git diff --quiet`) ;
 le garde de version n'admet que ceux-là.
 
@@ -196,9 +198,14 @@ le double install du corpus ne révèle rien d'autre.
 2. **La priorité** : `getInstaller` rend le dernier installeur activé qui
    prend le type. vivacity ne calcule pas l'ordre d'activation pour cela :
    si plusieurs placeurs actifs prennent le type d'un paquet, tous ses
-   chemins sont calculés ; égaux, c'est celui-là ; différents, repli nommé
-   (« the installer precedence follows the plugins' activation order »).
-   La règle existante composer/installers + mnsami reste.
+   chemins sont calculés ; différents, repli nommé (« the installer
+   precedence follows the plugins' activation order »). Égaux : natif
+   seulement si ce qui accompagne le chemin ne dépend pas du gagnant
+   (révisé après la méta-analyse, B1) — repli pour kirby sur un paquet
+   installé ou mis à jour (`postInstall`), pour johnpbloch (règle de
+   conflit), et au retrait quand l'un des installeurs écrit « Deleting »
+   (composer/installers, oomphinc). La règle existante composer/installers
+   + mnsami reste.
 3. **Cibles sous vendor/** : admises si elles ne sont ni le chemin d'un
    autre paquet, ni dans lui, ni au-dessus de lui, ni sous `vendor/composer`
    ou `bin-dir` ; la cible égale au chemin de LibraryInstaller est ce
@@ -221,9 +228,17 @@ le double install du corpus ne révèle rien d'autre.
 7. **contao-components** : `extra.contao-component-dir` chaîne → le chemin ;
    `config.component-dir` (avertissement), `config.contao-component-dir`
    (exception), ni l'un ni l'autre (NoopInstaller : rien posé) → repli.
-8. **omeka** : garde par contenu (empreinte des deux fichiers sources du
-   paquet `path`, au commit lu), à défaut de tag.
-9. Rien n'est émulé sous `--no-plugins` (tout dans vendor/, comme Composer).
+8. **omeka** : non porté (décidé en cours de route) — GPL-3.0, paquet
+   `path` que la fixture n'a pas et que le harnais ne peut embarquer :
+   aucune entrée levée, aucun cas vérifiable.
+9. Rien n'est émulé sous `--no-plugins` (tout dans vendor/, comme Composer) ;
+   la transaction cherche chaque paquet au chemin recalculé
+   (`LibraryInstaller::isInstalled`), ce qui réinstalle sous vendor/ ce
+   qu'un installeur avait posé ailleurs, comme Composer.
+10. **Ajouts de la méta-analyse et de la revue** : la ligne « Deleting »
+   (B2), le répertoire vide que le téléchargement laisse au chemin de
+   LibraryInstaller pour un paquet à `target-dir` posé ailleurs par un
+   installeur que la transaction installe, et les rendus listés plus bas.
 
 ## Replis nommés (avant toute écriture)
 
@@ -309,3 +324,60 @@ cas natifs en repli (code 3 contre 0), les garde-fous déjà verts
   remplacé à nom et version égaux (la dist n'a pas de `reference`, le
   `shasum` du lock n'entre pas dans l'identité) — zone de l'extraction,
   laissée au chantier voisin.
+
+## Méta-analyse (sous-agent frais, plan et code, sans mes conclusions)
+
+2 bloquants, 6 majeurs, 8 mineurs ; ce qui a changé :
+
+- **B1, priorité** : « chemins égaux, l'un ou l'autre » est faux — mesuré :
+  un `kirby-plugin` pris par kirby et composer/installers 1.12 garde son
+  `vendor/` au premier install (composer/installers, chargé en premier par
+  la transaction, gagne… puis kirby au run suivant) ; et seul
+  composer/installers écrit « Deleting » au retrait. → règle révisée
+  (modèle, point 2), cas `kirby-mix`, `th-nofront`.
+- **B2, « Deleting »** : jamais imprimé par vivacity, 2.x compris ; relatif
+  en 1.12 et chez oomphinc. → porté (stdout, après le retrait).
+- **M1** johnpbloch, « Two packages … cannot share the same directory! »
+  (un `wordpress-core` remplacé par un autre au même répertoire) → rendu.
+- **M2** binaires d'un paquet posé à un chemin relatif (`realpath`) → rendu
+  pour un paquet `path` ; le binaire symlink dans une archive : laissé.
+- **M3** dépréciations : état du processus PHP → rendues à côté d'un plugin
+  hors de la liste lue, sous `-v`, avec un refus ; chemin sous
+  `realpath(vendor-dir)` (vérifié dans `LibraryInstaller::
+  initializeVendorDir`, contre la lecture de la méta-analyse : `Config`
+  brut).
+- **M4** oomphinc charge le `BaseInstaller` de composer/installers quelle
+  que soit son autorisation → version gardée des deux côtés, 1.x rendu.
+- **M5** le corpus ne comparait le projet entier qu'avec composer/installers
+  autorisé → étendu à tout plugin de disposition émulé ; stdout et stderr
+  des six entrées comparés à la main (ci-dessous).
+- **M6** banc : ajoutés la priorité, le déplacement à la mise à jour
+  (`kirby-move`), `dump-autoload` et `remove --no-update` (dépréciations en
+  tête), `--no-plugins` sur l'arbre posé (qui a révélé l'écart de
+  `isInstalled`), le filtre de la note « emulated natively ».
+- Mineurs : 1, 2, 4, 5 (kirby `null`, thelia-core, davidbarratt `"0"`, neos
+  `psr-0` vide) étaient déjà conformes ; 7 (installeur global) → rendu ;
+  6 (plugin au répertoire absent) et 8 (fork au même tag) : laissés,
+  HANDOVER.
+
+## Revue indépendante (sous-agent frais, `git diff` depuis main)
+
+3 majeurs, 8 mineurs ; ce qui a changé :
+
+- **`target-dir`** : l'autoloader de Composer retranche `strlen('/' .
+  targetDir)` de tout chemin, et seuls LibraryInstaller et davidbarratt
+  l'ajoutent → rendu quand le chemin de l'installeur ne se termine pas par
+  `/<target-dir>` (et segments `.`/`..` rendus) ; l'autoloader de vivacity
+  retranchait le suffixe autant de fois qu'il se répétait → une fois
+  (`kirby-td`).
+- **Activation sans pose** : `update --no-install`, `remove --no-update`
+  activent les plugins (`config.component-dir` de contao-components :
+  ligne ou exception ; `installer-paths` scalaire de thelia ; oomphinc sur
+  1.x ; version non lue) → rendus (`cc-config`).
+- Mineurs corrigés : `wordpress-install-dir: true` lève ; `package-key`
+  neos terminée par `\n` ; chemin oomphinc `"0"` → LibraryInstaller ;
+  binaire kirby dans le `vendor/` retiré, classmap à joker ; 1.x sous
+  Windows rendu ; `handed_on` vérifie aussi composer.json/lock. Licences :
+  la ligne NOTICE de roots disait MIT (GPL-2.0-or-later) → corrigée,
+  décision ouverte ; copies de référence et lignes NOTICE ajoutées pour les
+  nouvelles origines MIT/Apache.
