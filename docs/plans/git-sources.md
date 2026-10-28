@@ -112,23 +112,32 @@ chemin du cache est mesurable **sans réseau**. Plus deux paquets réels
 
 ## Décision de parité pour `.git`
 
-« Identique à l'octet » vaut pour tout `.git` **sauf deux familles de
-fichiers dont le contenu dépend de l'instant ou du système de fichiers**,
-que Composer lui-même ne reproduit pas d'un run à l'autre :
+« Identique à l'octet » vaut pour tout `.git` **sauf trois familles dont
+le contenu dépend de l'instant, du système de fichiers ou de
+l'ordonnancement des threads de git**, que Composer lui-même ne reproduit
+pas d'un run à l'autre :
 
 - `index` : comparé par ce qu'il signifie — `git ls-files --stage` (mode,
   objet, étage, chemin) et `git status --porcelain` des deux côtés ;
 - `logs/**` : comparés ligne à ligne après masquage du seul champ
   `<epoch> <fuseau>` ; anciens et nouveaux objets, identité et message
-  restent comparés.
+  restent comparés ;
+- `objects/` hors `objects/info/` (packs, index de pack, objets libres) :
+  comparé par l'**ensemble des objets** (`git cat-file
+  --batch-all-objects --batch-check`, trié : nom, type, taille) — ajouté
+  après la méta-analyse, qui a montré trois packs différents pour trois
+  clones d'un même cache à objets libres (le `repack -a -d` de
+  `--dissociate` est multi-thread). `objects/info/` reste comparé à
+  l'octet : un `alternates` vers le cache serait une vraie différence.
 
-Tout le reste — fichiers, liste, modes (inventaire `stat` du `.git`
-compris) — est comparé tel quel. Conséquence : le banc doit partager le
-cache VCS entre les deux côtés (le message du reflog porte son chemin),
-comme `corpus.sh` le fait déjà. `harness/lib/compare.sh` cesse d'ignorer un
-`.git` situé **sous vendor/** (celui de la racine du projet reste exclu) ;
-`harness/compare-selftest.sh` prouve qu'une différence de `HEAD`, de
-`config` ou de reflog hors horodatage le fait échouer.
+Tout le reste — fichiers, liste, modes (inventaire `stat` du `.git` hors
+`objects/`) — est comparé tel quel. Conséquence : les deux côtés doivent
+utiliser un cache VCS **au même chemin** (le message du reflog du clone le
+porte) ; le banc donne à chacun le sien à ce chemin, `corpus.sh` partage le
+même. `harness/lib/compare.sh` cesse d'ignorer un `.git` situé **sous
+vendor/** (les autres, dont ceux des dépôts `path` du banc, restent
+exclus) ; `harness/compare-selftest.sh` prouve qu'une différence de `HEAD`,
+de `config`, d'objet ou de reflog hors horodatage le fait échouer.
 
 Ce n'est atteignable que par construction : vivacity lance **le même
 binaire git avec la même suite de commandes, les mêmes arguments et le
@@ -155,24 +164,25 @@ kovah-linkace peuvent devenir natives.
 ## Le modèle porté
 
 1. **Décision par paquet** (`vivacity_core::git_source`, appelée par
-   `scope::classify_package` quand la dist n'est pas utilisable) : natif
+   `scope::classify_package` quand le paquet n'a **aucune** dist) : natif
    seulement si toutes ces conditions tiennent, sinon un motif nommé
    (« package X: git source not installed natively (<raison>) ») :
    - Linux/macOS (`cfg!(unix)`, comme `path`) ; `source.type` = `git` ;
-     une référence faite de `[A-Za-z0-9._/-]`, sans `-` initial ; pas de
-     `source.mirrors` ;
+     une référence, et la branche que `updateToCommit` dérive de la
+     version, faites de `[A-Za-z0-9._/-]`, sans `-` initial ; pas de
+     `source.mirrors` ni de `transport-options.git.single_use_clone` ;
    - binaire `git` présent, version ≥ 2.3.0 (`getVersion`, seuil du cache
      et de `--dissociate`) ;
    - URL `https://` sans identifiants, ou URL locale (`isLocalPath`) dont
      `realpath` existe ; tout autre schéma (`http`, `git`, `ssh`, `git@…`)
      part à Composer (`prohibitUrlByConfig`, avertissements, protocoles) ;
-   - URL distante : cache VCS utilisable (ni `cache-dir` ni
-     `cache-vcs-dir` dans la configuration — vivacity ne les lit pas —,
-     pas `/dev/null`), réseau permis (ni `--offline` ni
+   - URL distante : cache VCS utilisable (ni `COMPOSER_CACHE_VCS_DIR`, ni
+     `cache-dir`/`cache-vcs-dir` dans la configuration — vivacity ne les
+     lit pas —, un chemin absolu sans `~` ni `$`, pas `/dev/null`), réseau permis (ni `--offline` ni
      `COMPOSER_DISABLE_NETWORK`), et pour un domaine GitHub ni
      `github-protocols` ni `github-domains` configurés (la boucle de
      protocoles n'essaie alors que l'URL elle-même en premier).
-2. **Garde d'état, avant toute écriture** (`installer::install`) : un
+2. **Garde d'état** (`scope::analyze`, donc vue par `--check-scope`) : un
    paquet qu'installed.json dit `installation-source: source` et que la
    transaction met à jour ou retire, ou un paquet git-seul que la
    transaction met à jour depuis une installation existante → refus
@@ -187,9 +197,10 @@ kovah-linkace peuvent devenir natives.
    synchronisation → `Unsupported` → Composer rejoue et produit sa propre
    erreur. Source locale : la référence est vérifiée dans le dépôt source
    (`rev-parse --verify`) avant toute écriture, pour la même raison.
-4. **Placement** : la suite exacte de `doInstall` + `updateToCommit`, dans
-   un répertoire temporaire frère du chemin d'installation puis renommé
-   (un clone raté ne laisse rien ; aucun chemin de destination n'est écrit
+4. **Préparation puis placement** : la suite exacte de `doInstall` +
+   `updateToCommit` tourne avant la première suppression, dans un
+   répertoire de travail sous vendor/ ; un échec l'efface et rend la main
+   à Composer ; le placement n'est qu'un `rename` ( aucun chemin de destination n'est écrit
    dans `.git`, vérifié : ni la config ni les reflogs ne le portent).
    Arguments en tableau (jamais de shell), `--` devant chaque URL comme
    Composer, environnement de `cleanEnv`. Aucune récursion de sous-module,
@@ -211,6 +222,66 @@ kovah-linkace peuvent devenir natives.
    Packagist ont une source GitHub et une dist, les passer en source c'est
    cloner l'écosystème (boucle d'authentification GitHub, `mirrors`, repli
    source→dist sur échec avec ses avertissements) ; à mesurer à part.
+
+## Méta-analyse (sous-agent frais) et ce qui change
+
+Le réfutateur a reçu le cadrage, ce plan et l'accès au code ; dix failles,
+toutes examinées :
+
+1. **Les packs ne sont pas reproductibles** (critique, reproduite par lui) :
+   un cache aux objets **non empaquetés** — ce que laisse un `remote update`
+   sous `transfer.unpackLimit` — donne à chaque `clone --dissociate` un pack
+   différent (`repack -a -d` multi-thread : trois noms de pack pour trois
+   clones du même cache). La mesure n'avait vu que des caches fraîchement
+   clonés, tout en packs. **Corrigé** : `objects/` sort de la comparaison à
+   l'octet ; on compare l'ensemble des objets (`git cat-file
+   --batch-all-objects --batch-check`, trié) et `objects/info/` à l'octet
+   (un `alternates` resté vers le cache serait une vraie différence). Cas
+   d'auto-test : un cache à objets libres.
+2. **Le clone au placement** (majeur) : après les suppressions et en
+   parallèle, un échec de checkout laisserait vendor/ à moitié réécrit sans
+   repli possible. **Corrigé** : clone, remotes, `pushurl` et
+   `updateToCommit` tournent dans une **phase de préparation**, avant la
+   première suppression, dans des répertoires de travail sous vendor/ ; un
+   échec les efface et rend `Unsupported` (Composer) ; le placement ne fait
+   plus qu'un `rename`.
+3. **Déclencheur trop large** (majeur) : « dist inutilisable » couvre une
+   dist `file`/`xz`/`phar` ou `path` absente, que Composer essaie d'abord
+   (avec ses avertissements de repli vers la source). **Corrigé** : natif
+   seulement quand il n'y a **aucune** dist (`DistKind::Missing`).
+4. **Chemin du cache** (majeur) : `COMPOSER_CACHE_VCS_DIR`, `expandPath`
+   (`~`, `$VAR`), chemin relatif — le chemin finit dans les reflogs.
+   **Corrigé** : repli quand `COMPOSER_CACHE_VCS_DIR` est posée, quand la
+   configuration (projet ou globale) a `cache-dir`/`cache-vcs-dir`, ou quand
+   le chemin obtenu n'est pas absolu ou contient `~`/`$`.
+5. **Le cache froid de vivacity jamais exercé** (majeur) : avec un cache
+   partagé, Composer passe le premier et vivacity trouve un miroir chaud.
+   **Corrigé** : chaque côté a son cache **au même chemin** (celui de
+   Composer mis de côté avant le passage de vivacity), et les deux miroirs
+   sont comparés (refs, config, ensemble d'objets) ; le cas chaud part de
+   deux copies identiques d'un même cache.
+6. **Garde d'état seulement à l'installation** (mineur) : `--check-scope`
+   et le scan du corpus l'ignoreraient. **Corrigé** : calculée dans
+   `scope::analyze` (installed.json, purge de `purgePackages` comprise) ;
+   seul le réseau reste un refus de l'installeur.
+7. **La branche dérivée de la version n'est pas validée** (mineur) :
+   `dev---detach` deviendrait une option de `git checkout`. **Corrigé** :
+   même jeu de caractères, pas de `-` initial, pour la branche dérivée.
+8. **`single_use_clone`** (mineur) : **repli nommé**.
+9. **Portée de `compare.sh`** (mineur) : les `.git` des dépôts `path` hors
+   vendor/ (path-repos) diffèrent par nature. **Corrigé** : seuls les
+   `.git` sous `<vendor>/` sont comparés ; les autres restent exclus.
+10. **Cache de classmap sur un clone** (mineur, préexistant) : un paquet
+    installé depuis la source par Composer, avec aussi une dist, serait
+    « réchauffé » dans le store et sa classmap lue depuis la dist.
+    **Corrigé** : pas de réchauffage ni d'association au store pour une
+    entrée `installation-source: source`.
+
+Notés aussi et retenus : `process-timeout` (300 s par défaut,
+`COMPOSER_PROCESS_TIMEOUT`, config) appliqué à chaque commande git, un
+dépassement rendant la main à Composer ; synchronisation dans l'ordre des
+opérations plutôt que du lock (sans effet visible, mais c'est l'ordre de
+Composer).
 
 ## Fichiers
 

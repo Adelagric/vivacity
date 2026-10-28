@@ -81,6 +81,8 @@ jobs:
         run: harness/net-retry.sh harness/transitions.sh
       - name: Path repositories (symlink and mirror strategies, modes and links)
         run: harness/net-retry.sh harness/path-repos.sh
+      - name: Git-only packages (clone and .git like GitDownloader, VCS cache, named fallbacks)
+        run: harness/net-retry.sh harness/git-sources.sh
       - name: config.vendor-dir / bin-dir (install, dump -o, no-op on moved directories)
         run: harness/net-retry.sh harness/vendor-dir.sh
       - name: wikimedia/composer-merge-plugin (merged root, no implicit update)
