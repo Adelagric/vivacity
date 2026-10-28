@@ -62,16 +62,22 @@ pub(crate) struct Load {
 /// `$filesystem` and `$binaryInstaller` in `__construct`): the first
 /// deprecation, then the notice that hides the next ones. The file is the
 /// one its autoloader finds: under `realpath(vendor-dir)`
-/// (`LibraryInstaller::initializeVendorDir`). Empty below PHP 8.4, or for
-/// another version of the plugin.
+/// (`LibraryInstaller::initializeVendorDir`). The line is where PHP places
+/// the deprecation: the `function __construct(` line (136) on PHP 8.4, the
+/// parameter's own line (140) from PHP 8.5 on — measured, Composer 2.10.3
+/// on PHP 8.4 (CI) and 8.5.12. Empty below PHP 8.4, or for another version
+/// of the plugin.
 pub(crate) fn installers_deprecation(vendor_dir: &Path, normalized_version: &str) -> Vec<String> {
-    if !normalized_version.starts_with("1.") || !php_raises_implicit_nullable() {
-        return Vec::new();
-    }
+    let line = match php_minor() {
+        _ if !normalized_version.starts_with("1.") => return Vec::new(),
+        Some(v) if v >= (8, 5) => 140,
+        Some(v) if v >= (8, 4) => 136,
+        _ => return Vec::new(),
+    };
     let vendor = physical(vendor_dir);
     vec![
         format!(
-            "Deprecation Notice: Composer\\Installers\\Installer::__construct(): Implicitly marking parameter $filesystem as nullable is deprecated, the explicit nullable type must be used instead in {}/composer/installers/src/Composer/Installers/Installer.php:140",
+            "Deprecation Notice: Composer\\Installers\\Installer::__construct(): Implicitly marking parameter $filesystem as nullable is deprecated, the explicit nullable type must be used instead in {}/composer/installers/src/Composer/Installers/Installer.php:{line}",
             vendor.display()
         ),
         "More deprecation notices were hidden, run again with `-v` to show them.".to_owned(),
@@ -90,11 +96,11 @@ fn physical(path: &Path) -> std::path::PathBuf {
     }
 }
 
-/// The PHP that runs Composer is 8.4 or later (implicitly nullable
-/// parameters deprecated).
-fn php_raises_implicit_nullable() -> bool {
+/// The major and minor version of the PHP that runs Composer (implicitly
+/// nullable parameters are deprecated from 8.4).
+fn php_minor() -> Option<(u32, u32)> {
     let Ok(entries) = vivacity_resolver::platform::probe() else {
-        return false;
+        return None;
     };
     let version = entries
         .iter()
@@ -102,8 +108,7 @@ fn php_raises_implicit_nullable() -> bool {
         .and_then(|e| e.get("version").and_then(Value::as_str))
         .unwrap_or_default();
     let mut parts = version.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
-    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    (major, minor) >= (8, 4)
+    Some((parts.next().unwrap_or(0), parts.next().unwrap_or(0)))
 }
 
 /// The parsed rules of one `PluginManager` side: `None` is the null rules
