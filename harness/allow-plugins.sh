@@ -146,11 +146,14 @@ handed() {
 }
 # composer_acts <base> <nom> <args…> : chez Composer seul, composer.json
 # réécrit (le cas montre bien ce qu'il teste).
+# `timeout` (GNU coreutils) bounds the reference run where it exists; macOS
+# ships none, and a missing command must not pass for "Composer did nothing".
+with_timeout() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
 composer_acts() {
   local b="$1" name="$2"; shift 2
   rm -rf "$WORK/$name-cref"; cp -a "$WORK/base/$b/ref" "$WORK/$name-cref"
   cp "$WORK/$name-cref/composer.json" "$WORK/$name.json.before"
-  (cd "$WORK/$name-cref" && timeout 600 composer "$@" --no-interaction --no-ansi >"$WORK/$name.composer.all" 2>&1) || true
+  (cd "$WORK/$name-cref" && with_timeout 600 composer "$@" --no-interaction --no-ansi >"$WORK/$name.composer.all" 2>&1) || true
   if cmp -s "$WORK/$name.json.before" "$WORK/$name-cref/composer.json"; then
     echo "FAIL $name : Composer n'a pas réécrit composer.json (cas mal construit)"; status=1
   fi
