@@ -941,17 +941,6 @@ impl Layout {
         let vendor_composer =
             normalize_path(&format!("{}/{vendor}/composer", root.to_string_lossy()));
         let root_norm = normalize_path(&root.to_string_lossy());
-        // installed.json's `install-path` of a package, project-relative.
-        let old_rel_of = |entry: &Value| -> Option<String> {
-            let ip = entry.get("install-path").and_then(Value::as_str)?;
-            let abs = if crate::pathutil::is_absolute_path(ip) {
-                normalize_path(ip)
-            } else {
-                normalize_path(&format!("{vendor_composer}/{ip}"))
-            };
-            abs.strip_prefix(&format!("{root_norm}/"))
-                .map(str::to_owned)
-        };
         for p in &wanted {
             if p.is_virtual(flex_packs) {
                 continue;
@@ -962,18 +951,24 @@ impl Layout {
                     if placed.rel != default {
                         customs.insert(p.name().to_owned());
                     }
-                    // LibraryInstaller::updateCode renames the previous
-                    // install path to the new one (removes and reinstalls
-                    // when one contains the other): not emulated.
+                    // LibraryInstaller::updateCode renames the install path
+                    // of the initial package to the target's, both computed
+                    // by the current installers: a package whose own
+                    // metadata moves it (`installer-name`, its autoload for
+                    // neos) — not emulated. (A path that moves because the
+                    // configuration did is a purge and a fresh install:
+                    // `isInstalled` misses it, the old directory stays.)
                     if placers.any() {
                         let before = previous
                             .iter()
                             .find(|e| e["name"].as_str() == Some(p.name()))
-                            .and_then(old_rel_of);
-                        if let Some(before) = before.filter(|b| *b != placed.rel) {
+                            .and_then(Value::as_object)
+                            .and_then(|e| place(&vendor, &placers, root_extra, e).ok());
+                        if let Some(before) = before.filter(|b| b.rel != placed.rel) {
                             issues.push(format!(
-                                "installed package {} moves from `{before}` to `{}`: let Composer handle this move",
+                                "installed package {} moves from `{}` to `{}` on update: let Composer handle this move",
                                 p.name(),
+                                before.rel,
                                 placed.rel
                             ));
                         }
