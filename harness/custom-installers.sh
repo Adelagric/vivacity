@@ -68,6 +68,7 @@ foreach (["1.0.0", "1.0.1"] as $v) {
 $make("acme/kirby-shop", "1.0.0", "kirby-plugin", ["installer-name" => "shop"], ["index.php" => "<?php\n", "vendor/autoload.php" => "<?php // bundled\n"], ["require" => ["getkirby/composer-installer" => "^1.2"]]);
 $make("acme/kirby-shop", "1.0.1", "kirby-plugin", ["installer-name" => "store"], ["index.php" => "<?php\n"], ["require" => ["getkirby/composer-installer" => "^1.2"]]);
 $make("acme/kirby-legacy", "1.0.0", "kirby-plugin", [], ["index.php" => "<?php\n", "vendor/keep.txt" => "kept\n"]);
+$make("acme/kirby-td", "1.0.0", "kirby-plugin", [], ["Td.php" => "<?php class Acme_Td {}"], ["require" => ["getkirby/composer-installer" => "^1.2"], "target-dir" => "Acme/Td", "autoload" => ["psr-0" => ["Acme_Td" => ""]]]);
 // neos/composer-plugin
 $make("acme/neos-site", "1.0.0", "neos-site", [], ["Classes/Site.php" => "<?php namespace Acme\\Site; class Site {}"], $psr4("Acme\\Site\\", "Classes/"));
 foreach (["1.0.0", "1.0.1"] as $v) {
@@ -171,7 +172,7 @@ handed_on() {
   local d="$WORK/$name-viv" v=0
   rm -rf "$d"; cp -a "$from" "$d"; stage "$src" "$d"; touch "$WORK/$name.marker"; sleep 1
   (cd "$d" && "$VIVACITY" "$@" --no-fallback >"$WORK/$name.vivacity.all" 2>&1) || v=$?
-  if [ "$v" = 3 ] && grep -qE -- "$pat" "$WORK/$name.vivacity.all" && [ -z "$(find "$d" -newer "$WORK/$name.marker" ! -name composer.json ! -name composer.lock -print -quit)" ]; then
+  if [ "$v" = 3 ] && grep -qE -- "$pat" "$WORK/$name.vivacity.all" && [ -z "$(find "$d" -newer "$WORK/$name.marker" -print -quit)" ]; then
     echo "OK   $name : rendu à Composer, la raison, rien d'écrit"
   else
     echo "FAIL $name : code $v"; tail -4 "$WORK/$name.vivacity.all"; status=1
@@ -223,6 +224,10 @@ handed_on "$WORK/km-ref" kirby-move kirby-move 'moves from `site/plugins/shop`' 
 # kirby retire le vendor/ du plugin, le gagnant suit l'ordre d'activation.
 lock kirby-mix "{\"require\": {\"getkirby/composer-installer\": \"1.2.1\", \"composer/installers\": \"v1.12.0\", \"acme/kirby-shop\": \"1.0.0\"}, \"config\": {\"allow-plugins\": {\"getkirby/composer-installer\": true, \"composer/installers\": true}}}"
 handed kirby-mix kirby-mix 'postInstall' "${I[@]}"
+# Une target-dir que kirby n'ajoute pas au chemin : l'autoloader de
+# Composer la retranche quand même.
+lock kirby-td "{\"require\": {\"getkirby/composer-installer\": \"1.2.1\", \"acme/kirby-td\": \"1.0.0\"}, $KIRBY}"
+handed kirby-td kirby-td 'target-dir `Acme/Td`' "${I[@]}"
 relock kirby-a kirby-old getkirby/composer-installer 1.2.0
 handed kirby-old kirby-old 'getkirby/composer-installer 1\.2\.0' "${I[@]}"
 
@@ -297,6 +302,10 @@ lock cc-c "{\"require\": {\"contao-components/installer\": \"1.4.1\", \"acme/lib
 run cc cc-a cc-b cc-c assets/jquery/jquery.js
 lock cc-nodir "{\"require\": {\"contao-components/installer\": \"1.4.1\", \"acme/jquery\": \"1.0.0\"}, $CC}"
 handed cc-nodir cc-nodir 'contao-components/installer' "${I[@]}"
+# Sans installation (`remove --no-update`), l'activation du plugin lit
+# config.component-dir : une ligne de dépréciation chez Composer.
+lock cc-config "{\"require\": {\"contao-components/installer\": \"1.4.1\", \"acme/lib\": \"1.0.0\"}, \"extra\": {\"contao-component-dir\": \"assets\"}, \"config\": {\"component-dir\": \"assets\", \"allow-plugins\": {\"contao-components/installer\": true}}}"
+handed_on "$WORK/cc-ref" cc-config cc-config 'component-dir' remove acme/lib --no-update
 
 # --- oomphinc/composer-installers-extender 2.0.1 + composer/installers v2.3.0
 OO='"config": {"allow-plugins": {"oomphinc/composer-installers-extender": true, "composer/installers": true}}'

@@ -516,7 +516,29 @@ pub fn resolution_issues(
     post_update_cmd: bool,
 ) -> Vec<ScopeIssue> {
     let mut issues = Vec::new();
+    let installed = crate::layout::installed_packages_of(project_dir, root_manifest);
     for name in active_plugins(project_dir, root_manifest, plugins_enabled) {
+        // The custom installers: inert for these commands at the versions
+        // read, but for what their activation does.
+        if crate::custom_installers::READ_VERSIONS
+            .iter()
+            .any(|(p, _)| *p == name)
+        {
+            let version = installed
+                .iter()
+                .find(|p| p.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                .and_then(|p| p.get("version").and_then(Value::as_str))
+                .unwrap_or_default();
+            if let Some(reason) = crate::custom_installers::activation_issue(
+                &name,
+                version,
+                root_manifest,
+                &installed,
+            ) {
+                issues.push(ScopeIssue::ResolutionPlugin(name, reason));
+                continue;
+            }
+        }
         // craftcms/plugin-installer's `Plugin::activate` registers a
         // `craft-plugin` root in vendor/craftcms/plugins.php, whatever the
         // command.

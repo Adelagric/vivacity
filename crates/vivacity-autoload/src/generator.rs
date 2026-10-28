@@ -591,7 +591,10 @@ pub fn plan(
         let mut install = install.clone();
         if let Some(td) = &p.target_dir {
             if !td.is_empty() && !p.is_root {
-                install = install.trim_end_matches(&format!("/{td}")).to_owned();
+                // `substr($installPath, 0, -strlen('/'.$targetDir))`: once.
+                if let Some(cut) = install.strip_suffix(&format!("/{td}")) {
+                    install = cut.to_owned();
+                }
             }
         }
         for ip in &p.include_paths {
@@ -923,7 +926,10 @@ fn package_paths(p: &Pkg, ty: &str, dev_mode: bool) -> Vec<(String, String, Stri
     let mut install = install.clone();
     if let Some(td) = &p.target_dir {
         if !td.is_empty() && !p.is_root {
-            install = install.trim_end_matches(&format!("/{td}")).to_owned();
+            // `substr($installPath, 0, -strlen('/'.$targetDir))`: once.
+            if let Some(cut) = install.strip_suffix(&format!("/{td}")) {
+                install = cut.to_owned();
+            }
         }
     }
     let mut out = Vec::new();

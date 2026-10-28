@@ -51,6 +51,51 @@ pub fn version_issue(plugin: &str, version: &str) -> Option<String> {
     ))
 }
 
+/// What activating `plugin` (loaded from installed.json, version
+/// `version`) does beyond registering its installer, for a command that
+/// lays nothing out (`update --no-install`, `remove --no-update`…): `None`
+/// when nothing, the reason otherwise. An unread version is a reason too.
+pub fn activation_issue(
+    plugin: &str,
+    version: &str,
+    root_manifest: &Value,
+    installed: &[Value],
+) -> Option<String> {
+    if let Some(issue) = version_issue(plugin, version) {
+        return Some(issue);
+    }
+    let root_extra = root_manifest.get("extra");
+    let config_has = |k: &str| {
+        root_manifest.get("config").and_then(|c| c.get(k)).is_some()
+            || crate::layout::global_config_value(k).is_some()
+    };
+    match plugin {
+        // `Plugin::hasComponentDir`, run by `activate`: a deprecation line
+        // on stdout for `config.component-dir`, an exception for
+        // `config.contao-component-dir`.
+        CONTAO_COMPONENTS if config_has("component-dir") || config_has("contao-component-dir") => Some(format!(
+            "{CONTAO_COMPONENTS}: config.component-dir / config.contao-component-dir at activation (a deprecation line, or an exception; not emulated)"
+        )),
+        // `TheliaInstaller::__construct` walks `extra.installer-paths`.
+        THELIA => thelia3(root_extra).err(),
+        // Its `Installer` extends composer/installers' own: 1.x's compiles
+        // with PHP 8.4 deprecations.
+        OOMPHINC => {
+            let one_x = installed.iter().any(|p| {
+                p.get("name").and_then(Value::as_str) == Some("composer/installers")
+                    && p.get("version")
+                        .and_then(Value::as_str)
+                        .and_then(installers::table_for)
+                        .is_none_or(|t| !t.absolute_paths())
+            });
+            one_x.then(|| {
+                format!("{OOMPHINC}: on top of composer/installers 1.x (or an unported version), whose classes it loads (not emulated)")
+            })
+        }
+        _ => None,
+    }
+}
+
 /// What the placers read of the root package and the configuration.
 pub struct Ctx<'a> {
     pub root_extra: Option<&'a Value>,
@@ -134,6 +179,8 @@ impl Placer {
             Placer::ContaoComponents(dir) => Ok(Some(format!("{dir}/{}", php_basename(pretty)))),
             Placer::Oomphinc(..) => {
                 match installers::custom_paths_only(ctx.root_extra, pretty, package_type, extra) {
+                    // `Installer::getInstallPath`: `$path ?: LibraryInstaller's`.
+                    Ok(Some(p)) if p.is_empty() || p == "0" => Ok(None),
                     Ok(Some(p)) => Ok(Some(p)),
                     // BaseInstaller: no `installer-paths` entry and no
                     // location → InvalidArgumentException.
@@ -312,6 +359,12 @@ fn neos_package_name(pkg: &Map<String, Value>) -> Result<String, String> {
         None | Some(Value::Null) => None,
         Some(Value::Object(m)) => match m.get("package-key") {
             None | Some(Value::Null) => None,
+            // PCRE's `$` also matches before a final newline.
+            Some(Value::String(s)) if s.ends_with('\n') => {
+                return Err(format!(
+                    "{NEOS}: extra.neos.package-key ends with a newline"
+                ))
+            }
             Some(Value::String(s)) => neos_package_key_valid(s).then(|| s.clone()),
             Some(_) => return Err(format!("{NEOS}: extra.neos.package-key is not a string")),
         },
@@ -582,6 +635,23 @@ mod tests {
             .unwrap()
             .contains("versions read: 1.2.1"));
         assert!(version_issue(NEOS, "dev-main").is_some());
+    }
+
+    #[test]
+    fn activation_side_effects() {
+        let none: Vec<Value> = Vec::new();
+        let plain = json!({});
+        assert!(activation_issue(KIRBY, "1.2.1", &plain, &none).is_none());
+        assert!(activation_issue(KIRBY, "1.2.0", &plain, &none).is_some());
+        let cfg = json!({"config": {"component-dir": "assets"}});
+        assert!(activation_issue(CONTAO_COMPONENTS, "1.4.1", &cfg, &none).is_some());
+        assert!(activation_issue(CONTAO_COMPONENTS, "1.4.1", &plain, &none).is_none());
+        let scalar = json!({"extra": {"installer-paths": "x"}});
+        assert!(activation_issue(THELIA, "1.6", &scalar, &none).is_some());
+        let one = vec![json!({"name": "composer/installers", "version": "v1.12.0"})];
+        assert!(activation_issue(OOMPHINC, "2.0.1", &plain, &one).is_some());
+        let two = vec![json!({"name": "composer/installers", "version": "v2.3.0"})];
+        assert!(activation_issue(OOMPHINC, "2.0.1", &plain, &two).is_none());
     }
 
     #[test]

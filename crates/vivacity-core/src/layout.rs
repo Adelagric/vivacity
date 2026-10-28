@@ -278,6 +278,10 @@ impl Placed {
     }
 }
 
+/// One installer taking a package's type: who, its label, its path as
+/// built (`None`: LibraryInstaller's).
+type Candidate<'a> = (Who, &'a str, Result<Option<String>, String>);
+
 /// Decision for a package (its lock or installed.json entry) under the
 /// current configuration: `InstallationManager::getInstaller` returns the
 /// last installer added that `supports()` the type; vivacity does not
@@ -298,9 +302,7 @@ fn place(
         .map(|t| t.trim_matches('/'))
         .filter(|t| !t.is_empty());
     let default = vendor_rel(vendor, name, target_dir);
-    // Each candidate: (who, its label, its path as built or None for
-    // LibraryInstaller's).
-    let mut cands: Vec<(Who, &str, Result<Option<String>, String>)> = Vec::new();
+    let mut cands: Vec<Candidate<'_>> = Vec::new();
     let mut plugins: Vec<&'static str> = Vec::new();
     if placers.custom_dirs && matches!(package_type, "library" | "composer-plugin") {
         cands.push((
@@ -358,7 +360,30 @@ fn place(
     for (who, label, path) in cands {
         let (rel, raw) = match path? {
             None => (default.clone(), None),
-            Some(p) => (custom_target(vendor, name, &p, label)?, Some(p)),
+            Some(p) => {
+                let rel = custom_target(vendor, name, &p, label)?;
+                // `AutoloadGenerator::parseAutoloads` cuts `strlen('/' .
+                // targetDir)` characters off the install path, and
+                // `getPackageBasePath` a target-dir suffix: right only for an
+                // installer that appends the target-dir (LibraryInstaller,
+                // davidbarratt's).
+                if let Some(t) = target_dir {
+                    // `Package::getTargetDir` rewrites `.`/`..` segments.
+                    if t.contains('\\')
+                        || t.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+                    {
+                        return Err(format!(
+                            "{label}: {name} has target-dir `{t}` (not emulated)"
+                        ));
+                    }
+                    if !rel.ends_with(&format!("/{t}")) {
+                        return Err(format!(
+                            "{label}: {name} has target-dir `{t}` that its install path `{p}` does not end with (Composer's autoloader cuts it anyway; not emulated)"
+                        ));
+                    }
+                }
+                (rel, Some(p))
+            }
         };
         resolved.push((who, rel, raw));
     }
@@ -525,7 +550,9 @@ fn wp_core_dir(
         match v {
             Value::String(s) => Some(s.clone()),
             Value::Number(n) => Some(n.to_string()),
-            Value::Bool(true) => Some("1".to_owned()),
+            // `in_array(true, $sensitiveDirectories)` is loose: always
+            // true, the installer throws (marked here, refused below).
+            Value::Bool(true) => Some("\0".to_owned()),
             _ => None,
         }
     };
@@ -550,6 +577,11 @@ fn wp_core_dir(
         }
     }
     let dir = dir.unwrap_or_else(|| "wordpress".to_owned());
+    if dir == "\0" {
+        return Err(format!(
+            "Warning! 1 is an invalid WordPress install directory (from {pretty_name})!"
+        ));
+    }
     if dir == "." || dir == vendor {
         return Err(format!(
             "Warning! {dir} is an invalid WordPress install directory (from {pretty_name})!"
@@ -937,7 +969,7 @@ impl Layout {
                         let before = previous
                             .iter()
                             .find(|e| e["name"].as_str() == Some(p.name()))
-                            .and_then(&old_rel_of);
+                            .and_then(old_rel_of);
                         if let Some(before) = before.filter(|b| *b != placed.rel) {
                             issues.push(format!(
                                 "installed package {} moves from `{before}` to `{}`: let Composer handle this move",
@@ -1006,6 +1038,19 @@ impl Layout {
                         if p.dist_kind() == crate::lock::DistKind::Path {
                             issues.push(format!(
                                 "{}: {} is a path package, whose source's own vendor/ the installer would remove (not emulated)",
+                                custom_installers::KIRBY,
+                                p.name()
+                            ));
+                        }
+                        // `postInstall` runs after BinaryInstaller: a binary
+                        // in the removed vendor/ keeps a proxy to nothing.
+                        if let Some(bin) = p
+                            .bins()
+                            .into_iter()
+                            .find(|b| normalize_path(b).starts_with("vendor/"))
+                        {
+                            issues.push(format!(
+                                "{}: {} has a binary `{bin}` in the vendor/ the installer removes (not emulated)",
                                 custom_installers::KIRBY,
                                 p.name()
                             ));
@@ -1426,6 +1471,11 @@ fn installers_one_x_issue(
             ));
         }
     }
+    if cfg!(windows) {
+        return Some(
+            "composer/installers 1.x on Windows: the file path its PHP deprecation names is not reproduced (not emulated)".to_owned(),
+        );
+    }
     if crate::io::level() >= crate::io::Verbosity::Verbose {
         return Some(
             "composer/installers 1.x under -v: its PHP deprecations come with stack traces (not emulated)".to_owned(),
@@ -1489,7 +1539,8 @@ fn autoload_reaches_vendor(pkg: &Map<String, Value>) -> Option<String> {
     dirs.into_iter()
         .find(|d| {
             let n = normalize_path(d);
-            n.is_empty() || n == "." || n == "vendor" || n.starts_with("vendor/")
+            // A wildcard (classmap `*`, `exclude`-like globs) may reach it.
+            n.is_empty() || n == "." || n == "vendor" || n.starts_with("vendor/") || n.contains('*')
         })
         .map(str::to_owned)
 }
@@ -1939,8 +1990,12 @@ mod tests {
         let allow = json!({"config": {"allow-plugins": true}});
         let one = pkg("composer/installers", "composer-plugin", "v1.12.0");
         let lock = lock_with(json!([one.clone(), pkg("a/b", "wordpress-plugin", "1.0")]));
-        let l = Layout::resolve(&root(), &lock, &allow, true, true).expect("1.12");
-        assert_eq!(l.rel("a/b"), Some("wp-content/plugins/b"));
+        if cfg!(windows) {
+            assert!(Layout::resolve(&root(), &lock, &allow, true, true).is_err());
+        } else {
+            let l = Layout::resolve(&root(), &lock, &allow, true, true).expect("1.12");
+            assert_eq!(l.rel("a/b"), Some("wp-content/plugins/b"));
+        }
         // Another plugin could raise the first deprecation.
         let lock = lock_with(json!([
             one.clone(),
@@ -1967,6 +2022,69 @@ mod tests {
             err.iter().any(|e| e.contains("composer/installers 1.x")),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn target_dir_bins_and_install_dir_edge_cases() {
+        let allow = json!({"config": {"allow-plugins": true}});
+        let pluginkit = |name: &str| {
+            with(
+                pkg(name, "kirby-plugin", "1.0"),
+                "require",
+                json!({"getkirby/composer-installer": "^1.2"}),
+            )
+        };
+        let kirby = pkg("getkirby/composer-installer", "composer-plugin", "1.2.1");
+        // kirby does not append the target-dir Composer's autoloader cuts.
+        let td = with(pluginkit("acme/shop"), "target-dir", json!("op"));
+        let err = Layout::resolve(
+            &root(),
+            &lock_with(json!([kirby.clone(), td])),
+            &allow,
+            true,
+            true,
+        )
+        .expect_err("target-dir");
+        assert!(err.iter().any(|e| e.contains("target-dir `op`")), "{err:?}");
+        // A binary in the vendor/ kirby removes.
+        let bin = with(pluginkit("acme/tool"), "bin", json!(["vendor/bin/tool"]));
+        let err = Layout::resolve(&root(), &lock_with(json!([kirby, bin])), &allow, true, true)
+            .expect_err("bin");
+        assert!(
+            err.iter().any(|e| e.contains("binary `vendor/bin/tool`")),
+            "{err:?}"
+        );
+        // `wordpress-install-dir: true` makes the installer throw.
+        let wp =
+            json!({"config": {"allow-plugins": true}, "extra": {"wordpress-install-dir": true}});
+        let lock = lock_with(json!([
+            pkg(
+                "johnpbloch/wordpress-core-installer",
+                "composer-plugin",
+                "2.0.0"
+            ),
+            pkg("acme/wp", "wordpress-core", "1.0")
+        ]));
+        let err = Layout::resolve(&root(), &lock, &wp, true, true).expect_err("true");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("1 is an invalid WordPress install directory")),
+            "{err:?}"
+        );
+        // oomphinc: a path that templates to "0" is LibraryInstaller's.
+        let oo = json!({"config": {"allow-plugins": true}, "extra": {
+            "installer-types": ["npm-asset"], "installer-paths": {"{$name}": ["type:npm-asset"]}}});
+        let lock = lock_with(json!([
+            pkg("composer/installers", "composer-plugin", "v2.3.0"),
+            pkg(
+                "oomphinc/composer-installers-extender",
+                "composer-plugin",
+                "2.0.1"
+            ),
+            pkg("acme/0", "npm-asset", "1.0")
+        ]));
+        let l = Layout::resolve(&root(), &lock, &oo, true, true).expect("zero");
+        assert_eq!(l.rel("acme/0"), Some("vendor/acme/0"));
     }
 
     #[test]
