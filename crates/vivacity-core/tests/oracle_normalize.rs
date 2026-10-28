@@ -55,6 +55,12 @@ const VERSIONS: &[&str] = &[
     "1.2.3._rc1",
     "1.2.3.",
     "1.2.3.beta.1",
+    // The date form: corpus, phplist/phplist-lan-help v2021-04.
+    "v2021-04",
+    "2021-04-01",
+    "20210401",
+    "2021.04.01.12.30",
+    "123456.1",
 ];
 
 #[test]

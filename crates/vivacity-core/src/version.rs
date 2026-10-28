@@ -179,6 +179,15 @@ pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
     }
 
     let (num, suffix) = split_stability(stripped);
+    // The classical form wants a major of at most five digits, four parts
+    // at most and a stability word before any modifier number; otherwise
+    // the date form (`v2021-04` is `2021.04`, `20210401` stays).
+    let classical = num.split('.').next().is_some_and(|m| m.len() <= 5)
+        && num.split('.').count() <= 4
+        && !suffix.starts_with(|c: char| c.is_ascii_digit());
+    if !classical {
+        return date_form(stripped).ok_or_else(|| UnsupportedVersion(input.to_owned()));
+    }
     let (stability, _) = parse_stability(suffix, input)?;
     // Same rule: `1.02` is `1.02.0.0`, `v01.2.3` is `01.2.3.0`.
     let mut parts: Vec<&str> = Vec::new();
@@ -211,6 +220,43 @@ pub fn normalize_pretty(input: &str) -> Result<String, UnsupportedVersion> {
     } else {
         Ok(format!("{base}-{word}{digits}"))
     }
+}
+
+/// `VersionParser::normalize`'s date form without a modifier:
+/// `^\d{4}(?:[.:-]?\d{2}){1,6}(?:[.:-]?\d{1,3}){0,2}$`, every non-digit
+/// then turned into `.`.
+fn date_form(s: &str) -> Option<String> {
+    fn digits(b: &[u8], i: usize, n: usize) -> bool {
+        b.len() >= i + n && b[i..i + n].iter().all(u8::is_ascii_digit)
+    }
+    // Groups of `[.:-]?` and `lo..=hi` digits, `min..=max` of them, from `i`
+    // (backtracking as PCRE does), then the rest.
+    fn groups(b: &[u8], i: usize, count: usize, spec: &[(usize, usize, usize, usize)]) -> bool {
+        let Some(&(lo, hi, min, max)) = spec.first() else {
+            return i == b.len();
+        };
+        if count < max {
+            let seps: &[usize] = if b.get(i).is_some_and(|c| b".:-".contains(c)) {
+                &[1, 0]
+            } else {
+                &[0]
+            };
+            for &sep in seps {
+                for n in (lo..=hi).rev() {
+                    if digits(b, i + sep, n) && groups(b, i + sep + n, count + 1, spec) {
+                        return true;
+                    }
+                }
+            }
+        }
+        count >= min && groups(b, i, 0, &spec[1..])
+    }
+    let b = s.as_bytes();
+    (digits(b, 0, 4) && groups(b, 4, 0, &[(2, 2, 1, 6), (1, 3, 0, 2)])).then(|| {
+        s.chars()
+            .map(|c| if c.is_ascii_digit() { c } else { '.' })
+            .collect()
+    })
 }
 
 #[cfg(test)]
