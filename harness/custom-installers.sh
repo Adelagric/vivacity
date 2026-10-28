@@ -66,6 +66,7 @@ foreach (["1.0.0", "1.0.1"] as $v) {
     $make("acme/kirbycms", $v, "kirby-cms", [], ["src/App.php" => "<?php namespace Acme\\KirbyCms; class App {}", "vendor/autoload.php" => "<?php // bundled\n", "vendor/acme/dep/Dep.php" => "<?php class Dep {}"], $psr4("Acme\\KirbyCms\\"));
 }
 $make("acme/kirby-shop", "1.0.0", "kirby-plugin", ["installer-name" => "shop"], ["index.php" => "<?php\n", "vendor/autoload.php" => "<?php // bundled\n"], ["require" => ["getkirby/composer-installer" => "^1.2"]]);
+$make("acme/kirby-shop", "1.0.1", "kirby-plugin", ["installer-name" => "store"], ["index.php" => "<?php\n"], ["require" => ["getkirby/composer-installer" => "^1.2"]]);
 $make("acme/kirby-legacy", "1.0.0", "kirby-plugin", [], ["index.php" => "<?php\n", "vendor/keep.txt" => "kept\n"]);
 // neos/composer-plugin
 $make("acme/neos-site", "1.0.0", "neos-site", [], ["Classes/Site.php" => "<?php namespace Acme\\Site; class Site {}"], $psr4("Acme\\Site\\", "Classes/"));
@@ -142,7 +143,7 @@ step() { # ref, viv, nom, args… (les mêmes des deux côtés)
   if ! diff <(sed "s#$rr#<project>#g" "$WORK/$name.composer.out") <(sed "s#$vr#<project>#g" "$WORK/$name.vivacity.out") >"$WORK/$name.out.diff"; then
     echo "FAIL $name : stdout différente"; head -8 "$WORK/$name.out.diff"; status=1; return
   fi
-  if ! diff <(grep -v '^  - Downloading ' "$WORK/$name.composer.err" | sed "s#$rr#<project>#g") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.err" | sed "s#$vr#<project>#g") >"$WORK/$name.err.diff"; then
+  if ! diff <(grep -v '^  - Downloading ' "$WORK/$name.composer.err" | sed "s#$rr#<project>#g") <(grep -v '^vivacity: \|^Note: plugin \|^Note: composer/installers .* emulated natively' "$WORK/$name.vivacity.err" | sed "s#$vr#<project>#g") >"$WORK/$name.err.diff"; then
     echo "FAIL $name : stderr différente"; head -10 "$WORK/$name.err.diff"; status=1; return
   fi
   if compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -163,6 +164,19 @@ handed() {
     echo "FAIL $name : code $v"; tail -4 "$WORK/$name.vivacity.all"; status=1
   fi
 }
+# handed_on <projet installé> <lock> <nom> <motif> <args…> : comme handed,
+# sur une copie d'un projet que Composer a installé (son installed.json).
+handed_on() {
+  local from="$1" src="$2" name="$3" pat="$4"; shift 4
+  local d="$WORK/$name-viv" v=0
+  rm -rf "$d"; cp -a "$from" "$d"; stage "$src" "$d"; touch "$WORK/$name.marker"; sleep 1
+  (cd "$d" && "$VIVACITY" "$@" --no-fallback >"$WORK/$name.vivacity.all" 2>&1) || v=$?
+  if [ "$v" = 3 ] && grep -qE -- "$pat" "$WORK/$name.vivacity.all" && [ -z "$(find "$d" -newer "$WORK/$name.marker" ! -name composer.json ! -name composer.lock -print -quit)" ]; then
+    echo "OK   $name : rendu à Composer, la raison, rien d'écrit"
+  else
+    echo "FAIL $name : code $v"; tail -4 "$WORK/$name.vivacity.all"; status=1
+  fi
+}
 I=(install --no-scripts)
 
 # run <préfixe> <lock A> <lock B> <lock C> <fichier attendu> : install,
@@ -176,6 +190,10 @@ run() {
   step "$ref" "$viv" "$p-no-op" "${I[@]}"
   stage "$b" "$ref" "$viv"; step "$ref" "$viv" "$p-update" "${I[@]}"
   stage "$c" "$ref" "$viv"; step "$ref" "$viv" "$p-removal" "${I[@]}"
+  # --no-plugins sur l'arbre posé par les plugins : rien à installer, les
+  # chemins de LibraryInstaller pour l'autoloader.
+  cp -a "$ref" "$ref-np"; cp -a "$viv" "$viv-np"
+  step "$ref-np" "$viv-np" "$p-installed-no-plugins" "${I[@]}" --no-plugins
   ref="$WORK/$1-noplug-ref"; viv="$WORK/$1-noplug-viv"; fresh "$a" "$ref" "$viv"
   step "$ref" "$viv" "$p-no-plugins" "${I[@]}" --no-plugins
 }
@@ -196,6 +214,15 @@ for l in kirby-path kirby-false; do
 done
 lock kirby-dot "{\"require\": {\"getkirby/composer-installer\": \"1.2.1\", \"acme/kirbycms\": \"1.0.0\"}, \"extra\": {\"kirby-cms-path\": \".\"}, $KIRBY}"
 handed kirby-dot kirby-dot 'getkirby/composer-installer' "${I[@]}"
+# Le chemin d'un paquet change à la mise à jour (installer-name) :
+# LibraryInstaller::updateCode renomme, rendu à Composer.
+fresh kirby-a "$WORK/km-ref"; (cd "$WORK/km-ref" && composer install --no-scripts --no-interaction --no-ansi -q)
+lock kirby-move "{\"require\": {\"getkirby/composer-installer\": \"1.2.1\", \"acme/kirbycms\": \"1.0.0\", \"acme/kirby-shop\": \"1.0.1\", \"acme/kirby-legacy\": \"1.0.0\"}, $KIRBY}"
+handed_on "$WORK/km-ref" kirby-move kirby-move 'moves from `site/plugins/shop`' "${I[@]}"
+# kirby et composer/installers 1.x prennent tous deux kirby-plugin : seul
+# kirby retire le vendor/ du plugin, le gagnant suit l'ordre d'activation.
+lock kirby-mix "{\"require\": {\"getkirby/composer-installer\": \"1.2.1\", \"composer/installers\": \"v1.12.0\", \"acme/kirby-shop\": \"1.0.0\"}, \"config\": {\"allow-plugins\": {\"getkirby/composer-installer\": true, \"composer/installers\": true}}}"
+handed kirby-mix kirby-mix 'postInstall' "${I[@]}"
 relock kirby-a kirby-old getkirby/composer-installer 1.2.0
 handed kirby-old kirby-old 'getkirby/composer-installer 1\.2\.0' "${I[@]}"
 
@@ -233,6 +260,9 @@ lock jp-b "{\"require\": {\"johnpbloch/wordpress-core-installer\": \"2.0.0\", \"
 lock jp-c "{\"require\": {\"johnpbloch/wordpress-core-installer\": \"2.0.0\", \"composer/installers\": \"v1.12.0\", \"acme/wpcore\": \"1.0.1\"}, $JP_EXTRA, $JP}"
 run jp jp-a jp-b jp-c web/plugins/wp-plug/plug.php
 [ -f "$WORK/jp-ref/web/wp/wp-load.php" ] || { echo "FAIL jp : wordpress-core pas sous web/wp chez Composer (cas mal construit)"; status=1; }
+# Les autres commandes : la dépréciation au chargement des plugins.
+step "$WORK/jp-ref" "$WORK/jp-viv" jp-dump dump-autoload
+step "$WORK/jp-ref" "$WORK/jp-viv" jp-remove remove acme/wpcore --no-update
 relock jp-a jp-old johnpbloch/wordpress-core-installer 1.0.2
 handed jp-old jp-old 'johnpbloch/wordpress-core-installer 1\.0\.2' "${I[@]}"
 
@@ -252,6 +282,10 @@ grep -q '^Deleting .*/vendor/acme/modules/Cheque - deleted$' "$WORK/th-removal.c
 lock th2 "{\"require\": {\"thelia/installer\": \"1.6\", \"composer/installers\": \"v2.3.0\", \"acme/cheque-module\": \"1.0.0\", $TH_PKGS}, $TH}"
 fresh th2 "$WORK/th2-ref" "$WORK/th2-viv"; step "$WORK/th2-ref" "$WORK/th2-viv" th2 "${I[@]}"
 [ -f "$WORK/th2-ref/local/modules/Cheque/Cheque.php" ] || { echo "FAIL th2 : module pas sous local/modules (cas mal construit)"; status=1; }
+# Retrait d'un template que thelia/installer et composer/installers
+# prennent tous deux : seul le second écrit « Deleting ».
+lock th-nofront "{\"require\": {\"thelia/installer\": \"1.6\", \"composer/installers\": \"v2.3.0\", \"acme/pdf\": \"1.0.0\", \"acme/config\": \"1.0.0\", \"acme/core\": \"1.0.0\", \"acme/lib\": \"1.0.0\"}, $TH3, $TH}"
+handed_on "$WORK/th-ref" th-nofront th-nofront 'removal of acme/front' "${I[@]}"
 relock th-a th-old thelia/installer 1.5
 handed th-old th-old 'thelia/installer 1\.5' "${I[@]}"
 

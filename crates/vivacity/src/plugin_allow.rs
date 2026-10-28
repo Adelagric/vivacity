@@ -50,6 +50,60 @@ pub(crate) struct Load {
     /// not allowed: Composer skips it or throws another exception — not
     /// emulated, the command goes to Composer.
     pub(crate) hand_over: Option<String>,
+    /// composer/installers 1.x loaded on PHP 8.4+: its deprecation lines
+    /// ([`installers_deprecation`]), printed once per process — by the
+    /// first load only, after the first `deprecation_at` warnings.
+    pub(crate) deprecation: Vec<String>,
+    pub(crate) deprecation_at: usize,
+}
+
+/// What `ErrorHandler::handle` prints when composer/installers 1.x's
+/// `Installer.php` is compiled on PHP 8.4+ (implicitly nullable
+/// `$filesystem` and `$binaryInstaller` in `__construct`): the first
+/// deprecation, then the notice that hides the next ones. The file is the
+/// one its autoloader finds: under `realpath(vendor-dir)`
+/// (`LibraryInstaller::initializeVendorDir`). Empty below PHP 8.4, or for
+/// another version of the plugin.
+pub(crate) fn installers_deprecation(vendor_dir: &Path, normalized_version: &str) -> Vec<String> {
+    if !normalized_version.starts_with("1.") || !php_raises_implicit_nullable() {
+        return Vec::new();
+    }
+    let vendor = physical(vendor_dir);
+    vec![
+        format!(
+            "Deprecation Notice: Composer\\Installers\\Installer::__construct(): Implicitly marking parameter $filesystem as nullable is deprecated, the explicit nullable type must be used instead in {}/composer/installers/src/Composer/Installers/Installer.php:140",
+            vendor.display()
+        ),
+        "More deprecation notices were hidden, run again with `-v` to show them.".to_owned(),
+    ]
+}
+
+/// `realpath` of a directory that may not exist yet: its nearest existing
+/// ancestor resolved, the rest appended.
+fn physical(path: &Path) -> std::path::PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if parent != path => physical(parent).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The PHP that runs Composer is 8.4 or later (implicitly nullable
+/// parameters deprecated).
+fn php_raises_implicit_nullable() -> bool {
+    let Ok(entries) = vivacity_resolver::platform::probe() else {
+        return false;
+    };
+    let version = entries
+        .iter()
+        .find(|e| e.get("name").and_then(Value::as_str) == Some("php"))
+        .and_then(|e| e.get("version").and_then(Value::as_str))
+        .unwrap_or_default();
+    let mut parts = version.split('.').map(|n| n.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (8, 4)
 }
 
 /// The parsed rules of one `PluginManager` side: `None` is the null rules
@@ -276,7 +330,16 @@ pub(crate) fn load(
                 out.refused = Some(p.name.clone());
                 break;
             }
-            Ok(true) if !global && p.present => out.loaded.push(p.name.clone()),
+            Ok(true) if !global && p.present => {
+                if p.name == "composer/installers" {
+                    out.deprecation = composer_dir
+                        .parent()
+                        .map(|vendor| installers_deprecation(vendor, &p.version))
+                        .unwrap_or_default();
+                    out.deprecation_at = out.warnings.len();
+                }
+                out.loaded.push(p.name.clone())
+            }
             Ok(_) => {}
         }
     }
@@ -360,6 +423,7 @@ pub(crate) fn at_load(
     let load = load_for(project, manifest);
     let issue = match (&load.hand_over, edited) {
         (Some(name), _) => Some(hand_over_issue(name)),
+        (None, _) if deprecation_issue(&load).is_some() => deprecation_issue(&load),
         (None, Some(edited)) if load.refusal.is_none() => second_load_issue(project, edited),
         _ => None,
     };
@@ -381,7 +445,24 @@ pub(crate) fn at_load(
 /// Holds the warnings of a load that went through, right after the lines
 /// of the `Factory` run that printed them.
 pub(crate) fn hold_warnings(load: &Load) {
-    vivacity_core::io::hold_after_factory(vivacity_core::io::Verbosity::Normal, &load.warnings);
+    let mut lines = load.warnings.clone();
+    let at = load.deprecation_at.min(lines.len());
+    lines.splice(at..at, load.deprecation.iter().cloned());
+    vivacity_core::io::hold_after_factory(vivacity_core::io::Verbosity::Normal, &lines);
+}
+
+/// A first load whose deprecation lines vivacity cannot place: a refusal
+/// (Composer runs the `Factory` again, the lines once), or -v (every
+/// deprecation, with its stack trace).
+pub(crate) fn deprecation_issue(load: &Load) -> Option<vivacity_core::scope::ScopeIssue> {
+    let verbose = vivacity_core::io::level() >= vivacity_core::io::Verbosity::Verbose;
+    (!load.deprecation.is_empty() && (load.refusal.is_some() || verbose)).then(|| {
+        vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+            "composer/installers".to_owned(),
+            "1.x prints PHP deprecations at load, here with a refusal or under -v (not emulated)"
+                .to_owned(),
+        )
+    })
 }
 
 /// yiisoft/yii2-composer registered before a refusal: its `activate` wrote

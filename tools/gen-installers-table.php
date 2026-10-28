@@ -55,7 +55,7 @@ foreach ($supported as $key => $class) {
         ? $obj->getLocations()
         : $obj->getLocations((string) $key);
     ksort($locations, SORT_STRING);
-    $out[] = ['key' => (string) $key, 'class' => $class, 'custom' => $custom, 'locations' => $locations];
+    $out[] = ['key' => (string) $key, 'class' => $class, 'custom' => $custom, 'locations' => $locations === [] ? new \stdClass() : $locations];
 }
 usort($out, fn($a, $b) => strcmp($a['key'], $b['key']));
 echo json_encode(['tag' => $argv[3] ?? 'v2.3.0', 'frameworks' => $out], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";

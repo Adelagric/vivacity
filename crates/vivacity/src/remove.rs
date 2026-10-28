@@ -62,6 +62,9 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
             );
         }
+        if let Some(issue) = crate::plugin_allow::deprecation_issue(load) {
+            return crate::delegate_resolution(&[issue], args.no_fallback);
+        }
         // `--unused` asks for the `Composer` before the edit.
         if load.refusal.is_some() && args.unused {
             if let Some(issue) = crate::plugin_allow::root_issue() {

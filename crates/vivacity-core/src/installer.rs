@@ -387,6 +387,10 @@ pub async fn install(
             crate::path_install::remove_path(&dir)?;
             prune_empty_parent(project_dir, &dir);
         }
+        // composer/installers' `Installer::uninstall`: its line on stdout.
+        if let Some(note) = layout.removal_note(name) {
+            crate::out!("{note}");
+        }
     }
 
     // Layout: remove the old version, then clone from the store.
@@ -419,6 +423,19 @@ pub async fn install(
         }
         let src = store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
         crate::clone::clone_tree(&src, &dest)?;
+        // What Composer's download left at LibraryInstaller's path.
+        if let Some(dir) = layout.download_leftover(p.name()) {
+            std::fs::create_dir_all(&dir).map_err(Error::io(&dir))?;
+        }
+        // getkirby/composer-installer's `Installer::postInstall`, once the
+        // package is laid out: its own `vendor/` goes (`is_dir`, then
+        // `removeDirectory`).
+        if layout.strips_vendor(p.name()) {
+            let own = dest.join("vendor");
+            if own.is_dir() {
+                crate::path_install::remove_path(&own)?;
+            }
+        }
         Ok(true)
     };
     let placed: Vec<bool> = if crate::platform::parallel_io() {

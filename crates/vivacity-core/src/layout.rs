@@ -9,12 +9,13 @@
 //! no trailing slash); that is the form Composer normalises before computing
 //! `install-path` (FilesystemRepository::write).
 
+use crate::custom_installers::{self, Placer};
 use crate::dirs::Dirs;
 use crate::installers::{self, Placement};
 use crate::lock::{Lock, LockPackage};
 use crate::pathutil::{find_shortest_path, normalize_path};
-use serde_json::Value;
-use std::collections::BTreeMap;
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,22 @@ pub struct Layout {
     /// directory to delete (`vendor/<name>` or the plugin's target), after
     /// checking that Composer would recompute the same path today.
     removals: BTreeMap<String, String>,
+    /// name -> `getPackageBasePath` (project-relative): the install path
+    /// without its `target-dir`, what a re-layout empties first.
+    bases: BTreeMap<String, String>,
+    /// getkirby/composer-installer's `postInstall`: packages whose own
+    /// `vendor/` is removed once laid out.
+    strip_vendor: BTreeSet<String>,
+    /// composer/installers' `Installer::uninstall` (and installers derived
+    /// from it): name -> the stdout line written once the package is gone.
+    removal_notes: BTreeMap<String, String>,
+    /// A directory Composer leaves empty: `FileDownloader::download`
+    /// creates the path the installer active at download time gives
+    /// (LibraryInstaller's, the installer plugin being installed by the same
+    /// transaction), and `cleanup` only removes that path and
+    /// `<vendor>/<vendor name>` when empty — with a target-dir, the
+    /// directories above it stay.
+    download_leftovers: BTreeMap<String, String>,
 }
 
 /// `allow-plugins` verdict for a package, like PluginManager in
@@ -154,6 +171,22 @@ pub fn global_composer_allow_plugins() -> Option<Value> {
     )
 }
 
+/// The packages of the global Composer's installed.json (COMPOSER_HOME,
+/// with its manifest's vendor-dir), when `Factory::createGlobalComposer`
+/// builds one (COMPOSER_HOME/composer.json exists).
+fn global_installed_packages() -> Vec<Value> {
+    let Some(home) = crate::fetch::composer_home() else {
+        return Vec::new();
+    };
+    let Some(manifest) = crate::jsonfile::read(&home.join("composer.json")) else {
+        return Vec::new();
+    };
+    match Dirs::resolve(&manifest) {
+        Ok(dirs) => installed_packages_at(&dirs.composer_dir(&home)),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// One `config.<key>` value of COMPOSER_HOME/config.json — the global
 /// layer of `Config::merge`, below the root composer.json.
 pub fn global_config_value(key: &str) -> Option<Value> {
@@ -171,75 +204,245 @@ fn vendor_rel(vendor: &str, name: &str, target_dir: Option<&str>) -> String {
     }
 }
 
-/// The active installers of a run: composer/installers' table, and
-/// whether roots/wordpress-core-installer places `wordpress-core`.
-#[derive(Clone, Copy, Default)]
+/// The active installers of a run: composer/installers' table, whether
+/// roots/wordpress-core-installer places `wordpress-core`, mnsami's
+/// installer, and the other custom installers (`custom_installers`).
+#[derive(Default)]
 struct Placers<'a> {
     table: Option<&'a installers::Table>,
     wp_core: bool,
     /// mnsami/composer-custom-directory-installer places `library` and
     /// `composer-plugin` packages named in `extra.installer-paths`.
     custom_dirs: bool,
+    custom: Vec<Placer>,
+    root_type: String,
+    /// The installer plugins this run's transaction installs (absent from
+    /// installed.json): not active yet when the packages are downloaded.
+    fresh: BTreeSet<&'static str>,
 }
 
-/// Decision for a package (name, type, extra) under the current configuration.
+impl Placers<'_> {
+    fn any(&self) -> bool {
+        self.table.is_some() || self.wp_core || self.custom_dirs || !self.custom.is_empty()
+    }
+}
+
+/// Who placed a package, when that matters after the layout: the stdout
+/// line of composer/installers' `uninstall`, kirby's `postInstall`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Who {
+    /// composer/installers, 2.x (absolute path in its line) or 1.x.
+    Installers {
+        absolute: bool,
+    },
+    /// oomphinc: composer/installers' `uninstall`, its own relative path.
+    Oomphinc,
+    Kirby,
+    /// johnpbloch/wordpress-core-installer: its `getInstallPath` refuses a
+    /// directory another package took in the same process.
+    Johnpbloch,
+    Other,
+}
+
+impl Who {
+    /// The installer returns a relative path: `BinaryInstaller` then
+    /// `realpath`s each binary (BinaryInstaller.php:77-82), symlinks
+    /// resolved. composer/installers 2.x prefixes `getcwd()`.
+    fn relative(self) -> bool {
+        !matches!(self, Who::Installers { absolute: true })
+    }
+}
+
+/// A placement: the project-relative path (normalised), the path as the
+/// winning installer built it, and the installer — `None` when several
+/// installers take the type and agree on the path (which one Composer asks
+/// follows the plugins' activation order). `whos` lists every installer
+/// that takes the type, the winner among them.
+struct Placed {
+    rel: String,
+    raw: Option<String>,
+    who: Option<Who>,
+    whos: Vec<Who>,
+    /// Every installer taking the type is activated by this transaction:
+    /// the package was downloaded to LibraryInstaller's path.
+    all_fresh: bool,
+}
+
+impl Placed {
+    /// Several installers take the type: the path they agree on is right,
+    /// what each does besides (kirby's `postInstall`, composer/installers'
+    /// `uninstall` line, johnpbloch's directory check) depends on which one
+    /// Composer asks.
+    fn contested(&self) -> bool {
+        self.whos.len() > 1
+    }
+}
+
+/// Decision for a package (its lock or installed.json entry) under the
+/// current configuration: `InstallationManager::getInstaller` returns the
+/// last installer added that `supports()` the type; vivacity does not
+/// replay the activation order — when several active installers take the
+/// type, their paths must agree.
 fn place(
     vendor: &str,
-    placers: Placers<'_>,
+    placers: &Placers<'_>,
     root_extra: Option<&Value>,
-    name: &str,
-    package_type: &str,
-    package_extra: Option<&Value>,
-    target_dir: Option<&str>,
-) -> Result<String, String> {
+    pkg: &Map<String, Value>,
+) -> Result<Placed, String> {
+    let name = pkg.get("name").and_then(Value::as_str).unwrap_or_default();
+    let package_type = pkg.get("type").and_then(Value::as_str).unwrap_or("library");
+    let package_extra = pkg.get("extra");
+    let target_dir = pkg
+        .get("target-dir")
+        .and_then(Value::as_str)
+        .map(|t| t.trim_matches('/'))
+        .filter(|t| !t.is_empty());
+    let default = vendor_rel(vendor, name, target_dir);
+    // Each candidate: (who, its label, its path as built or None for
+    // LibraryInstaller's).
+    let mut cands: Vec<(Who, &str, Result<Option<String>, String>)> = Vec::new();
+    let mut plugins: Vec<&'static str> = Vec::new();
     if placers.custom_dirs && matches!(package_type, "library" | "composer-plugin") {
-        if let Some(p) = custom_dir(root_extra, name, package_extra) {
-            return custom_target(vendor, name, &p, "custom-directory-installer");
-        }
+        cands.push((
+            Who::Other,
+            "custom-directory-installer",
+            Ok(custom_dir(root_extra, name, package_extra)),
+        ));
+        plugins.push(CUSTOM_DIRS_PLUGIN);
     }
     // roots/wordpress-core-installer's `getInstallPath` for its type.
     if placers.wp_core && package_type == WP_CORE_TYPE {
-        return match wp_core_dir(root_extra, name, package_extra, vendor) {
-            Ok(p) => custom_target(vendor, name, &p, "wordpress-core-installer"),
-            Err(e) => Err(format!("wordpress-core-installer: {e}")),
-        };
+        cands.push((
+            Who::Other,
+            "wordpress-core-installer",
+            wp_core_dir(root_extra, name, package_extra, vendor)
+                .map(Some)
+                .map_err(|e| format!("wordpress-core-installer: {e}")),
+        ));
+        plugins.push(WP_CORE_PLUGIN);
     }
-    let Some(table) = placers.table else {
-        return Ok(vendor_rel(vendor, name, target_dir));
+    if let Some(table) = placers.table {
+        if installers::supports_type(table, root_extra, package_type) {
+            cands.push((
+                Who::Installers {
+                    absolute: table.absolute_paths(),
+                },
+                "installers",
+                match installers::placement(table, root_extra, name, package_type, package_extra) {
+                    Ok(Placement::Vendor) => Ok(None),
+                    Ok(Placement::Custom(p)) => Ok(Some(p)),
+                    Err(e) => Err(format!("installers: {name} ({package_type}): {e}")),
+                },
+            ));
+            plugins.push(INSTALLERS_PLUGIN);
+        }
+    }
+    let ctx = custom_installers::Ctx {
+        root_extra,
+        root_type: &placers.root_type,
+        vendor,
     };
-    match installers::placement(table, root_extra, name, package_type, package_extra) {
-        Ok(Placement::Vendor) => Ok(vendor_rel(vendor, name, target_dir)),
-        Ok(Placement::Custom(p)) => custom_target(vendor, name, &p, "installers"),
-        Err(e) => Err(format!("installers: {name} ({package_type}): {e}")),
+    for c in &placers.custom {
+        if c.supports(package_type) {
+            let who = match c {
+                Placer::Oomphinc(..) => Who::Oomphinc,
+                Placer::Kirby => Who::Kirby,
+                Placer::Johnpbloch => Who::Johnpbloch,
+                _ => Who::Other,
+            };
+            cands.push((who, c.plugin(), c.install_path(&ctx, pkg)));
+            plugins.push(c.plugin());
+        }
+    }
+    let mut resolved: Vec<(Who, String, Option<String>)> = Vec::new();
+    for (who, label, path) in cands {
+        let (rel, raw) = match path? {
+            None => (default.clone(), None),
+            Some(p) => (custom_target(vendor, name, &p, label)?, Some(p)),
+        };
+        resolved.push((who, rel, raw));
+    }
+    let whos: Vec<Who> = resolved.iter().map(|(w, _, _)| *w).collect();
+    let all_fresh = !plugins.is_empty() && plugins.iter().all(|p| placers.fresh.contains(p));
+    match resolved.len() {
+        0 => Ok(Placed {
+            rel: default,
+            raw: None,
+            who: None,
+            whos,
+            all_fresh,
+        }),
+        1 => {
+            let (who, rel, raw) = resolved.remove(0);
+            Ok(Placed {
+                rel,
+                raw,
+                who: Some(who),
+                whos,
+                all_fresh,
+            })
+        }
+        _ => {
+            if resolved.iter().all(|(_, rel, _)| *rel == resolved[0].1) {
+                let (_, rel, _) = resolved.remove(0);
+                Ok(Placed {
+                    rel,
+                    raw: None,
+                    who: None,
+                    whos,
+                    all_fresh,
+                })
+            } else {
+                Err(format!(
+                    "{name} ({package_type}) is taken by several installers that place it differently ({}): the installer precedence follows the plugins' activation order (not emulated)",
+                    resolved.iter().map(|(_, r, _)| format!("`{r}`")).collect::<Vec<_>>().join(", ")
+                ))
+            }
+        }
     }
 }
 
 /// A custom install path's checks: relative, not the project root, not
-/// outside it, not inside vendor/.
+/// outside it, not the vendor directory itself nor Composer's own
+/// `vendor/composer` (a target elsewhere under vendor/ is checked against
+/// the other packages' paths once all are known).
 fn custom_target(vendor: &str, name: &str, p: &str, who: &str) -> Result<String, String> {
+    if crate::pathutil::is_absolute_path(p) {
+        return Err(format!(
+            "{who}: {name} would install at an absolute path `{p}`"
+        ));
+    }
+    let rel = normalize_path(p);
+    if rel.is_empty() || rel == "." {
+        return Err(format!("{who}: {name} would install at the project root"));
+    }
+    if rel.starts_with("../") || rel == ".." {
+        return Err(format!(
+            "{who}: {name} would install outside the project (`{p}`)"
+        ));
+    }
+    if rel == vendor
+        || rel == format!("{vendor}/composer")
+        || rel.starts_with(&format!("{vendor}/composer/"))
     {
-        {
-            if crate::pathutil::is_absolute_path(p) {
-                return Err(format!(
-                    "{who}: {name} would install at an absolute path `{p}`"
-                ));
-            }
-            let rel = normalize_path(p);
-            if rel.is_empty() || rel == "." {
-                return Err(format!("{who}: {name} would install at the project root"));
-            }
-            if rel.starts_with("../") || rel == ".." {
-                return Err(format!(
-                    "{who}: {name} would install outside the project (`{p}`)"
-                ));
-            }
-            if rel == vendor || rel.starts_with(&format!("{vendor}/")) {
-                return Err(format!(
-                    "{who}: {name} targets `{p}` inside {vendor}/ (not emulated: use the default vendor layout)"
-                ));
-            }
-            Ok(rel)
-        }
+        return Err(format!(
+            "{who}: {name} targets `{p}`, the vendor directory or Composer's own files (not emulated)"
+        ));
+    }
+    Ok(rel)
+}
+
+/// `LibraryInstaller::getPackageBasePath`: the install path without the
+/// `target-dir` it ends with (`preg_replace('{/*<target-dir>/?$}', '')`).
+fn base_path(rel: &str, target_dir: Option<&str>) -> String {
+    match target_dir {
+        Some(t) => rel
+            .strip_suffix(t)
+            .map(|r| r.trim_end_matches('/'))
+            .filter(|r| r.len() < rel.len() && !r.is_empty())
+            .unwrap_or(rel)
+            .to_owned(),
+        None => rel.to_owned(),
     }
 }
 
@@ -287,7 +490,22 @@ fn custom_dir(
 }
 
 pub const WP_CORE_PLUGIN: &str = "roots/wordpress-core-installer";
+
+const INSTALLERS_PLUGIN: &str = "composer/installers";
 pub const WP_CORE_TYPE: &str = "wordpress-core";
+
+/// `WordPressCoreInstaller::getInstallPath` of roots/wordpress-core-installer
+/// — and of johnpbloch/wordpress-core-installer 2.0.0, measured identical but
+/// for the rule on two packages sharing a directory, which vivacity refuses
+/// anyway (`custom_installers`).
+pub fn wp_core_install_dir(
+    root_extra: Option<&Value>,
+    pretty_name: &str,
+    package_extra: Option<&Value>,
+    vendor: &str,
+) -> Result<String, String> {
+    wp_core_dir(root_extra, pretty_name, package_extra, vendor)
+}
 
 fn wp_core_dir(
     root_extra: Option<&Value>,
@@ -350,11 +568,16 @@ impl Layout {
     /// `vendor_only` under the given `config.vendor-dir` / `bin-dir`.
     pub fn vendor_only_with(project_dir: &Path, lock: &Lock, with_dev: bool, dirs: Dirs) -> Layout {
         let mut paths = BTreeMap::new();
+        let mut bases = BTreeMap::new();
         for p in lock.wanted_packages(with_dev) {
             if !p.is_virtual(false) {
                 paths.insert(
                     p.name().to_owned(),
                     vendor_rel(dirs.vendor_rel(), p.name(), p.target_dir()),
+                );
+                bases.insert(
+                    p.name().to_owned(),
+                    format!("{}/{}", dirs.vendor_rel(), p.name()),
                 );
             }
         }
@@ -364,6 +587,10 @@ impl Layout {
             paths,
             installers_tag: None,
             removals: BTreeMap::new(),
+            bases,
+            strip_vendor: BTreeSet::new(),
+            removal_notes: BTreeMap::new(),
+            download_leftovers: BTreeMap::new(),
         }
     }
 
@@ -379,7 +606,6 @@ impl Layout {
         let root = absolutize(project_dir);
         let dirs = Dirs::resolve(manifest).map_err(|e| vec![e])?;
         let vendor = dirs.vendor_rel().to_owned();
-        let vendor_prefix = format!("{vendor}/");
         let mut issues: Vec<String> = Vec::new();
         let wanted: Vec<&LockPackage> = lock.wanted_packages(with_dev).collect();
         let previous = installed_packages(&root, &dirs);
@@ -395,6 +621,7 @@ impl Layout {
             .iter()
             .find(|p| p["name"].as_str() == Some("composer/installers"));
         let mut table: Option<&installers::Table> = None;
+        let mut fresh: BTreeSet<&'static str> = BTreeSet::new();
         let mut installers_tag = None;
         if plugins_enabled && (lock_plugin.is_some() || prev_plugin.is_some()) {
             let allow = merged_allow_plugins(
@@ -444,9 +671,26 @@ impl Layout {
                             )]);
                         }
                     }
+                    let prev_version = prev_plugin.and_then(|p| p["version"].as_str());
+                    let one_x =
+                        |v: &str| installers::table_for(v).is_some_and(|t| !t.absolute_paths());
+                    if !t.absolute_paths() || prev_version.is_some_and(one_x) {
+                        if let Some(issue) = installers_one_x_issue(
+                            lock_plugin.map(|p| p.version()),
+                            prev_version,
+                            &wanted,
+                            &previous,
+                            &allow,
+                        ) {
+                            return Err(vec![issue]);
+                        }
+                    }
                     if lock_plugin.is_some() {
                         installers_tag = Some(t.tag.clone());
                         table = Some(t);
+                        if prev_plugin.is_none() {
+                            fresh.insert(INSTALLERS_PLUGIN);
+                        }
                     }
                 }
                 PluginVerdict::Blocked => {} // Composer ignores it: everything in vendor/
@@ -484,6 +728,9 @@ impl Layout {
                         )]);
                     }
                     wp_core = wp_lock;
+                    if wp_lock && !wp_prev {
+                        fresh.insert(WP_CORE_PLUGIN);
+                    }
                 }
                 PluginVerdict::Blocked => {}
                 PluginVerdict::Unlisted => {
@@ -536,6 +783,9 @@ impl Layout {
                         )]);
                     }
                     custom_dirs = cd_lock;
+                    if cd_lock && !cd_prev {
+                        fresh.insert(CUSTOM_DIRS_PLUGIN);
+                    }
                 }
                 PluginVerdict::Blocked => {}
                 PluginVerdict::Unlisted => {
@@ -547,50 +797,275 @@ impl Layout {
         }
 
         let root_extra = manifest.get("extra");
+        let root_type = manifest
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("library")
+            .to_owned();
+        let mut placers = Placers {
+            table,
+            wp_core,
+            custom_dirs,
+            custom: Vec::new(),
+            root_type,
+            fresh,
+        };
+        if plugins_enabled {
+            let allow = merged_allow_plugins(
+                manifest.get("config").and_then(|c| c.get("allow-plugins")),
+                global_allow_plugins().as_ref(),
+            );
+            let raw_of = |p: &&LockPackage| p.raw.clone();
+            let lock_entries: Vec<Map<String, Value>> = wanted.iter().map(raw_of).collect();
+            let prev_entries: Vec<Map<String, Value>> = previous
+                .iter()
+                .filter_map(|p| p.as_object().cloned())
+                .collect();
+            // A global installer plugin registers after the project's
+            // (PluginManager::loadInstalledPlugins), so it wins its types.
+            let global = global_installed_packages();
+            for (plugin, _) in custom_installers::READ_VERSIONS {
+                if global.iter().any(|p| p["name"].as_str() == Some(*plugin)) {
+                    return Err(vec![format!(
+                        "{plugin} is installed globally (COMPOSER_HOME): its installer registers after the project's plugins (not emulated)"
+                    )]);
+                }
+            }
+            for (plugin, _) in custom_installers::READ_VERSIONS {
+                let lock_p = wanted.iter().find(|p| p.name() == *plugin);
+                let prev_p = previous
+                    .iter()
+                    .find(|p| p["name"].as_str() == Some(*plugin));
+                if lock_p.is_none() && prev_p.is_none() {
+                    continue;
+                }
+                match plugin_verdict(allow.as_ref(), plugin) {
+                    PluginVerdict::Blocked => continue,
+                    PluginVerdict::Unlisted => {
+                        return Err(vec![format!(
+                            "{plugin} is a plugin not covered by config.allow-plugins (Composer would refuse to run it)"
+                        )]);
+                    }
+                    PluginVerdict::Allowed => {}
+                }
+                // The versions on both sides: the plugin loaded from
+                // installed.json, and the one the transaction installs.
+                let versions = [
+                    lock_p.map(|p| p.version().to_owned()),
+                    prev_p.and_then(|p| p["version"].as_str().map(str::to_owned)),
+                ];
+                for v in versions.iter().flatten() {
+                    if let Some(issue) = custom_installers::version_issue(plugin, v) {
+                        return Err(vec![issue]);
+                    }
+                }
+                let placer =
+                    match custom_placer(plugin, manifest, &lock_entries, &prev_entries, &wanted) {
+                        Ok(p) => p,
+                        Err(e) => return Err(vec![e]),
+                    };
+                let Some(placer) = placer else { continue };
+                let taken = |e: &Map<String, Value>| {
+                    placer.supports(e.get("type").and_then(Value::as_str).unwrap_or("library"))
+                };
+                if has_state
+                    && lock_p.is_some() != prev_p.is_some()
+                    && (lock_entries.iter().any(taken) || prev_entries.iter().any(taken))
+                {
+                    return Err(vec![format!(
+                        "{plugin} is being {} an existing install (installed.json and composer.lock disagree): let Composer handle this transition",
+                        if lock_p.is_some() { "added to" } else { "removed from" }
+                    )]);
+                }
+                if lock_p.is_some() {
+                    if prev_p.is_none() {
+                        placers.fresh.insert(placer.plugin());
+                    }
+                    placers.custom.push(placer);
+                }
+            }
+        }
+
         let flex_packs = lock.flex_packs(manifest, with_dev, plugins_enabled);
         let mut paths: BTreeMap<String, String> = BTreeMap::new();
+        let mut bases: BTreeMap<String, String> = BTreeMap::new();
+        let mut customs: BTreeSet<String> = BTreeSet::new();
+        let mut strip_vendor: BTreeSet<String> = BTreeSet::new();
+        // A package the transaction leaves alone: same version and
+        // references in installed.json (no install, no update, so no
+        // installer is asked to lay it out).
+        let reference =
+            |v: &Map<String, Value>, k: &str| v.get(k).and_then(|d| d.get("reference")).cloned();
+        let unchanged = |p: &LockPackage| {
+            previous.iter().filter_map(Value::as_object).any(|e| {
+                e.get("name").and_then(Value::as_str) == Some(p.name())
+                    && e.get("version") == p.raw.get("version")
+                    && reference(e, "dist") == reference(&p.raw, "dist")
+                    && reference(e, "source") == reference(&p.raw, "source")
+            })
+        };
+        let mut johnpbloch_dirs: BTreeMap<String, String> = BTreeMap::new();
+        let mut download_leftovers: BTreeMap<String, String> = BTreeMap::new();
+        let vendor_composer =
+            normalize_path(&format!("{}/{vendor}/composer", root.to_string_lossy()));
+        let root_norm = normalize_path(&root.to_string_lossy());
+        // installed.json's `install-path` of a package, project-relative.
+        let old_rel_of = |entry: &Value| -> Option<String> {
+            let ip = entry.get("install-path").and_then(Value::as_str)?;
+            let abs = if crate::pathutil::is_absolute_path(ip) {
+                normalize_path(ip)
+            } else {
+                normalize_path(&format!("{vendor_composer}/{ip}"))
+            };
+            abs.strip_prefix(&format!("{root_norm}/"))
+                .map(str::to_owned)
+        };
         for p in &wanted {
             if p.is_virtual(flex_packs) {
                 continue;
             }
-            match place(
-                &vendor,
-                Placers {
-                    table,
-                    wp_core,
-                    custom_dirs,
-                },
-                root_extra,
-                p.name(),
-                p.package_type(),
-                p.raw.get("extra"),
-                p.target_dir(),
-            ) {
-                Ok(rel) => {
-                    paths.insert(p.name().to_owned(), rel);
+            match place(&vendor, &placers, root_extra, &p.raw) {
+                Ok(placed) => {
+                    let default = vendor_rel(&vendor, p.name(), p.target_dir());
+                    if placed.rel != default {
+                        customs.insert(p.name().to_owned());
+                    }
+                    // LibraryInstaller::updateCode renames the previous
+                    // install path to the new one (removes and reinstalls
+                    // when one contains the other): not emulated.
+                    if placers.any() {
+                        let before = previous
+                            .iter()
+                            .find(|e| e["name"].as_str() == Some(p.name()))
+                            .and_then(&old_rel_of);
+                        if let Some(before) = before.filter(|b| *b != placed.rel) {
+                            issues.push(format!(
+                                "installed package {} moves from `{before}` to `{}`: let Composer handle this move",
+                                p.name(),
+                                placed.rel
+                            ));
+                        }
+                    }
+                    if placed.contested() && placed.whos.contains(&Who::Johnpbloch) {
+                        issues.push(format!(
+                            "{} ({}) is taken by {} and another installer: which one Composer asks follows the plugins' activation order (not emulated)",
+                            p.name(),
+                            p.package_type(),
+                            custom_installers::JOHNPBLOCH
+                        ));
+                    }
+                    if placed.whos.contains(&Who::Johnpbloch) {
+                        johnpbloch_dirs.insert(placed.rel.clone(), p.name().to_owned());
+                    }
+                    if placed.contested()
+                        && placed.whos.contains(&Who::Kirby)
+                        && custom_installers::kirby_strips_vendor(&p.raw)
+                        && !unchanged(p)
+                    {
+                        issues.push(format!(
+                            "{} ({}) is taken by {} and another installer: whether its vendor/ is removed (`Installer::postInstall`) follows the plugins' activation order (not emulated)",
+                            p.name(),
+                            p.package_type(),
+                            custom_installers::KIRBY
+                        ));
+                    }
+                    // BinaryInstaller `realpath`s the binaries of a package
+                    // an installer placed at a relative path: through a
+                    // path repository's symlink, the proxy points at the
+                    // source (not emulated).
+                    if placed.rel != default
+                        && placed.whos.iter().any(|w| w.relative())
+                        && p.dist_kind() == crate::lock::DistKind::Path
+                        && !p.bins().is_empty()
+                    {
+                        issues.push(format!(
+                            "{} is a path package with binaries placed at a relative path (`{}`): BinaryInstaller resolves them with realpath (not emulated)",
+                            p.name(),
+                            placed.rel
+                        ));
+                    }
+                    if placed.all_fresh
+                        && placed.rel != default
+                        && matches!(
+                            p.dist_kind(),
+                            crate::lock::DistKind::Zip | crate::lock::DistKind::Tar
+                        )
+                    {
+                        // `<vendor>/<name>/<target-dir>` without its last
+                        // component: what `ensureDirectoryExists` made above
+                        // the path `cleanup` removes.
+                        if let Some((above, _)) =
+                            p.target_dir().and_then(|_| default.rsplit_once('/'))
+                        {
+                            download_leftovers.insert(p.name().to_owned(), above.to_owned());
+                        }
+                    }
+                    if placed.who == Some(Who::Kirby)
+                        && custom_installers::kirby_strips_vendor(&p.raw)
+                    {
+                        if p.dist_kind() == crate::lock::DistKind::Path {
+                            issues.push(format!(
+                                "{}: {} is a path package, whose source's own vendor/ the installer would remove (not emulated)",
+                                custom_installers::KIRBY,
+                                p.name()
+                            ));
+                        }
+                        if let Some(dir) = autoload_reaches_vendor(&p.raw) {
+                            issues.push(format!(
+                                "{}: {} autoloads `{dir}`, which reaches the package's own vendor/ that the installer removes (not emulated)",
+                                custom_installers::KIRBY,
+                                p.name()
+                            ));
+                        }
+                        strip_vendor.insert(p.name().to_owned());
+                    }
+                    let base = if placed.rel == default {
+                        format!("{vendor}/{}", p.name())
+                    } else {
+                        base_path(&placed.rel, p.target_dir())
+                    };
+                    bases.insert(p.name().to_owned(), base);
+                    paths.insert(p.name().to_owned(), placed.rel);
                 }
                 Err(e) => issues.push(e),
             }
         }
 
-        // Conflicting targets: two packages at the same place, or one under the other.
-        if table.is_some() || wp_core || custom_dirs {
+        // Conflicting targets: two packages at the same place, or one under
+        // the other (a placed package against every path).
+        if placers.any() {
             let mut by_path: BTreeMap<&str, &str> = BTreeMap::new();
             for (name, rel) in &paths {
                 if let Some(other) = by_path.insert(rel.as_str(), name.as_str()) {
                     issues.push(format!("{name} and {other} would both install at `{rel}`"));
                 }
             }
-            let customs: Vec<(&str, &str)> = paths
-                .iter()
-                .filter(|(_, rel)| !rel.starts_with(&vendor_prefix))
-                .map(|(n, r)| (n.as_str(), r.as_str()))
-                .collect();
-            for (name, rel) in &customs {
+            let bin_rel = dirs.bin_rel().to_owned();
+            for name in &customs {
+                let Some(rel) = paths.get(name) else { continue };
+                // The binaries' directory and the autoloader vivacity writes
+                // under vendor/ are not a package's to share.
+                let autoload = format!("{vendor}/autoload.php");
+                if *rel == bin_rel
+                    || rel.starts_with(&format!("{bin_rel}/"))
+                    || bin_rel.starts_with(&format!("{rel}/"))
+                    || *rel == autoload
+                {
+                    issues.push(format!(
+                        "{name} at `{rel}` would share `{bin_rel}` or `{autoload}` (not emulated)"
+                    ));
+                }
                 for (other, other_rel) in &paths {
-                    if other.as_str() != *name && other_rel.starts_with(&format!("{rel}/")) {
+                    if other == name {
+                        continue;
+                    }
+                    if other_rel.starts_with(&format!("{rel}/")) {
                         issues.push(format!(
                             "{name} at `{rel}` would contain {other} at `{other_rel}`"
+                        ));
+                    } else if rel.starts_with(&format!("{other_rel}/")) {
+                        issues.push(format!(
+                            "{name} at `{rel}` would be inside {other} at `{other_rel}`"
                         ));
                     }
                 }
@@ -601,11 +1076,9 @@ impl Layout {
         // the current configuration; we only delete if that path is the one
         // where the package was laid out (installed.json), else fallback.
         let mut removals = BTreeMap::new();
+        let mut removal_notes = BTreeMap::new();
         let wanted_names: std::collections::BTreeSet<&str> =
             wanted.iter().map(|p| p.name()).collect();
-        let vendor_composer =
-            normalize_path(&format!("{}/{vendor}/composer", root.to_string_lossy()));
-        let root_norm = normalize_path(&root.to_string_lossy());
         for prev in &previous {
             let name = prev["name"].as_str().unwrap_or("");
             if name.is_empty() || wanted_names.contains(name) {
@@ -628,37 +1101,71 @@ impl Layout {
                 ));
                 continue;
             };
-            let expected = place(
-                &vendor,
-                Placers {
-                    table,
-                    wp_core,
-                    custom_dirs,
-                },
-                root_extra,
-                name,
-                prev.get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("library"),
-                prev.get("extra"),
-                prev.get("target-dir")
-                    .and_then(Value::as_str)
-                    .map(|t| t.trim_matches('/'))
-                    .filter(|t| !t.is_empty()),
-            );
-            match expected {
-                Ok(rel) if rel == old_rel => {
+            let Some(entry) = prev.as_object() else {
+                continue;
+            };
+            let target_dir = prev
+                .get("target-dir")
+                .and_then(Value::as_str)
+                .map(|t| t.trim_matches('/'))
+                .filter(|t| !t.is_empty());
+            match place(&vendor, &placers, root_extra, entry) {
+                Ok(placed) if placed.rel == old_rel => {
+                    let default = vendor_rel(&vendor, name, target_dir);
                     // LibraryInstaller::removeCode deletes getPackageBasePath:
-                    // vendor/<name> without the target-dir.
-                    let dir = if rel.starts_with(&vendor_prefix) {
+                    // the install path without its target-dir.
+                    let dir = if placed.rel == default {
                         format!("{vendor}/{name}")
                     } else {
-                        rel
+                        base_path(&placed.rel, target_dir)
                     };
+                    // composer/installers' `Installer::uninstall`: "Deleting
+                    // <getPackageBasePath> - deleted" on stdout — the path as
+                    // the installer returns it (2.x: `getcwd() . '/' . $path`).
+                    // WordPressCoreInstaller::getInstallPath: "Two packages
+                    // (…) cannot share the same directory!" when the removed
+                    // package's directory is one an installed one takes.
+                    if placed.whos.contains(&Who::Johnpbloch) {
+                        if let Some(other) = johnpbloch_dirs.get(&placed.rel) {
+                            issues.push(format!(
+                                "{}: Two packages ({other} and {name}) cannot share the same directory!",
+                                custom_installers::JOHNPBLOCH
+                            ));
+                        }
+                    }
+                    match (placed.who, &placed.raw) {
+                        (Some(Who::Installers { absolute }), Some(raw)) => {
+                            let shown = base_path_raw(raw, target_dir);
+                            let shown = if absolute {
+                                format!("{}/{shown}", real_cwd(&root))
+                            } else {
+                                shown
+                            };
+                            removal_notes.insert(name.to_owned(), format!("Deleting {shown} - deleted"));
+                        }
+                        (Some(Who::Oomphinc), Some(raw)) => {
+                            removal_notes.insert(
+                                name.to_owned(),
+                                format!("Deleting {} - deleted", base_path_raw(raw, target_dir)),
+                            );
+                        }
+                        _ if placed.contested()
+                            && placed
+                                .whos
+                                .iter()
+                                .any(|w| matches!(w, Who::Installers { .. } | Who::Oomphinc)) =>
+                        {
+                            issues.push(format!(
+                                "removal of {name}: several installers take its type, and which one removes it (and what it prints) follows the plugins' activation order (not emulated)"
+                            ));
+                        }
+                        _ => {}
+                    }
                     removals.insert(name.to_owned(), dir);
                 }
-                Ok(rel) => issues.push(format!(
-                    "installed package {name} is at `{old_rel}` but the current layout puts it at `{rel}`: let Composer handle this removal"
+                Ok(placed) => issues.push(format!(
+                    "installed package {name} is at `{old_rel}` but the current layout puts it at `{}`: let Composer handle this removal",
+                    placed.rel
                 )),
                 Err(e) => issues.push(format!("removal of {name}: {e}")),
             }
@@ -671,6 +1178,10 @@ impl Layout {
                 paths,
                 installers_tag,
                 removals,
+                bases,
+                strip_vendor,
+                removal_notes,
+                download_leftovers,
             })
         } else {
             Err(issues)
@@ -721,17 +1232,30 @@ impl Layout {
         self.rel(name).map(|r| self.root.join(r))
     }
 
-    /// Root to empty before laying out the package: `vendor/<name>`
-    /// (target-dir included) for LibraryInstaller, the target itself otherwise.
+    /// Root to empty before laying out the package: `getPackageBasePath`,
+    /// `vendor/<name>` (target-dir included) for LibraryInstaller, the
+    /// installer's path without its target-dir otherwise.
     pub fn package_root(&self, name: &str) -> Option<PathBuf> {
-        let rel = self.rel(name)?;
-        Some(
-            if rel.starts_with(&format!("{}/", self.dirs.vendor_rel())) {
-                self.vendor_dir().join(name)
-            } else {
-                self.root.join(rel)
-            },
-        )
+        self.rel(name)?;
+        self.bases.get(name).map(|b| self.root.join(b))
+    }
+
+    /// getkirby/composer-installer removes this package's own `vendor/`
+    /// once it is laid out (`Installer::postInstall`).
+    pub fn strips_vendor(&self, name: &str) -> bool {
+        self.strip_vendor.contains(name)
+    }
+
+    /// The empty directory Composer's download leaves for this package
+    /// (`download_leftovers`), absolute.
+    pub fn download_leftover(&self, name: &str) -> Option<PathBuf> {
+        self.download_leftovers.get(name).map(|r| self.root.join(r))
+    }
+
+    /// The stdout line the installer writes once this removed package is
+    /// gone (composer/installers' `Installer::uninstall`).
+    pub fn removal_note(&self, name: &str) -> Option<&str> {
+        self.removal_notes.get(name).map(String::as_str)
     }
 
     /// `install-path` of installed.json / installed.php: relative to
@@ -752,6 +1276,243 @@ impl Layout {
             .iter()
             .map(|(n, rel)| (n.as_str(), self.root.join(rel)))
     }
+}
+
+/// The placer of a custom-installer plugin under this configuration:
+/// `None` when it places nothing (craftcms without a `craft-plugin`
+/// package, contao-components without a component), `Err` when Composer
+/// would do something vivacity does not reproduce.
+fn custom_placer(
+    plugin: &str,
+    manifest: &Value,
+    lock_entries: &[Map<String, Value>],
+    prev_entries: &[Map<String, Value>],
+    wanted: &[&LockPackage],
+) -> Result<Option<Placer>, String> {
+    use custom_installers as ci;
+    let root_extra = manifest.get("extra");
+    let any_of_type = |t: &str| {
+        lock_entries
+            .iter()
+            .chain(prev_entries)
+            .any(|e| e.get("type").and_then(Value::as_str) == Some(t))
+    };
+    Ok(match plugin {
+        ci::KIRBY => Some(Placer::Kirby),
+        ci::NEOS => Some(Placer::Neos),
+        ci::JOHNPBLOCH => Some(Placer::Johnpbloch),
+        ci::DAVIDBARRATT => Some(Placer::DavidBarratt(ci::DavidBarrattConfig::from_root(
+            root_extra,
+        )?)),
+        ci::THELIA => Some(Placer::Thelia(ci::thelia3(root_extra)?)),
+        ci::CRAFT => {
+            // `Installer::addPlugin`/`savePlugins` (vendor/craftcms/
+            // plugins.php) runs for a `craft-plugin` package or root only.
+            let root_type = manifest.get("type").and_then(Value::as_str);
+            if root_type == Some("craft-plugin") || any_of_type("craft-plugin") {
+                return Err(format!(
+                    "{}: a craft-plugin package writes vendor/craftcms/plugins.php (not emulated)",
+                    ci::CRAFT
+                ));
+            }
+            None
+        }
+        ci::CONTAO_COMPONENTS => {
+            // `Plugin::hasComponentDir`.
+            let config_has = |k: &str| {
+                manifest.get("config").and_then(|c| c.get(k)).is_some()
+                    || global_config_value(k).is_some()
+            };
+            match root_extra.and_then(|e| e.get("contao-component-dir")) {
+                Some(Value::String(dir)) => Some(Placer::ContaoComponents(dir.clone())),
+                Some(Value::Null) | None => {
+                    if config_has("contao-component-dir") || config_has("component-dir") {
+                        return Err(format!(
+                            "{}: config.component-dir / config.contao-component-dir (a deprecation line, or an exception; not emulated)",
+                            ci::CONTAO_COMPONENTS
+                        ));
+                    }
+                    // NoopInstaller: a component is recorded, never laid out.
+                    if any_of_type("contao-component") {
+                        return Err(format!(
+                            "{}: no extra.contao-component-dir — its NoopInstaller records contao-component packages without laying them out (not emulated)",
+                            ci::CONTAO_COMPONENTS
+                        ));
+                    }
+                    None
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{}: extra.contao-component-dir is not a string",
+                        ci::CONTAO_COMPONENTS
+                    ))
+                }
+            }
+        }
+        ci::OOMPHINC => {
+            // Its installer extends composer/installers' `Installer` (the
+            // `BaseInstaller` of the version installed), loaded through its
+            // own autoloader whatever allow-plugins says of composer/installers:
+            // that version is guarded here, on both sides of the transaction.
+            let installers_version = |e: &Map<String, Value>| {
+                (e.get("name").and_then(Value::as_str) == Some("composer/installers")).then(|| {
+                    e.get("version")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+            };
+            let lock_v = lock_entries.iter().find_map(installers_version);
+            let prev_v = prev_entries.iter().find_map(installers_version);
+            if prev_v.is_some() && prev_v != lock_v {
+                return Err(format!(
+                    "{}: composer/installers changes version under it (installed.json and composer.lock disagree): let Composer handle this transition",
+                    ci::OOMPHINC
+                ));
+            }
+            let Some(table) = wanted
+                .iter()
+                .find(|p| p.name() == "composer/installers")
+                .and_then(|p| installers::table_for(p.version()))
+            else {
+                return Err(format!(
+                    "{}: composer/installers is not installed in a ported version",
+                    ci::OOMPHINC
+                ));
+            };
+            if !table.absolute_paths() {
+                // Compiling 1.x's Installer.php prints a PHP 8.4 deprecation.
+                return Err(format!(
+                    "{}: on top of composer/installers 1.x (its classes, loaded by the extender, print deprecations; not emulated)",
+                    ci::OOMPHINC
+                ));
+            }
+            let types = match root_extra.and_then(|e| e.get("installer-types")) {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(a)) if a.iter().all(Value::is_string) => a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                Some(_) => {
+                    return Err(format!(
+                        "{}: extra.installer-types is not a list of strings",
+                        ci::OOMPHINC
+                    ))
+                }
+            };
+            Some(Placer::Oomphinc(types, table))
+        }
+        _ => None,
+    })
+}
+
+/// composer/installers 1.x: compiling its `Installer.php` on PHP 8.4+
+/// raises deprecations Composer's `ErrorHandler` prints (the first, then
+/// "More deprecation notices were hidden" — every one, with a stack trace,
+/// under -v), a process-wide state vivacity reproduces only alone: no
+/// version change on either side, not under -v, and no other plugin that
+/// could raise its own first.
+fn installers_one_x_issue(
+    lock_version: Option<&str>,
+    prev_version: Option<&str>,
+    wanted: &[&LockPackage],
+    previous: &[Value],
+    allow: &Option<Value>,
+) -> Option<String> {
+    if let (Some(l), Some(p)) = (lock_version, prev_version) {
+        if l != p {
+            return Some(format!(
+                "composer/installers changes from {p} to {l}: a 1.x on either side prints PHP deprecations at a point vivacity does not reproduce (let Composer handle this transition)"
+            ));
+        }
+    }
+    if crate::io::level() >= crate::io::Verbosity::Verbose {
+        return Some(
+            "composer/installers 1.x under -v: its PHP deprecations come with stack traces (not emulated)".to_owned(),
+        );
+    }
+    // The plugins whose code vivacity has read on PHP 8.4: none raises a
+    // deprecation of its own.
+    let quiet = |name: &str| {
+        name == "composer/installers"
+            || name == WP_CORE_PLUGIN
+            || name == CUSTOM_DIRS_PLUGIN
+            || custom_installers::READ_VERSIONS
+                .iter()
+                .any(|(p, _)| *p == name)
+    };
+    let plugin = |name: &str, ty: &str| {
+        matches!(ty, "composer-plugin" | "composer-installer")
+            && !quiet(name)
+            && plugin_verdict(allow.as_ref(), name) != PluginVerdict::Blocked
+    };
+    let other = wanted
+        .iter()
+        .find(|p| plugin(p.name(), p.package_type()))
+        .map(|p| p.name().to_owned())
+        .or_else(|| {
+            previous.iter().find_map(|p| {
+                let name = p["name"].as_str().unwrap_or_default();
+                plugin(name, p["type"].as_str().unwrap_or("library")).then(|| name.to_owned())
+            })
+        });
+    other.map(|o| {
+        format!(
+            "composer/installers 1.x next to {o}: which plugin prints the first PHP deprecation follows the load order (not emulated)"
+        )
+    })
+}
+
+/// The autoload path of a package that reaches its own `vendor/` (or the
+/// whole package): what getkirby/composer-installer removes would still be
+/// scanned from vivacity's store.
+fn autoload_reaches_vendor(pkg: &Map<String, Value>) -> Option<String> {
+    let autoload = pkg.get("autoload")?.as_object()?;
+    let mut dirs: Vec<&str> = Vec::new();
+    for (kind, v) in autoload {
+        match (kind.as_str(), v) {
+            ("psr-0" | "psr-4", Value::Object(m)) => {
+                for d in m.values() {
+                    match d {
+                        Value::String(s) => dirs.push(s),
+                        Value::Array(a) => dirs.extend(a.iter().filter_map(Value::as_str)),
+                        _ => {}
+                    }
+                }
+            }
+            ("classmap" | "files", Value::Array(a)) => {
+                dirs.extend(a.iter().filter_map(Value::as_str))
+            }
+            _ => {}
+        }
+    }
+    dirs.into_iter()
+        .find(|d| {
+            let n = normalize_path(d);
+            n.is_empty() || n == "." || n == "vendor" || n.starts_with("vendor/")
+        })
+        .map(str::to_owned)
+}
+
+/// `getPackageBasePath` on the path as the installer built it (trailing
+/// slash kept, as composer/installers' line prints it).
+fn base_path_raw(raw: &str, target_dir: Option<&str>) -> String {
+    let Some(t) = target_dir else {
+        return raw.to_owned();
+    };
+    let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+    match trimmed.strip_suffix(t) {
+        Some(r) if !r.is_empty() => r.trim_end_matches('/').to_owned(),
+        _ => raw.to_owned(),
+    }
+}
+
+/// PHP's `getcwd()` at the project root: the real path.
+fn real_cwd(root: &Path) -> String {
+    let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let s = real.to_string_lossy().into_owned();
+    // Windows: no `\\?\` prefix in PHP's form.
+    s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
 }
 
 fn installed_packages(root: &Path, dirs: &Dirs) -> Vec<Value> {
@@ -1007,7 +1768,7 @@ mod tests {
     fn unported_version_custom_framework_and_dangerous_targets_are_issues() {
         let manifest = json!({"config": {"allow-plugins": true}});
         let old = lock_with(json!([
-            pkg("composer/installers", "composer-plugin", "v1.12.0"),
+            pkg("composer/installers", "composer-plugin", "v1.11.0"),
             pkg("a/b", "drupal-module", "1.0")
         ]));
         let err = Layout::resolve(&root(), &old, &manifest, true, true).expect_err("v1");
@@ -1027,7 +1788,11 @@ mod tests {
         ]));
         for (paths, needle) in [
             (json!({"{$name}/../../x": ["a/b"]}), "outside the project"),
-            (json!({"vendor/{$name}": ["a/b"]}), "inside vendor/"),
+            (
+                json!({"vendor/composer/{$name}": ["a/b"]}),
+                "Composer's own files",
+            ),
+            (json!({"vendor/bin/{$name}": ["a/b"]}), "would share"),
             (json!({"/abs/{$name}": ["a/b"]}), "absolute path"),
             (json!({"same/": ["a/b", "a/c"]}), "would both install"),
             (json!({"modules/": ["a/b"]}), "would contain"),
@@ -1041,6 +1806,167 @@ mod tests {
             json!({"config": {"allow-plugins": true}, "extra": {"installer-paths": {"": ["a/b"]}}});
         let err = Layout::resolve(&root(), &lock, &m, true, true).expect_err("root");
         assert!(err.iter().any(|e| e.contains("project root")), "{err:?}");
+    }
+
+    fn with(mut v: Value, key: &str, val: Value) -> Value {
+        v[key] = val;
+        v
+    }
+
+    #[test]
+    fn several_installers_on_one_type() {
+        let allow = json!({"config": {"allow-plugins": true}});
+        // kirby and composer/installers 1.x agree on a pluginkit's path, but
+        // only kirby removes its vendor/: which one Composer asks follows
+        // the activation order.
+        let kp = with(
+            pkg("acme/kp", "kirby-plugin", "1.0"),
+            "require",
+            json!({"getkirby/composer-installer": "^1.2"}),
+        );
+        let lock = lock_with(json!([
+            pkg("composer/installers", "composer-plugin", "v1.12.0"),
+            pkg("getkirby/composer-installer", "composer-plugin", "1.2.1"),
+            kp
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("kirby");
+        assert!(err.iter().any(|e| e.contains("postInstall")), "{err:?}");
+
+        // thelia's and composer/installers' template paths agree; nothing
+        // else differs on install.
+        let thelia3 = json!({"config": {"allow-plugins": true}, "extra": {"installer-paths": {
+            "vendor/{$vendor}/modules/{$name}": ["type:thelia-module"]}}});
+        let lock = lock_with(json!([
+            pkg("composer/installers", "composer-plugin", "v2.3.0"),
+            pkg("thelia/installer", "composer-plugin", "1.6"),
+            pkg("acme/front", "thelia-frontoffice-template", "1.0"),
+            pkg("acme/cheque", "thelia-module", "1.0")
+        ]));
+        let l = Layout::resolve(&root(), &lock, &thelia3, true, true).expect("thelia");
+        assert_eq!(l.rel("acme/front"), Some("templates/frontOffice/front"));
+        assert_eq!(l.rel("acme/cheque"), Some("vendor/acme/modules/cheque"));
+
+        // Paths that disagree.
+        let lock = lock_with(json!([
+            pkg("composer/installers", "composer-plugin", "v1.12.0"),
+            pkg("getkirby/composer-installer", "composer-plugin", "1.2.1"),
+            pkg("acme/legacy", "kirby-plugin", "1.0")
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("differ");
+        assert!(
+            err.iter().any(|e| e.contains("place it differently")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn contested_removal_and_johnpbloch_directory() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let vc = dir.path().join("vendor/composer");
+        std::fs::create_dir_all(&vc).expect("mkdir");
+        let installed = |extra: Value| {
+            let mut packages = vec![
+                json!({"name": "composer/installers", "version": "v2.3.0", "type": "composer-plugin", "install-path": "./installers"}),
+                json!({"name": "thelia/installer", "version": "1.6", "type": "composer-plugin", "install-path": "../thelia/installer"}),
+                json!({"name": "johnpbloch/wordpress-core-installer", "version": "2.0.0", "type": "composer-plugin", "install-path": "../johnpbloch/wordpress-core-installer"}),
+            ];
+            packages.push(extra);
+            std::fs::write(
+                vc.join("installed.json"),
+                json!({"packages": packages, "dev": true, "dev-package-names": []}).to_string(),
+            )
+            .expect("write");
+        };
+        let plugins = || {
+            vec![
+                pkg("composer/installers", "composer-plugin", "v2.3.0"),
+                pkg("thelia/installer", "composer-plugin", "1.6"),
+                pkg(
+                    "johnpbloch/wordpress-core-installer",
+                    "composer-plugin",
+                    "2.0.0",
+                ),
+            ]
+        };
+        let allow = json!({"config": {"allow-plugins": true}});
+        // A template both installers take: composer/installers' uninstall
+        // prints a line, thelia's does not.
+        installed(
+            json!({"name": "acme/front", "version": "1.0", "type": "thelia-frontoffice-template", "install-path": "../../templates/frontOffice/front"}),
+        );
+        let err = Layout::resolve(dir.path(), &lock_with(json!(plugins())), &allow, true, true)
+            .expect_err("contested removal");
+        assert!(
+            err.iter().any(|e| e.contains("removal of acme/front")),
+            "{err:?}"
+        );
+
+        // wordpress-core swapped for another at the same directory.
+        installed(
+            json!({"name": "acme/wpa", "version": "1.0", "type": "wordpress-core", "install-path": "../../wordpress"}),
+        );
+        let mut locked = plugins();
+        locked.push(pkg("acme/wpb", "wordpress-core", "1.0"));
+        let err = Layout::resolve(dir.path(), &lock_with(json!(locked)), &allow, true, true)
+            .expect_err("johnpbloch");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("cannot share the same directory")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn relative_placement_of_a_path_package_with_binaries() {
+        let allow = json!({"config": {"allow-plugins": true}});
+        let mut kp = with(
+            pkg("acme/kp", "kirby-plugin", "1.0"),
+            "require",
+            json!({"getkirby/composer-installer": "^1.2"}),
+        );
+        kp["dist"] = json!({"type": "path", "url": "packages/kp", "reference": "r"});
+        kp["bin"] = json!(["bin/tool"]);
+        let lock = lock_with(json!([
+            pkg("getkirby/composer-installer", "composer-plugin", "1.2.1"),
+            kp
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("bins");
+        assert!(err.iter().any(|e| e.contains("realpath")), "{err:?}");
+    }
+
+    #[test]
+    fn installers_one_x_alone_only() {
+        let allow = json!({"config": {"allow-plugins": true}});
+        let one = pkg("composer/installers", "composer-plugin", "v1.12.0");
+        let lock = lock_with(json!([one.clone(), pkg("a/b", "wordpress-plugin", "1.0")]));
+        let l = Layout::resolve(&root(), &lock, &allow, true, true).expect("1.12");
+        assert_eq!(l.rel("a/b"), Some("wp-content/plugins/b"));
+        // Another plugin could raise the first deprecation.
+        let lock = lock_with(json!([
+            one.clone(),
+            pkg("symfony/flex", "composer-plugin", "v1.21.5"),
+            pkg("a/b", "wordpress-plugin", "1.0")
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("flex");
+        assert!(
+            err.iter().any(|e| e.contains("next to symfony/flex")),
+            "{err:?}"
+        );
+        // oomphinc on top of 1.x compiles its classes.
+        let lock = lock_with(json!([
+            one,
+            pkg(
+                "oomphinc/composer-installers-extender",
+                "composer-plugin",
+                "2.0.1"
+            ),
+            pkg("a/b", "wordpress-plugin", "1.0")
+        ]));
+        let err = Layout::resolve(&root(), &lock, &allow, true, true).expect_err("oomphinc");
+        assert!(
+            err.iter().any(|e| e.contains("composer/installers 1.x")),
+            "{err:?}"
+        );
     }
 
     #[test]

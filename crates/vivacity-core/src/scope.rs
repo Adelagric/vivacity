@@ -44,6 +44,16 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "bamarni/composer-bin-plugin",
     "roots/wordpress-core-installer",
     "mnsami/composer-custom-directory-installer",
+    // Custom installers (docs/plans/custom-installers.md), each in the
+    // versions of `custom_installers::READ_VERSIONS`, decided by `layout`.
+    crate::custom_installers::KIRBY,
+    crate::custom_installers::CRAFT,
+    crate::custom_installers::NEOS,
+    crate::custom_installers::DAVIDBARRATT,
+    crate::custom_installers::JOHNPBLOCH,
+    crate::custom_installers::THELIA,
+    crate::custom_installers::CONTAO_COMPONENTS,
+    crate::custom_installers::OOMPHINC,
 ];
 
 /// The versions of the listeners vivacity reproduces whose code changed
@@ -328,10 +338,7 @@ pub fn discovery_watches(root_manifest: &Value, installed: &[Value]) -> bool {
 
 /// Plugins known to change the install layout or the package contents:
 /// always out of scope.
-pub const LAYOUT_PLUGINS: &[&str] = &[
-    "cweagans/composer-patches",
-    "oomphinc/composer-installers-extender",
-];
+pub const LAYOUT_PLUGINS: &[&str] = &["cweagans/composer-patches"];
 
 /// The resolution commands (`update`, `require`, `remove`): Composer loads
 /// the installed plugins before resolving (`PluginManager::loadInstalledPlugins`
@@ -373,6 +380,16 @@ pub const RESOLUTION_INERT: &[&str] = &[
     "mlocati/composer-patcher",
     "oomphinc/composer-installers-extender",
     "mnsami/composer-custom-directory-installer",
+    // Installers only (docs/plans/custom-installers.md): install paths,
+    // decided by the install side. craftcms writes plugins.php when it is
+    // activated for a `craft-plugin` root — handed over below.
+    crate::custom_installers::KIRBY,
+    crate::custom_installers::CRAFT,
+    crate::custom_installers::NEOS,
+    crate::custom_installers::DAVIDBARRATT,
+    crate::custom_installers::JOHNPBLOCH,
+    crate::custom_installers::THELIA,
+    crate::custom_installers::CONTAO_COMPONENTS,
 ];
 
 /// A resolution command, for the per-plugin rules below.
@@ -500,6 +517,18 @@ pub fn resolution_issues(
 ) -> Vec<ScopeIssue> {
     let mut issues = Vec::new();
     for name in active_plugins(project_dir, root_manifest, plugins_enabled) {
+        // craftcms/plugin-installer's `Plugin::activate` registers a
+        // `craft-plugin` root in vendor/craftcms/plugins.php, whatever the
+        // command.
+        if name == crate::custom_installers::CRAFT
+            && root_manifest.get("type").and_then(Value::as_str) == Some("craft-plugin")
+        {
+            issues.push(ScopeIssue::ResolutionPlugin(
+                name,
+                "registers the craft-plugin root in vendor/craftcms/plugins.php when it is activated (not emulated)".to_owned(),
+            ));
+            continue;
+        }
         if let Some(effect) = resolution_effect(&name, command, with_install) {
             issues.push(ScopeIssue::ResolutionPlugin(name, effect));
         }

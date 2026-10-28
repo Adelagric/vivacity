@@ -716,6 +716,30 @@ fn local_repository_transaction(
     // The entries as loaded, for the classes the plugins declare.
     let installed_raw_names = installed_raw.clone();
     let mut installed_now = purge_missing(&composer_dir, installed_raw);
+    // `LibraryInstaller::isInstalled` looks at the path the installer of
+    // this run computes: a package an installer plugin laid out elsewhere,
+    // under `--no-plugins` (or with that plugin no longer active), is looked
+    // for at `<vendor-dir>/<name>` — absent, it is installed again there.
+    if let Ok(layout) = vivacity_core::layout::Layout::resolve(
+        &run.project,
+        &run.lock,
+        &run.manifest,
+        run.with_dev,
+        plugins_enabled,
+    ) {
+        installed_now.retain(|p| {
+            let name = p
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if p.get("type").and_then(serde_json::Value::as_str) == Some("metapackage")
+                || layout.install_path(name).is_none()
+            {
+                return true;
+            }
+            layout.abs(name).is_none_or(|d| d.exists())
+        });
+    }
     // A `symfony-pack` laid out by Flex's pack installer has no install
     // path in installed.json (`MetapackageInstaller`), which the purge above
     // reads as "always installed". `Factory::createComposer` loads the
@@ -1204,6 +1228,7 @@ fn execute_operations(
         run.lock
             .flex_packs(&run.manifest, run.with_dev, !args.no_plugins),
         !args.no_plugins,
+        &run.manifest,
     )?;
     // Composer decides these before it fetches anything; computed here for the
     // same reason `operation_lines` is — our own fetch fills that cache.
@@ -1968,9 +1993,21 @@ pub(crate) fn operation_lines(
     layout: &vivacity_core::layout::Layout,
     flex_packs: bool,
     plugins_enabled: bool,
+    manifest: &serde_json::Value,
 ) -> anyhow::Result<Vec<String>> {
     use vivacity_resolver::transaction::Operation;
     let mut lines = Vec::new();
+    // composer/installers 1.x registered by this transaction (not loaded
+    // with the installed plugins): `PluginInstaller::install` compiles its
+    // `Installer.php` right after its line — the PHP 8.4 deprecations.
+    let installers_loaded = !plugins_enabled
+        || crate::plugin_allow::load_for(project, manifest)
+            .loaded
+            .iter()
+            .any(|n| n == "composer/installers")
+        || vivacity_core::layout::plugin_allowed(manifest, "composer/installers")
+            != vivacity_core::layout::PluginVerdict::Allowed;
+    let mut deprecation_due = !installers_loaded;
     for op in operations {
         let Some(shown) = op.show(arena, false) else {
             continue;
@@ -2029,6 +2066,15 @@ pub(crate) fn operation_lines(
             _ => String::new(),
         };
         lines.push(format!("  - {shown}{appendix}"));
+        if let Operation::Install(p) | Operation::Update(_, p) = *op {
+            let pkg = &arena[p];
+            if deprecation_due && pkg.name == "composer/installers" {
+                let notes =
+                    crate::plugin_allow::installers_deprecation(&layout.vendor_dir(), &pkg.version);
+                deprecation_due = notes.is_empty();
+                lines.extend(notes);
+            }
+        }
         // `PluginInstaller::install|update` registers the package right
         // after laying it out, and `PluginManager::registerPackage` says so
         // when plugins are off.
