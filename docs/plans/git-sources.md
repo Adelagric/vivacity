@@ -454,3 +454,8 @@ la documentation.
   `git` ; un `vendor/.vivacity-git-*` survit à un arrêt brutal ;
   `config_issues` refuse encore `preferred-install: source` pour un
   paquet qui n'a qu'une dist (refus large, sans danger).
+
+Fusionné le 2026-10-28 avec `custom-installers` : friendica, à qui il ne
+manquait plus que l'installeur oomphinc, devient native elle aussi (corpus
+complet `docs/corpus/2026-10-28.md` : 85/106 en `--no-dev`, 83/106 en dev,
+0 diff).

@@ -381,3 +381,29 @@ cas natifs en repli (code 3 contre 0), les garde-fous déjà verts
   la ligne NOTICE de roots disait MIT (GPL-2.0-or-later) → corrigée,
   décision ouverte ; copies de référence et lignes NOTICE ajoutées pour les
   nouvelles origines MIT/Apache.
+
+## Résultat (2026-10-28)
+
+La session de travail s'est arrêtée après le commit de documentation
+(e57a73b), sans écrire cette section ni pousser la branche finale ; la
+vérification a été refaite sur `Darwin MacStudio-de-Adel-5.local 25.6.0
+arm64` (`sysctl -n hw.ncpu` : 14), PHP 8.5.12, Composer 2.10.3, bash 3.2.
+
+- **Harnais** : `harness/custom-installers.sh` 64/64 sous `/bin/bash` 3.2 ;
+  sur le binaire de main 8a48734 : 53 rouges, 11 verts (les garde-fous).
+- **Régression trouvée au balayage** : `custom-dirs.sh`, cas `unmapped`
+  (`installer-paths` vidé puis `install`), natif sur main, partait à
+  Composer : le refus « moves … » visait tout paquet dont le chemin
+  change, alors que seul `updateCode` (une mise à jour) renomme. Restreint
+  aux paquets mis à jour (94ea424) ; `custom-dirs.sh` 4/4.
+- **Licence** : roots/wordpress-core-installer (GPL-2.0-or-later) — copie
+  retirée de `docs/reference/`, `layout::wp_core_dir` récrite depuis le
+  comportement mesuré (7cf1646 ; DECISIONS 2026-10-28) ; `wp-core.sh` 5/5,
+  bedrock et wordplate natifs au corpus.
+- **Ensemble avec `git-sources`** : fmt, clippy (hôte et
+  `x86_64-pc-windows-gnu`), 401 tests, les 33 harnais de `ci.yml` et
+  `root-manifest.sh` à 0 ; corpus complet (`docs/corpus/2026-10-28.md`) :
+  85/106 natifs en `--no-dev`, 83/106 en dev, 0 diff, 0 indisponible. Les
+  six entrées visées sont natives, et friendica aussi (oomphinc ici, son
+  paquet git seul dans `git-sources`).
+- Non exécuté : `windows.yml` (pas de machine Windows ici).

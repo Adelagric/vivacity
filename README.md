@@ -90,15 +90,17 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 106 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-10-21 (vivacity
-0.22.0), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **76 of 106 projects (72 %)
-natively with `--no-dev`** and 74 of 105 (70 %) with the dev packages
-(Composer itself failed on the 106th),
-byte-identical down to file modes and link targets, and **no diff in
-either mode**: every other project was handed to Composer
-before any write, for reasons the report ranks — the Drupal scaffold
-(GPL, not ported), git-only packages, then plugins one by one. The
+committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (main after
+0.24.0), against Composer 2.10.3 `--no-scripts` with its
+plugins active, `vivacity install` laid out **85 of 106 projects (80 %)
+natively with `--no-dev`** and 83 of 106 (78 %) with the dev packages,
+byte-identical down to file modes and link targets (`.git` directories
+of git-only packages included), and **no diff in either mode**: every
+other project was handed to Composer before any write, for reasons the
+report ranks — the Drupal plugins (the scaffold is GPL, not ported),
+mautic's and silverstripe's own logic, then plugins one by one. On
+2026-10-21 it was 76 and 74: eight custom installer plugins and git-only
+packages make up the difference. The
 reasons that headed that list three days earlier (`symfony/thanks`,
 `yiisoft/yii2-composer`, asset-packagist's tarballs,
 `bamarni/composer-bin-plugin`, `roots/wordpress-core-installer`,
