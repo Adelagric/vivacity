@@ -117,8 +117,109 @@ compare_vendor() {
       esac
     done >> "$out"
   diff <(vendor_inventory "$ref") <(vendor_inventory "$viv") >> "$out" || true
+  compare_git_dirs "$ref" "$viv" >> "$out"
   if [ -s "$out" ]; then head -20 "$out"; return 1; fi
   return 0
+}
+
+# compare_git_dirs <scope de Composer> <scope de vivacity> : les `.git` des
+# paquets installés depuis leur source (GitDownloader), c'est-à-dire ceux
+# SOUS le vendor — ceux d'ailleurs (racine du projet, dépôts `path` d'un
+# banc) restent exclus, comme le reste de compare_vendor les exclut.
+# docs/plans/git-sources.md, « Décision de parité pour `.git` » : à l'octet,
+# sauf trois familles que deux runs de Composer ne reproduisent pas —
+#   - `index` (cache stat) : comparé par `git ls-files --stage` et
+#     `git status --porcelain` ;
+#   - `logs/**` (reflogs) : le seul champ `<epoch> <fuseau>` masqué ;
+#   - `objects/` hors `objects/info/` (packs refaits par `repack` en
+#     plusieurs threads) : comparé par l'ensemble des objets.
+# Les modes de tout le `.git` hors `objects/` sont comparés aussi.
+# N'écrit que les différences ; rien quand tout est identique.
+compare_git_dirs() {
+  local ref="$1" viv="$2" vrel="${VENDOR_REL:-vendor}" vref vviv
+  if [ -d "$ref/$vrel" ]; then vref="$ref/$vrel"; vviv="$viv/$vrel"; else vref="$ref"; vviv="$viv"; fi
+  [ -d "$vref" ] && [ -d "$vviv" ] || return 0
+  git_dirs_of() { (cd "$1" && find . -name .git -type d -prune -print | LC_ALL=C sort); }
+  local list_ref list_viv
+  list_ref="$(git_dirs_of "$vref")"; list_viv="$(git_dirs_of "$vviv")"
+  if [ "$list_ref" != "$list_viv" ]; then
+    echo ".git présents d'un seul côté :"
+    diff <(printf '%s\n' "$list_ref") <(printf '%s\n' "$list_viv") | sed -n '2,8p'
+  fi
+  local g a b name f
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    a="$vref/$g"; b="$vviv/$g"
+    [ -d "$b" ] || continue
+    # Les entrées de tête, puis chacune à l'octet sauf les trois familles.
+    if [ "$(ls -A "$a" | LC_ALL=C sort)" != "$(ls -A "$b" | LC_ALL=C sort)" ]; then
+      echo "$g : entrées différentes"
+      diff <(ls -A "$a" | LC_ALL=C sort) <(ls -A "$b" | LC_ALL=C sort) | sed -n '2,6p'
+    fi
+    for name in $(ls -A "$a"); do
+      case "$name" in index|logs|objects) continue ;; esac
+      [ -e "$b/$name" ] || continue
+      if ! diff -r --no-dereference "$a/$name" "$b/$name" >/dev/null 2>&1; then
+        echo "$g/$name diffère"
+        diff -r --no-dereference "$a/$name" "$b/$name" 2>&1 | head -6
+      fi
+    done
+    # `objects/info/` à l'octet (un `alternates` resté vers le cache serait
+    # une vraie différence), sauf les NOMS de packs que `packs` liste.
+    if [ -d "$a/objects/info" ] || [ -d "$b/objects/info" ]; then
+      if ! diff -r --exclude=packs "$a/objects/info" "$b/objects/info" >/dev/null 2>&1; then
+        echo "$g/objects/info diffère"; diff -r --exclude=packs "$a/objects/info" "$b/objects/info" 2>&1 | head -4
+      fi
+      if [ -f "$a/objects/info/packs" ] || [ -f "$b/objects/info/packs" ]; then
+        if [ ! -f "$a/objects/info/packs" ] || [ ! -f "$b/objects/info/packs" ]; then
+          echo "$g/objects/info/packs présent d'un seul côté"
+        elif ! diff <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$a/objects/info/packs") \
+            <(sed -E 's/pack-[0-9a-f]+\.pack/pack-N.pack/' "$b/objects/info/packs") >/dev/null; then
+          echo "$g/objects/info/packs diffère (noms de packs masqués)"
+        fi
+      fi
+    fi
+    # L'ensemble des objets, quel que soit leur rangement.
+    local objs_a objs_b
+    objs_a="$(git --git-dir="$a" cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>&1 | LC_ALL=C sort)"
+    objs_b="$(git --git-dir="$b" cat-file --batch-all-objects --batch-check='%(objectname) %(objecttype) %(objectsize)' 2>&1 | LC_ALL=C sort)"
+    if [ "$objs_a" != "$objs_b" ]; then
+      echo "$g : objets différents"
+      diff <(printf '%s\n' "$objs_a") <(printf '%s\n' "$objs_b") | sed -n '2,6p'
+    fi
+    # L'index par ce qu'il dit, sans le réécrire (`--no-optional-locks`).
+    local ia ib
+    ia="$(cd "${a%/.git}" && git --no-optional-locks ls-files --stage 2>&1; git --no-optional-locks status --porcelain 2>&1)"
+    ib="$(cd "${b%/.git}" && git --no-optional-locks ls-files --stage 2>&1; git --no-optional-locks status --porcelain 2>&1)"
+    if [ "$ia" != "$ib" ]; then
+      echo "$g/index diffère (ls-files --stage, status)"
+      diff <(printf '%s\n' "$ia") <(printf '%s\n' "$ib") | sed -n '2,6p'
+    fi
+    # Les reflogs, horodatage masqué : `<nom> <<courriel>> <epoch> <fuseau><TAB>`.
+    if [ "$( (cd "$a" && find logs -type f 2>/dev/null) | LC_ALL=C sort)" != "$( (cd "$b" && find logs -type f 2>/dev/null) | LC_ALL=C sort)" ]; then
+      echo "$g/logs : fichiers différents"
+    fi
+    while IFS= read -r f; do
+      [ -n "$f" ] && [ -f "$b/$f" ] || continue
+      if ! diff <(sed -E 's/> [0-9]+ [+-][0-9]{4}	/> <time>	/' "$a/$f") <(sed -E 's/> [0-9]+ [+-][0-9]{4}	/> <time>	/' "$b/$f") >/dev/null; then
+        echo "$g/$f diffère (horodatage masqué)"
+        diff <(sed -E 's/> [0-9]+ [+-][0-9]{4}	/> <time>	/' "$a/$f") <(sed -E 's/> [0-9]+ [+-][0-9]{4}	/> <time>	/' "$b/$f") | head -4
+      fi
+    done < <(cd "$a" && find logs -type f 2>/dev/null | LC_ALL=C sort)
+    # Les modes, `objects/` excepté.
+    if ! diff <(git_dir_modes "$a") <(git_dir_modes "$b") >/dev/null; then
+      echo "$g : modes différents"; diff <(git_dir_modes "$a") <(git_dir_modes "$b") | sed -n '2,6p'
+    fi
+  done <<< "$list_ref"
+}
+
+# git_dir_modes <.git> : mode et chemin de chaque entrée hors objects/, trié.
+git_dir_modes() {
+  (cd "$1" && if [ "$(uname -s)" = Darwin ]; then
+    find . -path ./objects -prune -o -print0 | xargs -0 stat -f '%Sp %N'
+  else
+    find . -path ./objects -prune -o -printf '%M %p\n'
+  fi) | LC_ALL=C sort
 }
 
 # vendor_inventory <dir> : mode et, pour un lien, sa cible — un chemin par

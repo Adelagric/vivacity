@@ -11,6 +11,7 @@ pub mod dirs;
 pub mod error;
 pub mod extract;
 pub mod fetch;
+pub mod git_source;
 pub mod glob;
 pub mod installer;
 pub mod installers;

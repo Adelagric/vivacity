@@ -171,6 +171,21 @@ Linux and macOS; on Windows a lock with a `path` package goes through the
 Composer fallback). Not yet: `vcs` repositories, `--minimal-changes`, the
 audit (`--no-audit` is the compared behaviour).
 
+A locked package with no dist at all and a `git` source (a `package` or
+`vcs` repository without archives) is installed as Composer installs it:
+the `git` binary runs `GitDownloader`'s commands — the mirror in the VCS
+cache (`  - Syncing … into cache`), then a clone of it with its `.git`
+directory (`: Cloning <ref> from cache`), `installation-source: source` —
+for an `https://` URL without credentials or a local path, on Linux and
+macOS. Its `.git` is compared with Composer's (`harness/git-sources.sh`):
+byte for byte, except the index, the reflog timestamps and the packing of
+objects, which two Composer runs do not reproduce either. Other schemes
+(ssh, `http`, `git://`), other VCS, a configured cache or GitHub protocol
+list, network disabled, an install path outside the vendor directory, the
+update or removal of a package installed from source, and
+`preferred-install: source` / `--prefer-source` for packages that have a
+dist go through the fallback with the reason.
+
 Composer's global options work on every command: `-q` leaves only what
 Composer prints at its quiet level (errors, the headline of an unsolvable
 set, the stale-lock warning) and the exit code; `-v` adds Composer's
@@ -300,7 +315,8 @@ notice. Forms the harness does not cover (absolute or `..` paths, `~`,
 `$VAR`) go through the fallback.
 
 Anything else — other plugins, `composer/installers` cases with custom
-naming, source-only packages, a `path` package on Windows, a plugin
+naming, source-only packages beyond git over https or a local path, a
+`path` package on Windows, a plugin
 upgrade in progress — is detected
 before `vendor/` is touched, and vivacity hands the command to the real
 `composer install` instead (`--no-fallback` to make it fail): the command

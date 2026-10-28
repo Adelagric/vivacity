@@ -1673,8 +1673,13 @@ fn say_summary(
     } else {
         String::new()
     };
+    let git = if report.from_git > 0 {
+        format!(", {} from git", report.from_git)
+    } else {
+        String::new()
+    };
     vivacity_core::say!(
-        "vivacity: {} installed, {} unchanged, {} removed ({} from store, {} from cache, {} from network){warmed}{autoload_note} in {:.2}s",
+        "vivacity: {} installed, {} unchanged, {} removed ({} from store, {} from cache, {} from network{git}){warmed}{autoload_note} in {:.2}s",
         report.installed,
         report.unchanged,
         report.removed,
@@ -1956,6 +1961,29 @@ pub(crate) fn download_lines(
         let Some(locked) = by_name.get(package.name.as_str()) else {
             continue;
         };
+        // `GitDownloader::doDownload`: a package without dist whose git
+        // repository is remote is synced into the VCS cache, in the same
+        // pass as the dists are downloaded (docs/plans/git-sources.md).
+        if locked.dist_kind() == vivacity_core::lock::DistKind::Missing {
+            // `MetapackageInstaller::download` does nothing.
+            if let Some(source) = package
+                .source
+                .as_ref()
+                .filter(|s| s.kind == "git" && package.package_type != "metapackage")
+            {
+                if !vivacity_core::git_source::is_local_path(&source.url) {
+                    lines.push(vivacity_core::git_source::syncing_line(
+                        &package.name,
+                        &vivacity_resolver::transaction::full_pretty_version(
+                            package,
+                            true,
+                            DisplayRef::SourceRefIfDev,
+                        ),
+                    ));
+                }
+            }
+            continue;
+        }
         let kind = match locked
             .raw
             .get("dist")
@@ -2030,6 +2058,19 @@ pub(crate) fn operation_lines(
                             Err(vivacity_core::Error::Refused(msg)) => anyhow::bail!("{msg}"),
                             Err(e) => return Err(e.into()),
                         }
+                    }
+                    // `GitDownloader::doInstall`: `Cloning <ref>[ from cache]`.
+                    None if pkg.package_type != "metapackage"
+                        && pkg.source.as_ref().is_some_and(|s| s.kind == "git") =>
+                    {
+                        let source = pkg.source.as_ref();
+                        let url = source.map(|s| s.url.as_str()).unwrap_or("");
+                        let reference = source.and_then(|s| s.reference.as_deref()).unwrap_or("");
+                        vivacity_core::git_source::install_appendix(
+                            reference,
+                            !vivacity_core::git_source::is_local_path(url),
+                            vivacity_core::io::level() == vivacity_core::io::Verbosity::Verbose,
+                        )
                     }
                     // `SymfonyPackInstaller extends MetapackageInstaller`:
                     // with Flex active a `symfony-pack` is laid out like a

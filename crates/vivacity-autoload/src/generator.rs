@@ -293,6 +293,12 @@ pub fn plan(
             let store = vivacity_core::store::Store::at(cfg.store_root.clone());
             lock.wanted_packages(opts.dev_mode)
                 .filter_map(|p| {
+                    // A checkout made from source is not the dist a store
+                    // entry holds (a clone keeps export-ignored files, and
+                    // its files can change).
+                    if p.raw.get("installation-source").and_then(|v| v.as_str()) == Some("source") {
+                        return None;
+                    }
                     let install = install_abs(p.name())?;
                     let entry = store.entry_path(p.name(), p.version(), p.dist_reference());
                     // Absent/non-directory entry: no cache for this package
