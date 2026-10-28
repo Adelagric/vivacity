@@ -56,7 +56,7 @@ ligne de cet environnement, pas du plugin).
 | craftcms/plugin-installer | 1.6.0 | MIT | `Plugin::activate`, `Installer` (`addPlugin`, `savePlugins`) |
 | neos/composer-plugin | 2.1.3 (= 2.1.1, 2.1.2) | MIT | `Installer` (préfixes, `deriveFlowPackageName`) |
 | davidbarratt/custom-installer | 1.1.0 | Apache-2.0 | `CustomInstaller`, `Configuration`, `ConfigurationAlpha1` |
-| johnpbloch/wordpress-core-installer | 2.0.0 | GPL-2.0-or-later | comparé ligne à ligne à roots v4.0.0 (GPL-2.0-or-later lui aussi, déjà émulé — NOTICE le disait MIT : corrigé, décision ouverte, HANDOVER) : une seule différence, la règle de conflit |
+| johnpbloch/wordpress-core-installer | 2.0.0 | GPL-2.0-or-later | comparé ligne à ligne à roots v4.0.0 (GPL-2.0-or-later lui aussi, déjà émulé — NOTICE le disait MIT : copie retirée et fonction récrite depuis le comportement, DECISIONS 2026-10-28) : une seule différence, la règle de conflit |
 | composer/installers | v1.12.0 | MIT | `Installer`, `BaseInstaller`, table par réflexion (`tools/gen-installers-table.php`) |
 | thelia/installer | 1.6 | LGPL-3.0-or-later | `TheliaInstaller` (deux dispositions) |
 | contao-components/installer | 1.4.1 (= 1.4.0) | LGPL-3.0-or-later | `Plugin`, `LibraryInstaller`, `NoopInstaller` |

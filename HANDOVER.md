@@ -167,13 +167,11 @@ dérivée incompatible avec la distribution MIT/Apache-2.0) a été retirée en
 0.6.0 avec sa source vendorée ; les versions 0.3.0 à 0.5.0 qui la
 contenaient ne sont plus distribuées sur crates.io (crates `vivace*`
 supprimés le 2026-09-15, ce qui libère aussi le nom pour svandragt/vivace).
-Rien n'est porté d'un logiciel GPL — **à une exception près, à trancher**
-(2026-10-28) : la ligne NOTICE de roots/wordpress-core-installer disait MIT,
-son `LICENSE.md` vendoré et son composer.json disent GPL-2.0-or-later.
-NOTICE est corrigé ; reste à décider s'il faut retirer `layout::wp_core_dir`
-et `docs/reference/plugins/wordpress-core-installer/`, ou les récrire depuis
-le comportement seul (johnpbloch, GPL lui aussi, réutilise cette fonction :
-comportement mesuré, aucune source copiée). thelia/installer et
+Rien n'est porté d'un logiciel GPL. roots/wordpress-core-installer est
+GPL-2.0-or-later (NOTICE le disait MIT jusqu'au 2026-10-28) : sa copie
+vendorée a été retirée et `layout::wp_core_dir` récrite depuis le
+comportement mesuré seul (`harness/wp-core.sh`, `custom-installers.sh`) ;
+johnpbloch, GPL lui aussi, réutilise cette fonction. thelia/installer et
 contao-components/installer (LGPL-3.0-or-later) : réimplémentés depuis le
 comportement, non vendorés.
 

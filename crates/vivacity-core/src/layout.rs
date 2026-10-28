@@ -471,12 +471,6 @@ fn base_path(rel: &str, target_dir: Option<&str>) -> String {
     }
 }
 
-/// roots/wordpress-core-installer (docs/reference/plugins/
-/// wordpress-core-installer/, read at v4.0.0 — 85d3589): the package type it
-/// installs, and `getInstallPath` — the root's `extra.wordpress-install-dir`
-/// (a string, or a map by pretty name; PHP `empty()` rules), else the
-/// package's own, else `wordpress`; `.` and the vendor directory refused
-/// with the plugin's exception.
 pub const CUSTOM_DIRS_PLUGIN: &str = "mnsami/composer-custom-directory-installer";
 
 /// mnsami/composer-custom-directory-installer (docs/reference/plugins/
@@ -519,10 +513,14 @@ pub const WP_CORE_PLUGIN: &str = "roots/wordpress-core-installer";
 const INSTALLERS_PLUGIN: &str = "composer/installers";
 pub const WP_CORE_TYPE: &str = "wordpress-core";
 
-/// `WordPressCoreInstaller::getInstallPath` of roots/wordpress-core-installer
-/// — and of johnpbloch/wordpress-core-installer 2.0.0, measured identical but
-/// for the rule on two packages sharing a directory, which vivacity refuses
-/// anyway (`custom_installers`).
+/// Where roots/wordpress-core-installer (and johnpbloch's 2.0.0, which
+/// behaves the same here; its rule on two packages sharing a directory is
+/// refused in `custom_installers`) puts a `wordpress-core` package.
+///
+/// Written from the plugin's observed behaviour only, measured against
+/// Composer by `harness/wp-core.sh` and `harness/custom-installers.sh`: the
+/// plugin is GPL-2.0-or-later, so none of its source is read, copied or
+/// vendored here (DECISIONS 2026-10-28).
 pub fn wp_core_install_dir(
     root_extra: Option<&Value>,
     pretty_name: &str,
@@ -532,62 +530,71 @@ pub fn wp_core_install_dir(
     wp_core_dir(root_extra, pretty_name, package_extra, vendor)
 }
 
+/// The observed rules, in order:
+/// 1. the root's `extra.wordpress-install-dir`: a string or number is the
+///    directory; an object is looked up by the package's pretty name;
+/// 2. otherwise the package's own `extra.wordpress-install-dir`;
+/// 3. otherwise `wordpress`.
+///
+/// A value that is unset, `null`, `false`, `""`, `"0"`, `0` or an empty
+/// array/object counts as absent and the next rule applies; any other
+/// array, object or `false` found at a rule yields nothing there either.
+/// `true`, `.` and the vendor directory make Composer fail with
+/// "Warning! <dir> is an invalid WordPress install directory (from
+/// <package>)!" (`true` printed as `1`): returned as an error.
 fn wp_core_dir(
     root_extra: Option<&Value>,
     pretty_name: &str,
     package_extra: Option<&Value>,
     vendor: &str,
 ) -> Result<String, String> {
-    let php_empty = |v: Option<&Value>| match v {
-        None | Some(Value::Null) => true,
-        Some(Value::Bool(b)) => !*b,
-        Some(Value::String(s)) => s.is_empty() || s == "0",
-        Some(Value::Number(n)) => n.as_f64() == Some(0.0),
-        Some(Value::Array(a)) => a.is_empty(),
-        Some(Value::Object(o)) => o.is_empty(),
-    };
-    let as_dir = |v: &Value| -> Option<String> {
+    enum Setting {
+        Dir(String),
+        Invalid,
+    }
+    fn unset(v: &Value) -> bool {
         match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            // `in_array(true, $sensitiveDirectories)` is loose: always
-            // true, the installer throws (marked here, refused below).
-            Value::Bool(true) => Some("\0".to_owned()),
+            Value::Null => true,
+            Value::Bool(b) => !b,
+            Value::String(s) => s.is_empty() || s == "0",
+            Value::Number(n) => n.as_f64() == Some(0.0),
+            Value::Array(a) => a.is_empty(),
+            Value::Object(o) => o.is_empty(),
+        }
+    }
+    fn setting(v: &Value) -> Option<Setting> {
+        match v {
+            Value::String(s) => Some(Setting::Dir(s.clone())),
+            Value::Number(n) => Some(Setting::Dir(n.to_string())),
+            Value::Bool(true) => Some(Setting::Invalid),
             _ => None,
         }
+    }
+    fn present(extra: Option<&Value>) -> Option<&Value> {
+        extra
+            .and_then(|e| e.get("wordpress-install-dir"))
+            .filter(|v| !unset(v))
+    }
+    let from_root = present(root_extra).and_then(|v| match v {
+        Value::Object(by_name) => by_name
+            .get(pretty_name)
+            .filter(|v| !unset(v))
+            .and_then(setting),
+        other => setting(other),
+    });
+    let chosen = from_root
+        .or_else(|| present(package_extra).and_then(setting))
+        .unwrap_or_else(|| Setting::Dir("wordpress".to_owned()));
+    let invalid = |shown: &str| {
+        Err(format!(
+            "Warning! {shown} is an invalid WordPress install directory (from {pretty_name})!"
+        ))
     };
-    let mut dir: Option<String> = None;
-    let top = root_extra.and_then(|e| e.get("wordpress-install-dir"));
-    if !php_empty(top) {
-        match top {
-            Some(Value::Object(map)) => {
-                let entry = map.get(pretty_name);
-                if !php_empty(entry) {
-                    dir = entry.and_then(as_dir);
-                }
-            }
-            Some(v) => dir = as_dir(v),
-            None => {}
-        }
+    match chosen {
+        Setting::Invalid => invalid("1"),
+        Setting::Dir(d) if d == "." || d == vendor => invalid(&d),
+        Setting::Dir(d) => Ok(d),
     }
-    if dir.is_none() {
-        let own = package_extra.and_then(|e| e.get("wordpress-install-dir"));
-        if !php_empty(own) {
-            dir = own.and_then(as_dir);
-        }
-    }
-    let dir = dir.unwrap_or_else(|| "wordpress".to_owned());
-    if dir == "\0" {
-        return Err(format!(
-            "Warning! 1 is an invalid WordPress install directory (from {pretty_name})!"
-        ));
-    }
-    if dir == "." || dir == vendor {
-        return Err(format!(
-            "Warning! {dir} is an invalid WordPress install directory (from {pretty_name})!"
-        ));
-    }
-    Ok(dir)
 }
 
 impl Layout {

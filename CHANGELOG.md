@@ -24,6 +24,10 @@ byte-identical-output promise are the public API.
   thelia-project).
 
 ### Changed
+- **roots/wordpress-core-installer's layout rule is rewritten from its
+  measured behaviour**, and the copy of its source under `docs/reference/`
+  is removed: the plugin is GPL-2.0-or-later (NOTICE.md listed it as MIT).
+  Output is unchanged.
 - **`-v` stays native under `--no-install` with phpstan, rector and
   codeception/c3.** `update`, `require` and `remove --no-install` play the
   plugins' `post-update-cmd` listeners since 0.24.0, but printed all the

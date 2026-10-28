@@ -4280,12 +4280,35 @@ et revue).
   copiée ni vendue. Les sources MIT et Apache-2.0 lues sont vendues sous
   `docs/reference/` avec leur licence (NOTICE.md). En vérifiant, la ligne
   NOTICE de roots/wordpress-core-installer disait MIT : son `LICENSE.md` et
-  son composer.json disent GPL-2.0-or-later. Corrigé dans NOTICE ; ce que
-  le projet en fait (retirer l'émulation de roots et sa copie, ou la
-  récrire depuis le comportement seul) est une décision laissée ouverte
-  (HANDOVER). johnpbloch réutilise la fonction de chemin de vivacity
+  son composer.json disent GPL-2.0-or-later. Corrigé dans NOTICE, puis
+  tranché le jour même (entrée suivante). johnpbloch réutilise la fonction de chemin de vivacity
   (`wp_core_dir`), mesurée identique à son comportement.
 - **Hors de portée** : simplesamlphp (modules imbriqués dans un autre
   paquet, liens durs nommés d'après le chemin absolu), contao/manager-plugin,
   silverstripe, mautic, `vendor/craftcms/plugins.php` ; omeka (paquet `path`
   GPL-3.0 absent de la fixture : aucun gain mesurable).
+
+## 2026-10-28 — roots/wordpress-core-installer : copie GPL retirée, `wp_core_dir` récrite depuis le comportement
+
+**Constat.** L'émulation de roots/wordpress-core-installer (v0.17,
+2026-09-22) avait été écrite en lisant sa source, vendorée sous
+`docs/reference/plugins/wordpress-core-installer/` et déclarée MIT dans
+NOTICE. Son `LICENSE.md` et son composer.json disent GPL-2.0-or-later : le
+même cas que l'émulation de `drupal/core-composer-scaffold`, retirée en
+0.6.0, contraire à la règle « rien n'est porté d'un logiciel GPL ».
+
+**Décision** (de l'auteur, 2026-10-28) : garder l'émulation, mais sans rien
+de la source. La copie vendorée est retirée ; `layout::wp_core_dir` est
+récrite depuis le comportement observé seul — les règles que les cas de
+`harness/wp-core.sh` et `harness/custom-installers.sh` mesurent contre
+Composer (réglage de la racine en chaîne ou en carte par nom, puis celui du
+paquet, puis `wordpress` ; valeurs « vides » à la PHP ignorées ; `true`,
+`.` et le répertoire vendor refusés avec le message de Composer) — avec
+une autre structure et des commentaires qui décrivent ce comportement, pas
+le code du plugin. johnpbloch/wordpress-core-installer, GPL lui aussi,
+réutilise cette fonction comme avant. Les sorties ne changent pas : mêmes
+tests unitaires, mêmes harnais.
+
+**Alternative écartée** : retirer l'émulation (bedrock, wordplate et
+themosis repartiraient à Composer) — rien ne l'impose une fois la source
+hors du projet, le comportement d'un installeur n'étant pas protégé.
