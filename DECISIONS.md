@@ -4729,3 +4729,76 @@ binaire 5afb474) : **95/106 natives en `--no-dev`, 94/106 en dev** (93 et
 (dev), typo3 et concretecms (deux modes) deviennent natives ; restent
 rendues dans le champ typo3-cms-base-distribution, contao-managed-edition
 et chamilo-lms (dev).
+
+## 2026-10-29 — L'action ne met en cache que le cache de Composer, résolu par le binaire (docs/plans/action-cache.md)
+
+**Constat.** `action.yml` mettait en cache, avec `actions/cache@v4`, six
+chemins écrits en dur : les trois répertoires du store et des
+enregistrements de classmap de vivacity, les trois du cache de Composer.
+
+- **Le store restauré est mort depuis le 27/10** : `store.rs` est passé de
+  `LAYOUT` `v2` à `v3` (05193b7) ; l'artefact ne contient que `store/v2`,
+  jamais lu, et la clé primaire touchée empêche toute nouvelle sauvegarde.
+  Run 40857206667 (29/10), job `action (ubuntu-latest)` : 40 Mo restaurés,
+  puis `0 from store, 109 from cache`. Même chose du 30/09 (v1→v2, 29cb00e)
+  au 22/10.
+- **Vivant, il ne paie pas.** Runs du workflow `action` (Laravel, 109
+  paquets), restauration + install sur clé trouvée : ubuntu 3,0 s (store
+  vivant) contre 2,7 s (mort) ; Windows 26,1 s contre 21,6 s (store sur
+  `C:`, projet sur `D:` : copie, pas de lien) ; macOS noyé dans le bruit du
+  téléchargement (le même artefact restauré en 6,2 s ou 12,0 s). Un run par
+  cas : une indication, pas une mesure. `bench/M7-ci-cache.md` allait dans
+  le même sens (addendum du jour).
+- **Les chemins étaient figés** : un `COMPOSER_CACHE_DIR`, `COMPOSER_HOME`
+  ou `XDG_CACHE_HOME` du projet sortait le cache de Composer des six
+  chemins.
+
+**Décision.**
+
+- L'action installe le binaire, puis lui demande le répertoire
+  (`vivacity config --global cache-dir`, même avec `cache: 'false'`), le
+  journalise, l'expose en sortie `composer-cache-dir`, et ne restaure et
+  sauve que lui, avec `actions/cache@55cc8345…` (v6.1.0, épinglé par SHA),
+  sous la même forme de clé. Une valeur vide, relative ou que Composer
+  désactive (`/dev/null`, `nul`) : `::notice::` et pas de cache. Demander
+  au binaire plutôt que recopier l'algorithme en bash : le répertoire sauvé
+  est celui où vivacity écrit (méta-analyse, point 3).
+- **Le cœur suit `Config::get('cache-dir')`**, pas seulement
+  `Factory::getCacheDir` : barres finales retirées, `~`, `$VAR`, `%VAR%`
+  développés, relatif résolu contre le répertoire de travail, `cache-dir`
+  du `config.json` global lu, `useXdg` vrai si `/etc/xdg` est un
+  répertoire. `composer_home` devient `Config::get('home')` (développé,
+  `0` traité comme absent, `/etc/xdg`). Jumeaux `Config.php` et
+  `ConfigCommand.php` ajoutés à `docs/reference/`.
+- **Rendu à Composer, nommé, avant toute écriture** (install, update,
+  require, remove ; dump-autoload pour les trois premiers) : valeur vide ou
+  `0` (Composer écrit `.htaccess` et ses zips dans le répertoire de travail
+  ou `./0`, mesuré), Windows sans `APPDATA` ni `COMPOSER_HOME` et `HOME`
+  absent (Composer s'arrête), une référence `{$clé}` ;
+  `COMPOSER_CACHE_FILES_DIR`, `COMPOSER_CACHE_REPO_DIR` (ou leurs clés du
+  `config.json`) ; un relatif sous `--working-dir` (Composer le résout après
+  son `chdir`, vivacity ne change jamais de répertoire).
+- `actions/cache` v6.1.0 : son `action.yml` ne diffère de v4.3.0 que par
+  `node20` → `node24`. Prémisse corrigée par la méta-analyse : node20 n'est
+  pas retiré des runners hébergés (ils le forcent en node24 avec un
+  avertissement) ; passer en v6.1.0 échange cet avertissement contre
+  l'exigence d'un runner ≥ 2.327.1 (CHANGELOG, Changed).
+- Changer `path` change la « version » du cache d'`actions/cache` : chaque
+  dépôt subit un échec de cache unique à la mise à jour.
+
+**Vérifié.** `harness/composer-cache-dir.sh` (sans réseau, dépôt
+`artifact`) : `config --global cache-dir` à l'octet (stdout, stderr, code)
+et l'endroit où le zip atterrit, sur 17 environnements plus un relatif sous
+`--working-dir` : 17 ok + 1 sauté (`/etc/xdg`) sous macOS, 18 ok en
+conteneur Linux root (Composer 2.10.3, `/etc/xdg` créé le temps du cas).
+Vu rouge avec le binaire 5ed42ff : 58 échecs sous macOS, 62 sous Linux,
+dont l'emplacement du zip faux dans 7 cas sous macOS (`~/cc`, `$HOME/cc`,
+`%HOME%/cc` écrits dans `./~/cc`…, `COMPOSER_HOME=0` dans `./0/cache`, vide,
+`COMPOSER_CACHE_FILES_DIR`, relatif sous `--working-dir`) et 8 sous Linux
+(plus `/etc/xdg`). Tests unitaires sur un hôte injecté (Windows, `/etc/xdg`,
+`HOME` absent), vus rouges sur le port de l'ancien algorithme (6 sur 6).
+`action-test.yml` compare la sortie à `composer config --global
+cache-dir` (environnement du runner, puis `COMPOSER_CACHE_DIR` sur un second
+appel sans cache) et exige `<sortie>/files` non vide après l'install ; avec
+l'ancienne action la sortie est vide et les deux pas échouent (simulation
+locale des pas, `bash -e`). Le workflow lui-même ne tourne qu'en CI.

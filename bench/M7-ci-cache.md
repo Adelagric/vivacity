@@ -34,3 +34,27 @@ Même mesure sur macOS (M4 Max, APFS, 14 cœurs, 2026-09-16) : produce 14,9 s,
 restore 16,3 s pour le store contre 0,23 s / 0,22 s pour les zips ; install
 6,5 s / 4,5 s / 0,73 s. APFS est lent à créer 40 000 fichiers ; le chiffre
 Linux est celui qui compte pour un worker CI.
+
+## Addendum (2026-10-29)
+
+Trois limites de la lecture ci-dessus, relevées en revoyant ce que l'action
+met en cache (docs/plans/action-cache.md, DECISIONS du même jour) :
+
+- **Elle comptait la sauvegarde à chaque job.** `actions/cache` ne sauve
+  qu'en cas d'échec de la clé primaire : sur une clé trouvée, un job ne paie
+  que la restauration. Le « ~2,4 s de plus par job » (produce + restore)
+  surestime donc le coût en régime établi ; il reste ~1,6 s de restauration
+  de plus pour le store (1 741 contre 156 ms), contre ~1,1 s gagné à
+  l'install (2 145 → 997 ms) : la conclusion tient, de peu.
+- **Elle n'a jamais mesuré restauration puis install** dans un même job,
+  sous `actions/cache` : les deux moitiés sont mesurées à part. Les runs du
+  workflow `action` (Laravel, 109 paquets, clé trouvée, un run par cas)
+  donnent restauration + install : ubuntu 3,0 s avec le store vivant contre
+  2,7 s sans (store mort, `LAYOUT` v2 restauré sous v3) ; Windows 26,1 s
+  contre 21,6 s (store sur `C:`, projet sur `D:` : copie, pas de lien) ;
+  macOS noyé dans le bruit du téléchargement (le même artefact restauré en
+  6,2 s ou 12,0 s). Même conclusion — le store en artefact ne paie pas —,
+  par une autre voie ; une indication, pas une mesure.
+- **Ses chiffres macOS sont ceux d'un M4 Max** (APFS, 14 cœurs), pas d'un
+  runner `macos-latest` : ils disent la lenteur d'APFS à créer 40 000
+  fichiers, rien du coût sur un worker CI macOS.

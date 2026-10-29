@@ -7,6 +7,12 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`vivacity config --global cache-dir`** prints Composer's cache directory
+  as vivacity uses it, byte for byte what `composer config --global
+  cache-dir` prints (stdout, stderr, exit code; `harness/composer-cache-dir.sh`,
+  17 environments plus `--working-dir`). Where vivacity does not reproduce
+  the value, Composer answers. Every other form of `config` stays a usage
+  error (exit 2).
 - **infection/extension-installer 0.1.2 is emulated.** Its
   `src/GeneratedExtensionsConfig.php` (the `infection-extension` packages:
   install path, `extra.infection`, version) and its lines ("No extensions
@@ -84,7 +90,34 @@ byte-identical-output promise are the public API.
   laminas-mvc-skeleton, mezzio-skeleton, owncloud-core, sculpin,
   spiral-app).
 
+### Changed
+- **The GitHub Action requires runner 2.327.1 or later**: it now uses
+  `actions/cache` v6.1.0 (node24), pinned by SHA, instead of `@v4`.
+  GitHub-hosted runners are newer; GHES and old self-hosted runners may not
+  be.
+
 ### Fixed
+- **The GitHub Action cached a dead store.** It saved vivacity's store
+  next to Composer's cache under fixed paths; since the store's layout
+  moved to `v3` (05193b7) the restored `store/v2` was never read (run
+  40857206667: 40 MB restored, then `0 from store, 109 from cache`), and
+  alive it did not make the install faster. The action now caches
+  Composer's cache directory only, the one `vivacity config --global
+  cache-dir` prints, exposed as the `composer-cache-dir` output; a project
+  that moved it with `COMPOSER_CACHE_DIR`, `COMPOSER_HOME` or
+  `XDG_CACHE_HOME` is now cached too. The cache's `path` changes, so every
+  repository misses its cache once after upgrading.
+- **The cache directory follows Composer's post-processing**
+  (`Config::get('cache-dir')` on top of `Factory::getCacheDir`): trailing
+  `/` and `\` trimmed, `~`, `$VAR` and `%VAR%` expanded, a relative value
+  resolved against the working directory, `config.json`'s `cache-dir`
+  read, and XDG used when `/etc/xdg` is a directory (the Composer home too).
+  A `COMPOSER_CACHE_DIR: ~/.composer-cache` set in YAML made vivacity cache
+  into `./~/.composer-cache`. What vivacity does not reproduce goes to
+  Composer, named, before anything is written: an empty or `0` value,
+  Windows without `APPDATA` nor `COMPOSER_HOME`, a missing `HOME`,
+  `COMPOSER_CACHE_FILES_DIR` / `COMPOSER_CACHE_REPO_DIR`, a relative value
+  under `--working-dir`.
 - **An aliased root lists both versions of its `self.version` replaces in
   installed.php**, as Composer does (it walks the root's alias too): a
   root on `dev-main` aliased to `15.0.x-dev` replaced each subtree package

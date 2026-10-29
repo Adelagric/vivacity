@@ -151,3 +151,31 @@ Onze points ; ceux qui changent le plan :
 - **Doc** : README (section GitHub Actions : ce qui est mis en cache, `COMPOSER_*` au
   niveau du job avant l'action, ne pas cacher soi-même le même répertoire, runner ≥
   2.327.1) ; « sans réseau » limité aux dists.
+
+## Exécution (2026-10-29)
+
+- **A — cœur** : `fetch.rs` porte `Factory::getHomeDir`/`getCacheDir`,
+  `Config::get('cache-dir'|'home')`, `Platform::expandPath` et
+  `Config::realpath` sur un hôte injectable (`Host`) ; `/etc/xdg` compris.
+  Le rendu à Composer se décide dans `lib.rs` avant le dispatch
+  (`Cli::cache_dir_hand_over`, via `delegate_for_verbosity`) ;
+  `git_source::cache_vcs_dir` réutilise la résolution. Jumeaux
+  `Config.php` et `ConfigCommand.php` ajoutés à `docs/reference/`. Au-delà
+  des cas listés : `HOME` absent (Composer s'arrête aussi), une référence
+  `{$clé}`, `cache-dir`/`cache-files-dir`/`cache-repo-dir` du `config.json`
+  global, un relatif sous `--working-dir`.
+- **B — `config --global cache-dir`** : `crates/vivacity/src/config.rs` ;
+  `-g`, ordre libre ; toute autre forme reste un rejet de clap (exit 2, le
+  message de clap change : il nomme désormais l'argument fautif au lieu de
+  « unrecognized subcommand 'config' »).
+- **C — action** : installer, résoudre (toujours, journalisé, sortie
+  `composer-cache-dir`), puis `actions/cache` v6.1.0 sur ce seul
+  répertoire si `cache` est vrai et la valeur absolue et utilisable ;
+  sinon `::notice::`.
+- **Mesures** : `harness/composer-cache-dir.sh` 17 ok + 1 sauté (macOS),
+  18 ok (conteneur Linux root, `/etc/xdg`) ; vu rouge avec le binaire
+  5ed42ff (58 et 62 échecs). Tests unitaires vus rouges (6/6) sur le port
+  de l'ancien algorithme. Les pas d'`action-test.yml` vus rouges contre
+  l'ancienne action par simulation locale (sortie vide). Le workflow
+  lui-même, et Windows, ne tournent qu'en CI.
+

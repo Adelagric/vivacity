@@ -45,6 +45,26 @@ GitHub Actions:
 - run: vivacity install
 ```
 
+The action caches Composer's cache directory only (dist zips, VCS mirrors,
+repository metadata), keyed on the hash of the `composer.lock` files.
+vivacity reads that cache and feeds it, and rebuilds its own store from the
+zips without the network (dists only: a package installed from git may
+still fetch), so its store and class map records are not cached: restored, they did not make the install faster (DECISIONS
+2026-10-29), and a store written by an older layout is never read. The
+directory is the one `vivacity config --global cache-dir` prints — the
+same value as `composer config --global cache-dir` — exposed as the
+`composer-cache-dir` output and resolved once, when the action runs. Set
+`COMPOSER_CACHE_DIR`, `COMPOSER_HOME` or `XDG_CACHE_HOME` at job level
+(the job's `env:`), so that the action sees them: one set in a later step,
+or only on the `run:` step that installs, is not followed. A relative value
+is not cached (a notice says so), nor is a `cache-dir` set in a project's
+`composer.json`. Do not cache that same
+directory yourself as well (`actions/cache` or setup-php's recipe): two
+caches would save the same files under two keys. The action uses
+`actions/cache` v6.1.0, which needs runner 2.327.1 or later (GitHub-hosted
+runners are newer; check GHES and old self-hosted runners). `cache:
+'false'` turns caching off.
+
 In a Docker image build: [docs/docker.md](docs/docker.md). Deploying with
 Capistrano: [docs/capistrano.md](docs/capistrano.md); with Deployer:
 [docs/deployer.md](docs/deployer.md).
