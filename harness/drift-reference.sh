@@ -21,6 +21,8 @@ twin() {
     BinaryInstaller.php)      echo "src/Composer/Installer/BinaryInstaller.php" ;;
     ClassLoader.php)          echo "src/Composer/Autoload/ClassLoader.php" ;;
     Factory.php)              echo "src/Composer/Factory.php" ;;
+    Config.php)               echo "src/Composer/Config.php" ;;
+    ConfigCommand.php)        echo "src/Composer/Command/ConfigCommand.php" ;;
     FilesystemRepository.php) echo "src/Composer/Repository/FilesystemRepository.php" ;;
     InstalledVersions.php)    echo "src/Composer/InstalledVersions.php" ;;
     JsonFile.php)             echo "src/Composer/Json/JsonFile.php" ;;
