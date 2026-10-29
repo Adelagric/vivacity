@@ -18,6 +18,12 @@
 #   - `$loader->setApcuPrefix('…')` **dans vendor/composer/autoload_real.php** :
 #     préfixe aléatoire chez Composer (`bin2hex(random_bytes(10))`) ; la ligne
 #     est ignorée là, et nulle part ailleurs ;
+#   - `    public const GENERATED_AT = <entier>;` **dans les cinq classes de
+#     <vendor>/drupol/composer-packages/build/** (Packages, Types,
+#     Directories, Versions, Dependencies) : `time()` chez le plugin ; les
+#     seuls chiffres de cette ligne exacte deviennent `<t>` des deux côtés,
+#     puis la comparaison reste stricte (une ligne absente ou dédoublée
+#     diffère toujours) ;
 #   - le chemin absolu du projet dans un fichier généré : remplacé par
 #     `<project>` de chaque côté avant comparaison ;
 #   - vendor/pest-plugins.json : le plugin lit le dépôt local dans l'ordre
@@ -77,8 +83,9 @@ compare_vendor() {
     viv_win="$(cygpath -w "$viv_real" | sed 's/\\/\\\\\\\\/g')|$(cygpath -w "$viv_real" | sed 's/\\/\\\\/g')"
     ref_winf="$(cygpath -m "$ref_real")"; viv_winf="$(cygpath -m "$viv_real")"
   fi
-  norm_ref() { sed -E -e "s#$ref_real#<project>#g" -e "s#$ref#<project>#g" ${ref_win:+-e "s#$ref_win#<project>#g"} ${ref_winf:+-e "s#$ref_winf#<project>#g"} "$1"; }
-  norm_viv() { sed -E -e "s#$viv_real#<project>#g" -e "s#$viv#<project>#g" ${viv_win:+-e "s#$viv_win#<project>#g"} ${viv_winf:+-e "s#$viv_winf#<project>#g"} "$1"; }
+  # (Arguments après le fichier : des expressions `sed` de plus.)
+  norm_ref() { sed -E -e "s#$ref_real#<project>#g" -e "s#$ref#<project>#g" ${ref_win:+-e "s#$ref_win#<project>#g"} ${ref_winf:+-e "s#$ref_winf#<project>#g"} "${@:2}" "$1"; }
+  norm_viv() { sed -E -e "s#$viv_real#<project>#g" -e "s#$viv#<project>#g" ${viv_win:+-e "s#$viv_win#<project>#g"} ${viv_winf:+-e "s#$viv_winf#<project>#g"} "${@:2}" "$1"; }
   : > "$out"
   # `diff -rq` : les fichiers présents d'un seul côté, et les paires qui
   # diffèrent — celles-ci sont recomparées normalisées.
@@ -103,15 +110,19 @@ compare_vendor() {
           # Le préfixe APCu aléatoire n'est ignoré que dans le fichier qui le
           # porte : partout ailleurs, une ligne contenant `setApcuPrefix` est
           # une différence comme une autre.
-          local ignore=()
+          local ignore=() gen=()
           case "$a" in
             */composer/autoload_real.php) ignore=(-I 'setApcuPrefix') ;;
+            # L'horodatage de drupol/composer-packages, dans ses cinq classes
+            # du vendor et nulle part ailleurs.
+            "$runtime_dir_ref/drupol/composer-packages/build/Packages.php"|"$runtime_dir_ref/drupol/composer-packages/build/Types.php"|"$runtime_dir_ref/drupol/composer-packages/build/Directories.php"|"$runtime_dir_ref/drupol/composer-packages/build/Versions.php"|"$runtime_dir_ref/drupol/composer-packages/build/Dependencies.php")
+              gen=(-e 's/^(    public const GENERATED_AT = )[0-9]+;$/\1<t>;/') ;;
           esac
           # `${a[@]+"${a[@]}"}` : sous `set -u`, le bash 3.2 de macOS refuse
           # `"${a[@]}"` quand le tableau est vide.
-          if ! diff ${ignore[@]+"${ignore[@]}"} <(norm_ref "$a") <(norm_viv "$b") >/dev/null 2>&1; then
+          if ! diff ${ignore[@]+"${ignore[@]}"} <(norm_ref "$a" ${gen[@]+"${gen[@]}"}) <(norm_viv "$b" ${gen[@]+"${gen[@]}"}) >/dev/null 2>&1; then
             echo "$line"
-            diff <(norm_ref "$a") <(norm_viv "$b") | head -6
+            diff <(norm_ref "$a" ${gen[@]+"${gen[@]}"}) <(norm_viv "$b" ${gen[@]+"${gen[@]}"}) | head -6
           fi ;;
         *) echo "$line" ;;
       esac

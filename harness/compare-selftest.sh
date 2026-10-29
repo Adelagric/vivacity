@@ -90,6 +90,36 @@ printf "<?php \$loader->setApcuPrefix('aaaaaaaaaa');\n" > "$WORK/apcu2/ref/vendo
 printf "<?php \$loader->setApcuPrefix('bbbbbbbbbb');\n" > "$WORK/apcu2/viv/vendor/acme/pkg/src/B.php"
 expect apcu2 differ
 
+# 20–24. l'horodatage de drupol/composer-packages : toléré dans ses cinq
+#     classes du vendor, pour les seuls chiffres de cette ligne exacte.
+dp_class() { # fichier, horodatage, [ligne en plus]
+  mkdir -p "$(dirname "$1")"
+  printf '<?php\nfinal class Packages\n{\n    public const GENERATED_AT = %s;\n    public const ROOT_PACKAGE_NAME = '"'"'a/b'"'"';\n%s}\n' "$2" "${3:-}" > "$1"
+}
+DP=vendor/drupol/composer-packages/build
+seed dp-ts
+for c in Packages Types Directories Versions Dependencies; do
+  dp_class "$WORK/dp-ts/ref/$DP/$c.php" 1793262112; dp_class "$WORK/dp-ts/viv/$DP/$c.php" 1793262999
+done
+expect dp-ts same
+# Une autre ligne qui diffère dans la même classe : vue.
+seed dp-other
+dp_class "$WORK/dp-other/ref/$DP/Packages.php" 1; dp_class "$WORK/dp-other/viv/$DP/Packages.php" 2 "    // x\n"
+expect dp-other differ
+# La ligne absente d'un côté : vue (pas de `diff -I`).
+seed dp-missing
+dp_class "$WORK/dp-missing/ref/$DP/Packages.php" 1; mkdir -p "$WORK/dp-missing/viv/$DP"
+printf '<?php\nfinal class Packages\n{\n    public const ROOT_PACKAGE_NAME = '"'"'a/b'"'"';\n}\n' > "$WORK/dp-missing/viv/$DP/Packages.php"
+expect dp-missing differ
+# La même ligne dans le build/ d'un autre paquet : vue.
+seed dp-elsewhere
+dp_class "$WORK/dp-elsewhere/ref/vendor/acme/pkg/build/Packages.php" 1; dp_class "$WORK/dp-elsewhere/viv/vendor/acme/pkg/build/Packages.php" 2
+expect dp-elsewhere differ
+# Un autre fichier du même build/ : vu.
+seed dp-file
+dp_class "$WORK/dp-file/ref/$DP/Other.php" 1; dp_class "$WORK/dp-file/viv/$DP/Other.php" 2
+expect dp-file differ
+
 # 9. un mode qui diffère, contenu identique : `diff -r` ne le voit pas,
 #    l'inventaire si.
 seed mode

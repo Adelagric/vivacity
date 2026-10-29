@@ -103,6 +103,8 @@ jobs:
         run: harness/net-retry.sh harness/custom-installers.sh
       - name: Plugins with effects at script events (spiral, sculpin, laminas component and skeleton installers, dg and liborm85 cleaners, cakephp)
         run: harness/net-retry.sh harness/plugins-round2.sh
+      - name: drupol/composer-packages (five classes generated from the lock)
+        run: harness/net-retry.sh harness/composer-packages.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
         run: harness/net-retry.sh harness/package-versions.sh
       - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)
