@@ -144,9 +144,13 @@ pub(crate) fn delegate_resolution(
         return Ok(3);
     }
     let Some(composer) = composer else {
-        vivacity_core::say_always!(
-            "composer not found for the fallback — install Composer or run with --no-plugins."
-        );
+        if crate::no_php::absent() {
+            vivacity_core::say_always!("{}", crate::no_php::stop_line());
+        } else {
+            vivacity_core::say_always!(
+                "composer not found for the fallback — install Composer or run with --no-plugins."
+            );
+        }
         return Ok(3);
     };
     let forwarded = forwarded_arguments(&tokens, &command);
@@ -322,9 +326,13 @@ pub(crate) fn fallback_or_fail(
         return Ok(3);
     }
     let Some(composer) = composer else {
-        vivacity_core::say_always!(
-            "composer not found for the fallback — install Composer or remove the unsupported items."
-        );
+        if crate::no_php::absent() {
+            vivacity_core::say_always!("{}", crate::no_php::stop_line());
+        } else {
+            vivacity_core::say_always!(
+                "composer not found for the fallback — install Composer or remove the unsupported items."
+            );
+        }
         return Ok(3);
     };
     let forwarded = match &args.fallback_line {
@@ -464,9 +472,13 @@ pub(crate) fn delegate_for_verbosity(
         return 3;
     }
     let Some(composer) = which_composer() else {
-        vivacity_core::say_always!(
-            "composer not found for the fallback — install Composer or {remedy}."
-        );
+        if crate::no_php::absent() {
+            vivacity_core::say_always!("{}", crate::no_php::stop_line());
+        } else {
+            vivacity_core::say_always!(
+                "composer not found for the fallback — install Composer or {remedy}."
+            );
+        }
         return 3;
     };
     let forwarded = forwarded_arguments(tokens, &command);
@@ -485,6 +497,10 @@ pub(crate) fn delegate_for_verbosity(
 }
 
 pub(crate) fn which_composer() -> Option<PathBuf> {
+    // Without PHP (`no_php`), Composer cannot run either: no hand-over.
+    if crate::no_php::absent() {
+        return None;
+    }
     let path = std::env::var_os("PATH")?;
     // On Windows, composer installs itself as composer.bat/.cmd (a wrapper
     // around the .phar); `Command` can launch a .bat (via cmd.exe).

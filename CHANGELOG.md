@@ -7,6 +7,22 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **`update`, `require`, `remove` and an `install` without a lock run
+  with no PHP under `--ignore-platform-reqs`** (or
+  `COMPOSER_IGNORE_PLATFORM_REQS=1`). Composer skips every rule on a
+  platform package under that option, so Composer with a PHP is the
+  reference: vivacity resolves on the `composer*` packages and the
+  `config.platform` overrides, with the same lock, composer.json,
+  vendor/, stdout and stderr (`harness/no-php.sh`, 37 cases, under PHP 8.4
+  and 8.5 on Composer's side). What would still depend on the real
+  platform stops with exit 3 and its reason, never handed to a Composer
+  that would need a PHP too: a `require` of a platform package with no
+  constraint, a package that replaces one, a suggestion of one by a new
+  package (or the root on a first install), a `--with` constraint on one,
+  an unsolvable set whose explanation lists the PHP's ini files, `-v` and
+  `-vv`. Without the option the commands still exit 1, now with a message
+  naming `--ignore-platform-reqs` and `VIVACITY_PHP`, and `remove` no
+  longer edits composer.json first (`remove --no-update` needs no PHP).
 - **Static musl builds for Linux** (`x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-musl`): vivacity runs on Alpine (the official
   `composer` image, `php:*-alpine`). `install.sh` picks them when the

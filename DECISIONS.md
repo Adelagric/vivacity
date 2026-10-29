@@ -5165,3 +5165,93 @@ Corpus (`docs/corpus/2026-10-29-chamilo-dealerdirect.md`) : les treize
 entrées à dealerdirect rejouées dans les deux modes (chamilo-lms aussi sous
 PHP 8.4), les 93 autres reprises du passage précédent : **95/106 natives
 en `--no-dev`, 95/106 en dev** (94 avant), 0 diff, 0 unavailable.
+
+## 2026-10-29 — `update`, `require`, `remove` sans PHP sous `--ignore-platform-reqs` (docs/plans/update-without-php.md)
+
+**Le problème.** Les commandes qui résolvent lançaient `VIVACITY_PHP` pour
+sonder la plateforme même sous `--ignore-platform-reqs` : sans PHP, code 1.
+Un programme qui embarque vivacity sans PHP à lui ne pouvait que poser un
+lock existant.
+
+**Pourquoi il y a une référence.** Sous `--ignore-platform-reqs`, le filtre
+de Composer est `IgnoreAllPlatformRequirementFilter`, dont `isIgnored` est
+`PlatformRepository::isPlatformPackage` ; `RuleSetGenerator` saute alors
+les exigences (l. 196), les conflits (l. 224) et les exigences racine
+(l. 287) visant un paquet plateforme. Le contenu du dépôt plateforme est
+inerte pour la résolution : Composer AVEC son PHP et le drapeau est la
+référence de vivacity SANS PHP et le drapeau. Relevé dans les sources
+2.10.3, ce qui lit encore la plateforme sous IgnoreAll (table complète au
+plan) : la règle « même nom » (`getNames(false)`, l. 176-179 et 243-248,
+non filtrée), le compte des suggestions (`Installer.php:344-352`,
+`SuggestedPackagesReporter.php:180-210`), `require` sans contrainte
+(`PackageDiscoveryTrait.php:307-313`, `VersionSelector.php:208-214`), les
+contraintes temporaires (`PoolBuilder.php:292-318`), les comptes de `-v`
+(`Installer.php:560-561`), l'indice d'extensions d'un ensemble insoluble
+(préfixe `ext-`, fichiers ini) et les dépréciations de composer/installers
+1.x (version du PHP).
+
+**Décision.** Le mode sans PHP est décidé une fois, au début de la commande
+(`no_php::decide`), avant toute sortie ou édition : PHP introuvable
+(`locate_php` : pas d'exécutable à ce chemin ni dans le `PATH`) ET filtre
+IgnoreAll (`--ignore-platform-reqs` ou `COMPOSER_IGNORE_PLATFORM_REQS`,
+même filtre chez Composer). La plateforme est alors celle qu'`install`
+utilise déjà sans PHP : les trois `composer*` et les surcharges de
+`config.platform`. Un nom est « connu sans PHP » s'il est hors plateforme,
+l'un des trois `composer*`, ou une clé VERSIONNÉE de `config.platform`
+(une clé à `false` ne retire que le paquet de ce nom : `ext-uuid` remplace
+toujours `lib-uuid`). Ce qui dépend d'un nom inconnu s'arrête en code 3,
+nommé : un paquet du pool qui le remplace, une suggestion comptée qui le
+vise, une contrainte temporaire qui le touche, un `require` sans contrainte
+d'un nom plateforme (sauf `composer*`) ou commençant par `ext-`, `-v`, un
+insoluble dont l'explication porterait l'indice d'extensions. Dans ce mode
+AUCUNE délégation n'a lieu (`which_composer` répond « aucun ») : Composer a
+besoin d'un PHP lui aussi, et lancer celui du `PATH` quand `VIVACITY_PHP`
+en désigne un autre résoudrait contre une autre plateforme ; chaque chemin
+de délégation s'arrête en code 3 avec ses raisons et une ligne qui nomme
+`VIVACITY_PHP`. Sans IgnoreAll — rien, une liste `--ignore-platform-req`
+(même `*` : les tests `instanceof IgnoreAll` de Composer,
+`VersionSelector.php:115`, `AutoloadGenerator.php:456`, ne la voient pas),
+ou `config.platform.php` seul, qui laisse les extensions au PHP — code 1,
+avec un message qui nomme `--ignore-platform-reqs` et `VIVACITY_PHP`,
+avant toute édition (`remove` éditait composer.json puis échouait). Un PHP
+trouvé qui échoue reste une erreur : un échec transitoire ne bascule pas
+en mode sans PHP ; l'absence se conclut d'un lancement qui échoue en
+`NotFound` ou `PermissionDenied` (`php_launchable`), pas d'une recherche
+dans le `PATH` qui ne verrait pas l'`.exe` qu'ajoute Windows. `run_once`
+prend la même décision avant ses propres délégations (`-vv`, `-v` avec
+plugins, `cache-dir`, version racine hors git). `remove --no-update` ne
+résout rien et n'en dépend pas.
+
+**Dépréciations de composer/installers 1.x.** Sans PHP, rien ne compile le
+plugin, rien n'est imprimé : vivacity se comporte comme Composer sous PHP
+8.1 à 8.3 (≥ 8.1 parce que le classmap lit les enums,
+`cmg-PhpFileParser.php:129` ; < 8.4 parce que la dépréciation des types
+implicitement nullables vient avec 8.4). C'est le comportement d'`install`
+sans PHP depuis toujours. Alternative écartée : refuser dès que le plugin
+serait chargé, ce qui fermerait le mode sans PHP à tout projet WordPress
+ou Drupal qui tire composer/installers 1.x — à rouvrir si l'on préfère la
+lettre du contrat à cet usage.
+
+**Ce que ça coûte, mesuré.** Sur les instantanés figés laravel et symfony,
+`update --no-install` depuis le lock (aucune installation) : lock et stderr
+identiques à Composer. Depuis zéro (sans lock), les deux s'arrêtent en
+code 3 : fakerphp/faker suggère `ext-curl`, symfony/polyfill-deepclone
+`ext-deepclone`, et le compte des suggestions dépend des extensions du PHP.
+Un projet qui déclare ses extensions dans `config.platform` (avec une
+version) les rend connues. Pistes non suivies : compter comme un PHP sans
+extension (une ligne de nombre qui diverge, sans référence), ou une liste
+d'extensions donnée à vivacity.
+
+**Écart trouvé en chemin, hors chantier.** `update <motif>` dont le motif
+ne correspond à rien de verrouillé (« Package … listed for update is not
+locked », « Pattern … matches platform packages ») : Composer écrit
+l'avertissement de `PoolBuilder` AVANT « Updating dependencies », vivacity
+après (avec PHP aussi, binaire de main) — `pool.warnings` mélange les
+avertissements du constructeur et ceux des filtres de politique.
+
+Méta-analyse (dix failles) et revue indépendante (neuf points), toutes
+traitées : au plan. Harnais `harness/no-php.sh` (37 cas : 23 de parité, 13
+refus, 1 en ligne) : vert sous PHP 8.5.12 et 8.4.27 côté Composer ; contre
+le binaire de main 091e221, 36 FAIL / 1 OK (`remove --no-update`, le témoin
+de non-régression). Test d'intégration `crates/vivacity/tests/no_php.rs`
+(7 tests, rouges sur main). `cargo test` : 467 tests, 0 échec.
