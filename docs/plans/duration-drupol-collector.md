@@ -203,10 +203,11 @@ Borné (~2 h, fait avant ce plan). Source lue au tag 1.2.0 (BSD-3-Clause).
   résolution des noms, l'héritage (parents, traits, interfaces, y compris
   dans vendor/) et un évaluateur d'expressions constantes : hors de portée
   sans port d'un analyseur PHP. **Résultat négatif**, aucun code.
-- Le cas vide (aucun fichier à `#[`) est déterministe — mesuré sur la
-  fixture du corpus, dont `src/` minimal ne contient aucune classe :
-  `attributes.php` à quatre `array (\n)`, deux lignes stdout dont une
-  durée. L'émuler ne rendrait natif que l'artefact du corpus (le vrai
+- Le cas vide (aucun fichier à `#[`) donne un fichier déterministe —
+  mesuré sur la fixture du corpus, dont `src/` minimal ne contient aucune
+  classe : `attributes.php` à quatre `array (\n)` ; mais ses deux lignes
+  stdout portent une durée (`microtime`), qu'il faudrait elle aussi
+  masquer. L'émuler ne rendrait natif que l'artefact du corpus (le vrai
   projet a 1 152 fichiers à attributs) et passerait sur l'exécution des
   `files` de l'autoloader (même catégorie que les cartes d'alias de
   typo3/class-alias-loader, rendu au tour précédent). Écarté ; consigné
@@ -237,6 +238,58 @@ d'abord) ; `compare-selftest.sh`, `plugins-round2.sh`, `plugin-lines.sh`,
 à 0 ; corpus `--only bolt-project,phpstan-src` dans les deux modes,
 bolt-project natif 0 diff (stdout et stderr comparés par script), compteurs
 mis à jour (93/106 `--no-dev` attendu ; dev selon le scan).
+
+## Méta-analyse (sous-agent frais, plan et code, sans mes conclusions)
+
+0 bloquant, 5 majeurs, 7 mineurs ; ce qui change :
+
+- **M1 chemins échappés** : dans `Directories.php` le chemin du projet
+  n'apparaît jamais brut (`var_export` : `\'` ; Twig : `&#039;`, `&amp;`),
+  la normalisation `<project>` de `compare.sh` ne le retrouve pas. → le
+  banc fait tourner Composer et vivacity **au même chemin absolu**, l'un
+  après l'autre (répertoires renommés entre les passages) : les chemins
+  écrits sont alors identiques, sans normalisation.
+- **M2 flottants de `var_export`** : `php_var_export` réutilise
+  `php_double` de l'encodeur JSON, qui écrit `e+20` ; `var_export` écrit
+  `1.0E+20`, `1.5E-7`, `1.8446744073709552E+19` (mesuré par le relecteur).
+  → `E` majuscule sur le chemin `var_export`, test unitaire sur ces
+  valeurs (mesurées sous PHP), et des flottants de ces formes dans le banc.
+- **M3 `dump-autoload` avec `config.lock: false`** : le `Locker` lit
+  `/dev/null`, `getLockData()` lève une `LogicException` dans le plugin —
+  Composer échoue, vivacity écrirait. → repli quand le lock est désactivé
+  hors de l'install qui suit un update (lock virtuel) ; et sans
+  composer.json.
+- **M4 preuve de A** : le test unitaire prévu ne peut pas échouer. → un
+  test de `verify_install` où la version racine arrive 200 ms après le
+  départ du fil : la durée rendue reste sous 50 ms ; vu rouge en
+  rebranchant temporairement l'ancien point de départ. La ligne de
+  `update` reste hors champ (consigne), consignée.
+- **M5 `-v` sous `require`/`remove`** : les classes renommées
+  `_composer_tmpN` partagent un compteur ; drupol dans `VERBOSE_PLUGINS`
+  le décale pour les autres. → étapes `require -v` et `remove -v` avec
+  package-versions-deprecated chargé.
+- **m6 masquage trop large** : `diff -I` laisserait passer une ligne
+  `GENERATED_AT` absente ou dédoublée. → seuls les chiffres de
+  `^    public const GENERATED_AT = [0-9]+;$` remplacés par `<t>` des deux
+  côtés, diff strict ; auto-test « ligne supprimée ».
+- **m7 chemins d'installation** : `Package::getTargetDir()` nettoie les
+  segments `.`/`..` et ne retire que les `/` de tête (un `/` final reste),
+  et `"0"` est faux pour `$targetDir ? …` ; le `realpath` de PHP garde la
+  casse donnée là où `canonicalize` la corrige (macOS). → `getTargetDir`
+  porté (regex PCRE2 de Composer), `realpath` de PHP émulé (liens résolus,
+  casse gardée).
+- **m8** `ROOT_PACKAGE_NAME` en minuscules, `__root__` sans nom (cas au
+  banc) ; noms en double comparés sans casse (repli).
+- **m9** une clé de `require` entière (`0 => 123` chez Dependencies) ou
+  une contrainte non chaîne (sautée par `parseLinks`) → repli.
+- **m10** `--run-scripts` avec un script racine `post-autoload-dump` :
+  `run-script` relance les écouteurs des plugins, drupol écrirait deux
+  fois → repli.
+- **m11** les classes générées entrent dans la classmap au no-op (500 Kio
+  de `var_export`) : le banc met dans descriptions et `extra` `class Foo`,
+  `?>`, `/*`, `#`, `<<<`, antislashs et guillemets.
+- **m12** C : formulation du cas vide corrigée (durée sur stdout) ; en dev,
+  phpstan-src est de toute façon rendu (cweagans/composer-patches).
 
 ## Non-objectifs
 
