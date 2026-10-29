@@ -37,7 +37,7 @@ qu'aux points suivants, relevés dans les sources 2.10.3 (`docs/reference/`) :
 | nom et version d'un paquet plateforme à `require` | `PackageDiscoveryTrait.php:307-313` (dépôt plateforme du `RequireCommand.php:196-200`) | lu (nom canonique, `*` ou `^x.y` sous `--no-update`) | idem : **rendu, nommé** |
 | `getPlatformExceptionDetails` | `PackageDiscoveryTrait.php:333`, `:439` | gardé par `!IgnoreAll` | inerte |
 | explications d'un ensemble insoluble | `Problem.php:258`, `Rule.php:155,178` ; indices d'extension (fichiers ini, extensions chargées) | seulement sur des règles visant un nom plateforme, qui n'existent pas sous IgnoreAll | inerte |
-| **compte des suggestions** | `Installer.php:344-352` → `SuggestedPackagesReporter.php:180-210` : une suggestion dont la cible est fournie par le dépôt plateforme (`getNames()`) n'est pas comptée | **lu** | une suggestion comptée vers un nom plateforme inconnaissable sans PHP → **rendu à Composer, nommé** |
+| **compte des suggestions** (remplacé par la révision option 2, plus bas) | `Installer.php:344-352` → `SuggestedPackagesReporter.php:180-210` : une suggestion dont la cible est fournie par le dépôt plateforme (`getNames()`) n'est pas comptée | **lu** | une suggestion comptée vers un nom plateforme inconnaissable sans PHP → **rendu à Composer, nommé** |
 | lock : `platform`, `platform-dev`, `platform-overrides` | `Installer.php:581-582`, `:677` | composer.json et `config.platform` | inerte (pas de sonde) |
 | `platform_check.php` | `AutoloadGenerator.php:456` | désactivé sous IgnoreAll | inerte |
 | filtres de politique | `FilterListPoolFilter.php:212`, `SecurityAdvisoryPoolFilter.php:68` | paquets plateforme exclus | inerte |
@@ -78,7 +78,7 @@ l'argument ; la preuve est le harnais.
 5. **`require` sans contrainte d'un nom plateforme** autre que les trois
    `composer*` (même surchargé : `findRecommendedRequireVersion` compare
    la version de l'extension à `PHP_VERSION`) → rendu avant toute édition.
-6. **Suggestions** : après la résolution, avant les lignes du lock et
+6. **Suggestions** (remplacé par la révision option 2, plus bas) : après la résolution, avant les lignes du lock et
    l'écriture, une suggestion que vivacity compterait et dont la cible est
    inconnaissable → rendu, nommé. Même calcul que `post_update_report`
    (factorisé), donc pas de seconde implémentation.
@@ -107,8 +107,8 @@ plateforme hors IgnoreAll (change la résolution) ; deviner `*` pour
    run, `unguessable_requirement` ; `fallback.rs` : `which_composer` muet
    dans ce mode, la ligne d'arrêt qui nomme `VIVACITY_PHP`.
 4. `crates/vivacity/src/update.rs` : `Unsupported` de `session.update` →
-   arrêt nommé ; `counted_suggestions` (extrait de `post_update_report`) et
-   le contrôle avant les lignes du lock ; `require.rs`, `remove.rs`,
+   arrêt nommé ; `counted_suggestions` (extrait de `post_update_report` ;
+   le contrôle avant les lignes du lock, retiré par la révision option 2) ; `require.rs`, `remove.rs`,
    `install.rs` : la décision au début (`remove --no-update` exclu).
 5. `crates/vivacity/tests/no_php.rs` : binaire sans PHP, dépôt `path`, hors
    réseau (7 tests, rouges sur main).
@@ -237,3 +237,64 @@ Corrigé dans un commit à part : `Pool::filter_warnings` sépare les
 avertissements des filtres de politique (dont la place ne change pas) de
 ceux du constructeur, écrits avant la notice de Flex et « Updating
 dependencies » ; test d'intégration et trois cas de harnais, rouges avant.
+
+## Révision : compter les suggestions comme une plateforme sans PHP (option 2)
+
+> Décision de l'utilisateur (2026-10-29), transmise par le coordinateur.
+
+**Cadrage.** Sans PHP, le compte « N package suggestions were added by new
+dependencies… » (`Installer.php:344-352`, `SuggestedPackagesReporter.php:180-210`)
+ne s'arrête plus en code 3 : une suggestion d'un nom plateforme inconnu
+compte comme non fournie : le compte d'une plateforme sans PHP du tout,
+un majorant de celui de Composer (méta 1 : un « PHP sans extension »
+n'existe pas). Les noms connus (`composer*`, clé versionnée de
+`config.platform`) sont dans la plateforme sans PHP et retirent la
+suggestion du compte, comme chez Composer. Même principe que les lignes de
+dépréciation : pas de runtime, rien de chargé. Les autres refus restent
+(replace, `require` sans contrainte, `--with`, `-v`, indice d'ini).
+Non-objectif : un compte « juste » pour le PHP de la machine (inconnaissable).
+L'écart assumé : cette seule ligne, quand le PHP de référence charge une
+extension suggérée (le nombre, ou la ligne entière si le compte tombe à 0
+chez Composer).
+
+**Plan.**
+1. `crates/vivacity/tests/no_php.rs` : un update dont un paquet suggère
+   `ext-foo`, `php-64bit` et `composer-plugin-api` termine en 0 et imprime
+   « 2 package suggestions… » (rouge).
+2. `crates/vivacity/src/update.rs` : retirer le contrôle avant les lignes
+   du lock ; `counted_suggestions` compte déjà contre `session.platform`
+   (les `composer*` et les surcharges, sans PHP) — rien d'autre à changer.
+3. Harnais : `suggests-ext` (refus) → parité sur une extension qu'aucun PHP
+   ne charge (`ext-nopesuggest`) ; `suggests-known` (versionnée dans
+   `config.platform`) ; `suggests-disabled` (`false`) ; `suggests-loaded` :
+   php-64bit et ext-json (toujours là en PHP 8 64 bits) — vivacity compte
+   exactement les k cibles que `composer show --platform` liste en plus,
+   la ligne à la même place, tout le reste identique (méta 2).
+4. Rejeu de `update` depuis zéro sur les instantanés laravel et symfony
+   sans PHP : doit terminer ; lock identique, stderr qui ne diffère que par
+   cette ligne.
+5. Docs : DECISIONS (option 2 choisie par l'utilisateur, la variante stricte
+   écartée, la ligne qui peut différer), README, CHANGELOG, HANDOVER.
+
+**Critère vert.** Gates ; harnais vert sous 8.4 et 8.5, les cas de
+suggestion vus rouges avant le changement ; rejeu des instantanés conforme.
+
+**Méta-analyse de la révision (sous-agent frais, sur le code).**
+1. *« Un PHP sans extension » n'existe pas* (php, php-64bit, php-ipv6, les
+   extensions toujours compilées, lib-pcre : `PlatformRepository.php:156-190`,
+   `:425-426`) → la doc dit « une plateforme sans PHP » et « un majorant
+   du compte de Composer », jamais « un PHP sans extension ». Le jeu de noms
+   toujours présents n'est pas retiré du compte (estimation de plus) :
+   noté comme piste dans DECISIONS.
+2. *Contrôle trop lâche* (« ne diffère que par cette ligne » accepte tout
+   nombre) → le cas `suggests-loaded` vérifie N(vivacity) = N(Composer) + k,
+   k = cibles suggérées que `composer show --platform` liste, k > 0 exigé ;
+   cibles php-64bit et ext-json (toujours là en PHP 8 64 bits). Rejeu des
+   instantanés : l'écart recalculé à part depuis le lock (95 = 49 + 46,
+   55 = 21 + 34).
+3. *Clé `false`* : désormais comptée des deux côtés, exacte pour un nom
+   d'extension → cas `suggests-disabled` ; README et commentaire périmés
+   retirés.
+4. *Asymétrie* (refus pour `replace`, devinette pour les suggestions) →
+   justifiée dans DECISIONS : une valeur devinée seulement sur une ligne de
+   stderr, dans un sens connu ; jamais sur le lock ou vendor/.

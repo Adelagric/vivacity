@@ -12,7 +12,10 @@
 # pour chaque cas : code de sortie, stdout, stderr entière (la ligne de
 # résumé `vivacity: …` exceptée), et le projet entier (composer.json,
 # composer.lock, vendor/, `compare_vendor`). Cache de fichiers vierge par
-# côté et par cas : les lignes Downloading sont symétriques.
+# côté et par cas : les lignes Downloading sont symétriques. Exception,
+# `suggests-loaded` : le nombre de « N package suggestions… » peut
+# différer (DECISIONS 2026-10-29, option 2) — vérifié égal à celui de
+# Composer plus les cibles que son PHP fournit, la ligne à la même place.
 #
 # Côté vivacity, un faux `composer` en tête du PATH : une délégation sans
 # PHP ne peut pas marcher (Composer en a besoin), elle ne doit jamais avoir
@@ -82,7 +85,11 @@ pkg acme/util 1.1.0 '{"require": {"acme/dep": "^1.1", "php-64bit": ">=99"}}'
 pkg acme/extra 1.0.0 '{"require": {"hhvm": "*"}}'
 pkg acme/devtool 1.0.0 '{"require": {"ext-nope": "*", "php": "<5"}}'
 pkg acme/replacer 1.0.0 '{"replace": {"ext-foo": "*"}}'
-pkg acme/suggester 1.0.0 '{"suggest": {"ext-intl": "for locales"}}'
+# Une extension qu'aucun PHP ne charge : la référence vaut sans PHP.
+pkg acme/suggester 1.0.0 '{"suggest": {"ext-nopesuggest": "for locales"}}'
+# Des noms que tout PHP 8 64 bits fournit : Composer les retire du compte,
+# vivacity sans PHP non (l'écart documenté, DECISIONS 2026-10-29).
+pkg acme/suggester-loaded 1.0.0 '{"suggest": {"php-64bit": "big ints", "ext-json": "json"}}'
 write_snapshot_packages_json "$REG"
 HOME_DIR="$WORK/home"; mkdir -p "$HOME_DIR"
 printf '{"repositories": %s}\n' "$(snapshot_repositories_json "$REG")" > "$HOME_DIR/config.json"
@@ -161,7 +168,31 @@ pair() {
   if ! diff -q "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" >/dev/null; then
     echo "FAIL $name : stdout diffère"; diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" | head -10; ok=0
   fi
-  if ! diff -q "$WORK/$name.composer.err" "$WORK/$name.vivacity.err2" >/dev/null; then
+  if [ -n "${SUGGEST_TARGETS:-}" ]; then
+    # L'écart attendu, et lui seul : vivacity compte en plus chaque cible
+    # suggérée que la plateforme de Composer fournit (`composer show
+    # --platform`) ; le reste de stderr identique.
+    local line='package suggestions were added by new dependencies, use `composer suggest` to see details.'
+    local c_n v_n k=0 t
+    c_n="$(grep -F "$line" "$WORK/$name.composer.err" | awk '{print $1}')"; c_n="${c_n:-0}"
+    v_n="$(grep -F "$line" "$WORK/$name.vivacity.err2" | awk '{print $1}')"; v_n="${v_n:-0}"
+    (cd "$ref" && COMPOSER_HOME="$HOME_DIR" COMPOSER_CACHE_DIR="$WORK/cache-ref-$name" COMPOSER_ROOT_VERSION=1.0.0 \
+      composer show --platform --no-ansi 2>/dev/null) | awk '{print $1}' > "$WORK/$name.platform"
+    for t in $SUGGEST_TARGETS; do grep -qx "$t" "$WORK/$name.platform" && k=$((k + 1)); done
+    if [ "$k" = 0 ]; then
+      echo "FAIL $name : aucune cible suggérée dans la plateforme de Composer (cas aveugle)"; ok=0
+    elif [ "$v_n" != "$((c_n + k))" ]; then
+      echo "FAIL $name : vivacity compte $v_n suggestions, attendu $c_n + $k"; ok=0
+    elif ! diff -q <(sed 's/^[0-9]* package suggestions/N package suggestions/' "$WORK/$name.composer.err") \
+                   <(sed 's/^[0-9]* package suggestions/N package suggestions/' "$WORK/$name.vivacity.err2") >/dev/null; then
+      # (Le nombre seul masqué : la ligne doit être à la même place.)
+      echo "FAIL $name : stderr diffère hors du nombre de suggestions"
+      diff <(sed 's/^[0-9]* package suggestions/N package suggestions/' "$WORK/$name.composer.err") \
+           <(sed 's/^[0-9]* package suggestions/N package suggestions/' "$WORK/$name.vivacity.err2") | head -10; ok=0
+    else
+      echo "     $name : seule la ligne des suggestions diffère (Composer $c_n, vivacity $v_n = $c_n + $k fournies par le PHP)"
+    fi
+  elif ! diff -q "$WORK/$name.composer.err" "$WORK/$name.vivacity.err2" >/dev/null; then
     echo "FAIL $name : stderr diffère"; diff "$WORK/$name.composer.err" "$WORK/$name.vivacity.err2" | head -20; ok=0
   fi
   if ! compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -231,8 +262,17 @@ pair require-composer-api seeded . - -- require composer-plugin-api $I
 pair require-composer-api-no-update seeded . - -- require composer-plugin-api --no-update $I
 pair require-ext-constraint seeded . - -- require ext-foo:^1 $I
 pair partial-not-locked seeded . - -- update acme/nothing $I
-# Une suggestion d'extension que `config.platform` rend connue (versionnée).
-pair suggests-known     nolock '.require["acme/suggester"] = "*" | .config.platform = {"ext-intl": "1.0.0"}' - -- update $I
+# Les suggestions de noms plateforme (DECISIONS 2026-10-29, option 2) : une
+# extension qu'aucun PHP ne charge, comptée des deux côtés ; une rendue
+# connue par `config.platform` (versionnée), retirée des deux côtés ; des
+# noms désactivés (`false`), comptés des deux côtés ; des noms que le PHP de
+# Composer fournit, l'écart documenté.
+pair suggests-ext       nolock '.require["acme/suggester"] = "*"' - -- update $I
+pair suggests-known     nolock '.require["acme/suggester"] = "*" | .config.platform = {"ext-nopesuggest": "1.0.0"}' - -- update $I
+pair suggests-disabled  nolock '.require["acme/suggester-loaded"] = "*" | .config.platform = {"ext-json": false, "php-64bit": false}' - -- update $I
+SUGGEST_TARGETS="$(jq -r '.packages["acme/suggester-loaded"][0].suggest | keys | join(" ")' "$REG/p2/acme/suggester-loaded.json")"
+pair suggests-loaded nolock '.require["acme/suggester-loaded"] = "*"' - -- update $I
+unset SUGGEST_TARGETS
 # `remove --no-update` ne résout rien : sans PHP ni drapeau, comme Composer.
 pair remove-no-update   seeded . - -- remove acme/util --no-update
 # Ni VIVACITY_PHP ni php dans le PATH.
@@ -246,7 +286,6 @@ refused remove-no-flag   seeded . 1 "--ignore-platform-reqs" -- remove acme/util
 refused require-ext      seeded . 3 "ext-foo without a version constraint" -- require ext-foo $I
 refused require-php      seeded . 3 "php without a version constraint" -- require php --no-update $I
 refused replacer         nolock '.require["acme/replacer"] = "*"' 3 "acme/replacer replaces ext-foo" -- update $I
-refused suggests-ext     nolock '.require["acme/suggester"] = "*"' 3 "acme/suggester suggests ext-intl" -- update $I
 refused with-platform    seeded '.require["ext-json"] = "*"' 3 "temporary constraint on ext-json" -- update --with ext-json:^99 $I
 refused verbose          nolock . 3 "-v without PHP" -- update -v $I
 refused very-verbose     nolock . 3 "No PHP to run Composer with" -- update -vv $I

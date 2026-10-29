@@ -5232,7 +5232,7 @@ serait chargé, ce qui fermerait le mode sans PHP à tout projet WordPress
 ou Drupal qui tire composer/installers 1.x — à rouvrir si l'on préfère la
 lettre du contrat à cet usage.
 
-**Ce que ça coûte, mesuré.** Sur les instantanés figés laravel et symfony,
+**Ce que ça coûte, mesuré.** (Suggestions : remplacé le même jour, voir l'entrée « option 2 » plus bas.) Sur les instantanés figés laravel et symfony,
 `update --no-install` depuis le lock (aucune installation) : lock et stderr
 identiques à Composer. Depuis zéro (sans lock), les deux s'arrêtent en
 code 3 : fakerphp/faker suggère `ext-curl`, symfony/polyfill-deepclone
@@ -5265,3 +5265,61 @@ le binaire de main 091e221, 36 FAIL / 1 OK (`remove --no-update`, le témoin
 de non-régression). Avec la correction de l'ordre des avertissements, 40
 cas (3 de plus, rouges avant elle), verts sous 8.5 et 8.4. Test d'intégration `crates/vivacity/tests/no_php.rs`
 (7 tests, rouges sur main). `cargo test` : 467 tests, 0 échec (468 avec le test de l’ordre des avertissements). `steps.sh` (279), `update.sh` (19) et `verbosity.sh` (310) verts après la correction.
+
+## 2026-10-29 — Sans PHP, le compte des suggestions traite les noms plateforme inconnus comme non fournis (option 2, choix de l'utilisateur)
+
+**Le choix.** Jusqu'ici, sans PHP, une suggestion comptée d'un nom
+plateforme inconnu (php*, ext-*, lib-*, hors `composer*` et clés
+versionnées de `config.platform`) arrêtait la commande en code 3 : Composer
+ne compte pas les suggestions que son PHP fournit
+(`SuggestedPackagesReporter.php:180-210`, appelé par `Installer.php:344-352`
+avec le dépôt plateforme), et sans PHP ce nombre est inconnaissable. Mesuré
+sur les instantanés laravel et symfony résolus depuis zéro, ça arrêtait
+tout projet réel. L'utilisateur a choisi l'option 2 : compter ces
+suggestions comme non fournies. Rien ne change dans le code du compte
+(`counted_suggestions`) : sans PHP, la plateforme ne contient que les
+`composer*` et les surcharges versionnées ; seul le refus est retiré.
+
+**La ligne qui peut différer, et dans quel sens.** « N package suggestions
+were added by new dependencies, use `composer suggest` to see details. » :
+le N de vivacity sans PHP majore celui de Composer, il ne le minore jamais
+(la plateforme sans PHP est une partie de celle de Composer). Ce n'est pas
+le compte d'un « PHP sans extension » : un tel PHP n'existe pas — `php`,
+`php-64bit` (build 64 bits), presque toujours `php-ipv6`, les extensions toujours compilées
+(date, pcre, Reflection, SPL ; json, hash, random selon la version) et
+`lib-pcre` y sont toujours (`PlatformRepository.php:156-190`, `:425-426`) —
+c'est le compte d'une plateforme sans PHP du tout. Mesuré : laravel 95
+contre 49 (46 suggestions que le PHP 8.5.12 de la machine fournit : ext-intl
+×9, ext-pcntl ×4, ext-bcmath ×4…), symfony 55 contre 21 (34, dont php-64bit
+×2) ; dans les deux cas l'écart est exactement le nombre de cibles comptées
+que `composer show --platform` liste, et lock, stdout et toutes les autres
+lignes de stderr sont identiques. Déclarer avec une version, dans
+`config.platform`, chaque nom plateforme suggéré que le PHP fournit
+(php-64bit compris) ramène le compte à celui de Composer lancé avec ce
+même `config.platform`.
+
+**Écarté.** La variante stricte (arrêt en code 3, décision du matin) : elle
+fermait le mode sans PHP à tout projet dont un paquet nouveau suggère une
+extension, c'est-à-dire à presque tous. Non retenu non plus : retirer du
+compte un jeu de noms présents sur tout PHP que Composer 2.10.3 accepte
+(`php`, ext-date, ext-pcre, ext-reflection, ext-spl, `lib-pcre`) — une
+estimation de plus, qui réduirait l'écart sans l'annuler ; à rouvrir si
+l'on veut s'approcher du compte sans le promettre.
+
+**Où passe la ligne.** On accepte une valeur devinée seulement là où elle
+change une ligne de stderr, dans un sens connu (un majorant) ; partout où
+une devinette changerait le lock, composer.json ou vendor/ — un paquet qui
+remplace un nom plateforme, `require` sans contrainte, une contrainte
+`--with`, l'indice d'ini, les comptes de `-v` — l'arrêt nommé reste.
+
+Méta-analyse (sous-agent frais, quatre failles : référence « PHP sans
+extension » incohérente, contrôle du harnais trop lâche, cas `false` et
+textes périmés, asymétrie à justifier) : toutes traitées ci-dessus et au
+plan. Harnais `harness/no-php.sh` : 42 cas (le refus de suggestion devenu
+parité sur `ext-nopesuggest`, plus une suggestion rendue connue, une
+désactivée par `false`, et `suggests-loaded` : php-64bit et ext-json, où
+seule la ligne du compte diffère, de exactement le nombre de ces cibles que
+`composer show --platform` liste) ; les trois cas de suggestion qui
+attendaient l'arrêt vus rouges avant le retrait du refus ; verts sous PHP
+8.5.12 et 8.4.27. Test d'intégration rouge puis vert
+(`suggestions_of_unknown_platform_names_count_as_not_provided`).

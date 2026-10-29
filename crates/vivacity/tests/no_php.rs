@@ -33,6 +33,10 @@ fn project(require: &str) -> Project {
         r#"{"name": "acme/base", "version": "1.0.0", "require": {"php": ">=99", "ext-nope": "*", "lib-nope": "^1"}, "conflict": {"ext-json": "*"}}"#,
     );
     write(
+        &pkgs.join("suggester"),
+        r#"{"name": "acme/suggester", "version": "1.0.0", "suggest": {"ext-foo": "x", "php-64bit": "y", "composer-plugin-api": "z"}}"#,
+    );
+    write(
         &pkgs.join("replacer"),
         r#"{"name": "acme/replacer", "version": "1.0.0", "replace": {"ext-foo": "*"}}"#,
     );
@@ -238,4 +242,19 @@ fn pool_builder_warnings_come_before_updating_dependencies() {
         let updating = err.find("Updating dependencies").expect(&err);
         assert!(warning < updating, "{err}");
     }
+}
+
+/// Without PHP, a suggestion of a platform name no PHP-less platform holds
+/// counts as not provided (DECISIONS 2026-10-29, option 2); the composer*
+/// packages are there and keep theirs out of the count.
+#[test]
+#[cfg(unix)]
+fn suggestions_of_unknown_platform_names_count_as_not_provided() {
+    let p = project(r#"{"acme/suggester": "*"}"#);
+    let (code, err) = p.run(&["update", "--no-install", "--ignore-platform-reqs"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("2 package suggestions were added by new dependencies"),
+        "{err}"
+    );
 }

@@ -953,32 +953,6 @@ pub(crate) fn resolve_and_lock(
         };
 
     let ops = &report.transaction.transaction.operations;
-    // Without PHP: `SuggestedPackagesReporter` leaves out a suggestion the
-    // platform repository provides (Installer.php:344-352), which only a
-    // PHP can say for php*, ext-* and lib-* — decided before the lock lines.
-    if session.php_absent {
-        let manifest = patched_manifest(&session, &manifest_text);
-        let fresh_install = !composer_dir_of(&project, &manifest)
-            .join("installed.json")
-            .is_file();
-        if let Some((source, target)) =
-            counted_suggestions(&session, ops, &lock, &manifest_text, fresh_install)
-                .into_iter()
-                .find(|(_, target)| {
-                    !vivacity_resolver::platform::known_without_php(
-                        target,
-                        &session.config.platform,
-                    )
-                })
-        {
-            return Ok(Resolved {
-                hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(format!(
-                    "{source} suggests {target}: Composer does not count a suggestion the platform provides, and only a PHP can say whether it does"
-                ))),
-                ..Resolved::stopped(0)
-            });
-        }
-    }
     // What `Installer::doUpdate` writes between the resolution and the lock
     // operations (the resolution lines, `Nothing to modify in lock file`),
     // held by the session until the checks above have decided the run is
@@ -1104,8 +1078,11 @@ pub(crate) fn post_update_report(
 /// after an update, as (source pretty name, target): those of the packages
 /// this update installs, plus the root's own on a fresh install, minus the
 /// targets another installed package — of the new lock, the platform or the
-/// root — provides (`getFilteredSuggestions`).
-pub(crate) fn counted_suggestions(
+/// root — provides (`getFilteredSuggestions`). Without PHP the platform
+/// holds the `composer*` packages and `config.platform`'s versioned
+/// overrides only: any other platform name counts as not provided — an
+/// upper bound of Composer's count (DECISIONS 2026-10-29).
+fn counted_suggestions(
     session: &vivacity_resolver::session::UpdateSession,
     ops: &[vivacity_resolver::transaction::Operation],
     lock: &serde_json::Value,

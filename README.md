@@ -642,14 +642,19 @@ platform package, so its output with a PHP is the reference, and vivacity
 resolves on the `composer*` packages and the `config.platform` overrides
 alone. What still depends on the real platform stops with exit 3 and is
 named, never guessed: a `require` of php, an extension or a library with
-no version constraint; a package that `replace`s one of them; a
-suggestion of one by a newly installed package, or by the root on a first
-install (Composer does not count those the PHP provides; a version for it
-in `config.platform` makes it known); a `--with` constraint on one; an
-unsolvable set whose explanation would list the PHP's ini files; `-v`,
-whose counts include the platform packages. Nothing compiles
-composer/installers 1.x, so its PHP 8.4 deprecation lines are not
-printed, as on a PHP below 8.4. Without `--ignore-platform-reqs` these
+no version constraint; a package that `replace`s one of them; a `--with`
+constraint on one; an unsolvable set whose explanation would list the
+PHP's ini files; `-v`, whose counts include the platform packages. One
+line may differ, by choice: `N package suggestions were added by new
+dependencies`. Composer leaves out the suggestions its PHP provides
+(php-64bit, the extensions it loads); with no PHP, vivacity leaves out
+only the `composer*` packages and the `config.platform` names that have a
+version, so its N can be higher, never lower (Laravel's fixture from
+scratch: 95 against 49). Declaring, with a version in `config.platform`,
+the suggested platform names the PHP provides (php-64bit included) brings
+it back to Composer's. Nothing compiles composer/installers 1.x
+either, so its PHP 8.4 deprecation lines are not printed, as on a PHP
+below 8.4. Without `--ignore-platform-reqs` these
 commands exit 1 and say so (an `--ignore-platform-req` list or
 `config.platform` leaves the extensions to PHP). A hand-over to Composer,
 for what vivacity does not reproduce, needs `composer` and its PHP on the
