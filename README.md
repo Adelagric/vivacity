@@ -152,6 +152,26 @@ thirteen parity bugs that six fixtures never could; all are fixed.
 
 What is not covered is listed in [HANDOVER.md](HANDOVER.md).
 
+## Used by
+
+[ePHPm](https://github.com/ephpm/ephpm), a PHP server in a single binary,
+embeds vivacity as its `ephpm composer` subcommand (see
+[Embedding](#embedding)). Its author measured it on Windows and wrote it up
+in [Composer Without PHP: Embedding vivacity in
+ePHPm](https://luth.io/blog/2026/10/composer-without-php-vivacity/)
+(2026-10-14): vivacity's Laravel fixture (109 packages), a Ryzen 9 5950X
+under Windows 11 with Defender's real-time protection on, Composer 2.10.3
+against vivacity 0.17.0, caches warm on both sides, medians:
+
+| | Composer | vivacity 0.17 |
+|---|---|---|
+| install, `vendor/` deleted | 107.3 s | 13.9 s |
+| no-op install | 6.7 s | 0.73 s |
+| `dump-autoload -o` | 6.5 s | 0.38 s |
+
+Both `vendor/` trees held 8853 files, every sha256 identical. These are his
+numbers, on his machine and an older vivacity; they are not reproduced here.
+
 ## Speed
 
 Warm `install` is bound by writing tens of thousands of small files and
@@ -590,11 +610,16 @@ the autoloader generator).
 
 Embedded by [ePHPm](https://github.com/ephpm/ephpm) since
 [v0.11.0](https://github.com/ephpm/ephpm/releases/tag/v0.11.0)
-(vivacity 0.15 as of its
-[v0.11.1](https://github.com/ephpm/ephpm/releases/tag/v0.11.1)): its
+(vivacity 0.23.0 as of its
+[v0.13.2](https://github.com/ephpm/ephpm/releases/tag/v0.13.2)): its
 [`ephpm composer`](https://ephpm.dev/reference/cli/composer/) subcommand
 forwards every argument to vivacity compiled into the same binary, so
 `ephpm composer install` needs neither a PHP runtime nor `composer.phar`.
+`update`, `require` and `remove` run a `php` for the platform probe; since
+[v0.13.0](https://github.com/ephpm/ephpm/releases/tag/v0.13.0)
+([ephpm#558](https://github.com/ephpm/ephpm/pull/558)) an ePHPm build that
+links PHP points `VIVACITY_PHP` at itself and answers as php-cli, so those
+need no system PHP either.
 
 Embedding brings in vivacity's HTTP stack (reqwest over rustls). The default
 feature `rustls-tls-ring` bundles the ring crypto provider — right for the

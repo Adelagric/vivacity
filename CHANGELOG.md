@@ -216,6 +216,11 @@ byte-identical-output promise are the public API.
   with a plugin whose line goes to stdout before its work.
 
 ### Documentation
+- **README: "Used by".** ePHPm embeds vivacity, and its author's Windows
+  measurement (2026-10-14, vivacity 0.17.0 against Composer 2.10.3 on
+  the Laravel fixture) is quoted with its conditions, as his numbers. The
+  Embedding section follows ePHPm to v0.13: vivacity 0.23.0, and
+  `update`/`require`/`remove` without a system PHP since ephpm#558.
 - **Why the GitHub Action does not cache vivacity's class map records**
   ([bench/M8-classmap-cache.md](bench/M8-classmap-cache.md)). The README
   said that restoring them did not make the install faster, but that was
