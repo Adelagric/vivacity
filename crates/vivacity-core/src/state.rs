@@ -355,17 +355,29 @@ pub fn installed_php(
                 if entry.dev_requirement == Some(true) {
                     entry.dev_requirement = Some(false);
                 }
-                let mut c = constraint.as_str().unwrap_or("*").to_owned();
-                if c == "self.version" {
-                    c = root.pretty_version.clone();
-                }
+                let c = constraint.as_str().unwrap_or("*").to_owned();
+                // `self.version`: the root's pretty version, and, for an
+                // aliased root, each `RootAliasPackage`'s — Composer walks
+                // the alias too (`generateInstalledVersions`, its links
+                // rewritten by `replaceSelfVersionDependencies`).
+                let values = if c == "self.version" {
+                    root.aliases
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(root.pretty_version.clone()))
+                        .collect()
+                } else {
+                    vec![c]
+                };
                 let list = if is_replace {
                     &mut entry.replaced
                 } else {
                     &mut entry.provided
                 };
-                if !list.contains(&c) {
-                    list.push(c);
+                for c in values {
+                    if !list.contains(&c) {
+                        list.push(c);
+                    }
                 }
             }
         }
@@ -665,6 +677,31 @@ mod tests {
             "metapackage without a path"
         );
         assert!(text.contains("'dev_requirement' => true,"));
+    }
+
+    #[test]
+    fn an_aliased_root_replaces_at_both_versions() {
+        // The TYPO3 repository: `dev-main` aliased to `15.0.x-dev`, its
+        // subtree packages replaced at `self.version` (corpus `typo3`).
+        let root = RootPackage {
+            name: "typo3/cms".to_owned(),
+            pretty_version: "dev-main".to_owned(),
+            version: "dev-main".to_owned(),
+            reference: None,
+            package_type: "typo3-cms-core".to_owned(),
+            dev: true,
+            aliases: vec!["15.0.x-dev".to_owned()],
+            alias_normalized: None,
+        };
+        let lock = sample_lock();
+        let layout = Layout::vendor_only(std::path::Path::new("/proj"), &lock, true);
+        let manifest = json!({"replace": {"typo3/cms-core": "self.version", "x/y": "^1.0"}});
+        let text = installed_php(&lock, &root, &manifest, true, &layout).expect("php");
+        assert!(
+            text.contains("'typo3/cms-core' => array(\n            'dev_requirement' => false,\n            'replaced' => array(\n                0 => '15.0.x-dev',\n                1 => 'dev-main',\n            ),"),
+            "{text}"
+        );
+        assert!(text.contains("'replaced' => array(\n                0 => '^1.0',\n            ),"));
     }
 
     #[test]
