@@ -22,7 +22,12 @@ inputs:
     required: false
     default: ""
   cache:
-    description: "Cache the vivacity store and the Composer dist cache between runs."
+    description: >
+      Restore and save Composer's cache directory (dist zips, VCS mirrors,
+      repository metadata) between runs: the directory `vivacity config
+      --global cache-dir` prints, which vivacity reads and feeds and rebuilds
+      its own store from. Set COMPOSER_CACHE_DIR / COMPOSER_HOME /
+      XDG_CACHE_HOME at job level, before this action, if you set them.
     required: false
     default: "true"
 
@@ -30,25 +35,17 @@ outputs:
   version:
     description: "The version string reported by `vivacity --version`."
     value: ${{ steps.install.outputs.version }}
+  composer-cache-dir:
+    description: >
+      Composer's cache directory as vivacity resolves it (`vivacity config
+      --global cache-dir`, the same value as `composer config --global
+      cache-dir`), resolved even with `cache: 'false'`; empty when it could not
+      be resolved.
+    value: ${{ steps.cache-dir.outputs.composer-cache-dir }}
 
 runs:
   using: "composite"
   steps:
-    - name: Cache vivacity store and Composer dists
-      if: inputs.cache == 'true'
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/vivacity
-          ~/Library/Caches/vivacity
-          ~/AppData/Local/vivacity
-          ~/.cache/composer
-          ~/Library/Caches/composer
-          ~/AppData/Local/Composer
-        key: vivacity-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/composer.lock') }}
-        restore-keys: |
-          vivacity-${{ runner.os }}-${{ runner.arch }}-
-
     - name: Install vivacity
       id: install
       shell: bash
@@ -72,3 +69,61 @@ runs:
         fi
         echo "$VIVACITY_INSTALL_DIR" >> "$GITHUB_PATH"
         echo "version=$("$VIVACITY_INSTALL_DIR/vivacity$exe" --version)" >> "$GITHUB_OUTPUT"
+
+    # Asked of the binary rather than recomputed here: the directory saved is
+    # the one vivacity writes to, Config::get('cache-dir') included (`~`,
+    # `$VAR`, trailing slashes, /etc/xdg). Resolved once, from the
+    # environment this action is called with.
+    - name: Resolve Composer's cache directory
+      id: cache-dir
+      shell: bash
+      env:
+        VIVACITY_INSTALL_DIR: ${{ runner.temp }}/vivacity-bin
+        VIVACITY_CACHE_INPUT: ${{ inputs.cache }}
+      run: |
+        set -u
+        exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
+        dir=""; why=""
+        if ! dir="$("$VIVACITY_INSTALL_DIR/vivacity$exe" config --global cache-dir)"; then
+          dir=""; why="vivacity config --global cache-dir failed"
+        fi
+        # A Git Bash path (/c/...) is not one actions/cache or PHP reads.
+        if [ "$RUNNER_OS" = "Windows" ] && [ "${dir#/}" != "$dir" ]; then
+          dir="$(cygpath -m "$dir")"
+        fi
+        echo "Composer cache directory: ${dir:-<none>}"
+        if [ -z "$why" ]; then
+          case "$dir" in
+            "") why="the cache directory is empty" ;;
+            /*|[A-Za-z]:*|\\\\*) ;;
+            *) why="the cache directory $dir is relative (Composer resolves it from the project directory)" ;;
+          esac
+        fi
+        # Cache::isUsable: a cache Composer itself disables.
+        # shellcheck disable=SC2016 # a literal `$null`
+        if [ -z "$why" ] && printf '%s' "$dir" | grep -Eq '(^|[\\/])(\$null|nul|NUL|/dev/null)([\\/]|$)'; then
+          why="the cache directory $dir disables Composer's cache"
+        fi
+        if [ "$VIVACITY_CACHE_INPUT" != "true" ]; then
+          why="cache is '$VIVACITY_CACHE_INPUT'"
+        fi
+        if [ -n "$why" ]; then
+          echo "::notice title=vivacity::Composer's cache directory is not cached: $why"
+          echo "cacheable=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "cacheable=true" >> "$GITHUB_OUTPUT"
+        fi
+        {
+          echo "composer-cache-dir<<VIVACITY_EOF"
+          echo "$dir"
+          echo "VIVACITY_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Cache Composer's cache directory
+      if: steps.cache-dir.outputs.cacheable == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.cache-dir.outputs.composer-cache-dir }}
+        key: vivacity-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          vivacity-${{ runner.os }}-${{ runner.arch }}-

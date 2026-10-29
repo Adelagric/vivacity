@@ -46,6 +46,17 @@ jobs:
         shell: pwsh
         run: vivacity --version
 
+      # The cache directory is resolved even with caching off, from the
+      # environment the action is called with.
+      - name: Setup vivacity again, cache off, COMPOSER_CACHE_DIR set
+        id: setup-cc
+        uses: ./
+        env:
+          COMPOSER_CACHE_DIR: ${{ runner.temp }}/cc
+        with:
+          binary: target/release/vivacity${{ runner.os == 'Windows' && '.exe' || '' }}
+          cache: "false"
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.4"
@@ -67,6 +78,32 @@ jobs:
           vivacity install 2> install.log
           cat install.log
           grep -q ' 0 installed, ' install.log
+
+      - name: The install fed the cache directory the action resolved
+        env:
+          CACHE_DIR: ${{ steps.setup.outputs.composer-cache-dir }}
+        run: |
+          echo "composer-cache-dir: [$CACHE_DIR]"
+          test -n "$CACHE_DIR"
+          test -n "$(ls -A "$CACHE_DIR/files")"
+
+      # Last: `composer config` creates the directories it prints (Factory's
+      # .htaccess protection), which must not help the checks above.
+      - name: The resolved directory is Composer's (runner environment, then COMPOSER_CACHE_DIR)
+        env:
+          CACHE_DIR: ${{ steps.setup.outputs.composer-cache-dir }}
+          CACHE_DIR_CC: ${{ steps.setup-cc.outputs.composer-cache-dir }}
+          CC: ${{ runner.temp }}/cc
+        run: |
+          expected="$(composer config --global cache-dir)"
+          echo "action:   [$CACHE_DIR]"
+          echo "composer: [$expected]"
+          test "$CACHE_DIR" = "$expected"
+          expected_cc="$(COMPOSER_CACHE_DIR="$CC" composer config --global cache-dir)"
+          echo "action:   [$CACHE_DIR_CC]"
+          echo "composer: [$expected_cc]"
+          test -n "$CACHE_DIR_CC"
+          test "$CACHE_DIR_CC" = "$expected_cc"
 
   installers:
     name: installers (${{ matrix.os }})
