@@ -120,6 +120,46 @@ seed dp-file
 dp_class "$WORK/dp-file/ref/$DP/Other.php" 1; dp_class "$WORK/dp-file/viv/$DP/Other.php" 2
 expect dp-file differ
 
+# Le suffixe aléatoire de typo3/class-alias-loader : la classe de
+# vendor/composer/autoload_classaliasmap_static.php et la ligne setAliasMap
+# de vendor/typo3/alias-loader-include.php, 32 chiffres hexadécimaux, là
+# seulement.
+cal_map() { # fichier, suffixe, [ligne en plus]
+  mkdir -p "$(dirname "$1")"
+  printf '<?php\n\nnamespace TYPO3\\ClassAliasLoader;\n\nclass ClassAliasLoaderStaticInit%s\n{\n    public static $aliasMap=array (\n);\n%s}\n' "$2" "${3:-}" > "$1"
+}
+cal_inc() { # fichier, suffixe
+  mkdir -p "$(dirname "$1")"
+  printf '<?php\n$classAliasLoader->setAliasMap(TYPO3\\ClassAliasLoader\\ClassAliasLoaderStaticInit%s::$aliasMap);\n$classAliasLoader->register(true);\n' "$2" > "$1"
+}
+S1=0123456789abcdef0123456789abcdef; S2=fedcba9876543210fedcba9876543210
+seed cal-suffix
+cal_map "$WORK/cal-suffix/ref/vendor/composer/autoload_classaliasmap_static.php" $S1
+cal_map "$WORK/cal-suffix/viv/vendor/composer/autoload_classaliasmap_static.php" $S2
+cal_inc "$WORK/cal-suffix/ref/vendor/typo3/alias-loader-include.php" $S1
+cal_inc "$WORK/cal-suffix/viv/vendor/typo3/alias-loader-include.php" $S2
+expect cal-suffix same
+# Une autre ligne de la carte qui diffère : vue.
+seed cal-other
+cal_map "$WORK/cal-other/ref/vendor/composer/autoload_classaliasmap_static.php" $S1
+cal_map "$WORK/cal-other/viv/vendor/composer/autoload_classaliasmap_static.php" $S2 "    // x\n"
+expect cal-other differ
+# Un suffixe qui n'a pas 32 chiffres (celui de la configuration) : vu.
+seed cal-short
+cal_map "$WORK/cal-short/ref/vendor/composer/autoload_classaliasmap_static.php" abc
+cal_map "$WORK/cal-short/viv/vendor/composer/autoload_classaliasmap_static.php" abd
+expect cal-short differ
+# Le fichier d'inclusion ailleurs que sous vendor/typo3 : vu.
+seed cal-elsewhere
+cal_inc "$WORK/cal-elsewhere/ref/vendor/acme/pkg/alias-loader-include.php" $S1
+cal_inc "$WORK/cal-elsewhere/viv/vendor/acme/pkg/alias-loader-include.php" $S2
+expect cal-elsewhere differ
+# La ligne de la classe dans un autre fichier de vendor/composer : vue.
+seed cal-file
+cal_map "$WORK/cal-file/ref/vendor/composer/autoload_static.php" $S1
+cal_map "$WORK/cal-file/viv/vendor/composer/autoload_static.php" $S2
+expect cal-file differ
+
 # 9. un mode qui diffère, contenu identique : `diff -r` ne le voit pas,
 #    l'inventaire si.
 seed mode
