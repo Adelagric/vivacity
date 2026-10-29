@@ -53,9 +53,12 @@ check() {
 [ -f "$CAPTURED" ] || { echo "missing $CAPTURED"; exit 1; }
 
 # The captured macOS log: red, run once, the cause named, Composer's side.
+# Outside GitHub Actions and without a token, whatever the caller's
+# environment (ci.yml sets both).
 fake captured "cat '$CAPTURED'; exit 1"
-check captured 1 1 '+GitHub refusing requests; not run again' "+in Composer's wording" \
-  '+COMPOSER_AUTH was not set' '-running it once more' '-::error'
+( unset GITHUB_ACTIONS COMPOSER_AUTH
+  check captured 1 1 '+GitHub refusing requests; not run again' "+in Composer's wording" \
+    '+COMPOSER_AUTH was not set' '-running it once more' '-::error' ) || status=1
 
 # The same under GitHub Actions with a token configured: the annotation, the
 # token's presence, never its value.
