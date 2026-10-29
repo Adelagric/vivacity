@@ -29,14 +29,22 @@ curl -fsSL https://raw.githubusercontent.com/Adelagric/vivacity/main/install.sh 
 ```
 
 Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64 (Git Bash); the
-script checks the sha256. On Windows from PowerShell:
+script checks the sha256. The Linux binaries run on **glibc 2.17 or later**
+(CentOS/RHEL 7 and up, Amazon Linux 2 and 2023, Debian 10+, Ubuntu 20.04+,
+GitHub's `ubuntu-22.04` and `ubuntu-24.04` runners); on **musl** (Alpine,
+the official `composer` image, `php:*-alpine`) the script picks a static
+build — it needs `curl` there (`apk add curl`). Both are checked on every
+release by running the binary in `centos:7` and `alpine`
+(`tools/linux-release.sh`). On Windows from PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/Adelagric/vivacity/main/install.ps1 | iex
 ```
 
-Also `cargo install vivacity` (crates.io), `cargo binstall vivacity`, or
-`cargo install --path crates/vivacity`.
+Also `cargo install vivacity` (crates.io), `cargo binstall vivacity` (the
+same release assets), or `cargo install --path crates/vivacity`; a
+`cargo install` build links against the glibc of the machine that builds
+it.
 
 GitHub Actions:
 
@@ -63,7 +71,8 @@ directory yourself as well (`actions/cache` or setup-php's recipe): two
 caches would save the same files under two keys. The action uses
 `actions/cache` v6.1.0, which needs runner 2.327.1 or later (GitHub-hosted
 runners are newer; check GHES and old self-hosted runners). `cache:
-'false'` turns caching off.
+'false'` turns caching off. In a job `container:`, the action runs its steps
+with `bash` and `curl`: an Alpine image needs both installed first.
 
 In a Docker image build: [docs/docker.md](docs/docker.md). Deploying with
 Capistrano: [docs/capistrano.md](docs/capistrano.md); with Deployer:

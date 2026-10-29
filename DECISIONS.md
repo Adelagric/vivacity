@@ -4826,3 +4826,108 @@ d'une délégation (doc). Laissés, consignés au HANDOVER : `config` refuse
 sort en 1 et `config` répond (hors du cache) ; la branche `cygpath -m` presque morte (MSYS
 convertit déjà `/c/…` pour un binaire natif), gardée comme demandé. La notice à chaque run sous `cache: 'false'` a été retirée à la
 vérification : un cache coupé exprès se dit dans le journal, pas en annotation.
+
+## 2026-10-29 — Binaires Linux : plancher glibc 2.17 par cargo-zigbuild, musl statique ajouté (docs/plans/linux-glibc-floor.md)
+
+**Constat.** Les binaires Linux de v0.25.0, liés à la glibc du runner de
+build (ubuntu 24.04), exigent `GLIBC_2.39` (`pidfd_spawnp`, `pidfd_getpid`
+de la std, références faibles). Mesuré dans Docker, binaires de la
+release, `--version` puis un vrai `install` réseau :
+
+| image | glibc | aarch64 v0.25.0 | x86_64 v0.25.0 | 2.17 (zig), les deux |
+|---|---|---|---|---|
+| centos:7 | 2.17 | refus | refus | OK |
+| amazonlinux:2 | 2.26 | refus | refus | OK |
+| debian:10, rockylinux:8 | 2.28 | refus | refus | OK |
+| ubuntu:20.04, debian:11 | 2.31 | refus | refus | OK |
+| rockylinux:9, amazonlinux:2023 | 2.34 | refus | avertissement stderr | OK |
+| ubuntu:22.04 | 2.35 | refus | avertissement stderr | OK |
+| debian:12 | 2.36 | refus | avertissement stderr | OK |
+| ubuntu:24.04, debian:13 | 2.39, 2.41 | OK | OK | OK |
+
+En x86_64 l'entrée `GLIBC_2.39` de `.gnu.version_r` est marquée faible
+(drapeau 0x02) : une glibc ≥ 2.34 charge le binaire mais écrit « weak
+version 'GLIBC_2.39' not found » sur stderr à chaque lancement — la stderr
+identique à Composer est cassée sur les runners `ubuntu-22.04`. En aarch64
+l'entrée est forte : refus sous 2.39.
+
+**Choix : `cargo zigbuild --target <triple>.2.17`** (cargo-zigbuild
+0.23.4, zig 0.16.0, installés par pip dans un venv, épinglés par hachage :
+`tools/zigbuild-requirements.txt`). Aucun changement de code ni de
+`Cargo.lock` : PCRE2 préfixé et ring compilent avec `zig cc`. 2.17 est le
+plancher de la std Rust pour ces cibles ; les cibles nommées (Ubuntu 20.04
+et 22.04, Debian 11 et 12, RHEL 8 et 9, AL2023) demandaient 2.28, et rien
+ne coûte entre les deux. Une std ou une dépendance qui exigerait un
+symbole absent de 2.17 en référence forte ferait échouer l'édition de liens
+de zig : pas de remontée silencieuse. Écartés : construire dans un
+conteneur CentOS 7 / manylinux (les actions node n'y tournent pas, rustup à
+installer à chaque job, x86_64 seulement en émulation sur le Mac) ; un
+runner plus ancien (`ubuntu-22.04` = 2.35, ne couvre ni RHEL 8/9 ni AL2023
+ni Debian 11, et se redéprécie).
+
+**musl statique ajouté** (`x86_64-` et `aarch64-unknown-linux-musl`) : même
+`cargo zigbuild`, 40 s, binaire statique de 10,3 Mo (aarch64), aucun
+changement de code. Banc Laravel (109 paquets) dans `php:8.4-cli` arm64,
+VM Docker de 4 vCPU (M4 Max), hyperfine, médianes de deux passes, même
+rustc 1.99.0 :
+
+| scénario | gnu natif (gcc) | gnu zig 2.17 | musl zig |
+|---|---|---|---|
+| no-op | 46,3 / 42,6 ms | 45,6 / 44,6 ms | 40,8 / 41,8 ms |
+| warm (vendor/ supprimé) | 69,5 / 70,3 ms | 67,7 / 67,6 ms | 66,8 / 66,7 ms |
+| dump-autoload -o | 30,0 / 27,0 ms | 32,5 / 28,3 ms | 30,6 / 30,9 ms |
+
+Pas de ralentissement de l'allocateur de musl mesurable à 4 cœurs ; un
+runner à beaucoup de cœurs n'est pas mesuré. Le binaire v0.25.0 (rustc
+1.99.1, gcc 13) fait 24,8 / 25,1 ms en dump-o : l'écart suit la chaîne
+(rustc, gcc), pas zig — à rustc égal, natif et zig sont dans le bruit. La
+reprise à rustc 1.99.1 n'a pas pu être faite (Docker indisponible, plus
+bas). `install.sh` choisit musl quand `ldd --version` dit musl (sinon
+`/lib/libc.musl-<arch>.so.1`, propre à Alpine) : pas sur la seule présence
+de `/lib/ld-musl-*`, que le paquet `musl` de Debian installe aussi.
+
+**Table des symboles.** zig traduit le `strip = "debuginfo"` du profil
+release en strip total : plus de `.symtab` (14,2 → 10,9 Mo en aarch64,
+15,3 → 12,4 Mo en x86_64), backtraces sans noms. La garder demandait
+`strip = "none"` puis `objcopy --strip-debug`, outil différent selon l'hôte
+(binutils en CI, absent du Mac) : écarté, noté au CHANGELOG.
+
+**Le contrôle** (`tools/linux-release.sh check`) : le maximum des
+`GLIBC_` des « Version References » d'`objdump -p` (pas `objdump -T`, qui
+liste des symboles : c'est l'entrée de version, avec son drapeau faible,
+que le chargeur vérifie), NEEDED dans les bibliothèques de base ou statique
+pour musl ; puis dans `centos:7` ou `alpine` (épinglés par digest),
+`--version` à stderr VIDE, `install -vv` rendu à un faux `composer` (un
+processus fils, son code 7 relu : sans PHP dans l'image, rien d'autre ne
+lance de processus) et un vrai `install` de `fixtures/projects/scripts`.
+Vu rouge sur les binaires v0.25.0 (ELF : « requires GLIBC_2.39, above the
+floor 2.17 », avec les entrées 2.18…2.39 et leurs drapeaux), vert sur les
+quatre binaires zig, rouge sur un binaire d'une autre architecture et sur
+un binaire gnu présenté comme musl ; il a trouvé son propre défaut (une
+sortie de `set -e` muette quand aucune `GLIBC_` n'est trouvée). En CI :
+chaque release (quatre triples, en natif), chaque push (x86_64 gnu et
+musl, job `installers`), et un témoin négatif à chaque push qui exige que
+le contrôle REFUSE l'asset v0.25.0 (sha256 épinglé) pour la bonne raison.
+
+**Méta-analyse** (sous-agent frais, plan et code) : neuf points, intégrés
+au plan — stderr vide exigée (le symptôme x86_64 était un lancement
+réussi), version-need au lieu des symboles, texte du témoin négatif,
+détection musl, curl absent d'Alpine (`install.sh` le dit ; le test passe
+aussi par `file://`), réseau de la release réduit à deux paquets avec une
+nouvelle tentative, chemin `spawn` exercé, venv hors de `target/`. En
+écrivant le test Alpine : `sha256sum -c --quiet` d'`install.sh` ne passe
+pas sous BusyBox (`getopt32(argv, "^scwbt…")`, pas d'option longue) →
+sortie jetée.
+
+**Ce que le Mac n'a pas pu prouver.** En cours de chantier le disque de
+l'hôte s'est rempli (120 Mio libres, worktrees parallèles), et la VM Docker
+est restée en erreur d'E/S (containerd) après la libération de place. La
+matrice et le banc ont été faits avant, sur les binaires du spike ; les
+binaires finaux de `tools/linux-release.sh build` leur sont identiques à
+l'octet (sha256, gnu aarch64 et x86_64, musl aarch64 : la build zig est
+reproductible ici), donc la matrice vaut pour eux. Pas faits localement :
+le script `check` complet (sa partie conteneur), les binaires musl dans
+alpine (le musl aarch64 n'a tourné que dans `php:8.4-cli`, Debian, pour le
+banc ; le musl x86_64 nulle part), `install.sh` dans centos:7 et alpine.
+Ils sont laissés au run `release` en `workflow_dispatch` et au job
+`installers`.

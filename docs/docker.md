@@ -22,7 +22,8 @@ A real image build adds its own overhead around it: measure yours.
 ```dockerfile
 # syntax=docker/dockerfile:1
 FROM php:8.4-cli
-# Debian-based PHP images only: the release binary links glibc (no Alpine/musl build).
+# Any glibc 2.17+ image; on an Alpine image (php:*-alpine) install.sh picks
+# the static musl build, after `apk add curl`.
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip \
  && rm -rf /var/lib/apt/lists/*
 # Composer stays in the image: vivacity hands it what it does not reproduce,
