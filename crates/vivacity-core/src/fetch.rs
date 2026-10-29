@@ -1,8 +1,8 @@
 //! Dist downloads, interoperable with Composer's cache: same layout
 //! (`<cache>/files/<vendor>/<pkg>/<sha1-of-url>.zip`), both read AND fed, so
 //! a cache warmed by one serves the other. Minimal v1 auth: `github-oauth`,
-//! `http-basic`, `bearer` (project auth.json, COMPOSER_AUTH, then the
-//! COMPOSER_HOME auth.json). The lock's shasum, when present, is checked on
+//! `http-basic`, `bearer` (the COMPOSER_HOME auth.json, the project's, then
+//! COMPOSER_AUTH, as Composer merges them). The lock's shasum, when present, is checked on
 //! download AND when reading back from the cache (meta-analysis F7: a shared
 //! cache is read back with suspicion).
 
@@ -20,19 +20,28 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// Merges (from lowest to highest priority): the COMPOSER_HOME auth.json,
-    /// the COMPOSER_AUTH variable, the project auth.json.
+    /// Merges in `Factory::createComposer`'s order, each layer over the
+    /// previous one: the COMPOSER_HOME auth.json, the project's auth.json,
+    /// then COMPOSER_AUTH (`loadComposerAuthEnv`, merged last).
     pub fn load(project_dir: &Path) -> Auth {
+        Auth::load_from(
+            composer_home().as_deref(),
+            project_dir,
+            std::env::var("COMPOSER_AUTH").ok().as_deref(),
+        )
+    }
+
+    fn load_from(home: Option<&Path>, project_dir: &Path, composer_auth: Option<&str>) -> Auth {
         let mut auth = Auth::default();
-        if let Some(home) = composer_home() {
+        if let Some(home) = home {
             auth.merge_json_file(&home.join("auth.json"));
         }
-        if let Ok(env) = std::env::var("COMPOSER_AUTH") {
-            if let Ok(v) = serde_json::from_str::<Value>(&env) {
+        auth.merge_json_file(&project_dir.join("auth.json"));
+        if let Some(env) = composer_auth {
+            if let Ok(v) = serde_json::from_str::<Value>(env) {
                 auth.merge_value(&v);
             }
         }
-        auth.merge_json_file(&project_dir.join("auth.json"));
         auth
     }
 
@@ -73,29 +82,87 @@ impl Auth {
         }
     }
 
-    /// Value of the Authorization header for this host, if any.
-    pub fn authorization_for(&self, host: &str) -> Option<String> {
-        let host = host.to_ascii_lowercase();
-        // GitHub dists go through api.github.com / codeload.github.com
-        // but the token is stored under github.com.
-        if host == "github.com" || host.ends_with(".github.com") {
-            if let Some(t) = self.github_oauth.get("github.com") {
-                return Some(format!("token {t}"));
+    /// Value of the Authorization header Composer sends with this URL, if
+    /// any: one credential per origin, a (username, password) pair as
+    /// `BaseIO::loadConfiguration` stores it (github-oauth `(token,
+    /// x-oauth-basic)`, then http-basic, then bearer `(token, bearer)`, the
+    /// last one loaded winning), found by `AuthHelper::findAuthOrigin`,
+    /// rendered by `AuthHelper::addAuthenticationOptions` from the pair's
+    /// values. A github.com token goes to `api.github.com` only — never to
+    /// codeload.github.com (its own origin) nor to github.com itself. Not
+    /// rendered as Composer does: GitLab tokens, Bitbucket `x-token-auth`,
+    /// `custom-headers`, `client-certificate` (basic credentials here).
+    /// Called per request: a redirect inherits reqwest's rule (the header
+    /// is dropped across hosts), where Composer computes the target's own.
+    pub fn authorization_for_url(&self, url: &str) -> Option<String> {
+        let origin = composer_origin(url)?;
+        let has = |o: &str| {
+            self.bearer.contains_key(o)
+                || self.http_basic.contains_key(o)
+                || self.github_oauth.contains_key(o)
+        };
+        let origin = if has(&origin) {
+            origin
+        } else {
+            match origin.as_str() {
+                "api.bitbucket.org" | "api.github.com" => {
+                    let canonical = origin.trim_start_matches("api.").to_owned();
+                    if has(&canonical) {
+                        canonical
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
             }
+        };
+        let (user, password): (&str, &str) = if let Some(t) = self.bearer.get(&origin) {
+            (t, "bearer")
+        } else if let Some((u, p)) = self.http_basic.get(&origin) {
+            (u, p)
+        } else {
+            (self.github_oauth.get(&origin)?, "x-oauth-basic")
+        };
+        if password == "bearer" {
+            return Some(format!("Bearer {user}"));
         }
-        if let Some(t) = self.github_oauth.get(&host) {
-            return Some(format!("token {t}"));
+        if origin == "github.com" && password == "x-oauth-basic" {
+            // `{^https?://api\.github\.com/}`, on the URL as written.
+            let api = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+                .is_some_and(|rest| rest.starts_with("api.github.com/"));
+            return api.then(|| format!("token {user}"));
         }
-        if let Some(t) = self.bearer.get(&host) {
-            return Some(format!("Bearer {t}"));
-        }
-        if let Some((u, p)) = self.http_basic.get(&host) {
-            use base64::Engine as _;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
-            return Some(format!("Basic {encoded}"));
-        }
-        None
+        // Anything else — a GitHub Enterprise token included — as basic
+        // credentials.
+        use base64::Engine as _;
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+        Some(format!("Basic {encoded}"))
     }
+}
+
+/// `Url::getOrigin`: the host, with its port when the URL carries one;
+/// every `*.github.com` but codeload.github.com is `github.com`,
+/// repo.packagist.org is `packagist.org`. (PHP's `parse_url` keeps an
+/// explicit default port that the `url` crate drops: `https://h:443/` is
+/// `h:443` for Composer, `h` here. And Composer compares hosts and the
+/// keys of auth.json as written, where vivacity lowercases both.)
+fn composer_origin(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let origin = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    if origin.ends_with(".github.com") && origin != "codeload.github.com" {
+        return Some("github.com".to_owned());
+    }
+    if origin == "repo.packagist.org" {
+        return Some("packagist.org".to_owned());
+    }
+    Some(origin)
 }
 
 /// What `Factory` and `Config` read of the machine to place Composer's
@@ -743,12 +810,8 @@ impl Fetcher {
             )
             .timeout(std::time::Duration::from_secs(10))
             .body(body.to_owned());
-        if let Ok(parsed) = reqwest::Url::parse(url) {
-            if let Some(host) = parsed.host_str() {
-                if let Some(authz) = self.auth.authorization_for(host) {
-                    req = req.header(reqwest::header::AUTHORIZATION, authz);
-                }
-            }
+        if let Some(authz) = self.auth.authorization_for_url(url) {
+            req = req.header(reqwest::header::AUTHORIZATION, authz);
         }
         let resp = req.send().await.map_err(|e| Error::Http {
             url: url.to_owned(),
@@ -782,12 +845,8 @@ impl Fetcher {
         let mut retries = 0u32;
         let last_err = loop {
             let mut req = self.client.get(url);
-            if let Ok(parsed) = reqwest::Url::parse(url) {
-                if let Some(host) = parsed.host_str() {
-                    if let Some(authz) = self.auth.authorization_for(host) {
-                        req = req.header(reqwest::header::AUTHORIZATION, authz);
-                    }
-                }
+            if let Some(authz) = self.auth.authorization_for_url(url) {
+                req = req.header(reqwest::header::AUTHORIZATION, authz);
             }
             if let Some(ims) = if_modified_since {
                 req = req.header(reqwest::header::IF_MODIFIED_SINCE, ims);
@@ -890,12 +949,8 @@ impl Fetcher {
             },
         };
         let mut req = self.client.get(url);
-        if let Ok(parsed) = reqwest::Url::parse(url) {
-            if let Some(host) = parsed.host_str() {
-                if let Some(authz) = self.auth.authorization_for(host) {
-                    req = req.header(reqwest::header::AUTHORIZATION, authz);
-                }
-            }
+        if let Some(authz) = self.auth.authorization_for_url(url) {
+            req = req.header(reqwest::header::AUTHORIZATION, authz);
         }
         let resp = req.send().await.map_err(|e| fail(e, url))?;
         let resp = resp.error_for_status().map_err(|e| fail(e, url))?;
@@ -1317,38 +1372,146 @@ mod tests {
         assert_eq!(p("ssh://git@example/x.git"), None);
     }
 
+    /// Where Composer sends what (`Url::getOrigin`,
+    /// `AuthHelper::findAuthOrigin`, `AuthHelper::addAuthenticationOptions`,
+    /// one credential per origin, `BaseIO::loadConfiguration` order).
     #[test]
     fn auth_header_selection() {
         let mut auth = Auth::default();
         auth.github_oauth
             .insert("github.com".into(), "ghtok".into());
+        auth.github_oauth
+            .insert("ghe.example.com".into(), "enttok".into());
         auth.bearer
             .insert("repo.example.com".into(), "beartok".into());
         auth.http_basic
             .insert("basic.example.com".into(), ("user".into(), "pass".into()));
+        let h = |url: &str| auth.authorization_for_url(url);
 
+        // The github.com token goes to the API only, http included
+        // (`{^https?://api\.github\.com/}`).
         assert_eq!(
-            auth.authorization_for("github.com").as_deref(),
+            h("https://api.github.com/repos/a/b/zipball/c").as_deref(),
             Some("token ghtok")
         );
         assert_eq!(
-            auth.authorization_for("codeload.github.com").as_deref(),
-            Some("token ghtok"),
-            "github dists go through codeload"
-        );
-        assert_eq!(
-            auth.authorization_for("api.github.com").as_deref(),
+            h("http://api.github.com/repos/a/b/zipball/c").as_deref(),
             Some("token ghtok")
         );
+        // codeload is its own origin; github.com and the other
+        // `*.github.com` are origin github.com but not the API.
+        assert_eq!(h("https://codeload.github.com/a/b/legacy.zip/c"), None);
+        assert_eq!(h("https://github.com/a/b/archive/c.zip"), None);
+        assert_eq!(h("https://objects.github.com/x.zip"), None);
+        // A port is part of the origin: `api.github.com:8443` is not github.com.
+        assert_eq!(h("https://api.github.com:8443/repos/a/b/zipball/c"), None);
+        // A GitHub Enterprise domain: the token as basic credentials.
         assert_eq!(
-            auth.authorization_for("repo.example.com").as_deref(),
+            h("https://ghe.example.com/api/v3/repos/a/b/zipball/c").as_deref(),
+            Some("Basic ZW50dG9rOngtb2F1dGgtYmFzaWM=")
+        );
+        assert_eq!(
+            h("https://repo.example.com/x.zip").as_deref(),
             Some("Bearer beartok")
         );
         assert_eq!(
-            auth.authorization_for("basic.example.com").as_deref(),
+            h("https://basic.example.com/x.zip").as_deref(),
             Some("Basic dXNlcjpwYXNz")
         );
-        assert_eq!(auth.authorization_for("unknown.example.com"), None);
+        assert_eq!(h("https://unknown.example.com/x.zip"), None);
+        assert_eq!(h("not a url"), None);
+    }
+
+    #[test]
+    fn auth_one_credential_per_origin() {
+        // Same origin, three kinds: the last loaded wins (bearer).
+        let mut auth = Auth::default();
+        auth.github_oauth.insert("h.example".into(), "g".into());
+        auth.http_basic
+            .insert("h.example".into(), ("u".into(), "p".into()));
+        auth.bearer.insert("h.example".into(), "b".into());
+        assert_eq!(
+            auth.authorization_for_url("https://h.example/x").as_deref(),
+            Some("Bearer b")
+        );
+        // http-basic over github-oauth, on the API too.
+        let mut auth = Auth::default();
+        auth.github_oauth.insert("github.com".into(), "g".into());
+        auth.http_basic
+            .insert("github.com".into(), ("u".into(), "p".into()));
+        assert_eq!(
+            auth.authorization_for_url("https://api.github.com/x")
+                .as_deref(),
+            Some("Basic dTpw")
+        );
+        // repo.packagist.org is origin packagist.org; api.bitbucket.org
+        // falls back to bitbucket.org.
+        let mut auth = Auth::default();
+        auth.http_basic
+            .insert("packagist.org".into(), ("u".into(), "p".into()));
+        auth.http_basic
+            .insert("bitbucket.org".into(), ("u".into(), "p".into()));
+        assert_eq!(
+            auth.authorization_for_url("https://repo.packagist.org/p2/a/b.json")
+                .as_deref(),
+            Some("Basic dTpw")
+        );
+        assert_eq!(
+            auth.authorization_for_url("https://api.bitbucket.org/2.0/x")
+                .as_deref(),
+            Some("Basic dTpw")
+        );
+        assert_eq!(auth.authorization_for_url("https://repo.example/x"), None);
+        // The pair's values decide, not the key it came from: http-basic
+        // with Composer's GitHub or bearer passwords.
+        let mut auth = Auth::default();
+        auth.http_basic
+            .insert("github.com".into(), ("t".into(), "x-oauth-basic".into()));
+        auth.http_basic
+            .insert("b.example".into(), ("t".into(), "bearer".into()));
+        assert_eq!(
+            auth.authorization_for_url("https://api.github.com/x")
+                .as_deref(),
+            Some("token t")
+        );
+        assert_eq!(
+            auth.authorization_for_url("https://github.com/a/b/archive/c.zip"),
+            None
+        );
+        assert_eq!(
+            auth.authorization_for_url("https://b.example/x").as_deref(),
+            Some("Bearer t")
+        );
+    }
+
+    /// `Factory::createComposer`: the COMPOSER_HOME auth.json, then the
+    /// project's auth.json, then COMPOSER_AUTH (`loadComposerAuthEnv`, last).
+    #[test]
+    fn auth_sources_load_in_composers_order() {
+        let home = tempfile::tempdir().expect("tmp");
+        let project = tempfile::tempdir().expect("tmp");
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"github-oauth":{"github.com":"home","a.example":"home"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("auth.json"),
+            r#"{"github-oauth":{"github.com":"project","b.example":"project"}}"#,
+        )
+        .unwrap();
+        let env = r#"{"github-oauth":{"github.com":"env"}}"#;
+        let auth = Auth::load_from(Some(home.path()), project.path(), Some(env));
+        assert_eq!(auth.github_oauth["github.com"], "env");
+        assert_eq!(auth.github_oauth["a.example"], "home");
+        assert_eq!(auth.github_oauth["b.example"], "project");
+        // Without the variable, the project's file wins over the home one.
+        let auth = Auth::load_from(Some(home.path()), project.path(), None);
+        assert_eq!(auth.github_oauth["github.com"], "project");
+        // An empty variable adds nothing (a malformed one stops Composer:
+        // `global_config_layer` hands such a run over before this is read).
+        let auth = Auth::load_from(None, project.path(), Some(""));
+        assert_eq!(auth.github_oauth["github.com"], "project");
     }
 
     #[test]

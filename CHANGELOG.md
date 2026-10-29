@@ -97,6 +97,20 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **A `github-oauth` token goes where Composer sends it, and only there.**
+  The github.com token is sent as `token …` to `api.github.com` URLs only
+  (it went to github.com and every `*.github.com`, codeload included); a
+  GitHub Enterprise domain gets it as basic credentials (`token:x-oauth-basic`),
+  as Composer does. One credential per origin (`repo.packagist.org` uses
+  what is configured for `packagist.org`, `api.bitbucket.org` for
+  `bitbucket.org`), bearer over http-basic over github-oauth, and
+  `COMPOSER_AUTH` now overrides the project's `auth.json`, merged last like
+  Composer's `Factory`. With a valid token nothing changed; with a revoked
+  one, a codeload dist failed under vivacity and installed under Composer.
+  `harness/auth-hosts.sh` compares the headers with Composer's.
+  Library: `fetch::Auth::authorization_for(host)` is now
+  `authorization_for_url(url)` — renamed so that a caller passing a host
+  fails to compile instead of silently getting no header.
 - **The GitHub Action cached a dead store.** It saved vivacity's store
   next to Composer's cache under fixed paths; since the store's layout
   moved to `v3` (05193b7) the restored `store/v2` was never read (run
