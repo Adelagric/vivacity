@@ -1163,14 +1163,19 @@ impl UpdateSession {
                 return Err(unsupported(reason));
             }
         }
-        // `Installer::doUpdate`: the pool is built (Flex's notice comes out
-        // of it), then `Updating dependencies`, then the policy filters'
-        // warnings as they happened.
+        // `Installer::doUpdate`: the pool is built — the builder's own
+        // warnings as it loads (the update allow list, PoolBuilder.php:216;
+        // a root requirement kept locked, :539 and :569), then Flex's notice
+        // at `PRE_POOL_CREATE` (:328) — then `Updating dependencies`, then
+        // the policy filters' warnings as they happened.
+        for w in &pool.warnings {
+            vivacity_core::say!("{w}");
+        }
         if let Some(notice) = &pool.flex_notice {
             vivacity_core::say!("{notice}");
         }
         vivacity_core::say!("Updating dependencies");
-        for w in &pool.warnings {
+        for w in &pool.filter_warnings {
             vivacity_core::say!("{w}");
         }
         lap("pool", &t);
@@ -1380,6 +1385,7 @@ impl UpdateSession {
         // The policy filters rebuild the pool: what PRE_POOL_CREATE noted
         // rides along.
         let flex_notice = pool.flex_notice.take();
+        let builder_warnings = std::mem::take(&mut pool.warnings);
         let mut warnings = Vec::new();
         pool = crate::pool_filters::security_advisory_filter(
             pool,
@@ -1400,7 +1406,9 @@ impl UpdateSession {
             &mut warnings,
         )
         .map_err(SessionError::from)?;
-        pool.warnings.extend(warnings);
+        pool.filter_warnings = std::mem::take(&mut pool.warnings);
+        pool.filter_warnings.extend(warnings);
+        pool.warnings = builder_warnings;
         pool.flex_notice = flex_notice;
         if std::env::var_os("VIVACITY_TRACE").is_some() {
             eprintln!(

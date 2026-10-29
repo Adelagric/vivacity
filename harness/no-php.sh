@@ -224,11 +224,13 @@ pair install-nolock     nolock . - -- install $I
 pair platform-config    nolock '.config.platform = {"php": "7.0.0", "ext-json": "1.0.0", "ext-mbstring": false, "lib-nope": "1.2.3"}' - -- update $I
 pair env-flag           nolock . COMPOSER_IGNORE_PLATFORM_REQS=1 -- update
 pair unsolvable         nolock '.require["acme/base"] = "^9"' - -- update $I
-# (Sans --no-update, la liste d'update `composer-plugin-api` fait écrire à
-# PoolBuilder « Pattern … matches platform packages » AVANT « Updating
-# dependencies », vivacity après — écart antérieur, avec PHP aussi, hors de
-# ce chantier.)
-pair require-composer-api seeded . - -- require composer-plugin-api --no-update $I
+# La liste d'update d'un `require` de nom plateforme, et un nom non
+# verrouillé : les avertissements de PoolBuilder avant « Updating
+# dependencies » (écart antérieur, avec PHP aussi, corrigé le 2026-10-29).
+pair require-composer-api seeded . - -- require composer-plugin-api $I
+pair require-composer-api-no-update seeded . - -- require composer-plugin-api --no-update $I
+pair require-ext-constraint seeded . - -- require ext-foo:^1 $I
+pair partial-not-locked seeded . - -- update acme/nothing $I
 # Une suggestion d'extension que `config.platform` rend connue (versionnée).
 pair suggests-known     nolock '.require["acme/suggester"] = "*" | .config.platform = {"ext-intl": "1.0.0"}' - -- update $I
 # `remove --no-update` ne résout rien : sans PHP ni drapeau, comme Composer.

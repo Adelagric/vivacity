@@ -212,3 +212,30 @@ fn verbose_output_without_php_stops_named() {
     assert!(!p.root.join("composer.lock").exists());
     assert!(!p.composer_ran(), "composer was run");
 }
+
+/// `PoolBuilder::warnAboutNonMatchingUpdateAllowList` writes while the pool
+/// is built (PoolBuilder.php:216), before `Installer::doUpdate` writes
+/// `Updating dependencies` (Installer.php:533-536) — with or without PHP.
+#[test]
+#[cfg(unix)]
+fn pool_builder_warnings_come_before_updating_dependencies() {
+    let p = project(r#"{"acme/base": "*", "ext-json": "*"}"#);
+    let (code, err) = p.run(&["update", "--no-install", "--ignore-platform-reqs"]);
+    assert_eq!(code, 0, "{err}");
+    for (pattern, line) in [
+        (
+            "acme/nothing",
+            "Package \"acme/nothing\" listed for update is not locked.",
+        ),
+        (
+            "ext-json",
+            "Pattern \"ext-json\" listed for update matches platform packages, but these cannot be updated by Composer.",
+        ),
+    ] {
+        let (code, err) = p.run(&["update", pattern, "--no-install", "--ignore-platform-reqs"]);
+        assert_eq!(code, 0, "{err}");
+        let warning = err.find(line).unwrap_or_else(|| panic!("{line}: {err}"));
+        let updating = err.find("Updating dependencies").expect(&err);
+        assert!(warning < updating, "{err}");
+    }
+}

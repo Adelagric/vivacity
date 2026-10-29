@@ -13,7 +13,7 @@ byte-identical-output promise are the public API.
   platform package under that option, so Composer with a PHP is the
   reference: vivacity resolves on the `composer*` packages and the
   `config.platform` overrides, with the same lock, composer.json,
-  vendor/, stdout and stderr (`harness/no-php.sh`, 37 cases, under PHP 8.4
+  vendor/, stdout and stderr (`harness/no-php.sh`, 40 cases, under PHP 8.4
   and 8.5 on Composer's side). What would still depend on the real
   platform stops with exit 3 and its reason, never handed to a Composer
   that would need a PHP too: a `require` of a platform package with no
@@ -141,6 +141,13 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **The pool builder's warnings come before `Updating dependencies`**, as
+  Composer writes them while it builds the pool: an update allow list
+  that matches nothing locked (`Package "…" listed for update is not
+  locked.`, `Pattern "…" listed for update matches platform packages…`,
+  printed by `require` of a platform package too) and a root requirement
+  kept locked (`Dependency … is also a root requirement…`). vivacity
+  printed them after that line, with or without PHP.
 - **A `github-oauth` token goes where Composer sends it, and only there.**
   The github.com token is sent as `token …` to `api.github.com` URLs only
   (it went to github.com and every `*.github.com`, codeload included); a

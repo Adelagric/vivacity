@@ -233,3 +233,7 @@ locked », « Pattern … matches platform packages », « Dependency … is als
 a root requirement ») sont écrits par Composer pendant `buildPool`, avant
 « Updating dependencies » (`PoolBuilder.php:216`, `:539`, `:569` ;
 `Installer.php:533-536`), vivacity les écrivait après — avec PHP aussi.
+Corrigé dans un commit à part : `Pool::filter_warnings` sépare les
+avertissements des filtres de politique (dont la place ne change pas) de
+ceux du constructeur, écrits avant la notice de Flex et « Updating
+dependencies » ; test d'intégration et trois cas de harnais, rouges avant.

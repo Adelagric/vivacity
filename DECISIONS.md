@@ -5242,16 +5242,26 @@ version) les rend connues. Pistes non suivies : compter comme un PHP sans
 extension (une ligne de nombre qui diverge, sans référence), ou une liste
 d'extensions donnée à vivacity.
 
-**Écart trouvé en chemin, hors chantier.** `update <motif>` dont le motif
-ne correspond à rien de verrouillé (« Package … listed for update is not
-locked », « Pattern … matches platform packages ») : Composer écrit
-l'avertissement de `PoolBuilder` AVANT « Updating dependencies », vivacity
-après (avec PHP aussi, binaire de main) — `pool.warnings` mélange les
-avertissements du constructeur et ceux des filtres de politique.
+**Écart trouvé en chemin, corrigé à part.** Les avertissements que
+`PoolBuilder` écrit pendant `buildPool` — la liste d'update (« Package …
+listed for update is not locked », « Pattern … matches platform packages »,
+l. 216) et une exigence racine gardée verrouillée (« Dependency … is also a
+root requirement », l. 539 et 569) — viennent chez Composer AVANT
+« Updating dependencies » (`Installer.php:533-536`), avant aussi la notice
+de Flex (`PRE_POOL_CREATE`, l. 328) ; vivacity les écrivait après, avec PHP
+aussi (binaire de main, mesuré : `update composer-plugin-api`, `require
+ext-foo:^1`, `update acme/nothing`). `Pool` sépare désormais ces
+avertissements de ceux des filtres de politique (`filter_warnings`), dont
+la place — après « Updating dependencies » — ne change pas : elle n'a pas
+été remesurée ici, et par la lecture du code ils sont eux aussi écrits
+dans `createPool` (`SecurityAdvisoryPoolFilter.php:82`,
+`FilterListPoolFilter.php:173`) ; à vérifier sur un dépôt injoignable sous
+`ignore-unreachable`.
 
 Méta-analyse (dix failles) et revue indépendante (neuf points), toutes
 traitées : au plan. Harnais `harness/no-php.sh` (37 cas : 23 de parité, 13
 refus, 1 en ligne) : vert sous PHP 8.5.12 et 8.4.27 côté Composer ; contre
 le binaire de main 091e221, 36 FAIL / 1 OK (`remove --no-update`, le témoin
-de non-régression). Test d'intégration `crates/vivacity/tests/no_php.rs`
-(7 tests, rouges sur main). `cargo test` : 467 tests, 0 échec.
+de non-régression). Avec la correction de l'ordre des avertissements, 40
+cas (3 de plus, rouges avant elle), verts sous 8.5 et 8.4. Test d'intégration `crates/vivacity/tests/no_php.rs`
+(7 tests, rouges sur main). `cargo test` : 467 tests, 0 échec (468 avec le test de l’ordre des avertissements). `steps.sh` (279), `update.sh` (19) et `verbosity.sh` (310) verts après la correction.
