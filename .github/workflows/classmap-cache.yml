@@ -1,0 +1,52 @@
+name: classmap-cache
+
+# On demand: whether a CI cache should carry vivacity's class-map records
+# besides Composer's zip cache (bench/classmap-cache.sh,
+# docs/plans/classmap-cache.md). Cold-runner install, zips only against
+# zips + classmap records, Laravel and Sylius, with and without -o, on the
+# three OSes; the table lands in each job's summary.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "hyperfine runs per arm"
+        required: false
+        default: "10"
+
+jobs:
+  classmap-cache:
+    name: classmap-cache (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:2.10.3
+          # Sylius's lock requires gd, exif, sodium, intl; Laravel's fileinfo.
+          extensions: mbstring, intl, fileinfo, zip, curl, gd, exif, sodium
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+      - name: zstd and jq
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            command -v zstd >/dev/null || brew install zstd
+            command -v jq >/dev/null || brew install jq
+          fi
+          zstd --version || echo "no zstd: the restore column will say n/a"
+          jq --version
+      - run: cargo build --release -p vivacity
+      - name: bench/classmap-cache.sh
+        env:
+          BENCH_RUNS: ${{ inputs.runs }}
+        run: bench/classmap-cache.sh
