@@ -135,6 +135,8 @@ jobs:
         run: harness/net-retry.sh harness/verbosity.sh
       - name: The fallback hands Composer the command line (argv, cwd, env, exit code)
         run: harness/net-retry.sh harness/fallback-args.sh
+      - name: Composer's cache directory (config --global cache-dir and where zips land, env matrix, offline)
+        run: harness/composer-cache-dir.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/net-retry.sh harness/root-scan.sh
