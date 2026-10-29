@@ -94,6 +94,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         return dry_run(&run, &tx);
     }
     let layout = proceed!(native_layout(&run, scope)?);
+    // `PRE_INSTALL_CMD` listeners that print, once the run is known to stay
+    // native (a hand-over after them would have Composer print them again);
+    // nothing else reaches stdout before this point.
+    if !args.after_update() {
+        crate::effect_plugins::patcher_pre(&run.project, &run.manifest, &layout, !args.no_plugins)?;
+    }
     let installed = proceed!(execute_operations(&run, &tx, &layout)?);
     // `Installer::run`, after `doInstall`.
     let (autoload_note, cleaner_counts) = if args.no_autoloader {
@@ -1650,6 +1656,7 @@ fn post_install(
             "symfony/flex",
             vivacity_core::effect_plugins::DG_CLEANER,
             vivacity_core::effect_plugins::VENDOR_CLEANER,
+            vivacity_core::effect_plugins::PATCHER,
         ];
         // `Installer::run` (Installer.php:440): POST_UPDATE_CMD after an
         // update, POST_INSTALL_CMD otherwise. Under -v each listener's line
@@ -1733,6 +1740,31 @@ fn post_install_listener(
             run.with_dev,
             !args.no_plugins,
         )?,
+        vivacity_core::effect_plugins::PATCHER => {
+            if let Some(patched) = crate::effect_plugins::patcher_post(
+                &run.project,
+                &run.manifest,
+                layout,
+                local,
+                run.with_dev,
+                !args.no_plugins,
+            )? {
+                // `setPatchedPackageData`: installed.json written again.
+                let root = vivacity_core::state::RootPackage::detect(
+                    &run.manifest,
+                    &run.project,
+                    run.with_dev,
+                );
+                vivacity_core::state::write_state_files(
+                    &layout.composer_dir(),
+                    &patched,
+                    &root,
+                    &run.manifest,
+                    run.with_dev,
+                    layout,
+                )?;
+            }
+        }
         vivacity_core::c3_plugin::PLUGIN_NAME => emulate_c3(
             &run.project,
             local,

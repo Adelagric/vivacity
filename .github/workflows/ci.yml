@@ -107,6 +107,8 @@ jobs:
         run: harness/net-retry.sh harness/composer-packages.sh
       - name: infection/extension-installer, typo3/class-alias-loader and cms-composer-installers (inert under typo3/cms)
         run: harness/net-retry.sh harness/plugins-round3.sh
+      - name: mlocati/composer-patcher (patches applied by patch, patches_applied in installed.json)
+        run: harness/net-retry.sh harness/composer-patcher.sh
       - name: composer/package-versions-deprecated (Versions.php generated from the lock)
         run: harness/net-retry.sh harness/package-versions.sh
       - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)

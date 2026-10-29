@@ -77,8 +77,19 @@ pub(crate) fn dump_autoload_plan(
                                 == Some(vivacity_core::effect_plugins::VENDOR_CLEANER)
                         }),
                 // Its generated classes stay under vendor/ whether the
-                // plugin runs or not (`--no-plugins`, refused, removed).
-                mutable_copies: vec![vivacity_core::effect_plugins::DRUPOL.to_owned()],
+                // plugin runs or not (`--no-plugins`, refused, removed);
+                // and the copies mlocati/composer-patcher patches (or did:
+                // installed.json says so).
+                mutable_copies: std::iter::once(vivacity_core::effect_plugins::DRUPOL.to_owned())
+                    .chain(vivacity_core::composer_patcher::patched_copies(
+                        manifest,
+                        lock.packages
+                            .iter()
+                            .chain(lock.packages_dev.iter())
+                            .map(|p| &p.raw),
+                        &vivacity_core::layout::installed_packages_of(project, manifest),
+                    ))
+                    .collect(),
             })
         },
     };

@@ -73,6 +73,8 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     // TYPO3 installers, inert under the root `typo3/cms` (observed).
     crate::effect_plugins::CLASS_ALIAS_LOADER,
     crate::effect_plugins::CMS_INSTALLERS,
+    // `PRE_INSTALL_CMD` / `POST_INSTALL_CMD`: patches applied by `patch`.
+    crate::effect_plugins::PATCHER,
 ];
 
 /// The versions of the listeners vivacity reproduces whose code changed
@@ -435,6 +437,8 @@ pub const RESOLUTION_INERT: &[&str] = &[
     // TYPO3 installers, inert under the root `typo3/cms` (observed).
     crate::effect_plugins::CLASS_ALIAS_LOADER,
     crate::effect_plugins::CMS_INSTALLERS,
+    // `PRE_INSTALL_CMD` / `POST_INSTALL_CMD`: patches applied by `patch`.
+    crate::effect_plugins::PATCHER,
 ];
 
 /// A resolution command, for the per-plugin rules below.

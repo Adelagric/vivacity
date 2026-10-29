@@ -435,3 +435,177 @@ pub(crate) fn composer_packages(
     vivacity_core::out!("drupol/composer-packages: Done.");
     Ok(())
 }
+
+/// `PATH` as `EventDispatcher::ensureBinDirIsInPath` leaves it for a
+/// plugin's listener: the bin directory (`realpath`) first when it exists
+/// and is not in `PATH` yet. `None`: unchanged.
+fn path_with_bin_dir(bin: &std::path::Path) -> Option<std::ffi::OsString> {
+    if !bin.is_dir() {
+        return None;
+    }
+    let real = std::fs::canonicalize(bin).ok()?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&path).any(|p| p == real) {
+        return None;
+    }
+    std::env::join_paths(std::iter::once(real).chain(std::env::split_paths(&path))).ok()
+}
+
+fn patcher_loaded_at_start(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    plugins_enabled: bool,
+) -> Option<Vec<serde_json::Value>> {
+    if !plugins_enabled || !allowed(manifest, fx::PATCHER) {
+        return None;
+    }
+    let installed = crate::plugin_order::installed_json_packages(
+        &crate::manifest::composer_dir_of(project, manifest),
+    );
+    installed
+        .iter()
+        .any(|p| p.get("name").and_then(serde_json::Value::as_str) == Some(fx::PATCHER))
+        .then_some(installed)
+}
+
+/// mlocati/composer-patcher's `preOperation` (`PRE_INSTALL_CMD`), the
+/// plugin loaded from installed.json: its collection lines (a package it
+/// would uninstall was handed over by `effect_plugins::issues`).
+pub(crate) fn patcher_pre(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    layout: &vivacity_core::layout::Layout,
+    plugins_enabled: bool,
+) -> anyhow::Result<()> {
+    use vivacity_core::composer_patcher as cp;
+    let Some(installed) = patcher_loaded_at_start(project, manifest, plugins_enabled) else {
+        return Ok(());
+    };
+    let Some(root) = manifest.as_object() else {
+        return Ok(());
+    };
+    let mut entries: Vec<&serde_json::Map<String, serde_json::Value>> = installed
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .collect();
+    entries.sort_by(|a, b| package_name(a).cmp(package_name(b)));
+    let vendor = layout.vendor_dir();
+    let sources: Vec<cp::Source<'_>> = entries
+        .iter()
+        .map(|p| cp::Source {
+            package: p,
+            dir: vendor.join(package_name(p)),
+        })
+        .collect();
+    let root_source = cp::Source {
+        package: root,
+        dir: project.to_path_buf(),
+    };
+    let collection =
+        cp::collect(manifest, &root_source, &sources).map_err(|e| anyhow::anyhow!("{e}"))?;
+    for line in &collection.lines {
+        vivacity_core::out!("{line}");
+    }
+    Ok(())
+}
+
+fn package_name(p: &serde_json::Map<String, serde_json::Value>) -> &str {
+    p.get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// mlocati/composer-patcher's `postOperation` (`POST_INSTALL_CMD`): the
+/// collection from the packages the install leaves, its lines, each
+/// patch applied by `patch` (vivacity_core::composer_patcher), and the
+/// local repository with `extra.patches_applied` set on the packages whose
+/// patches all passed — `Some` when installed.json must be written again.
+/// The packages in installed.json's order (by name): Composer's own order
+/// after a fresh install is that of its parallel extractions.
+pub(crate) fn patcher_post(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    layout: &vivacity_core::layout::Layout,
+    local: &vivacity_core::lock::Lock,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> anyhow::Result<Option<vivacity_core::lock::Lock>> {
+    use vivacity_core::composer_patcher as cp;
+    if !active(local, manifest, with_dev, plugins_enabled, fx::PATCHER) {
+        return Ok(None);
+    }
+    let Some(root) = manifest.as_object() else {
+        return Ok(None);
+    };
+    let mut packages: Vec<&vivacity_core::lock::LockPackage> =
+        local.wanted_packages(with_dev).collect();
+    packages.sort_by(|a, b| a.name().cmp(b.name()));
+    let sources: Vec<cp::Source<'_>> = packages
+        .iter()
+        .map(|p| cp::Source {
+            package: &p.raw,
+            dir: layout
+                .abs(p.name())
+                .unwrap_or_else(|| layout.vendor_dir().join(p.name())),
+        })
+        .collect();
+    let root_source = cp::Source {
+        package: root,
+        dir: project.to_path_buf(),
+    };
+    let collection =
+        cp::collect(manifest, &root_source, &sources).map_err(|e| anyhow::anyhow!("{e}"))?;
+    for line in &collection.lines {
+        vivacity_core::out!("{line}");
+    }
+    if collection.patches.is_empty() {
+        vivacity_core::out!("No patches supplied.");
+        return Ok(None);
+    }
+    let mut patcher = cp::Patcher::new(path_with_bin_dir(&layout.bin_dir()));
+    let mut records: Vec<(String, serde_json::Value)> = Vec::new();
+    for p in &packages {
+        let patches = collection.for_package(p.name(), p.version());
+        if patches.is_empty() {
+            continue;
+        }
+        let Some(dir) = layout.abs(p.name()) else {
+            continue;
+        };
+        // A store-backed copy gets inodes of its own before `patch` writes.
+        cp::detach(&dir)?;
+        let mut all_passed = true;
+        for patch in &patches {
+            let outcome = patcher.apply(patch, &dir)?;
+            vivacity_core::out!(
+                "Applying patch {}/{} to {}... {}",
+                patch.from_name,
+                patch.description,
+                p.name(),
+                outcome.text()
+            );
+            if matches!(outcome, cp::Outcome::Failed(_)) {
+                all_passed = false;
+            }
+        }
+        if all_passed {
+            if let Some(record) = cp::applied_record(&patches) {
+                records.push((p.name().to_owned(), record));
+            }
+        }
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let mut patched = local.clone();
+    for p in patched
+        .packages
+        .iter_mut()
+        .chain(patched.packages_dev.iter_mut())
+    {
+        if let Some((_, record)) = records.iter().find(|(n, _)| n == p.name()) {
+            cp::set_applied(&mut p.raw, record.clone());
+        }
+    }
+    Ok(Some(patched))
+}

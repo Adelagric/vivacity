@@ -11,6 +11,7 @@ pub mod class_alias_loader;
 pub mod clone;
 pub mod composer_cleaner;
 pub mod composer_packages;
+pub mod composer_patcher;
 pub mod constraint;
 pub mod content_hash;
 pub mod custom_installers;

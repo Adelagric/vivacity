@@ -59,7 +59,7 @@ pub const CAKEPHP: &str = cakephp_plugins::PLUGIN_NAME;
 pub const DRUPOL: &str = composer_packages::PLUGIN_NAME;
 pub const CLASS_ALIAS_LOADER: &str = crate::class_alias_loader::PLUGIN_NAME;
 pub const CMS_INSTALLERS: &str = "typo3/cms-composer-installers";
-pub const PATCHER: &str = "mlocati/composer-patcher";
+pub const PATCHER: &str = crate::composer_patcher::PLUGIN_NAME;
 
 /// The seven plugins and the versions whose source was read (normalized):
 /// another version goes to Composer, named. Tags with identical sources
@@ -103,6 +103,7 @@ pub const READ_VERSIONS: &[(&str, &[&str], &str)] = &[
         &["5.0.2.0"],
         "other versions were not observed",
     ),
+    (PATCHER, &["1.2.6.0"], "other versions were not read"),
 ];
 
 /// The configuration files `ConfigDiscovery` (laminas-component-installer
@@ -250,11 +251,17 @@ pub fn issues(ctx: &Context<'_>) -> Vec<String> {
     drupol_issues(ctx, &mut out);
     class_alias_loader_issues(ctx, &mut out);
     cms_installers_issues(ctx, &mut out);
+    patcher_issues(ctx, &mut out);
     out
 }
 
+/// PHP's `(bool)` of a decoded value.
+pub fn php_truthy(v: &Value) -> bool {
+    !php_empty(Some(v))
+}
+
 /// PHP's `empty()` of a decoded (assoc) value.
-fn php_empty(v: Option<&Value>) -> bool {
+pub fn php_empty(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) => true,
         Some(Value::Bool(b)) => !b,
@@ -817,6 +824,222 @@ fn reindent(text: &str, indent: &str) -> String {
         }
     }
     out
+}
+
+/// The packages of the local repository the run ends with, as patch
+/// sources: each with its install directory (`<vendor>/<name>`).
+fn patch_sources<'a>(
+    entries: impl Iterator<Item = &'a Map<String, Value>>,
+    vendor: &Path,
+) -> Vec<crate::composer_patcher::Source<'a>> {
+    entries
+        .map(|p| crate::composer_patcher::Source {
+            package: p,
+            dir: vendor.join(name_of(p)),
+        })
+        .collect()
+}
+
+/// A package the local repository holds twice (a dev version's branch
+/// alias, an inline alias of the lock): composer-patcher collects and
+/// applies per entry.
+fn aliased(p: &Map<String, Value>, lock_aliases: bool) -> bool {
+    let version = p.get("version").and_then(Value::as_str).unwrap_or_default();
+    lock_aliases
+        || crate::root_version::branch_alias_of(
+            version,
+            p.get("extra"),
+            p.get("default-branch") == Some(&Value::Bool(true)),
+        )
+        .is_some()
+}
+
+/// The local repository's order of a fresh dump: installed.json sorts by
+/// name.
+fn by_name<'a>(entries: &[&'a Map<String, Value>]) -> Vec<&'a Map<String, Value>> {
+    let mut v = entries.to_vec();
+    v.sort_by(|a, b| name_of(a).cmp(name_of(b)));
+    v
+}
+
+fn patcher_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    let loaded = ctx.plugins_enabled
+        && allowed(ctx.manifest, PATCHER)
+        && ctx.installed_entry(PATCHER).is_some();
+    let active = ctx.active(PATCHER);
+    if (!loaded && !active) || matches!(ctx.command, Command::DumpAutoload) {
+        return;
+    }
+    let reason = |why: String| format!("plugin {PATCHER} {why}");
+    if windows_issue(ctx, PATCHER, out) {
+        return;
+    }
+    if !matches!(ctx.command, Command::Install) {
+        out.push(reason(
+            "listens to pre-update-cmd and post-update-cmd (not emulated)".to_owned(),
+        ));
+        return;
+    }
+    if let Some(why) = crate::composer_patcher::config_issue(ctx.manifest) {
+        out.push(reason(format!("with {why} (not emulated)")));
+        return;
+    }
+    let Some(root) = ctx.manifest.as_object() else {
+        return;
+    };
+    let Ok(dirs) = crate::dirs::Dirs::resolve(ctx.manifest) else {
+        return;
+    };
+    let vendor = dirs.vendor_dir(ctx.project);
+    let root_source = crate::composer_patcher::Source {
+        package: root,
+        dir: ctx.project.to_path_buf(),
+    };
+    let root_name = name_of(root).to_ascii_lowercase();
+    // `PRE_INSTALL_CMD`, the plugin loaded from installed.json: the
+    // collection from the packages installed at the start (and the files
+    // of those versions), and the packages it would uninstall.
+    let installed: Vec<&Map<String, Value>> =
+        ctx.installed.iter().filter_map(Value::as_object).collect();
+    if loaded {
+        let installed = by_name(&installed);
+        let sources = patch_sources(installed.iter().copied(), &vendor);
+        match crate::composer_patcher::collect(ctx.manifest, &root_source, &sources) {
+            Err(e) => {
+                out.push(reason(format!("with {e} (not emulated)")));
+                return;
+            }
+            Ok(c) if !c.patches.is_empty() => {
+                for p in &installed {
+                    let version = p.get("version").and_then(Value::as_str).unwrap_or_default();
+                    let patches = c.for_package(name_of(p), version);
+                    if patches.is_empty() {
+                        continue;
+                    }
+                    match crate::composer_patcher::must_uninstall(p, &patches) {
+                        Some(false) => {}
+                        Some(true) => {
+                            out.push(reason(format!(
+                                "would uninstall {} to patch it again (its patches changed; not emulated)",
+                                name_of(p)
+                            )));
+                            return;
+                        }
+                        None => {
+                            out.push(reason(format!(
+                                "cannot read a patch file for {} (not emulated)",
+                                name_of(p)
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+        if let Some(p) = installed
+            .iter()
+            .find(|p| aliased(p, false) && (patch_source(ctx.manifest, p) || c_targets_any(ctx, p)))
+        {
+            out.push(reason(format!(
+                "with {} aliased in the local repository (collected or patched once per entry; not emulated)",
+                name_of(p)
+            )));
+            return;
+        }
+    }
+    if !active {
+        return;
+    }
+    // `POST_INSTALL_CMD`: the lock's packages, as the run leaves them.
+    let local = by_name(&ctx.local);
+    let sources = patch_sources(local.iter().copied(), &vendor);
+    let collection = match crate::composer_patcher::collect(ctx.manifest, &root_source, &sources) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(reason(format!("with {e} (not emulated)")));
+            return;
+        }
+    };
+    for target in collection.targets() {
+        if target == root_name {
+            out.push(reason(format!(
+                "would patch the root package {target} (not emulated)"
+            )));
+            return;
+        }
+        let Some(p) = local.iter().find(|p| name_of(p) == target) else {
+            continue;
+        };
+        let dist_type = p
+            .get("dist")
+            .and_then(|d| d.get("type"))
+            .and_then(Value::as_str);
+        let from_source = installed.iter().any(|i| {
+            name_of(i) == target
+                && i.get("installation-source").and_then(Value::as_str) == Some("source")
+        });
+        if dist_type == Some("path")
+            || p.get("dist").is_none_or(Value::is_null)
+            || from_source
+            || p.get("type").and_then(Value::as_str) == Some("metapackage")
+        {
+            out.push(reason(format!(
+                "would patch {target}, a path, source or metapackage install (not emulated)"
+            )));
+            return;
+        }
+        if aliased(p, ctx.aliases) {
+            out.push(reason(format!(
+                "would patch {target}, aliased in the local repository (not emulated)"
+            )));
+            return;
+        }
+    }
+    if let Some(p) = local
+        .iter()
+        .find(|p| patch_source(ctx.manifest, p) && aliased(p, ctx.aliases))
+    {
+        out.push(reason(format!(
+            "with the patch source {} aliased in the local repository (not emulated)",
+            name_of(p)
+        )));
+    }
+}
+
+/// The package is one whose `extra.patches` the plugin collects.
+fn patch_source(manifest: &Value, p: &Map<String, Value>) -> bool {
+    let has = p
+        .get("extra")
+        .and_then(|e| e.get("patches"))
+        .is_some_and(|v| !v.is_null());
+    let allowed = match manifest
+        .get("extra")
+        .and_then(|e| e.get("allow-subpatches"))
+    {
+        Some(Value::Bool(true)) => true,
+        Some(Value::Array(a)) => a.iter().any(|n| n.as_str() == Some(name_of(p))),
+        _ => false,
+    };
+    has && allowed
+}
+
+/// Some collected patch of the lock or the root names this package.
+fn c_targets_any(ctx: &Context<'_>, p: &Map<String, Value>) -> bool {
+    let name = name_of(p);
+    let keys = |e: &Map<String, Value>| -> bool {
+        e.get("extra")
+            .and_then(|x| x.get("patches"))
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.keys().any(|k| k.split(':').next() == Some(name)))
+    };
+    ctx.manifest.as_object().is_some_and(keys)
+        || ctx
+            .installed
+            .iter()
+            .filter_map(Value::as_object)
+            .chain(ctx.local.iter().copied())
+            .any(keys)
 }
 
 fn class_alias_loader_issues(ctx: &Context<'_>, out: &mut Vec<String>) {

@@ -234,6 +234,10 @@ pub(crate) const VERBOSE_DELEGATED: &[(&str, &str)] = &[
         "it writes a line from inside its pre-autoload-dump listener, among typo3/cms-composer-installers' listener lines",
     ),
     (
+        "mlocati/composer-patcher",
+        "it writes a line per package without patches at -v",
+    ),
+    (
         "typo3/cms-composer-installers",
         "it writes a line of its own between its post-autoload-dump listeners (observed)",
     ),
