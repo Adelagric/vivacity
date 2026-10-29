@@ -65,6 +65,15 @@ jobs:
           # lock requires ext-fileinfo).
           extensions: mbstring, intl, fileinfo, zip, curl
 
+      # What the cache restored proves nothing about where vivacity writes:
+      # its files/ goes, so that the install below must fill it again.
+      - name: Empty the restored files/ of the resolved cache directory
+        env:
+          CACHE_DIR: ${{ steps.setup.outputs.composer-cache-dir }}
+        run: |
+          : "${CACHE_DIR:?the action resolved no cache directory}"
+          rm -rf "$CACHE_DIR/files"
+
       - name: Install the Laravel skeleton with vivacity (network)
         working-directory: fixtures/projects/laravel
         run: |
@@ -95,11 +104,12 @@ jobs:
           CACHE_DIR_CC: ${{ steps.setup-cc.outputs.composer-cache-dir }}
           CC: ${{ runner.temp }}/cc
         run: |
-          expected="$(composer config --global cache-dir)"
+          # Composer ends its line with PHP_EOL (\r\n on Windows).
+          expected="$(composer config --global cache-dir | tr -d '\r')"
           echo "action:   [$CACHE_DIR]"
           echo "composer: [$expected]"
           test "$CACHE_DIR" = "$expected"
-          expected_cc="$(COMPOSER_CACHE_DIR="$CC" composer config --global cache-dir)"
+          expected_cc="$(COMPOSER_CACHE_DIR="$CC" composer config --global cache-dir | tr -d '\r')"
           echo "action:   [$CACHE_DIR_CC]"
           echo "composer: [$expected_cc]"
           test -n "$CACHE_DIR_CC"
