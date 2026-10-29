@@ -4826,3 +4826,82 @@ d'une délégation (doc). Laissés, consignés au HANDOVER : `config` refuse
 sort en 1 et `config` répond (hors du cache) ; la branche `cygpath -m` presque morte (MSYS
 convertit déjà `/c/…` pour un binaire natif), gardée comme demandé. La notice à chaque run sous `cache: 'false'` a été retirée à la
 vérification : un cache coupé exprès se dit dans le journal, pas en annotation.
+
+## 2026-10-29 — Le jeton du job pour GitHub, aux deux côtés ; permissions en lecture ; un refus de GitHub nommé, pas relancé (docs/plans/ci-github-token.md)
+
+Contexte : run 40894179601, job `parity (macos-latest)`, `flex-update.sh` rouge
+sur ses 25 cas, dans la préparation de la référence : « In AuthHelper.php
+line 152: Could not authenticate against github.com » (Composer non
+interactif après un 401/403 de api.github.com ; la cause exacte n'est pas
+imprimée). Mesuré : un zipball anonyme ne décrémente pas le compteur `core`
+(`x-ratelimit-used: 0`), donc c'est une autre limite, vraisemblablement par
+IP, que les runners macOS partagent. setup-php écrit déjà le jeton du job
+dans `~/.composer/auth.json` ; flex-update.sh, à COMPOSER_HOME privé sans
+copie de ce fichier et à cache vierge par run (~150 zipballs), téléchargeait
+anonymement.
+
+- **`COMPOSER_AUTH` au niveau des jobs `parity`** (ci.yml, windows.yml) :
+  `{"github-oauth":{"github.com":<github.token>}}`. Composer et vivacity le
+  lisent pareil, donc chaque côté de chaque harnais est authentifié, y
+  compris un harnais à home privé à venir. Écartés : recopier `auth.json`
+  dans chaque harnais (dépend de ce qu'écrit setup-php, à refaire pour
+  chaque nouveau harnais) ; seulement réchauffer les caches (moins de
+  volume, mais toujours anonyme sur une IP partagée). Pas de garde
+  « jeton vide » : `github.token` est émis pour chaque run, en lecture seule
+  sur un PR de fork. corpus.yml retombe sur ce jeton sans son secret.
+- **Moins de volume aussi** : flex-update.sh et flex-recipes.sh prennent le
+  cache de fichiers global (comme plugin-lines.sh), que `actions/cache`
+  restaure avec les dists de la fixture symfony ; les lignes `  - Downloading`
+  y étaient déjà hors comparaison.
+- **Permissions** : `contents: read` en tête de ci, windows, action-test,
+  bench, ci-cache, corpus, drift — les harnais exécutent le PHP de plugins
+  tiers avec le jeton à portée (COMPOSER_AUTH, l'auth.json de setup-php, la
+  configuration git de checkout). Le dépôt est déjà réglé en lecture
+  (`Contents/Metadata/Packages: read` dans le run) ; l'écrire le fige contre
+  un changement de réglage et retire `packages`. drift.yml avait
+  `issues: write` pour tout le workflow, donc dans l'auth.json lu par les
+  plugins de ses harnais : le rapport passe dans un job `report`
+  (`issues: write`, `needs: drift`, `if: !cancelled() && échec`), sans
+  checkout ni plugin, qui lit un artefact par canal et n'en garde que les
+  valeurs que le job de drift peut produire (canal, issues, version au
+  motif strict).
+- **vivacity envoie le jeton là où Composer l'envoie** (`fetch.rs`) : une
+  authentification par origine (`Url::getOrigin` : `*.github.com` sauf
+  codeload → github.com, repo.packagist.org → packagist.org, port compris ;
+  `findAuthOrigin`), la dernière chargée gagne (bearer > http-basic >
+  github-oauth), le jeton de github.com en `token` vers
+  `^https?://api.github.com/` SEULEMENT, un domaine GitHub Enterprise en
+  `Basic jeton:x-oauth-basic`, et les sources dans l'ordre de Factory
+  (auth.json global, du projet, puis COMPOSER_AUTH). Avant : `token` vers
+  github.com et tout `*.github.com` (codeload compris), vers les domaines GHE,
+  github > bearer > basic par hôte, COMPOSER_AUTH sous l'auth.json du projet.
+  Sans effet avec un jeton valide ; avec un jeton révoqué, codeload aurait
+  répondu 401 à vivacity et 200 à Composer. `harness/auth-hosts.sh` le
+  prouve sans réseau (mandataire HTTP local qui journalise les en-têtes,
+  302 api → codeload) : rouge avec le binaire de main 5768dc9 (codeload,
+  github.com, objects.github.com, GHE, ordre), vert après ; et le jeton ne
+  change ni stdout, ni stderr, ni le projet, d'un côté comme de l'autre.
+- **net-retry.sh** : un refus de GitHub (« Could not authenticate against
+  github.com », 403 de codeload, 429 non relancé de Composer ; 401/403/429
+  du client de vivacity sur api/codeload) n'est **pas relancé** — sa limite
+  se compte à l'heure ou par IP, un second passage la dépense encore — et le
+  code du harnais est gardé : rouge reste rouge. La raison est écrite (quel
+  libellé : celui de Composer, ou celui de vivacity seul, qui peut être
+  vivacity envoyant ce que Composer n'enverrait pas ; COMPOSER_AUTH posé ou
+  non, jamais sa valeur), `::error::` sous GitHub Actions. Écarté : une
+  attente longue puis une relance (jusqu'à une heure de runner macOS pour
+  une issue incertaine) ; un vert toléré (masquerait une régression de
+  l'authentification de vivacity). `harness/net-retry-selftest.sh` rejoue
+  l'extrait capturé : rouge sur l'ancien script (6 cas), vert sur le
+  nouveau, les 5 cas de comportement inchangé verts sur les deux.
+- **Restent** (HANDOVER) : vivacity ignore `secure-http` (télécharge un
+  dist `http://` que Composer refuse, avec ses identifiants s'il y en a —
+  préexistant) ; deux types d'auth sur une origine : Composer écrit
+  « avoid overwriting already defined auth settings », vivacity non ; les
+  clés d'auth posées dans `config` (composer.json, config.json global) non
+  lues ; un harnais qui n'imprime pas la stderr de l'outil ne laisse pas
+  net-retry voir le refus. Ce qui ne se prouve qu'en CI : que le jeton du
+  job passe la limite d'un runner macOS, et ce qu'un zipball authentifié
+  coûte au budget de 1 000 requêtes/heure du dépôt — les deux étapes
+  « GitHub API budget » de ci.yml lisent `/rate_limit` (gratuit) aux deux
+  bouts du job.
