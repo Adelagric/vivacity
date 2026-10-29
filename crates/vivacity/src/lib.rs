@@ -607,6 +607,16 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
             }
         }
     }
+    // Composer's cache directory as `Config::get('cache-dir')` resolves it:
+    // what vivacity does not reproduce is Composer's, whole, before anything
+    // is read or written (docs/plans/action-cache.md).
+    if let Some(reason) = cli.cache_dir_hand_over() {
+        return delegate_for_verbosity(
+            tail,
+            &reason,
+            &format!("change the cache directory settings ({reason})"),
+        );
+    }
     // The `_composer_tmpN` counter belongs to one run, like a process.
     verbose_listeners::reset();
     // Under -v, a resolution that installs may still go to Composer once
@@ -774,6 +784,26 @@ impl Cli {
             Cli::Remove(a) => a.no_plugins,
             Cli::Require(a) => a.no_plugins,
         }
+    }
+
+    /// Why the command goes to Composer because of the cache directory, if
+    /// it must: what `fetch::cache_dir_hand_over` names, and a relative
+    /// cache directory under `--working-dir`, which Composer resolves from
+    /// there (`Config::realpath`, after `Application::doRun`'s `chdir`)
+    /// where vivacity, which never changes directory, would not.
+    /// `dump-autoload` reads no cache.
+    fn cache_dir_hand_over(&self) -> Option<String> {
+        let reads_cache = match self {
+            Cli::DumpAutoload(_) => false,
+            Cli::Install(_) | Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) => true,
+        };
+        if let Some(why) = vivacity_core::fetch::cache_dir_hand_over(reads_cache) {
+            return Some(why);
+        }
+        (reads_cache
+            && self.working_dir().is_some()
+            && vivacity_core::fetch::cache_dir_is_relative())
+        .then(|| "a relative cache-dir with --working-dir".to_owned())
     }
 }
 

@@ -98,106 +98,340 @@ impl Auth {
     }
 }
 
-/// `Factory::useXdg`: true as soon as any `XDG_*` environment variable exists.
-#[cfg(not(windows))]
-fn use_xdg() -> bool {
-    std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("XDG_"))
+/// What `Factory` and `Config` read of the machine to place Composer's
+/// directories: the environment, a few directory probes, the OS. A trait so
+/// that the tests can play Windows, a Linux with `/etc/xdg`, or a missing
+/// `HOME`, on any host.
+pub(crate) trait Host {
+    /// `Platform::getEnv`: `None` when unset (PHP's `false`), the value
+    /// otherwise, empty included.
+    fn env(&self, name: &str) -> Option<String>;
+    /// Some environment variable whose name starts with `XDG_` exists.
+    fn any_xdg_env(&self) -> bool;
+    fn is_dir(&self, path: &str) -> bool;
+    /// `Platform::isWindows`.
+    fn windows(&self) -> bool;
+    /// `PHP_OS === 'Darwin'`.
+    fn darwin(&self) -> bool;
+    /// `config.<key>` of `<home>/config.json`.
+    fn global_config(&self, home: &str, key: &str) -> Option<Value>;
 }
 
-#[cfg(not(windows))]
-fn user_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h.trim_end_matches('/')))
+/// The running process.
+struct RealHost;
+
+impl Host for RealHost {
+    fn env(&self, name: &str) -> Option<String> {
+        std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
+    }
+    fn any_xdg_env(&self) -> bool {
+        std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("XDG_"))
+    }
+    fn is_dir(&self, path: &str) -> bool {
+        Path::new(path).is_dir()
+    }
+    fn windows(&self) -> bool {
+        cfg!(windows)
+    }
+    fn darwin(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+    fn global_config(&self, home: &str, key: &str) -> Option<Value> {
+        let v = crate::jsonfile::read(&Path::new(home).join("config.json"))?;
+        v.get("config")?.get(key).cloned()
+    }
+}
+
+/// PHP truthiness of an environment value: set, not empty, not `"0"`.
+fn truthy(v: Option<String>) -> Option<String> {
+    v.filter(|s| !s.is_empty() && s != "0")
+}
+
+/// `strtr($s, '\\', '/')` then `rtrim(…, '/')`.
+fn slashes_trimmed(s: &str) -> String {
+    s.replace('\\', "/").trim_end_matches('/').to_owned()
+}
+
+/// `Factory::useXdg`: any `XDG_*` environment variable, or a `/etc/xdg`
+/// directory.
+fn use_xdg(h: &dyn Host) -> bool {
+    h.any_xdg_env() || h.is_dir("/etc/xdg")
+}
+
+/// `Factory::getUserDir`: HOME, separators normalised and trailing ones
+/// trimmed; Composer stops without it.
+fn user_dir(h: &dyn Host) -> std::result::Result<String, String> {
+    truthy(h.env("HOME"))
+        .map(|home| slashes_trimmed(&home))
+        .ok_or_else(|| "neither HOME nor COMPOSER_HOME is set, where Composer stops".to_owned())
 }
 
 /// `Factory::getHomeDir` (docs/reference/Factory.php): COMPOSER_HOME, else
-/// on Windows `%APPDATA%/Composer`, else the first existing directory among
-/// `$XDG_CONFIG_HOME/composer` (if XDG is in use) and `~/.composer`, else
-/// the first candidate.
-pub fn composer_home() -> Option<PathBuf> {
-    if let Ok(h) = std::env::var("COMPOSER_HOME") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
-        }
+/// on Windows `%APPDATA%/Composer` (Composer stops without APPDATA), else
+/// the first existing directory among `$XDG_CONFIG_HOME/composer` (if XDG
+/// is in use) and `~/.composer`, else the first candidate.
+fn home_dir(h: &dyn Host) -> std::result::Result<String, String> {
+    if let Some(home) = truthy(h.env("COMPOSER_HOME")) {
+        return Ok(home);
     }
-    #[cfg(windows)]
-    {
-        // Composer requires APPDATA on Windows (throws otherwise); here it
-        // is None, and the layers above (auth.json, config.json) cope
-        // without it.
-        std::env::var("APPDATA")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|a| PathBuf::from(a.trim_end_matches(['/', '\\'])).join("Composer"))
+    if h.windows() {
+        return truthy(h.env("APPDATA"))
+            .map(|a| format!("{}/Composer", slashes_trimmed(&a)))
+            .ok_or_else(|| {
+                "neither APPDATA nor COMPOSER_HOME is set, where Composer stops".to_owned()
+            });
     }
-    #[cfg(not(windows))]
-    {
-        let user = user_dir()?;
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if use_xdg() {
-            let xdg = std::env::var("XDG_CONFIG_HOME")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| user.join(".config"));
-            dirs.push(xdg.join("composer"));
+    let user = user_dir(h)?;
+    let mut dirs: Vec<String> = Vec::new();
+    if use_xdg(h) {
+        let xdg = truthy(h.env("XDG_CONFIG_HOME")).unwrap_or_else(|| format!("{user}/.config"));
+        dirs.push(format!("{xdg}/composer"));
+    }
+    dirs.push(format!("{user}/.composer"));
+    let first = dirs.first().cloned().unwrap_or_default();
+    Ok(dirs.into_iter().find(|d| h.is_dir(d)).unwrap_or(first))
+}
+
+/// `Platform::expandPath`: a leading `~/` (or `~\`) becomes the user's
+/// directory; a leading `$VAR` or `%VAR%` becomes the variable's value (the
+/// empty string when unset; `$HOME` falls back to USERPROFILE on Windows).
+/// `Err` where Composer would ask the password database for the user's
+/// directory (no HOME at all), which is not reproduced.
+fn expand_path(h: &dyn Host, path: &str) -> std::result::Result<String, String> {
+    if let Some(rest) = path.strip_prefix('~') {
+        if rest.starts_with(['/', '\\']) {
+            // `Platform::getUserDirectory`: HOME as it is, set even empty.
+            let user = match h.env("HOME") {
+                Some(home) => home,
+                None => h
+                    .env("USERPROFILE")
+                    .filter(|_| h.windows())
+                    .ok_or_else(|| "`~` in the cache directory without HOME".to_owned())?,
+            };
+            return Ok(format!("{user}{rest}"));
         }
-        dirs.push(user.join(".composer"));
-        dirs.iter()
-            .find(|d| d.is_dir())
-            .cloned()
-            .or_else(|| dirs.first().cloned())
+        return Ok(path.to_owned());
+    }
+    let percent = match path.chars().next() {
+        Some('$') => false,
+        Some('%') => true,
+        _ => return Ok(path.to_owned()),
+    };
+    let body = &path[1..];
+    // `\w++` without the `u` modifier: ASCII word characters, possessive.
+    let len = body
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    if len == 0 {
+        return Ok(path.to_owned());
+    }
+    let var = &body[..len];
+    let rest = if percent {
+        match body[len..].strip_prefix('%') {
+            Some(rest) => rest,
+            None => return Ok(path.to_owned()),
+        }
+    } else {
+        &body[len..]
+    };
+    let value = if h.windows() && var == "HOME" {
+        truthy(h.env("HOME")).or_else(|| h.env("USERPROFILE"))
+    } else {
+        h.env(var)
+    };
+    Ok(format!("{}{rest}", value.unwrap_or_default()))
+}
+
+/// `Factory::getCacheDir`, the default `cache-dir`: COMPOSER_CACHE_DIR;
+/// else `$COMPOSER_HOME/cache`; Windows -> `%LOCALAPPDATA%/Composer` (else
+/// `<home>/cache`); Darwin -> `~/Library/Caches/composer`;
+/// `~/.composer/cache` if the home is `~/.composer` and it exists; XDG ->
+/// `$XDG_CACHE_HOME/composer`; else `<home>/cache`. Strings are joined as
+/// Composer joins them (`/tmp/h/` gives `/tmp/h//cache`).
+fn factory_cache_dir(h: &dyn Host, home: &str) -> std::result::Result<String, String> {
+    if let Some(dir) = truthy(h.env("COMPOSER_CACHE_DIR")) {
+        return Ok(dir);
+    }
+    if let Some(home_env) = truthy(h.env("COMPOSER_HOME")) {
+        return Ok(format!("{home_env}/cache"));
+    }
+    if h.windows() {
+        let dir = match truthy(h.env("LOCALAPPDATA")) {
+            Some(local) => format!("{local}/Composer"),
+            None => format!("{home}/cache"),
+        };
+        return Ok(slashes_trimmed(&dir));
+    }
+    let user = user_dir(h)?;
+    if h.darwin() {
+        // Composer also moves a legacy `<home>/cache` there: not reproduced
+        // (it only ever moves a directory vivacity does not read).
+        return Ok(format!("{user}/Library/Caches/composer"));
+    }
+    if home == format!("{user}/.composer") && h.is_dir(&format!("{home}/cache")) {
+        return Ok(format!("{home}/cache"));
+    }
+    if use_xdg(h) {
+        let xdg = truthy(h.env("XDG_CACHE_HOME")).unwrap_or_else(|| format!("{user}/.cache"));
+        return Ok(format!("{xdg}/composer"));
+    }
+    Ok(format!("{home}/cache"))
+}
+
+/// A `{$key}` reference, which `Config::process` would substitute.
+fn has_config_reference(s: &str) -> bool {
+    // `#\{\$(.+)\}#`: `{$`, at least one character, then a `}`.
+    s.match_indices("{$")
+        .any(|(at, _)| s[at + 2..].chars().skip(1).any(|c| c == '}'))
+}
+
+/// `Config::get('home')`: the home, expanded, trailing separators trimmed —
+/// the directory whose config.json and auth.json Composer reads.
+fn config_home(h: &dyn Host) -> std::result::Result<String, String> {
+    let home = expand_path(h, &home_dir(h)?)?;
+    if has_config_reference(&home) {
+        return Err(format!("home {home} holds a {{$…}} reference"));
+    }
+    Ok(home.trim_end_matches(['/', '\\']).to_owned())
+}
+
+/// The raw value `Config::get($key)` starts from, for a `*-dir` key whose
+/// environment variable is `env`: the variable when set (even empty), else
+/// config.json's value, else `default` (the value `Factory` merged).
+fn config_dir_value(
+    h: &dyn Host,
+    env: &str,
+    key: &str,
+    default: impl FnOnce() -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    if let Some(v) = h.env(env) {
+        return Ok(v);
+    }
+    match h.global_config(&config_home(h)?, key) {
+        Some(Value::String(s)) => Ok(s),
+        Some(other) => Err(format!("config {key} {other} in config.json")),
+        None => default(),
     }
 }
 
-/// `Factory::getCacheDir`: COMPOSER_CACHE_DIR; else `$COMPOSER_HOME/cache`
-/// if COMPOSER_HOME is set; Windows -> `%LOCALAPPDATA%/Composer` (else
-/// `<home>/cache`); Darwin -> `~/Library/Caches/composer`;
-/// `~/.composer/cache` if it exists; XDG -> `$XDG_CACHE_HOME/composer`;
-/// else `<home>/cache`.
-pub fn composer_cache_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("COMPOSER_CACHE_DIR") {
-        if !d.is_empty() {
-            return PathBuf::from(d);
-        }
+/// `Config::get('cache-dir', Config::RELATIVE_PATHS)` — what `composer
+/// config --global cache-dir` prints: COMPOSER_CACHE_DIR when set (even
+/// empty), else config.json's `cache-dir`, else [`factory_cache_dir`];
+/// trailing `/` and `\` trimmed, then `~`, `$VAR` and `%VAR%` expanded. A
+/// relative value stays relative. `Err` (the reason) where Composer stops
+/// (no APPDATA/HOME nor COMPOSER_HOME) or where vivacity does not reproduce
+/// it (a `{$key}` reference, a config.json value that is not a string).
+fn cache_dir_setting_with(h: &dyn Host) -> std::result::Result<String, String> {
+    // `Factory::createConfig` asks for the home first, whatever comes next.
+    let home = home_dir(h)?;
+    let raw = config_dir_value(h, "COMPOSER_CACHE_DIR", "cache-dir", || {
+        factory_cache_dir(h, &home)
+    })?;
+    if has_config_reference(&raw) {
+        return Err(format!("cache-dir {raw} holds a {{$…}} reference"));
     }
-    if let Ok(h) = std::env::var("COMPOSER_HOME") {
-        if !h.is_empty() {
-            return PathBuf::from(h).join("cache");
-        }
+    expand_path(h, raw.trim_end_matches(['/', '\\']))
+}
+
+/// `Config::realpath`'s test for a path it keeps as it is: `/…`, a drive
+/// letter, a `scheme://`, a UNC `\\…`.
+fn is_config_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    if b.first() == Some(&b'/') || path.starts_with("\\\\") {
+        return true;
     }
-    #[cfg(windows)]
-    {
-        if let Ok(l) = std::env::var("LOCALAPPDATA") {
-            if !l.is_empty() {
-                return PathBuf::from(l.trim_end_matches(['/', '\\'])).join("Composer");
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return true;
+    }
+    let scheme = path
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == b'.')
+        .count();
+    scheme > 0 && path[scheme..].starts_with("://")
+}
+
+/// `Config::realpath`: an absolute path as it is, anything else under the
+/// base directory (Composer's working directory), joined with `/`.
+fn config_realpath(path: &str, base: &str) -> String {
+    if is_config_absolute(path) {
+        path.to_owned()
+    } else {
+        format!("{base}/{path}")
+    }
+}
+
+/// Why a command cannot use Composer's cache directory natively, if it
+/// cannot: Composer would stop, would write into the working directory (an
+/// empty value) or a `0` directory, or would place `files/` or `repo/` on
+/// a path of their own (`reads_cache`: the command downloads or resolves).
+fn cache_dir_hand_over_with(h: &dyn Host, reads_cache: bool) -> Option<String> {
+    let setting = match cache_dir_setting_with(h) {
+        Ok(s) => s,
+        Err(why) => return Some(why),
+    };
+    if setting.is_empty() {
+        return Some(
+            "an empty cache-dir, which Composer resolves to the working directory".to_owned(),
+        );
+    }
+    if setting == "0" {
+        return Some("cache-dir 0, which Composer reads as the directory ./0".to_owned());
+    }
+    if reads_cache {
+        for (env, key) in [
+            ("COMPOSER_CACHE_FILES_DIR", "cache-files-dir"),
+            ("COMPOSER_CACHE_REPO_DIR", "cache-repo-dir"),
+        ] {
+            if h.env(env).is_some() {
+                return Some(format!("{env} is set"));
+            }
+            if let Ok(home) = config_home(h) {
+                if h.global_config(&home, key).is_some() {
+                    return Some(format!("config {key} in config.json"));
+                }
             }
         }
-        composer_home()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cache")
     }
-    #[cfg(not(windows))]
-    {
-        let user = user_dir().unwrap_or_else(|| PathBuf::from("."));
-        let home = composer_home().unwrap_or_else(|| user.join(".composer"));
-        if cfg!(target_os = "macos") {
-            return user.join("Library/Caches/composer");
-        }
-        if home == user.join(".composer") && home.join("cache").is_dir() {
-            return home.join("cache");
-        }
-        if use_xdg() {
-            let xdg = std::env::var("XDG_CACHE_HOME")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| user.join(".cache"));
-            return xdg.join("composer");
-        }
-        home.join("cache")
-    }
+    None
+}
+
+/// `Config::get('home')`: the directory of Composer's global config.json,
+/// auth.json and composer.json (`Factory::getHomeDir`, expanded and
+/// trimmed). `None` where Composer stops.
+pub fn composer_home() -> Option<PathBuf> {
+    config_home(&RealHost).ok().map(PathBuf::from)
+}
+
+/// `composer config --global cache-dir`: the cache directory as Composer
+/// prints it (`Config::RELATIVE_PATHS`). `Err` (the reason) where Composer
+/// stops or vivacity does not reproduce the value.
+pub fn cache_dir_setting() -> std::result::Result<String, String> {
+    cache_dir_setting_with(&RealHost)
+}
+
+/// Whether the cache directory is relative, so that Composer would resolve
+/// it against its working directory (`--working-dir` included).
+pub fn cache_dir_is_relative() -> bool {
+    cache_dir_setting().is_ok_and(|s| !is_config_absolute(&s))
+}
+
+/// Why a command must go to Composer because of the cache directory, if it
+/// must ([`cache_dir_hand_over_with`]); decided before anything is written.
+pub fn cache_dir_hand_over(reads_cache: bool) -> Option<String> {
+    cache_dir_hand_over_with(&RealHost, reads_cache)
+}
+
+/// `Config::get('cache-dir')`, the directory Composer's caches live under:
+/// [`cache_dir_setting`] resolved against the working directory. The
+/// commands hand the cases it does not reproduce to Composer first
+/// ([`cache_dir_hand_over`]); reached anyway (a library caller), it falls
+/// back to `<cwd>/cache`.
+pub fn composer_cache_dir() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let base = cwd.to_string_lossy();
+    let setting = cache_dir_setting().unwrap_or_else(|_| "cache".to_owned());
+    PathBuf::from(config_realpath(&setting, &base))
 }
 
 /// Cache path of a dist, identical to Composer's: sha1 of the FULL URL
@@ -615,6 +849,253 @@ impl Fetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine described in the test: its environment, the directories
+    /// that exist, its OS.
+    #[derive(Default)]
+    struct FakeHost {
+        env: BTreeMap<String, String>,
+        dirs: Vec<String>,
+        windows: bool,
+        darwin: bool,
+        config_json: BTreeMap<String, Value>,
+    }
+
+    impl FakeHost {
+        fn linux(home: &str) -> FakeHost {
+            FakeHost::default().with("HOME", home)
+        }
+        fn with(mut self, k: &str, v: &str) -> FakeHost {
+            self.env.insert(k.to_owned(), v.to_owned());
+            self
+        }
+        fn dir(mut self, d: &str) -> FakeHost {
+            self.dirs.push(d.to_owned());
+            self
+        }
+    }
+
+    impl Host for FakeHost {
+        fn env(&self, name: &str) -> Option<String> {
+            self.env.get(name).cloned()
+        }
+        fn any_xdg_env(&self) -> bool {
+            self.env.keys().any(|k| k.starts_with("XDG_"))
+        }
+        fn is_dir(&self, path: &str) -> bool {
+            self.dirs.iter().any(|d| d == path)
+        }
+        fn windows(&self) -> bool {
+            self.windows
+        }
+        fn darwin(&self) -> bool {
+            self.darwin
+        }
+        fn global_config(&self, home: &str, key: &str) -> Option<Value> {
+            self.config_json.get(&format!("{home}|{key}")).cloned()
+        }
+    }
+
+    fn setting(h: &FakeHost) -> std::result::Result<String, String> {
+        cache_dir_setting_with(h)
+    }
+
+    #[test]
+    fn the_cache_dir_is_config_get_on_top_of_factory() {
+        // Each expectation is what `composer config --global cache-dir`
+        // printed on Composer 2.10.3 (harness/composer-cache-dir.sh).
+        let mac = |k: &str, v: &str| {
+            let mut h = FakeHost::linux("/Users/u").with(k, v);
+            h.darwin = true;
+            h
+        };
+        // Trailing separators go, both kinds, any number.
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "/tmp/zz/")).unwrap(),
+            "/tmp/zz"
+        );
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "/tmp/zz\\/")).unwrap(),
+            "/tmp/zz"
+        );
+        // `~/`, `$VAR`, `%VAR%` expand; an unset variable is the empty string.
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "~/zz")).unwrap(),
+            "/Users/u/zz"
+        );
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "$HOME/zz")).unwrap(),
+            "/Users/u/zz"
+        );
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "%HOME%/zz")).unwrap(),
+            "/Users/u/zz"
+        );
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "$NOPE/zz")).unwrap(),
+            "/zz"
+        );
+        // Only a leading `~/`; `%VAR` without its closing `%` stays.
+        assert_eq!(setting(&mac("COMPOSER_CACHE_DIR", "~zz")).unwrap(), "~zz");
+        assert_eq!(setting(&mac("COMPOSER_CACHE_DIR", "~/")).unwrap(), "~");
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "%HOME/zz")).unwrap(),
+            "%HOME/zz"
+        );
+        // Relative stays relative here (RELATIVE_PATHS), set-but-empty is
+        // taken as it is, and so is `0` (Config::get tests `!== false`).
+        assert_eq!(
+            setting(&mac("COMPOSER_CACHE_DIR", "rel/x")).unwrap(),
+            "rel/x"
+        );
+        assert_eq!(setting(&mac("COMPOSER_CACHE_DIR", "")).unwrap(), "");
+        assert_eq!(setting(&mac("COMPOSER_CACHE_DIR", "/")).unwrap(), "");
+        assert_eq!(setting(&mac("COMPOSER_CACHE_DIR", "0")).unwrap(), "0");
+        // COMPOSER_HOME: `<home>/cache` as written, then expanded.
+        assert_eq!(
+            setting(&mac("COMPOSER_HOME", "/tmp/hh/")).unwrap(),
+            "/tmp/hh//cache"
+        );
+        assert_eq!(
+            setting(&mac("COMPOSER_HOME", "~/hh")).unwrap(),
+            "/Users/u/hh/cache"
+        );
+        // `0` is PHP-falsy for Factory: as if unset.
+        assert_eq!(
+            setting(&mac("COMPOSER_HOME", "0")).unwrap(),
+            "/Users/u/Library/Caches/composer"
+        );
+        // A `{$key}` reference is Config::process's: not reproduced.
+        assert!(setting(&mac("COMPOSER_CACHE_DIR", "{$home}/c")).is_err());
+    }
+
+    #[test]
+    fn linux_follows_xdg_etc_xdg_and_the_legacy_directory() {
+        let h = FakeHost::linux("/home/u");
+        assert_eq!(setting(&h).unwrap(), "/home/u/.composer/cache");
+        // `/etc/xdg` alone turns XDG on (Factory::useXdg).
+        let h = FakeHost::linux("/home/u").dir("/etc/xdg");
+        assert_eq!(setting(&h).unwrap(), "/home/u/.cache/composer");
+        assert_eq!(home_dir(&h).unwrap(), "/home/u/.config/composer");
+        // Any XDG_* variable does too; XDG_CACHE_HOME is taken as written.
+        let h = FakeHost::linux("/home/u").with("XDG_CACHE_HOME", "/x/");
+        assert_eq!(setting(&h).unwrap(), "/x//composer");
+        let h = FakeHost::linux("/home/u").with("XDG_RUNTIME_DIR", "/run/u");
+        assert_eq!(setting(&h).unwrap(), "/home/u/.cache/composer");
+        // An existing ~/.composer/cache wins while the home is ~/.composer.
+        let h = FakeHost::linux("/home/u")
+            .dir("/etc/xdg")
+            .dir("/home/u/.composer")
+            .dir("/home/u/.composer/cache");
+        assert_eq!(setting(&h).unwrap(), "/home/u/.composer/cache");
+        // HOME's trailing slash goes (getUserDir).
+        let h = FakeHost::linux("/home/u/");
+        assert_eq!(setting(&h).unwrap(), "/home/u/.composer/cache");
+        // No HOME and no COMPOSER_HOME: Composer stops.
+        assert!(setting(&FakeHost::default()).is_err());
+        assert!(home_dir(&FakeHost::default()).is_err());
+    }
+
+    #[test]
+    fn windows_paths_and_the_missing_appdata() {
+        let win = || FakeHost {
+            windows: true,
+            ..FakeHost::default()
+        };
+        let h = win()
+            .with("APPDATA", "C:\\Users\\u\\AppData\\Roaming\\")
+            .with("LOCALAPPDATA", "C:\\Users\\u\\AppData\\Local");
+        assert_eq!(setting(&h).unwrap(), "C:/Users/u/AppData/Local/Composer");
+        assert_eq!(home_dir(&h).unwrap(), "C:/Users/u/AppData/Roaming/Composer");
+        let h = win().with("APPDATA", "C:\\Users\\u\\AppData\\Roaming");
+        assert_eq!(
+            setting(&h).unwrap(),
+            "C:/Users/u/AppData/Roaming/Composer/cache"
+        );
+        // A COMPOSER_CACHE_DIR keeps its backslashes, trailing ones aside.
+        let h = win()
+            .with("APPDATA", "C:\\a")
+            .with("COMPOSER_CACHE_DIR", "D:\\cc\\");
+        assert_eq!(setting(&h).unwrap(), "D:\\cc");
+        // `$HOME` falls back to USERPROFILE on Windows only.
+        let h = win()
+            .with("APPDATA", "C:\\a")
+            .with("USERPROFILE", "C:\\Users\\u")
+            .with("COMPOSER_CACHE_DIR", "$HOME/cc");
+        assert_eq!(setting(&h).unwrap(), "C:\\Users\\u/cc");
+        // Neither APPDATA nor COMPOSER_HOME: getHomeDir throws, even with
+        // LOCALAPPDATA or COMPOSER_CACHE_DIR set.
+        assert!(setting(&win().with("LOCALAPPDATA", "C:\\l")).is_err());
+        assert!(setting(&win().with("COMPOSER_CACHE_DIR", "C:\\c")).is_err());
+        assert!(setting(&win().with("COMPOSER_HOME", "C:\\h")).is_ok());
+    }
+
+    #[test]
+    fn the_global_config_json_is_read_under_the_processed_home() {
+        let mut h = FakeHost::linux("/home/u").with("COMPOSER_HOME", "~/h/");
+        h.config_json
+            .insert("/home/u/h|cache-dir".to_owned(), Value::from("/srv/cc/"));
+        assert_eq!(setting(&h).unwrap(), "/srv/cc");
+        // The environment still wins over config.json.
+        let h2 = FakeHost {
+            config_json: h.config_json.clone(),
+            ..FakeHost::linux("/home/u")
+                .with("COMPOSER_HOME", "~/h/")
+                .with("COMPOSER_CACHE_DIR", "/env")
+        };
+        assert_eq!(setting(&h2).unwrap(), "/env");
+        // A value that is not a string is not reproduced.
+        h.config_json
+            .insert("/home/u/h|cache-dir".to_owned(), Value::from(3));
+        assert!(setting(&h).is_err());
+    }
+
+    #[test]
+    fn a_relative_cache_dir_resolves_against_the_working_directory() {
+        // Config::realpath: absolute forms kept, the rest under the base.
+        assert_eq!(config_realpath("/a", "/w"), "/a");
+        assert_eq!(config_realpath("C:\\a", "/w"), "C:\\a");
+        assert_eq!(config_realpath("c:/a", "/w"), "c:/a");
+        assert_eq!(config_realpath("\\\\srv\\a", "/w"), "\\\\srv\\a");
+        assert_eq!(config_realpath("s3://b", "/w"), "s3://b");
+        assert_eq!(config_realpath("rel/x", "/w"), "/w/rel/x");
+        assert_eq!(config_realpath("~", "/w"), "/w/~");
+        assert_eq!(config_realpath("", "/w"), "/w/");
+        assert!(!is_config_absolute("rel"));
+        assert!(is_config_absolute("/rel"));
+    }
+
+    #[test]
+    fn what_vivacity_hands_to_composer() {
+        let h = |k: &str, v: &str| FakeHost::linux("/home/u").with(k, v);
+        assert_eq!(
+            cache_dir_hand_over_with(&FakeHost::linux("/home/u"), true),
+            None
+        );
+        assert_eq!(
+            cache_dir_hand_over_with(&h("COMPOSER_CACHE_DIR", "/c/"), true),
+            None
+        );
+        for v in ["", "/", "0"] {
+            assert!(
+                cache_dir_hand_over_with(&h("COMPOSER_CACHE_DIR", v), false).is_some(),
+                "{v:?}"
+            );
+        }
+        // A cache sub-directory of its own: commands that read the cache only.
+        for k in ["COMPOSER_CACHE_FILES_DIR", "COMPOSER_CACHE_REPO_DIR"] {
+            assert!(cache_dir_hand_over_with(&h(k, "/f"), true).is_some(), "{k}");
+            assert_eq!(cache_dir_hand_over_with(&h(k, "/f"), false), None, "{k}");
+        }
+        let mut cfg = FakeHost::linux("/home/u");
+        cfg.config_json.insert(
+            "/home/u/.composer|cache-files-dir".to_owned(),
+            Value::from("/f"),
+        );
+        assert!(cache_dir_hand_over_with(&cfg, true).is_some());
+        // Composer stops: the hand-over lets it say so.
+        assert!(cache_dir_hand_over_with(&FakeHost::default(), false).is_some());
+    }
 
     #[test]
     fn cache_layout_matches_composer() {

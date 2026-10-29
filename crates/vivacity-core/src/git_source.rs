@@ -766,10 +766,11 @@ fn process_timeout(root_manifest: &Value) -> std::result::Result<Option<Duration
 }
 
 /// `Config::get('cache-vcs-dir')` for the cases vivacity reads:
-/// `{$cache-dir}/vcs` with the cache directory `Factory::getCacheDir`
-/// computes. Any configured `cache-dir` / `cache-vcs-dir`,
-/// `COMPOSER_CACHE_VCS_DIR`, or a path `expandPath`/`realpath` would
-/// rewrite, is handed over: the path ends up in the clone's reflog.
+/// `{$cache-dir}/vcs` with the cache directory `Config::get('cache-dir')`
+/// resolves (`fetch::composer_cache_dir`). Any configured `cache-dir` /
+/// `cache-vcs-dir`, `COMPOSER_CACHE_VCS_DIR`, or a cache directory the
+/// commands hand over (`fetch::cache_dir_hand_over`), is handed over: the
+/// path ends up in the clone's reflog.
 fn cache_vcs_dir(root_manifest: &Value) -> std::result::Result<String, String> {
     if std::env::var_os("COMPOSER_CACHE_VCS_DIR").is_some() {
         return Err("COMPOSER_CACHE_VCS_DIR is set".to_owned());
@@ -779,33 +780,13 @@ fn cache_vcs_dir(root_manifest: &Value) -> std::result::Result<String, String> {
             return Err(format!("config {key}"));
         }
     }
-    // Set but empty, `Config::get('cache-dir')` takes "" (the project
-    // directory) where `Factory::getCacheDir` moves on: handed over.
-    for key in ["COMPOSER_CACHE_DIR", "COMPOSER_HOME"] {
-        if std::env::var_os(key).is_some_and(|v| v.is_empty()) {
-            return Err(format!("{key} is set and empty"));
-        }
+    if let Some(why) = crate::fetch::cache_dir_hand_over(true) {
+        return Err(why);
     }
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    let base = if let Some(dir) = env("COMPOSER_CACHE_DIR") {
-        if dir == "0" {
-            return Err("COMPOSER_CACHE_DIR=0".to_owned());
-        }
-        dir
-    } else if let Some(home) = env("COMPOSER_HOME") {
-        if home == "0" {
-            return Err("COMPOSER_HOME=0".to_owned());
-        }
-        format!("{home}/cache")
-    } else {
-        if env("XDG_CACHE_HOME").is_some_and(|x| x.ends_with('/')) {
-            return Err("XDG_CACHE_HOME ends with a slash".to_owned());
-        }
-        crate::fetch::composer_cache_dir()
-            .to_str()
-            .ok_or_else(|| "non UTF-8 cache directory".to_owned())?
-            .to_owned()
-    };
+    let base = crate::fetch::composer_cache_dir()
+        .to_str()
+        .ok_or_else(|| "non UTF-8 cache directory".to_owned())?
+        .to_owned();
     let base = base.trim_end_matches('/');
     if !base.starts_with('/') {
         return Err(format!("cache directory {base} is not absolute"));
