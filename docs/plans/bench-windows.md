@@ -239,3 +239,76 @@ Alternatives :
   Windows. Le premier dispatch est le test ; les échecs probables sont
   nommés (phar introuvable → message ; exécutable introuvable sous `-N` →
   journal hyperfine en fin de log).
+
+## Correctif après le premier run (run 40927754769, 2026-10-29)
+
+**Constat.** Les deux dispositions s'arrêtent au premier `--prepare` :
+« Command ''true'' terminated with non-zero exit code 1 ». Préparation
+réseau verte, preuve Laravel verte (les deux arbres identiques), échec à
+la première commande de hyperfine. Lu dans le journal et dans les sources
+de hyperfine :
+
+- `taiki-e/install-action` a installé **hyperfine 2.0.0** (sorti le
+  2026-10-07) ; le passage macOS tournait sous 1.20.0.
+- **hyperfine 2.0 lance `--prepare` (et setup, conclude, cleanup) toujours
+  dans un shell**, même sous `-N` : le shell choisi par `--shell`, sinon
+  celui de la plateforme — `cmd.exe /C` sous Windows
+  (`RawExecutor::run_intermediate_command_and_measure`). Sous 1.x, `-N`
+  s'appliquait aussi à la préparation (découpage à la shell, sans shell).
+  `'true'` entre apostrophes n'est pas une commande pour cmd.exe ; et
+  `command -v true` rendait `true` (une primitive de bash), pas un chemin.
+  `'…/rm.exe' -rf '…'` aurait échoué de la même façon.
+- **Le JSON de 2.0 change de schéma** (version 2) : `command` est la ligne
+  de commande, le nom donné par `-n` passe dans `name`, et les
+  statistiques sous `summary.time_wall_clock`. Le tableau du banc serait
+  sorti vide ou faux même après la préparation.
+
+**Plan.**
+
+1. `noop` et `dump-o` : une invocation `-N` **sans** `--prepare` (la
+   commande mesurée reste exécutée sans shell sous 1.x comme 2.x, découpée
+   à la shell : apostrophes valides).
+2. `fresh` : une invocation à part, `--shell` = le bash de Git (chemin
+   absolu, `.exe`, entre guillemets ; `bash` ailleurs), `--prepare "rm -rf
+   '<vendor>'"`. La préparation passe par ce bash sous 1.x et 2.x ; la
+   commande mesurée aussi, et hyperfine retranche le démarrage du shell
+   qu'il calibre (bruit de quelques dizaines de ms sur des installs de
+   plusieurs secondes : acceptable ; `-N` reste là où il compte, sur les
+   scénarios courts).
+3. Lecture des JSON compatible avec les deux schémas : `(.name //
+   .command)` et `(.summary.time_wall_clock // .)`. Les deux invocations
+   fusionnées dans `<fixture>-<outil>.json` (`jq -s`).
+4. Workflow : `hyperfine@2.0.0` épinglé (les chiffres nomment une version,
+   comme Composer).
+5. `native true`/`native rm` retirés (plus de préparation sous `-N`).
+
+**Méta-analyse (auto-checklist).**
+
+- Le passage par bash pour `fresh` change ce qui est mesuré : hyperfine
+  retranche la moyenne calibrée de `bash -c ""` ; résidu de variance
+  ajouté aux deux outils de la même façon. Dit dans M9.
+- `$BASH` sous Git Bash vaut `/usr/bin/bash` → `C:/Program Files/Git/usr/bin/bash`,
+  un espace : entre guillemets doubles, découpé par `shell_words` (1.x et
+  2.x). Le bash lancé directement (pas par `Git\bin\bash.exe`) reçoit le
+  `PATH` Windows de l'étape, où figure `Git\usr\bin` : `rm` s'y trouve.
+- L'ordre change : `noop`, `dump-o`, puis `fresh`. L'état « after »
+  devient celui d'un install `vendor/` supprimé (Laravel : `-o` par sa
+  config) ; la comparaison des deux outils reste valable.
+- Pas de Windows ici, encore : 2.0 n'est pas installé sur ce Mac (pas de
+  téléchargement de binaire sans accord) ; le schéma v2 est testé sur un
+  JSON écrit d'après le CHANGELOG de hyperfine, le chemin 1.x sur le Mac.
+- Hors périmètre, signalé : `bench/classmap-cache.sh` lit `.command` et
+  `.median` (schéma 1) et le workflow `classmap-cache` installe hyperfine
+  sans version : il tombera sur le même changement. `ci-bench.sh`/`gate.py`
+  prennent le hyperfine d'apt sur ubuntu (1.x) : intacts tant qu'il l'est.
+
+**Vérification.** `shellcheck`, `actionlint` propres. Mac, hyperfine
+1.20.0, `BENCH_RUNS=2`, Laravel et Sylius : vert, arbres identiques aux
+trois étapes (8 845 et 40 584 entrées). Lecture JSON testée sur un fichier
+fusionné schéma 2 + schéma 1 (noms et statistiques justes). Vu rouge : une
+install qui échoue seulement sous `-q` et sans `vendor/` arrête le bras
+`fresh` à sa chauffe (exit 1) — la préparation par bash a donc bien
+supprimé `vendor/`. `-N` contre `--shell bash` sur le `fresh` de vivacity
+(Laravel, 5 runs) : 415 ± 167 contre 349 ± 159 ms sur un Mac à charge 17,
+pas d'écart lisible. Non vérifié ici : hyperfine 2.0 lui-même, et tout le
+chemin Windows au-delà de la première commande de hyperfine.

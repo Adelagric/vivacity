@@ -37,10 +37,11 @@ case "$OS_NAME" in MINGW*|MSYS*|CYGWIN*) WIN=1; exe=".exe"; OS_NAME=Windows ;; e
 # slashes, drive letter first: RUNNER_TEMP comes as D:\a\_temp, and
 # hyperfine splits its commands like a shell would.
 winpath() { if [ "$WIN" = 1 ]; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
-# A program by absolute path for hyperfine -N (no shell, no PATHEXT): on
-# Windows `command -v` gives /usr/bin/rm, the file is rm.exe.
+# A program by absolute path, for hyperfine (no PATHEXT): on Windows
+# `command -v php` gives /c/tools/php/php, the file is php.exe.
 native() {
   local p; p="$(command -v "$1")" || { echo "$1 is required" >&2; exit 1; }
+  case "$p" in /*) ;; *) echo "$1 is not a program here ($p)" >&2; exit 1 ;; esac
   p="$(winpath "$p")"
   if [ "$WIN" = 1 ] && [ -f "$p.exe" ]; then p="$p.exe"; fi
   printf '%s' "$p"
@@ -192,14 +193,26 @@ prove() { # fixture — fresh install, no-op, dump -o on each side, without -q
   same_trees "$fx" dump-o
 }
 
+# Two hyperfine runs per tool, because hyperfine 2.0 runs every --prepare
+# through a shell even under -N (cmd.exe /C on Windows when no --shell is
+# given), where 1.x ran it without one (run 40927754769: `'true'` refused
+# by cmd.exe). `noop` and `dump-o` need no preparation: -N, the timed
+# command started directly, no shell to subtract. `fresh` needs vendor/
+# deleted before each run: its preparation and its command go through this
+# same bash (Git's on Windows, by absolute path), in 1.x as in 2.x;
+# hyperfine subtracts the shell start-up it calibrates, a few tens of ms of
+# noise on installs of several seconds.
 time_tool() { # fixture tool
-  local fx="$1" t="$2" d; d="$(app "$1")"
+  local fx="$1" t="$2" d log; d="$(app "$1")"; log="$RESULTS/$1-$2.hyperfine.log"
   enter "$fx" "$t"
-  (cd "$d" && hyperfine -N --style basic --warmup 1 --min-runs "$RUNS" --export-json "$RESULTS/$fx-$t.json" \
-    --prepare "'$TRUE'" -n noop "$(cmdline "$t" "${INSTALL[@]}" -q)" \
-    --prepare "'$RM' -rf '$d/vendor'" -n fresh "$(cmdline "$t" "${INSTALL[@]}" -q)" \
-    --prepare "'$TRUE'" -n dump-o "$(cmdline "$t" "${DUMP[@]}" -q)") > "$RESULTS/$fx-$t.hyperfine.log" 2>&1 \
-    || { echo "hyperfine failed on $fx/$t:" >&2; tail -20 "$RESULTS/$fx-$t.hyperfine.log" >&2; exit 1; }
+  (cd "$d" && hyperfine -N --style basic --warmup 1 --min-runs "$RUNS" --export-json "$RESULTS/$fx-$t-steady.json" \
+    -n noop "$(cmdline "$t" "${INSTALL[@]}" -q)" \
+    -n dump-o "$(cmdline "$t" "${DUMP[@]}" -q)") > "$log" 2>&1 \
+    || { echo "hyperfine failed on $fx/$t (noop, dump-o):" >&2; tail -20 "$log" >&2; exit 1; }
+  (cd "$d" && hyperfine --shell "\"$SH\"" --style basic --warmup 1 --min-runs "$RUNS" --export-json "$RESULTS/$fx-$t-fresh.json" \
+    --prepare "rm -rf '$d/vendor'" -n fresh "$(cmdline "$t" "${INSTALL[@]}" -q)") >> "$log" 2>&1 \
+    || { echo "hyperfine failed on $fx/$t (fresh):" >&2; tail -20 "$log" >&2; exit 1; }
+  jq -s '{results: (map(.results) | add)}' "$RESULTS/$fx-$t-steady.json" "$RESULTS/$fx-$t-fresh.json" > "$RESULTS/$fx-$t.json"
   leave "$fx" "$t"
 }
 
@@ -246,13 +259,19 @@ conditions() {
   fi
 }
 
-ms() { jq -r --arg n "$2" ".results[] | select(.command==\$n) | (.$3*1000|round)" "$1"; }
+# hyperfine 1.x JSON: the -n name in `command`, statistics at the top of a
+# result; 2.x (schema 2): the name in `name`, statistics under
+# `summary.time_wall_clock`.
+ms() {
+  jq -r --arg n "$2" --arg f "$3" \
+    '.results[] | select((.name // .command) == $n) | (.summary.time_wall_clock // .) | (.[$f] * 1000 | round)' "$1"
+}
 cell() { echo "$(ms "$1" "$2" median) ($(ms "$1" "$2" stddev), $(ms "$1" "$2" min)–$(ms "$1" "$2" max))"; }
 
 measure() {
   command -v hyperfine >/dev/null || { echo "hyperfine is required" >&2; exit 1; }
   command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
-  TRUE="$(native true)"; RM="$(native rm)"
+  SH="$(native bash)"
   mkdir -p "$RESULTS"
   local fx t s c v rows="" pkgs
   for fx in $FIXTURES; do

@@ -43,9 +43,15 @@ les caches, ni les drapeaux exacts passés à ePHPm.
   a `optimize-autoloader: true`, c'est le `install -o` de Luther),
   `fresh` (`vendor/` supprimé avant chaque run, caches chauds ; le `warm`
   de `ci-bench.sh`), `dump-o`.
-- **hyperfine** `-N`, une chauffe, au moins `runs` runs (5 par défaut) ;
-  médiane, écart-type, min–max. `-N` : pas de shell à démarrer, ce qui
-  sous Windows coûte des dizaines de millisecondes variables.
+- **hyperfine** 2.0.0 (épinglé dans le workflow), une chauffe, au moins
+  `runs` runs (5 par défaut) ; médiane, écart-type, min–max. `noop` et
+  `dump-o` sous `-N` : pas de shell à démarrer, ce qui sous Windows coûte
+  des dizaines de millisecondes variables. `fresh` passe par le bash de
+  Git (`--shell`), parce que hyperfine 2.0 lance toujours `--prepare`
+  dans un shell (`cmd.exe` par défaut sous Windows) et que la
+  préparation supprime `vendor/` ; hyperfine retranche le démarrage du
+  shell qu'il calibre, un bruit faible devant des installs de plusieurs
+  secondes. Le banc lit les deux schémas JSON (hyperfine 1.x et 2.x).
 - **Une copie par outil, un seul chemin absolu** : chaque `vendor/` est
   écrit par son outil, mais la copie est renommée en `<fixture>/app` le
   temps que son outil travaille. Vu sur le passage macOS : sur Sylius,

@@ -68,7 +68,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: hyperfine
+          # Pinned: 2.0 changed how --prepare runs and the JSON schema
+          # (docs/plans/bench-windows.md), and the summary names the version.
+          tool: hyperfine@2.0.0
 
       - name: Build
         run: cargo build --release -p vivacity

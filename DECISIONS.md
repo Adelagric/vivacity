@@ -5207,3 +5207,20 @@ fixtures) vert : arbres identiques, Laravel `fresh` 3,0 s contre 0,19 s.
 Le chemin Windows (cygpath, PowerShell, `rm.exe` sous `-N`, le phar de
 setup-php) n'a tourné que sous des doublures sur ce Mac ; les chiffres
 Windows viendront du premier run (`bench/M9-windows.md`).
+
+**Correctif après le premier run (run 40927754769, même jour).** Les deux
+dispositions se sont arrêtées au premier `--prepare` de hyperfine
+(« Command ''true'' terminated with non-zero exit code 1 »), après une
+préparation et une preuve Laravel vertes. Cause, lue dans les sources :
+le runner a pris **hyperfine 2.0.0** (2026-10-07), qui lance toujours
+`--prepare` dans un shell, `cmd.exe /C` sous Windows quand `--shell` n'est
+pas donné, même sous `-N` (1.x l'exécutait sans shell) ; et dont le JSON
+(schéma 2) range le nom de `-n` dans `name` et les statistiques sous
+`summary.time_wall_clock`. Fait : `noop` et `dump-o` restent sous `-N`,
+sans préparation ; `fresh` passe par le bash de Git (`--shell`, chemin
+absolu), préparation comprise, en 1.x comme en 2.x ; lecture des deux
+schémas ; `hyperfine@2.0.0` épinglé dans le workflow. Vu rouge sur le Mac
+(1.20.0) : une install qui échoue seulement quand `vendor/` est absent
+arrête le bras `fresh`, ce qui prouve aussi que la préparation supprime
+bien `vendor/`. Hors de ce correctif, même cause : `bench/classmap-cache.sh`
+lit le schéma 1 et son workflow prend hyperfine sans version.
