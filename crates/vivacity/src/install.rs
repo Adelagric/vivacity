@@ -448,6 +448,23 @@ fn pre_install_cmd(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
     } else {
         None
     };
+    // Decided before the first script runs: a hand-over after it would
+    // have Composer run it a second time.
+    if runner.is_some() {
+        if let Some(issue) = crate::effect_plugins::drupol_replay_issue(
+            &run.manifest,
+            &run.lock,
+            run.with_dev,
+            !args.no_plugins,
+            true,
+        ) {
+            let report = vivacity_core::scope::ScopeReport {
+                issues: vec![vivacity_core::scope::ScopeIssue::Layout(issue)],
+                ..Default::default()
+            };
+            return Ok(Flow::Break(fallback_or_fail(args, &report)?));
+        }
+    }
     if let Some(r) = &runner {
         let code = r.run(scripts::PRE_INSTALL_CMD)?;
         if code != 0 {
@@ -943,9 +960,6 @@ fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
             global: &global,
             aliases: !run.lock.aliases.is_empty(),
             lock_data: Some(&run.lock_value),
-            run_scripts_post_dump: run.runner.is_some()
-                && crate::scripts::declared_events(&run.manifest)
-                    .contains(crate::scripts::POST_AUTOLOAD_DUMP),
         };
         report.issues.extend(
             vivacity_core::effect_plugins::issues(&ctx)

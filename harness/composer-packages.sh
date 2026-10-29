@@ -131,9 +131,22 @@ step() {
   mv "$ref" "$P"
   (cd "$P" && composer "$@" --no-interaction --no-ansi >"$WORK/$name.composer.out" 2>"$WORK/$name.composer.err") || c_code=$?
   mv "$P" "$ref"; mv "$viv" "$P"
+  local t0 t1; t0="$(date +%s)"
   (cd "$P" && "$VIVACITY" "$@" --no-fallback >"$WORK/$name.vivacity.out" 2>"$WORK/$name.vivacity.err") || v_code=$?
+  t1="$(date +%s)"
   mv "$P" "$viv"
   if [ "$c_code" != "$v_code" ]; then echo "FAIL $name : codes $c_code vs $v_code"; tail -4 "$WORK/$name.vivacity.err"; status=1; return; fi
+  # La comparaison masque les chiffres de GENERATED_AT : ceux de vivacity
+  # doivent être l'heure de son passage, quand le plugin a tourné.
+  if grep -q '^drupol/composer-packages: Done\.$' "$WORK/$name.vivacity.out"; then
+    local c ts
+    for c in Packages Types Directories Versions Dependencies; do
+      ts="$(sed -n 's/^    public const GENERATED_AT = \([0-9]*\);$/\1/p' "$viv/vendor/drupol/composer-packages/build/$c.php")"
+      if [ -z "$ts" ] || [ "$ts" -lt "$t0" ] || [ "$ts" -gt "$t1" ]; then
+        echo "FAIL $name : GENERATED_AT de $c.php ($ts) hors du passage de vivacity ($t0–$t1)"; status=1; return
+      fi
+    done
+  fi
   if ! diff "$WORK/$name.composer.out" "$WORK/$name.vivacity.out" >"$WORK/$name.out.diff"; then
     echo "FAIL $name : stdout différente"; head -8 "$WORK/$name.out.diff"; status=1; return
   fi
@@ -233,7 +246,7 @@ step "$ref" "$viv" dp-lock-false "${U[@]}"
 relock dp-a dp-old drupol/composer-packages 1.1.2
 handed dp-old dp-old 'drupol/composer-packages 1\.1\.2' "${I[@]}"
 relock dp-a dp-twig2 twig/twig v2.16.1
-handed dp-twig2 dp-twig2 'drupol/composer-packages with twig/twig 2\.16\.1' "${I[@]}"
+handed dp-twig2 dp-twig2 'drupol/composer-packages with twig/twig v2\.16\.1' "${I[@]}"
 fresh dp-a "$WORK/dp-base"; composer_in "$WORK/dp-base" "${I[@]}"
 # Le plugin chargé, retiré par le lock : son `uninstall`.
 lock dp-gone "{\"require\": {\"composer/package-versions-deprecated\": \"1.11.99.5\", \"acme/lib\": \"1.0.0\"}, $CFG}"
@@ -243,9 +256,11 @@ no_lock() { rm -f "$1/composer.lock"; }
 PREP=no_lock handed_on "$WORK/dp-base" - dp-dump-no-lock 'drupol/composer-packages reads composer\.lock' dump-autoload
 lock_off() { jq '.config.lock = false' "$1/composer.json" > "$1/c.json" && mv "$1/c.json" "$1/composer.json"; }
 PREP=lock_off handed_on "$WORK/dp-base" - dp-dump-lock-false 'drupol/composer-packages reads composer\.lock' dump-autoload
-# --run-scripts avec un script racine post-autoload-dump.
-with_script() { jq '.scripts["post-autoload-dump"] = ["@php -r \"echo 1;\""]' "$1/composer.json" > "$1/c.json" && mv "$1/c.json" "$1/composer.json"; }
+# --run-scripts avec un script racine post-autoload-dump : rendu avant le
+# script pre-install-cmd (qui écrirait un fichier, vu par `handed_here`).
+with_script() { jq '.scripts["post-autoload-dump"] = ["@php -r \"echo 1;\""] | .scripts["pre-install-cmd"] = ["@php -r \"file_put_contents(\u0027marker\u0027, \u0027x\u0027);\""]' "$1/composer.json" > "$1/c.json" && mv "$1/c.json" "$1/composer.json"; }
 PREP=with_script handed_on "$WORK/dp-base" - dp-run-scripts 'drupol/composer-packages would run again' install --run-scripts
+PREP=with_script handed_on "$WORK/dp-base" - dp-dump-run-scripts 'drupol/composer-packages would run again' dump-autoload --run-scripts
 # Un installeur (composer/installers actif) : `getInstallPath` d'autres installeurs.
 lock dp-installers "{\"require\": {$PLUG, \"composer/installers\": \"2.3.0\", \"acme/lib\": \"1.0.0\"}, \"config\": {\"allow-plugins\": {\"drupol/composer-packages\": true, \"composer/package-versions-deprecated\": true, \"composer/installers\": true}}}"
 handed dp-installers dp-installers 'drupol/composer-packages with the installer plugin composer/installers' "${I[@]}"

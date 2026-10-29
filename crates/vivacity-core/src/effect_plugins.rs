@@ -132,10 +132,6 @@ pub struct Context<'a> {
     /// false` — or `None` where it throws (`dump-autoload` without a lock
     /// file, or with the lock disabled).
     pub lock_data: Option<&'a Value>,
-    /// `--run-scripts` with a `post-autoload-dump` script in composer.json:
-    /// `composer run-script` dispatches the event again, the plugins'
-    /// listeners included.
-    pub run_scripts_post_dump: bool,
 }
 
 fn name_of(p: &Map<String, Value>) -> &str {
@@ -638,10 +634,11 @@ fn drupol_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     if !ctx.active(DRUPOL) || ctx.no_autoloader || windows_issue(ctx, DRUPOL, out) {
         return;
     }
-    if ctx.run_scripts_post_dump {
+    // The install paths it prints are text: a project path that is not
+    // UTF-8 (Linux) is not rendered.
+    if ctx.project.to_str().is_none() || crate::dirs::Dirs::resolve(ctx.manifest).is_err() {
         out.push(reason(
-            "would run again through `composer run-script post-autoload-dump` (not emulated)"
-                .to_owned(),
+            "with a project or vendor path vivacity cannot render (not emulated)".to_owned(),
         ));
         return;
     }
@@ -663,6 +660,21 @@ fn drupol_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
         out.push(reason(format!(
             "with the installer plugin {name} active: install paths of other installers (not emulated)"
         )));
+        return;
+    }
+    // A pack's install path is that of Flex's `SymfonyPackInstaller`
+    // (a metapackage's) only in the Flex versions that have it: not
+    // measured with this plugin.
+    let pack = |p: &Value| p.get("type").and_then(Value::as_str) == Some("symfony-pack");
+    if ["packages", "packages-dev"]
+        .iter()
+        .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+        .flatten()
+        .any(pack)
+    {
+        out.push(reason(
+            "with a symfony-pack in the lock (its install path depends on the Flex version; not emulated)".to_owned(),
+        ));
         return;
     }
     if let Some(name) = [DG_CLEANER, VENDOR_CLEANER]
@@ -698,12 +710,14 @@ fn drupol_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
         .iter()
         .find(|p| name_of(p) == "twig/twig")
         .and_then(|p| p.get("version"))
-        .and_then(Value::as_str)
-        .and_then(|v| crate::version::normalize_pretty(v).ok());
-    if !twig.as_deref().is_some_and(|v| v.starts_with("3.")) {
+        .and_then(Value::as_str);
+    let major3 = twig
+        .and_then(|v| crate::version::normalize_pretty(v).ok())
+        .is_some_and(|v| v.starts_with("3."));
+    if !major3 {
         out.push(reason(format!(
             "with twig/twig {} (the rendering of Twig 3 is reproduced; not emulated)",
-            twig.as_deref().unwrap_or("absent")
+            twig.unwrap_or("absent")
         )));
     }
 }
@@ -802,7 +816,6 @@ mod tests {
             global: &[],
             aliases: false,
             lock_data: None,
-            run_scripts_post_dump: false,
         }
     }
 
@@ -816,6 +829,69 @@ mod tests {
         } else {
             assert!(found.is_empty(), "{found:?}");
         }
+    }
+
+    #[test]
+    fn drupol_composer_packages() {
+        let d = tempfile::tempdir().unwrap();
+        let m = json!({"config": {"allow-plugins": true}});
+        let plugin = json!({"name": DRUPOL, "version": "2.0.0", "type": "composer-plugin",
+            "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}});
+        let twig = json!({"name": "twig/twig", "version": "v3.28.0", "type": "library"});
+        let local = || vec![plugin.as_object().unwrap(), twig.as_object().unwrap()];
+        let lock = json!({"packages": [plugin, twig], "packages-dev": []});
+        let mut c = ctx(d.path(), &m, local(), &[], Command::Install);
+        c.lock_data = Some(&lock);
+        assert_native(&c);
+        if cfg!(windows) {
+            return;
+        }
+        // No lock data (dump-autoload without a lock, or disabled).
+        c.lock_data = None;
+        assert!(
+            issues(&c)[0].contains("reads composer.lock"),
+            "{:?}",
+            issues(&c)
+        );
+        // A pack in the lock.
+        let pack = json!({"name": "a/pack", "version": "1.0.0", "type": "symfony-pack"});
+        let with_pack = json!({"packages": [plugin, twig, pack], "packages-dev": []});
+        c.lock_data = Some(&with_pack);
+        assert!(issues(&c)[0].contains("symfony-pack"), "{:?}", issues(&c));
+        // Removed while loaded: its uninstall hook fails in Composer.
+        let installed = [plugin.clone()];
+        let mut c = ctx(
+            d.path(),
+            &m,
+            vec![twig.as_object().unwrap()],
+            &installed,
+            Command::Install,
+        );
+        c.lock_data = Some(&lock);
+        assert!(
+            issues(&c)[0].contains("removed while loaded"),
+            "{:?}",
+            issues(&c)
+        );
+        // Another Twig.
+        let twig2 = json!({"name": "twig/twig", "version": "v2.16.1", "type": "library"});
+        let mut c = ctx(
+            d.path(),
+            &m,
+            vec![plugin.as_object().unwrap(), twig2.as_object().unwrap()],
+            &[],
+            Command::Install,
+        );
+        c.lock_data = Some(&lock);
+        assert!(
+            issues(&c)[0].contains("twig/twig v2.16.1 ("),
+            "{:?}",
+            issues(&c)
+        );
+        // Without an install, no dump, nothing.
+        let mut c = ctx(d.path(), &m, local(), &[], Command::UpdateNoInstall);
+        c.lock_data = None;
+        assert!(issues(&c).is_empty());
     }
 
     #[test]

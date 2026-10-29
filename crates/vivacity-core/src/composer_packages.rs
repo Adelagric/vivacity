@@ -487,12 +487,16 @@ enum Node {
     For(Option<String>, String, String, Vec<Node>),
 }
 
+/// `{% for key, value in seq %}`'s three names.
+type ForHead = (Option<String>, String, String);
+
 /// Twig's lexer for these templates: text, `{{ … }}`, `{% … %}` — and the
 /// newline right after a block tag removed (`%}\n?`), the indentation
 /// before it kept.
 fn parse(template: &str) -> std::result::Result<Vec<Node>, String> {
-    let mut stack: Vec<(Option<(Option<String>, String, String)>, Vec<Node>)> =
-        vec![(None, Vec::new())];
+    // One frame per open `for` (its key, value and sequence names), the
+    // template itself at the bottom.
+    let mut stack: Vec<(Option<ForHead>, Vec<Node>)> = vec![(None, Vec::new())];
     let mut rest = template;
     loop {
         let next = [rest.find("{{"), rest.find("{%"), rest.find("{#")]

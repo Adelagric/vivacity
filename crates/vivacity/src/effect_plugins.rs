@@ -269,6 +269,29 @@ pub(crate) fn vendor_cleaner_finish(
     finish_vendor_cleaner(&mut c, layout)
 }
 
+/// drupol/composer-packages with `--run-scripts` and a `post-autoload-dump`
+/// script in composer.json: `composer run-script post-autoload-dump`
+/// dispatches the event again, the plugins' listeners included — the
+/// classes and the two lines a second time, where Composer's own run has
+/// them once.
+pub(crate) fn drupol_replay_issue(
+    manifest: &serde_json::Value,
+    local: &vivacity_core::lock::Lock,
+    with_dev: bool,
+    plugins_enabled: bool,
+    run_scripts: bool,
+) -> Option<String> {
+    (run_scripts
+        && crate::scripts::declared_events(manifest).contains(crate::scripts::POST_AUTOLOAD_DUMP)
+        && active(local, manifest, with_dev, plugins_enabled, fx::DRUPOL))
+    .then(|| {
+        format!(
+            "plugin {} would run again through `composer run-script post-autoload-dump` (not emulated)",
+            fx::DRUPOL
+        )
+    })
+}
+
 /// drupol/composer-packages in this run: active (plugins on, allowed, in
 /// the local repository the dump reads), with the lock data its exporters
 /// read and whether Flex lays `symfony-pack` packages out as metapackages.
