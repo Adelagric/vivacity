@@ -28,8 +28,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux: built against glibc 2.17 (gnu) or statically (musl, for
+          # Alpine) by tools/linux-release.sh, each on its own architecture so
+          # that the check below runs the binary natively.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
           - { os: macos-latest, target: aarch64-apple-darwin }
           # x86_64 macOS is cross-compiled from the arm64 runner (macos-13 is rare and deprecated)
           - { os: macos-latest, target: x86_64-apple-darwin }
@@ -50,7 +55,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p vivacity
+        with:
+          # Per target: two Linux rows share a runner image, and zig's
+          # objects must not mix with an older gcc build's.
+          key: ${{ matrix.target }}-zig
+      - if: runner.os != 'Linux'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p vivacity
+      # Not the runner's glibc (2.39 on ubuntu 24.04, which v0.25.0's
+      # binaries required): docs/plans/linux-glibc-floor.md.
+      - name: Build (Linux, glibc 2.17 or static musl)
+        if: runner.os == 'Linux'
+        run: tools/linux-release.sh build ${{ matrix.target }}
+      # No GLIBC_ version above the floor, then `--version`, a child process
+      # and a real install in the oldest supported image (centos:7, alpine).
+      - name: Linux floor
+        if: runner.os == 'Linux'
+        run: tools/linux-release.sh check ${{ matrix.target }}
       # PCRE2 is built in (vivacity-pcre2-sys): the binary must not need a
       # system libpcre2-8 (0.10.0's macOS and Linux binaries did).
       - name: No dynamic PCRE2

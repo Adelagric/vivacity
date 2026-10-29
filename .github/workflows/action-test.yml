@@ -5,7 +5,10 @@ name: action
 # frozen Laravel skeleton over the network — the end-to-end path a user's CI
 # takes with `uses: Adelagric/vivacity@vX.Y.Z`. A second job packages that
 # same binary like release.yml does and runs install.sh (and install.ps1 on
-# Windows) against it, so the installers are proven before any release.
+# Windows) against it, so the installers are proven before any release. On
+# Linux that binary is built and checked as release.yml does it
+# (tools/linux-release.sh: glibc 2.17 / static musl, run in the oldest
+# supported image), and install.sh runs inside that image.
 
 on:
   push:
@@ -120,7 +123,7 @@ jobs:
           test "$CACHE_DIR_CC" = "$expected_cc"
 
   installers:
-    name: installers (${{ matrix.os }})
+    name: installers (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -130,23 +133,74 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p vivacity
+        with:
+          key: ${{ matrix.target }}
+      - if: runner.os != 'Linux'
+        run: cargo build --release -p vivacity
+      - name: Build like release.yml (Linux, glibc 2.17 or static musl)
+        if: runner.os == 'Linux'
+        run: tools/linux-release.sh build ${{ matrix.target }}
+      - name: Linux floor
+        if: runner.os == 'Linux'
+        run: tools/linux-release.sh check ${{ matrix.target }}
+
+      # The same check must refuse v0.25.0's binary (built on the runner's
+      # glibc 2.39): on the version references, and in centos:7.
+      - name: Linux floor refuses the v0.25.0 binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          old="$RUNNER_TEMP/v0.25.0"; mkdir -p "$old"
+          curl -fsSL -o "$old/a.tar.gz" https://github.com/Adelagric/vivacity/releases/download/v0.25.0/vivacity-v0.25.0-x86_64-unknown-linux-gnu.tar.gz
+          echo "6aa3ca5e264cb83e6eb69ad7e739cc2138d6e029779e3d41c87884940d206256  $old/a.tar.gz" | sha256sum -c
+          tar -xzf "$old/a.tar.gz" -C "$old" vivacity
+          if tools/linux-release.sh check x86_64-unknown-linux-gnu "$old/vivacity" > "$old/check.log" 2>&1; then
+            cat "$old/check.log"; echo "::error::the floor check accepted a binary that requires GLIBC_2.39"; exit 1
+          fi
+          cat "$old/check.log"
+          grep -q '^FAIL requires GLIBC_2.39, above the floor 2.17' "$old/check.log"
+          grep -Eq "version .GLIBC_2\.[0-9]+' not found" "$old/check.log"
 
       - name: Package like release.yml
         run: tools/package-release.sh v0.0.0-ci ${{ matrix.target }} "" "$RUNNER_TEMP/assets"
 
       - name: install.sh against the local assets
+        if: runner.os != 'Linux'
         run: |
           rm -rf "$RUNNER_TEMP/bin-sh"
           VIVACITY_VERSION=v0.0.0-ci VIVACITY_DOWNLOAD_BASE="$RUNNER_TEMP/assets" VIVACITY_INSTALL_DIR="$RUNNER_TEMP/bin-sh" sh install.sh
           exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
           "$RUNNER_TEMP/bin-sh/vivacity$exe" --version
+
+      # In the image the binary is checked in: install.sh picks the asset
+      # of that libc (gnu in centos:7, musl in alpine), from a directory,
+      # then (alpine, with curl added) from a file:// URL.
+      - name: install.sh in the oldest supported image, against the local assets
+        if: runner.os == 'Linux'
+        run: |
+          image="$(tools/linux-release.sh image ${{ matrix.target }})"
+          docker run --rm -v "$RUNNER_TEMP/assets:/assets:ro" -v "$PWD/install.sh:/install.sh:ro" \
+            -e TARGET=${{ matrix.target }} "$image" sh -c '
+              set -eu
+              export VIVACITY_VERSION=v0.0.0-ci
+              VIVACITY_DOWNLOAD_BASE=/assets VIVACITY_INSTALL_DIR=/opt/a sh /install.sh 2> log || { cat log; exit 1; }
+              cat log; grep -q "downloading vivacity-v0.0.0-ci-$TARGET.tar.gz" log
+              /opt/a/vivacity --version
+              case "$TARGET" in *-musl)
+                if VIVACITY_DOWNLOAD_BASE=file:///assets VIVACITY_INSTALL_DIR=/opt/b sh /install.sh 2> log; then cat log; exit 1; fi
+                cat log; grep -q "curl is required" log
+                apk add --no-cache -q curl
+                VIVACITY_DOWNLOAD_BASE=file:///assets VIVACITY_INSTALL_DIR=/opt/b sh /install.sh
+                /opt/b/vivacity --version ;;
+              esac'
 
       - name: install.ps1 against the local assets
         if: runner.os == 'Windows'
@@ -165,5 +219,6 @@ jobs:
           exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
           "$RUNNER_TEMP/bin-latest/vivacity$exe" --version
         # No Windows asset exists before the first 0.7 release: that step
-        # would fail there until then.
-        if: runner.os != 'Windows'
+        # would fail there until then. On the runner (glibc) install.sh takes
+        # the gnu asset: the musl row would repeat the gnu one.
+        if: runner.os != 'Windows' && !endsWith(matrix.target, '-musl')

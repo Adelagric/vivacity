@@ -7,6 +7,12 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **Static musl builds for Linux** (`x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`): vivacity runs on Alpine (the official
+  `composer` image, `php:*-alpine`). `install.sh` picks them when the
+  system's `ldd` is musl's (it needs `curl` there: `apk add curl`), and so
+  does the GitHub Action, which runs `install.sh`. Laravel install timings
+  match the glibc build (4 vCPU, DECISIONS 2026-10-29).
 - **`vivacity config --global cache-dir`** prints Composer's cache directory
   as vivacity uses it, byte for byte what `composer config --global
   cache-dir` prints (stdout, stderr, exit code; `harness/composer-cache-dir.sh`,
@@ -91,6 +97,18 @@ byte-identical-output promise are the public API.
   spiral-app).
 
 ### Changed
+- **The Linux release binaries run on glibc 2.17 or later** (CentOS/RHEL 7
+  and up, Amazon Linux 2 and 2023, Debian 10+, Ubuntu 20.04+). Up to
+  v0.25.0 they were linked against the build runner's glibc and required
+  GLIBC_2.39: the aarch64 binary did not start on Ubuntu 22.04, Debian 12,
+  RHEL 8/9 or Amazon Linux 2023, and the x86_64 one printed a "weak version
+  'GLIBC_2.39' not found" warning on stderr at every run on glibc 2.34 to
+  2.38 (GitHub's `ubuntu-22.04` runners among them) and did not start
+  below. They are now built with cargo-zigbuild against glibc 2.17, and
+  every release runs them in `centos:7` before publishing
+  (`tools/linux-release.sh`). They no longer carry a symbol table
+  (14.2 → 10.9 MB on aarch64, 15.3 → 12.4 MB on x86_64): a backtrace
+  shows addresses, not function names.
 - **The GitHub Action requires runner 2.327.1 or later**: it now uses
   `actions/cache` v6.1.0 (node24), pinned by SHA, instead of `@v4`.
   GitHub-hosted runners are newer; GHES and old self-hosted runners may not
@@ -111,6 +129,8 @@ byte-identical-output promise are the public API.
   Library: `fetch::Auth::authorization_for(host)` is now
   `authorization_for_url(url)` — renamed so that a caller passing a host
   fails to compile instead of silently getting no header.
+- **`install.sh` on BusyBox** (Alpine): the checksum check used
+  `sha256sum -c --quiet`, which BusyBox's `sha256sum` does not accept.
 - **The GitHub Action cached a dead store.** It saved vivacity's store
   next to Composer's cache under fixed paths; since the store's layout
   moved to `v3` (05193b7) the restored `store/v2` was never read (run
