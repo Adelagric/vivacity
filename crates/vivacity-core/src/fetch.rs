@@ -113,8 +113,9 @@ pub(crate) trait Host {
     fn windows(&self) -> bool;
     /// `PHP_OS === 'Darwin'`.
     fn darwin(&self) -> bool;
-    /// `config.<key>` of `<home>/config.json`.
-    fn global_config(&self, home: &str, key: &str) -> Option<Value>;
+    /// `config.<key>` of the global layer under `<home>`
+    /// ([`global_config_layer`]).
+    fn global_config(&self, home: &str, key: &str) -> std::result::Result<Option<Value>, String>;
 }
 
 /// The running process.
@@ -136,10 +137,62 @@ impl Host for RealHost {
     fn darwin(&self) -> bool {
         cfg!(target_os = "macos")
     }
-    fn global_config(&self, home: &str, key: &str) -> Option<Value> {
-        let v = crate::jsonfile::read(&Path::new(home).join("config.json"))?;
-        v.get("config")?.get(key).cloned()
+    fn global_config(&self, home: &str, key: &str) -> std::result::Result<Option<Value>, String> {
+        global_config_layer(home, key, std::env::var("COMPOSER_AUTH").ok().as_deref())
     }
+}
+
+/// The global layer of `Config::get($key)` as `Factory::createConfig`
+/// merges it: `config.<key>` of `<home>/config.json`, then the top level of
+/// `<home>/auth.json` and of COMPOSER_AUTH (both merged under `config`).
+/// `Err` where Composer would read something vivacity does not: a file or
+/// COMPOSER_AUTH that is not valid JSON (Composer stops), or `key` set by
+/// auth.json or COMPOSER_AUTH.
+fn global_config_layer(
+    home: &str,
+    key: &str,
+    composer_auth: Option<&str>,
+) -> std::result::Result<Option<Value>, String> {
+    let read = |name: &str| -> std::result::Result<Option<Value>, String> {
+        let path = Path::new(home).join(name);
+        match std::fs::read_to_string(&path) {
+            Err(_) => Ok(None),
+            Ok(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| format!("{} is not valid JSON", path.display())),
+        }
+    };
+    let config = read("config.json")?;
+    let auth = read("auth.json")?;
+    // `if ($composerAuthEnv)`: PHP truthiness.
+    let env_auth = match composer_auth.filter(|a| !a.is_empty() && *a != "0") {
+        Some(text) => Some(
+            serde_json::from_str::<Value>(text)
+                .map_err(|_| "COMPOSER_AUTH is not valid JSON".to_owned())?,
+        ),
+        None => None,
+    };
+    for (source, layer) in [("auth.json", &auth), ("COMPOSER_AUTH", &env_auth)] {
+        if layer.as_ref().and_then(|l| l.get(key)).is_some() {
+            return Err(format!("{key} in {source}"));
+        }
+    }
+    Ok(config
+        .as_ref()
+        .and_then(|c| c.get("config"))
+        .and_then(|c| c.get(key))
+        .cloned())
+}
+
+/// A cache directory set in the project's composer.json (`config.cache-dir`,
+/// `cache-files-dir`, `cache-repo-dir`), which `Config::get` would take over
+/// the global value: not reproduced, named for the hand-over.
+pub fn project_cache_config(manifest: &Value) -> Option<String> {
+    let config = manifest.get("config")?;
+    ["cache-dir", "cache-files-dir", "cache-repo-dir"]
+        .into_iter()
+        .find(|key| config.get(key).is_some())
+        .map(|key| format!("config {key} in composer.json"))
 }
 
 /// PHP truthiness of an environment value: set, not empty, not `"0"`.
@@ -192,14 +245,16 @@ fn home_dir(h: &dyn Host) -> std::result::Result<String, String> {
     Ok(dirs.into_iter().find(|d| h.is_dir(d)).unwrap_or(first))
 }
 
-/// `Platform::expandPath`: a leading `~/` (or `~\`) becomes the user's
+/// `Platform::expandPath`: a leading `~/` becomes the user's
 /// directory; a leading `$VAR` or `%VAR%` becomes the variable's value (the
 /// empty string when unset; `$HOME` falls back to USERPROFILE on Windows).
 /// `Err` where Composer would ask the password database for the user's
 /// directory (no HOME at all), which is not reproduced.
 fn expand_path(h: &dyn Host, path: &str) -> std::result::Result<String, String> {
     if let Some(rest) = path.strip_prefix('~') {
-        if rest.starts_with(['/', '\\']) {
+        // `'#^~[\\/]#'` is a PHP single-quoted string: the class is `[\/]`,
+        // a slash only.
+        if rest.starts_with('/') {
             // `Platform::getUserDirectory`: HOME as it is, set even empty.
             let user = match h.env("HOME") {
                 Some(home) => home,
@@ -308,7 +363,7 @@ fn config_dir_value(
     if let Some(v) = h.env(env) {
         return Ok(v);
     }
-    match h.global_config(&config_home(h)?, key) {
+    match h.global_config(&config_home(h)?, key)? {
         Some(Value::String(s)) => Ok(s),
         Some(other) => Err(format!("config {key} {other} in config.json")),
         None => default(),
@@ -387,8 +442,10 @@ fn cache_dir_hand_over_with(h: &dyn Host, reads_cache: bool) -> Option<String> {
                 return Some(format!("{env} is set"));
             }
             if let Ok(home) = config_home(h) {
-                if h.global_config(&home, key).is_some() {
-                    return Some(format!("config {key} in config.json"));
+                match h.global_config(&home, key) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => return Some(format!("config {key} in config.json")),
+                    Err(why) => return Some(why),
                 }
             }
         }
@@ -859,6 +916,8 @@ mod tests {
         windows: bool,
         darwin: bool,
         config_json: BTreeMap<String, Value>,
+        /// `<home>|<key>` whose global layer cannot be reproduced.
+        config_errors: BTreeMap<String, String>,
     }
 
     impl FakeHost {
@@ -891,8 +950,16 @@ mod tests {
         fn darwin(&self) -> bool {
             self.darwin
         }
-        fn global_config(&self, home: &str, key: &str) -> Option<Value> {
-            self.config_json.get(&format!("{home}|{key}")).cloned()
+        fn global_config(
+            &self,
+            home: &str,
+            key: &str,
+        ) -> std::result::Result<Option<Value>, String> {
+            let at = format!("{home}|{key}");
+            match self.config_errors.get(&at) {
+                Some(e) => Err(e.clone()),
+                None => Ok(self.config_json.get(&at).cloned()),
+            }
         }
     }
 
@@ -1095,6 +1162,87 @@ mod tests {
         assert!(cache_dir_hand_over_with(&cfg, true).is_some());
         // Composer stops: the hand-over lets it say so.
         assert!(cache_dir_hand_over_with(&FakeHost::default(), false).is_some());
+    }
+
+    #[test]
+    fn only_a_tilde_slash_expands() {
+        // `'#^~[\\/]#'` in single quotes is the PCRE `[\/]`: a slash only.
+        let h = FakeHost::linux("/home/u").with("COMPOSER_CACHE_DIR", "~\\zz");
+        assert_eq!(setting(&h).unwrap(), "~\\zz");
+    }
+
+    #[test]
+    fn a_global_layer_vivacity_does_not_read_is_handed_over() {
+        // An unreadable config.json, or a cache key at the top of auth.json
+        // or COMPOSER_AUTH (Factory merges both under `config`).
+        let mut h = FakeHost::linux("/home/u");
+        h.config_errors.insert(
+            "/home/u/.composer|cache-dir".to_owned(),
+            "cache-dir in auth.json".to_owned(),
+        );
+        assert!(setting(&h).is_err());
+        assert!(cache_dir_hand_over_with(&h, false).is_some());
+        let mut h = FakeHost::linux("/home/u");
+        h.config_errors.insert(
+            "/home/u/.composer|cache-files-dir".to_owned(),
+            "cache-files-dir in COMPOSER_AUTH".to_owned(),
+        );
+        assert!(setting(&h).is_ok());
+        assert!(cache_dir_hand_over_with(&h, true).is_some());
+    }
+
+    #[test]
+    fn the_global_layer_is_read_as_factory_merges_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let home = dir.path().to_str().expect("utf8");
+        let layer = |config: Option<&str>, auth: Option<&str>, env: Option<&str>| {
+            let _ = std::fs::remove_file(dir.path().join("config.json"));
+            let _ = std::fs::remove_file(dir.path().join("auth.json"));
+            if let Some(c) = config {
+                std::fs::write(dir.path().join("config.json"), c).expect("write");
+            }
+            if let Some(a) = auth {
+                std::fs::write(dir.path().join("auth.json"), a).expect("write");
+            }
+            global_config_layer(home, "cache-dir", env)
+        };
+        assert_eq!(layer(None, None, None), Ok(None));
+        assert_eq!(
+            layer(Some(r#"{"config":{"cache-dir":"/c"}}"#), None, None),
+            Ok(Some(Value::from("/c")))
+        );
+        // auth.json and COMPOSER_AUTH as CI sets them: no effect.
+        assert_eq!(
+            layer(
+                Some(r#"{"config":{"cache-dir":"/c"}}"#),
+                Some(r#"{"github-oauth":{"github.com":"t"}}"#),
+                Some(r#"{"http-basic":{}}"#)
+            ),
+            Ok(Some(Value::from("/c")))
+        );
+        assert!(layer(Some("{not json"), None, None).is_err());
+        assert!(layer(None, Some("{not json"), None).is_err());
+        assert!(layer(None, None, Some("{not json")).is_err());
+        assert!(layer(None, Some(r#"{"cache-dir":"/a"}"#), None).is_err());
+        assert!(layer(None, None, Some(r#"{"cache-dir":"/a"}"#)).is_err());
+        // An empty COMPOSER_AUTH is PHP-falsy: ignored.
+        assert_eq!(layer(None, None, Some("")), Ok(None));
+    }
+
+    #[test]
+    fn a_project_cache_setting_is_handed_over() {
+        let m = |c: Value| serde_json::json!({ "config": c });
+        assert_eq!(project_cache_config(&serde_json::json!({})), None);
+        assert_eq!(
+            project_cache_config(&m(serde_json::json!({"vendor-dir": "v"}))),
+            None
+        );
+        for key in ["cache-dir", "cache-files-dir", "cache-repo-dir"] {
+            assert!(
+                project_cache_config(&m(serde_json::json!({ key: "/x" }))).is_some(),
+                "{key}"
+            );
+        }
     }
 
     #[test]

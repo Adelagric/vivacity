@@ -795,7 +795,8 @@ impl Cli {
     }
 
     /// Why the command goes to Composer because of the cache directory, if
-    /// it must: what `fetch::cache_dir_hand_over` names, and a relative
+    /// it must: what `fetch::cache_dir_hand_over` names, a cache directory
+    /// set in the project's composer.json, and a relative
     /// cache directory under `--working-dir`, which Composer resolves from
     /// there (`Config::realpath`, after `Application::doRun`'s `chdir`)
     /// where vivacity, which never changes directory, would not.
@@ -808,6 +809,18 @@ impl Cli {
         };
         if let Some(why) = vivacity_core::fetch::cache_dir_hand_over(reads_cache) {
             return Some(why);
+        }
+        if reads_cache {
+            let manifest = project_dir(self.working_dir())
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p.join("composer.json")).ok())
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+            if let Some(why) = manifest
+                .as_ref()
+                .and_then(vivacity_core::fetch::project_cache_config)
+            {
+                return Some(why);
+            }
         }
         (reads_cache
             && self.working_dir().is_some()

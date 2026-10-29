@@ -11,7 +11,8 @@
 #   2. `install` d'un projet à dépôt `artifact` (aucun réseau), store de
 #      vivacity vierge : l'endroit où le zip du paquet atterrit vraiment.
 #      Les cas que vivacity rend à Composer (valeur vide, `0`,
-#      COMPOSER_CACHE_FILES_DIR, relatif sous --working-dir) passent par la
+#      COMPOSER_CACHE_FILES_DIR, `cache-files-dir` du composer.json du projet,
+#      relatif sous --working-dir) passent par la
 #      délégation : même endroit, par construction, et la délégation est
 #      vérifiée au passage.
 #
@@ -65,6 +66,10 @@ reset() {
   cp -R "$WORK/proj" "$SB/proj"
   case "$1" in
     legacy*) mkdir -p "$SB/home/.composer/cache" ;;
+    project-config)
+      "$PHP" -r '$f = $argv[1]; $j = json_decode(file_get_contents($f), true);
+        $j["config"]["cache-files-dir"] = $argv[2];
+        file_put_contents($f, json_encode($j, JSON_UNESCAPED_SLASHES));' "$SB/proj/composer.json" "$SB/pf" ;;
   esac
 }
 
@@ -75,6 +80,7 @@ case_env() {
     absolute)      echo "COMPOSER_CACHE_DIR=@/cc" ;;
     trailing)      echo "COMPOSER_CACHE_DIR=@/cc/" ;;
     tilde)         echo "COMPOSER_CACHE_DIR=~/cc" ;;
+    tilde-backslash) echo 'COMPOSER_CACHE_DIR=~\cc' ;;
     dollar-home)   echo 'COMPOSER_CACHE_DIR=$HOME/cc' ;;
     percent-home)  echo 'COMPOSER_CACHE_DIR=%HOME%/cc' ;;
     relative)      echo "COMPOSER_CACHE_DIR=rel/cc" ;;
@@ -88,6 +94,8 @@ case_env() {
     empty)         echo "COMPOSER_CACHE_DIR=" ;;
     zero)          echo "COMPOSER_CACHE_DIR=0" ;;
     files-dir)     echo "COMPOSER_CACHE_FILES_DIR=@/ff" ;;
+    composer-auth) echo 'COMPOSER_AUTH={"github-oauth":{"github.com":"x"}}' ;;
+    project-config) ;;
   esac
 }
 
@@ -115,7 +123,7 @@ if [ -d /etc/xdg ]; then
   echo "note : /etc/xdg existe ici, chaque cas Linux passe par la branche XDG"
 fi
 
-CASES="no-xdg absolute trailing tilde dollar-home percent-home relative home-slash home-zero xdg-cache xdg-other legacy legacy-xdg etc-xdg empty zero files-dir"
+CASES="no-xdg absolute trailing tilde tilde-backslash dollar-home percent-home relative home-slash home-zero xdg-cache xdg-other legacy legacy-xdg etc-xdg empty zero files-dir composer-auth project-config"
 for c in $CASES; do
   if [ "$c" = etc-xdg ]; then
     if [ "$(uname -s)" != Linux ]; then
@@ -140,6 +148,15 @@ for c in $CASES; do
   [ "$c_code" = "$v_code" ] || { fail "$c config exit : composer $c_code vivacity $v_code"; case_ok=0; }
   printed="$(cat "$WORK/c.out")"
 
+  # `~\cc` n'est pas développé (la classe de `expandPath` est `[\/]` : une
+  # barre oblique seulement) ; hors Windows, Composer échoue ensuite à écrire
+  # son cache à travers la contre-oblique (Filesystem::copy la normalise) :
+  # seule la valeur imprimée se compare.
+  if [ "$c" = tilde-backslash ]; then
+    if [ "$case_ok" = 1 ]; then echo "ok   $c : [$printed] (config seulement)"; passed=$((passed + 1)); fi
+    continue
+  fi
+
   # 2. Où install écrit le zip.
   reset "$c"; run "$c" "$SB/proj" "$COMPOSER" install -n >"$WORK/ci.log" 2>&1 || { fail "$c composer install"; cat "$WORK/ci.log"; case_ok=0; }
   c_zips="$(zips)"
@@ -150,7 +167,7 @@ for c in $CASES; do
   fi
   delegated=no; grep -q '^vivacity: delegating to `composer install' "$WORK/vi.log" && delegated=yes
   case "$c" in
-    empty|zero|files-dir) [ "$delegated" = yes ] || { fail "$c : vivacity aurait dû déléguer"; case_ok=0; } ;;
+    empty|zero|files-dir|project-config) [ "$delegated" = yes ] || { fail "$c : vivacity aurait dû déléguer"; case_ok=0; } ;;
     *) [ "$delegated" = no ] || { fail "$c : délégation inattendue"; case_ok=0; } ;;
   esac
   if [ "$case_ok" = 1 ]; then
