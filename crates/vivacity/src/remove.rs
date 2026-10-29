@@ -20,17 +20,6 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
         anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
     }
-    // PHP or not, decided before composer.json is edited (`--no-update`
-    // resolves nothing: no PHP needed).
-    if !args.no_update {
-        let (ignore_all, _) =
-            platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, false);
-        if let crate::no_php::Decision::Stop(code) =
-            crate::no_php::decide("remove", ignore_all, true, args.no_fallback)?
-        {
-            return Ok(code);
-        }
-    }
     // `--dry-run`: the links are collected instead of removed from the
     // file, and the root package is patched in memory (`$toRemove`).
     let dry_run = args.dry_run;

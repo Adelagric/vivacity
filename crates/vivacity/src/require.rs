@@ -356,28 +356,6 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             anyhow::bail!("COMPOSER={f}: an alternate manifest is not supported yet");
         }
     }
-    // PHP or not, decided before anything is printed, created or edited;
-    // without PHP, a requirement whose constraint Composer reads from the
-    // platform stops here, named.
-    let (ignore_all, _) = crate::platform_requirement_env(
-        args.ignore_platform_reqs,
-        &args.ignore_platform_req,
-        false,
-    );
-    match crate::no_php::decide("require", ignore_all, !args.no_update, args.no_fallback)? {
-        crate::no_php::Decision::Stop(code) => return Ok(code),
-        crate::no_php::Decision::Without => {
-            let issues: Vec<_> = parse_name_version_pairs(&args.packages)
-                .into_iter()
-                .filter(|(_, version)| version.is_none())
-                .filter_map(|(name, _)| crate::no_php::unguessable_requirement(&name))
-                .collect();
-            if !issues.is_empty() {
-                return crate::delegate_resolution(&issues, args.no_fallback);
-            }
-        }
-        crate::no_php::Decision::Php => {}
-    }
     // `RequireCommand::execute`'s first line: held like the lines of
     // `initialize`, so that an early hand-over leaves it to Composer.
     if args.no_suggest {
@@ -504,7 +482,6 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         Some(&cache_repo_dir),
         &UpdateOptions {
             ignore_lock: true,
-            php_absent: crate::no_php::absent(),
             ..UpdateOptions::default()
         },
     );

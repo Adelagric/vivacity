@@ -166,8 +166,6 @@ jobs:
         run: harness/net-retry.sh harness/fallback-args.sh
       - name: Composer's cache directory (config --global cache-dir and where zips land, env matrix, offline)
         run: harness/composer-cache-dir.sh
-      - name: update/require/remove with no PHP under --ignore-platform-reqs (Composer with its PHP as the reference)
-        run: harness/net-retry.sh harness/no-php.sh
 
       - name: Per-file scan cache (root sources edited between installs)
         run: harness/net-retry.sh harness/root-scan.sh

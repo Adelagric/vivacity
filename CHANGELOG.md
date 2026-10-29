@@ -7,28 +7,6 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
-- **`update`, `require`, `remove` and an `install` without a lock run
-  with no PHP under `--ignore-platform-reqs`** (or
-  `COMPOSER_IGNORE_PLATFORM_REQS=1`). Composer skips every rule on a
-  platform package under that option, so Composer with a PHP is the
-  reference: vivacity resolves on the `composer*` packages and the
-  `config.platform` overrides, with the same lock, composer.json,
-  vendor/, stdout and stderr (`harness/no-php.sh`, 42 cases, under PHP 8.4
-  and 8.5 on Composer's side). What would still depend on the real
-  platform stops with exit 3 and its reason, never handed to a Composer
-  that would need a PHP too: a `require` of a platform package with no
-  constraint, a package that replaces one, a `--with` constraint on one,
-  an unsolvable set whose explanation lists the PHP's ini files, `-v` and
-  `-vv`. One line is allowed to differ: the `N package suggestions were
-  added…` count treats every platform name but the `composer*` packages
-  and the versioned `config.platform` keys as not provided, so N can be
-  higher than Composer's (never lower); the lock, vendor/ and every other
-  line stay Composer's. On the Laravel and Symfony fixtures resolved from
-  scratch: 95 against 49, 55 against 21, each difference accounted for by
-  the suggested names Composer's PHP provides. Without the option the
-  commands still exit 1, now with a message naming
-  `--ignore-platform-reqs` and `VIVACITY_PHP`, and `remove` no longer
-  edits composer.json first (`remove --no-update` needs no PHP).
 - **Static musl builds for Linux** (`x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-musl`): vivacity runs on Alpine (the official
   `composer` image, `php:*-alpine`). `install.sh` picks them when the
@@ -147,13 +125,6 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
-- **The pool builder's warnings come before `Updating dependencies`**, as
-  Composer writes them while it builds the pool: an update allow list
-  that matches nothing locked (`Package "…" listed for update is not
-  locked.`, `Pattern "…" listed for update matches platform packages…`,
-  printed by `require` of a platform package too) and a root requirement
-  kept locked (`Dependency … is also a root requirement…`). vivacity
-  printed them after that line, with or without PHP.
 - **A `github-oauth` token goes where Composer sends it, and only there.**
   The github.com token is sent as `token …` to `api.github.com` URLs only
   (it went to github.com and every `*.github.com`, codeload included); a

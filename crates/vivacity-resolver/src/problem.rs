@@ -50,17 +50,6 @@ pub struct PrettyConstraint<'a> {
 // ---------------------------------------------------------------------------
 // SolverProblemsException
 
-/// The first name that `getExtensionProblems` would report for these
-/// problems (a rule whose required package starts with `ext-`, platform
-/// package or not): its hint lists the PHP's ini files.
-pub fn extension_problem(arena: &[Package], problems: &[SolvedProblem]) -> Option<String> {
-    problems
-        .iter()
-        .flat_map(|p| p.sections.iter().flatten())
-        .filter_map(|rule| required_package(arena, rule))
-        .find(|required| required.starts_with("ext-"))
-}
-
 /// `SolverProblemsException::getPrettyString(..., $isDevExtraction)`: the
 /// numbered problems, deduplicated, then the hints.
 pub fn pretty_string(

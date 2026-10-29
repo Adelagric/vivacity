@@ -352,9 +352,6 @@ pub struct Pool {
     package_by_name: HashMap<String, Vec<usize>>,
     pub unacceptable_fixed_or_locked: Vec<usize>,
     pub warnings: Vec<String>,
-    /// The policy filters' warnings (`SecurityAdvisoryPoolFilter`,
-    /// `FilterListPoolFilter`), kept apart from the builder's own.
-    pub filter_warnings: Vec<String>,
     /// Flex's `Restricting packages listed in "symfony/symfony" to …`
     /// notice, printed once by the caller before `Updating dependencies`.
     pub flex_notice: Option<String>,
@@ -385,7 +382,6 @@ impl Pool {
             package_by_name: HashMap::new(),
             unacceptable_fixed_or_locked: unacceptable,
             warnings: Vec::new(),
-            filter_warnings: Vec::new(),
             filter_list_removed: BTreeMap::new(),
             security_removed: BTreeMap::new(),
             abandoned_removed: BTreeMap::new(),
@@ -488,7 +484,6 @@ impl Pool {
     pub fn with_packages(&self, kept: Vec<usize>, arena: &[Package]) -> Pool {
         let mut pool = Pool::new(kept, self.unacceptable_fixed_or_locked.clone(), arena);
         pool.warnings = self.warnings.clone();
-        pool.filter_warnings = self.filter_warnings.clone();
         pool.filter_list_removed = self.filter_list_removed.clone();
         pool.security_removed = self.security_removed.clone();
         pool.abandoned_removed = self.abandoned_removed.clone();
