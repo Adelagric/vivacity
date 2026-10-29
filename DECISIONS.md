@@ -4774,10 +4774,14 @@ enregistrements de classmap de vivacity, les trois du cache de Composer.
   require, remove ; dump-autoload pour les trois premiers) : valeur vide ou
   `0` (Composer écrit `.htaccess` et ses zips dans le répertoire de travail
   ou `./0`, mesuré), Windows sans `APPDATA` ni `COMPOSER_HOME` et `HOME`
-  absent (Composer s'arrête), une référence `{$clé}` ;
-  `COMPOSER_CACHE_FILES_DIR`, `COMPOSER_CACHE_REPO_DIR` (ou leurs clés du
-  `config.json`) ; un relatif sous `--working-dir` (Composer le résout après
-  son `chdir`, vivacity ne change jamais de répertoire).
+  absent (Composer s'arrête), une référence `{$clé}`, un `config.json`,
+  `auth.json` ou `COMPOSER_AUTH` invalide (Composer s'arrête) ou une clé de
+  cache au premier niveau des deux derniers (`Factory` les fusionne sous
+  `config`) ; `COMPOSER_CACHE_FILES_DIR`, `COMPOSER_CACHE_REPO_DIR` (ou
+  leurs clés du `config.json`), `cache-dir` / `cache-files-dir` /
+  `cache-repo-dir` du `composer.json` du projet ; un relatif sous
+  `--working-dir` (Composer le résout après son `chdir`, vivacity ne change
+  jamais de répertoire).
 - `actions/cache` v6.1.0 : son `action.yml` ne diffère de v4.3.0 que par
   `node20` → `node24`. Prémisse corrigée par la méta-analyse : node20 n'est
   pas retiré des runners hébergés (ils le forcent en node24 avec un
@@ -4788,17 +4792,37 @@ enregistrements de classmap de vivacity, les trois du cache de Composer.
 
 **Vérifié.** `harness/composer-cache-dir.sh` (sans réseau, dépôt
 `artifact`) : `config --global cache-dir` à l'octet (stdout, stderr, code)
-et l'endroit où le zip atterrit, sur 17 environnements plus un relatif sous
-`--working-dir` : 17 ok + 1 sauté (`/etc/xdg`) sous macOS, 18 ok en
-conteneur Linux root (Composer 2.10.3, `/etc/xdg` créé le temps du cas).
-Vu rouge avec le binaire 5ed42ff : 58 échecs sous macOS, 62 sous Linux,
-dont l'emplacement du zip faux dans 7 cas sous macOS (`~/cc`, `$HOME/cc`,
-`%HOME%/cc` écrits dans `./~/cc`…, `COMPOSER_HOME=0` dans `./0/cache`, vide,
-`COMPOSER_CACHE_FILES_DIR`, relatif sous `--working-dir`) et 8 sous Linux
-(plus `/etc/xdg`). Tests unitaires sur un hôte injecté (Windows, `/etc/xdg`,
-`HOME` absent), vus rouges sur le port de l'ancien algorithme (6 sur 6).
+et l'endroit où le zip atterrit, sur 20 environnements plus un relatif
+sous `--working-dir` (`~\cc` comparé sur la valeur seulement, Composer
+échouant ensuite à écrire son cache à travers la contre-oblique hors
+Windows) : 20 ok + 1 sauté (`/etc/xdg`) sous macOS, 21 ok en conteneur
+Linux root (Composer 2.10.3, `/etc/xdg` créé le temps du cas). Vu rouge
+avec le binaire 5ed42ff : 0 ok, 69 lignes d'échec sous macOS, 73 sous
+Linux ; l'emplacement du zip faux dans 8 cas sous macOS (`~/cc`,
+`$HOME/cc`, `%HOME%/cc` écrits dans `./~/cc`…, `COMPOSER_HOME=0` dans
+`./0/cache`, vide, `COMPOSER_CACHE_FILES_DIR`, `cache-files-dir` du projet,
+relatif sous `--working-dir`), plus `/etc/xdg` sous Linux. Tests unitaires
+sur un hôte injecté (Windows, `/etc/xdg`, `HOME` absent), vus rouges sur le
+port de l'ancien algorithme (6 sur 6), puis 3 sur 3 pour les points de la
+revue.
 `action-test.yml` compare la sortie à `composer config --global
 cache-dir` (environnement du runner, puis `COMPOSER_CACHE_DIR` sur un second
-appel sans cache) et exige `<sortie>/files` non vide après l'install ; avec
-l'ancienne action la sortie est vide et les deux pas échouent (simulation
-locale des pas, `bash -e`). Le workflow lui-même ne tourne qu'en CI.
+appel sans cache) et exige `<sortie>/files` non vide après l'install, ce
+`files/` restauré ayant été vidé avant ; avec l'ancienne action la sortie
+est vide et les trois pas échouent, et un install qui écrit ailleurs fait
+échouer le pas `files/` (simulation locale des pas, `bash -eo pipefail`).
+Le workflow lui-même ne tourne qu'en CI.
+
+**Revue indépendante** (sous-agent frais, sur `git diff 5ed42ff..`) :
+aucun défaut haut. Intégrés : les clés de cache du `composer.json` du
+projet (moyen ; Composer écrivait ses zips ailleurs, vivacity restait
+natif), le test `files/` qui ne pouvait pas rougir sur une clé trouvée
+(moyen), `~\` que Composer ne développe pas (bas), `auth.json` /
+`COMPOSER_AUTH` / JSON global invalide (bas), le `\r\n` de `PHP_EOL` sous
+Windows dans la comparaison (soupçon), l'affirmation « stderr à l'octet »
+d'une délégation (doc). Laissés, consignés au HANDOVER : `config` refuse
+`-q`/`-n`/`--no-ansi`/`-d` (la consigne : toute autre forme sort en 2) ;
+`COMPOSER_BIN_COMPAT` invalide ou `./composer.json` invalide, où Composer
+sort en 1 et `config` répond (hors du cache) ; la notice à chaque run sous
+`cache: 'false'` (demandée) ; la branche `cygpath -m` presque morte (MSYS
+convertit déjà `/c/…` pour un binaire natif), gardée comme demandé.

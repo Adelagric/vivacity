@@ -10,9 +10,9 @@ byte-identical-output promise are the public API.
 - **`vivacity config --global cache-dir`** prints Composer's cache directory
   as vivacity uses it, byte for byte what `composer config --global
   cache-dir` prints (stdout, stderr, exit code; `harness/composer-cache-dir.sh`,
-  17 environments plus `--working-dir`). Where vivacity does not reproduce
-  the value, Composer answers. Every other form of `config` stays a usage
-  error (exit 2).
+  20 environments plus `--working-dir`). Where vivacity does not reproduce the value, Composer
+  answers, after vivacity's `delegating to` line on stderr. Every other form
+  of `config` stays a usage error (exit 2).
 - **infection/extension-installer 0.1.2 is emulated.** Its
   `src/GeneratedExtensionsConfig.php` (the `infection-extension` packages:
   install path, `extra.infection`, version) and its lines ("No extensions
@@ -111,13 +111,17 @@ byte-identical-output promise are the public API.
   (`Config::get('cache-dir')` on top of `Factory::getCacheDir`): trailing
   `/` and `\` trimmed, `~`, `$VAR` and `%VAR%` expanded, a relative value
   resolved against the working directory, `config.json`'s `cache-dir`
-  read, and XDG used when `/etc/xdg` is a directory (the Composer home too).
+  read, and XDG used when `/etc/xdg` is a directory (the Composer home too);
+  `~\` is left as it is, as Composer leaves it.
   A `COMPOSER_CACHE_DIR: ~/.composer-cache` set in YAML made vivacity cache
   into `./~/.composer-cache`. What vivacity does not reproduce goes to
   Composer, named, before anything is written: an empty or `0` value,
   Windows without `APPDATA` nor `COMPOSER_HOME`, a missing `HOME`,
-  `COMPOSER_CACHE_FILES_DIR` / `COMPOSER_CACHE_REPO_DIR`, a relative value
-  under `--working-dir`.
+  `COMPOSER_CACHE_FILES_DIR` / `COMPOSER_CACHE_REPO_DIR`, a `cache-dir`,
+  `cache-files-dir` or `cache-repo-dir` in the project's composer.json, a
+  cache key in auth.json or `COMPOSER_AUTH`, an invalid global config.json,
+  auth.json or `COMPOSER_AUTH` (Composer stops), a relative value under
+  `--working-dir`.
 - **An aliased root lists both versions of its `self.version` replaces in
   installed.php**, as Composer does (it walks the root's alias too): a
   root on `dev-main` aliased to `15.0.x-dev` replaced each subtree package

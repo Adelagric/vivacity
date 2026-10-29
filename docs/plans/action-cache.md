@@ -172,10 +172,15 @@ Onze points ; ceux qui changent le plan :
   `composer-cache-dir`), puis `actions/cache` v6.1.0 sur ce seul
   répertoire si `cache` est vrai et la valeur absolue et utilisable ;
   sinon `::notice::`.
-- **Mesures** : `harness/composer-cache-dir.sh` 17 ok + 1 sauté (macOS),
-  18 ok (conteneur Linux root, `/etc/xdg`) ; vu rouge avec le binaire
-  5ed42ff (58 et 62 échecs). Tests unitaires vus rouges (6/6) sur le port
-  de l'ancien algorithme. Les pas d'`action-test.yml` vus rouges contre
-  l'ancienne action par simulation locale (sortie vide). Le workflow
-  lui-même, et Windows, ne tournent qu'en CI.
+- **Mesures** : `harness/composer-cache-dir.sh` 20 ok + 1 sauté (macOS),
+  21 ok (conteneur Linux root, `/etc/xdg`) ; vu rouge avec le binaire
+  5ed42ff (0 ok ; 69 et 73 lignes d'échec) et, pour les ajouts de la revue,
+  avec celui de 7eb7c2d (3 lignes, 2 cas). Tests unitaires vus rouges (6/6
+  puis 3/3). Les pas d'`action-test.yml` vus rouges contre l'ancienne
+  action par simulation locale (sortie vide), et le pas `files/` rouge
+  quand l'install écrit ailleurs. Le workflow lui-même, et Windows, ne
+  tournent qu'en CI.
+- **Revue indépendante** : intégrée (clés de cache du projet, couches
+  `auth.json`/`COMPOSER_AUTH`, `~\`, test `files/` vidé d'abord, `\r`
+  de Windows) ; le reste est consigné (DECISIONS, HANDOVER).
 

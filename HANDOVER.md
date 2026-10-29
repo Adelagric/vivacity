@@ -43,7 +43,7 @@ harness/vendor-dir.sh [variante...]      # config.vendor-dir / bin-dir : 6 varia
 harness/path-repos.sh                    # dépôts `path` (14 étapes, dont 4 sur la ligne « Generating [optimized] autoload files ») : install (liens), install à vide, update après édition, remove, require, changement d'options (liens → miroirs → liens absolus), lien supprimé à la main, install en miroir — stderr, lock, vendor/ (diff + inventaire modes/liens + mtime des miroirs)
 harness/verbosity.sh                     # stdout et stderr entiers sous normal, -q et -v (296 cas : 212 sur instantanés figés, dont 49 sans COMPOSER_ROOT_VERSION : l'avertissement de version racine ; `@files:` compare des fichiers écrits sans être dits, `platform_check.php` ; puis 84 `online`, plugins actifs, Packagist en ligne et fixtures/projects/laravel-pest : lignes `> événement: classe->méthode` sous -v, sortie fusionnée et projet comparés, `@delegates:` pour les plugins rendus avec leur raison ; `VERBOSITY_ONLINE_ONLY=<motif>` pour un sous-ensemble, `VIVACITY_BIN` pour un autre binaire)
 harness/fallback-args.sh                 # ce que le fallback transmet à Composer (50 cas, faux composer, faux `hg`) + les lignes retenues (version racine, variables `COMPOSER_IGNORE_PLATFORM_REQ(S)`, `--no-suggest`) comptées devant chaque délégation
-harness/composer-cache-dir.sh            # le répertoire de cache de Composer (2026-10-29, docs/plans/action-cache.md), sans réseau : `config --global cache-dir` à l'octet (stdout, stderr, code) et l'endroit où atterrit le zip d'un dépôt `artifact`, 17 environnements (`COMPOSER_CACHE_DIR` absolu, barre finale, `~`, `$HOME`, `%HOME%`, relatif, vide, `0` ; `COMPOSER_HOME` à barre finale ou `0` ; `XDG_*` ; `~/.composer/cache` existant ; `/etc/xdg` sous Linux root ; `COMPOSER_CACHE_FILES_DIR`) + un relatif sous `--working-dir` ; les cas rendus vérifient la délégation
+harness/composer-cache-dir.sh            # le répertoire de cache de Composer (2026-10-29, docs/plans/action-cache.md), sans réseau : `config --global cache-dir` à l'octet (stdout, stderr, code) et l'endroit où atterrit le zip d'un dépôt `artifact`, 20 environnements (`COMPOSER_CACHE_DIR` absolu, barre finale, `~`, `~\` (valeur seulement), `$HOME`, `%HOME%`, relatif, vide, `0` ; `COMPOSER_HOME` à barre finale ou `0` ; `XDG_*` ; `~/.composer/cache` existant ; `/etc/xdg` sous Linux root ; `COMPOSER_CACHE_FILES_DIR` ; `cache-files-dir` du projet ; `COMPOSER_AUTH` à jetons) + un relatif sous `--working-dir` ; les cas rendus vérifient la délégation
 tools/snapshot-packagist.sh <fixture>    # (re)capture un instantané Packagist + lock de référence
 harness/boot.sh                          # les 6 fixtures démarrent sur un vendor 100 % vivacity
 harness/drift-reference.sh [phar]        # docs/reference/ == fichiers du phar (2.10.3 ou autre) ; une dérive lue et tranchée s'acquitte dans docs/reference/DRIFT-ACK (clé = empreinte du diff, donc un nouveau mouvement amont réalerte), le script imprimant la ligne à coller
@@ -338,7 +338,7 @@ comportement, non vendorés.
 - **Le cache de l'action et le répertoire de cache de Composer (2026-10-29,
   `docs/plans/action-cache.md`)** : l'action ne met plus en cache que le
   répertoire que `vivacity config --global cache-dir` imprime ; le cœur suit
-  `Config::get('cache-dir')` (`harness/composer-cache-dir.sh`, 17
+  `Config::get('cache-dir')` (`harness/composer-cache-dir.sh`, 20
   environnements + `--working-dir`, macOS et conteneur Linux). Le workflow
   `action` (trois OS, `action-test.yml`) n'est exercé qu'en CI : la
   branche Windows (`cygpath -m` d'une valeur en `/c/…`, `%LOCALAPPDATA%`)
@@ -357,20 +357,34 @@ comportement, non vendorés.
   - `hashFiles('**/composer.lock')` **hache tous les locks du dépôt**
     (fixtures, sous-projets), pas celui qu'on installe ;
   - les autres **`actions/*@v4`** des workflows du dépôt (`checkout`,
-    `cache`, `upload-artifact`, `download-artifact` dans ci, bench,
-    ci-cache, drift, release, windows, corpus) : non épinglés par SHA,
-    avertissement node20 ; hors de ce changement ;
+    `cache`, `upload-artifact`, `download-artifact` dans action-test, ci,
+    bench, ci-cache, drift, release, windows, corpus) : non épinglés par
+    SHA, avertissement node20 ; hors de ce changement ;
   - le store se dit « content-addressed » (`store.rs`, README) : sa clé est
     la version plus les 12 premiers caractères de la référence, testée par
     `is_dir()` — pas un condensat du contenu ;
   - « reconstruit sans réseau » ne vaut que pour les dists : une source git
     est resynchronisée pour une référence sans branche ni tag, Windows rend
     les sources git à Composer, Flex fait un GET conditionnel ;
-  - `config.cache-dir` / `cache-files-dir` / `cache-repo-dir` /
-    `cache-vcs-dir` du `composer.json` **du projet** : ni suivis par
-    l'action (elle ne connaît pas le projet) ni rendus à Composer par
-    `install` (seuls l'environnement et le `config.json` global le sont ;
-    les sources git rendent déjà `cache-dir`/`cache-vcs-dir`) ;
+  - `config.cache-dir` / `cache-files-dir` / `cache-repo-dir` du
+    `composer.json` **du projet** : rendus à Composer par les commandes,
+    mais pas suivis par l'action (elle ne connaît pas le projet ; un
+    `working-directory:` de l'install non plus) ;
+  - `vivacity config` n'accepte que `--global`/`-g` et `cache-dir` : `-q`,
+    `-n`, `--no-ansi`, `-d` sortent en 2 là où Composer répond ; un
+    `COMPOSER_BIN_COMPAT` ou un `./composer.json` invalides font sortir
+    Composer en 1, vivacity répond ; une délégation de `config` ajoute la
+    ligne `vivacity: delegating to …` sur stderr ;
+  - l'action : `cache: 'false'` écrit une notice à chaque run ; une entrée
+    `version:` antérieure à cette version n'a pas `config` et coupe le
+    cache (notice) ; la valeur résolue l'est dans bash — MSYS convertit
+    `/c/…` pour le binaire natif, si bien que `cygpath -m` ne sert presque
+    jamais, et une étape `pwsh` qui lit un `COMPOSER_CACHE_DIR` en `/…`
+    brut peut écrire ailleurs ;
+  - **sous Windows, la fin de ligne de stdout** : Composer écrit `PHP_EOL`
+    (`\r\n`), vivacity `\n`, pour toutes les commandes (constaté par la
+    revue en lisant `StreamOutput::doWrite`, non mesuré sur un runner) ;
+    `action-test.yml` retire le `\r` avant de comparer ;
   - `htaccess-protect` : Composer crée `.htaccess` dans son home, son cache
     et son répertoire de données à chaque commande, vivacity jamais ; sous
     macOS il déplace aussi un ancien `<home>/cache` vers
