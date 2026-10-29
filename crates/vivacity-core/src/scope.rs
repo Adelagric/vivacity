@@ -100,8 +100,10 @@ pub const EMULATED_VERSIONS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "dealerdirect/phpcodesniffer-composer-installer",
-        &["1.0.0.0", "1.1.1.0", "1.1.2.0", "1.2.0.0", "1.2.1.0"],
-        "0.x also searches the whole project for rulesets, v1.1.0 asks InstalledVersions where phpcs is",
+        &[
+            "0.7.2.0", "1.0.0.0", "1.1.1.0", "1.1.2.0", "1.2.0.0", "1.2.1.0",
+        ],
+        "the other 0.x versions were not read, v1.1.0 asks InstalledVersions where phpcs is",
     ),
     (
         "composer/package-versions-deprecated",
@@ -124,6 +126,66 @@ fn emulated_version_issue(name: &str, version: &str) -> Option<ScopeIssue> {
             .collect::<Vec<_>>()
             .join(", ")
     )))
+}
+
+/// dealerdirect/phpcodesniffer-composer-installer in a version read
+/// (`phpcs_installer::scope_issue`): `packages` are the installed packages
+/// as (name, version) pairs, `aliased` whether the lock aliases a name.
+fn phpcs_issue(
+    project_dir: &Path,
+    packages: &[(&str, &str)],
+    aliased: impl Fn(&str) -> bool,
+    root_manifest: &Value,
+) -> Option<ScopeIssue> {
+    use crate::phpcs_installer::{path_issue, scope_issue, variant, PLUGIN_NAME};
+    let &(_, plugin) = packages.iter().find(|(n, _)| *n == PLUGIN_NAME)?;
+    if emulated_version_issue(PLUGIN_NAME, plugin).is_some()
+        || !matches!(
+            crate::layout::plugin_allowed(root_manifest, PLUGIN_NAME),
+            crate::layout::PluginVerdict::Allowed
+        )
+    {
+        return None;
+    }
+    let phpcs = packages
+        .iter()
+        .find(|(n, _)| *n == "squizlabs/php_codesniffer")
+        .map(|&(n, v)| (v, aliased(n)));
+    scope_issue(plugin, phpcs, root_manifest)
+        .or_else(|| {
+            // The `PATH` matters to v0.7.2 only, and only with phpcs there.
+            phpcs.filter(|_| variant(plugin).search_project)?;
+            path_issue(
+                project_dir,
+                root_manifest,
+                &std::env::var("PATH").unwrap_or_default(),
+            )
+        })
+        .map(ScopeIssue::Layout)
+}
+
+/// [`phpcs_issue`] on a lock: `analyze`, and the solved lock of an update
+/// before its install phase.
+pub fn phpcs_lock_issue(
+    project_dir: &Path,
+    lock: &Lock,
+    root_manifest: &Value,
+    with_dev: bool,
+) -> Option<ScopeIssue> {
+    let wanted: Vec<(&str, &str)> = lock
+        .wanted_packages(with_dev)
+        .map(|p| (p.name(), p.version()))
+        .collect();
+    phpcs_issue(
+        project_dir,
+        &wanted,
+        |name| {
+            lock.aliases
+                .iter()
+                .any(|a| a.get("package").and_then(Value::as_str) == Some(name))
+        },
+        root_manifest,
+    )
 }
 
 /// phpstan/extension-installer and rector/extension-installer write each
@@ -614,7 +676,18 @@ pub fn resolution_issues(
     // their `POST_UPDATE_CMD` listener on the local repository: the same
     // check, for those listeners.
     if plugins_enabled && (with_install || post_update_cmd) {
-        for p in crate::layout::installed_packages_of(project_dir, root_manifest) {
+        let installed = crate::layout::installed_packages_of(project_dir, root_manifest);
+        let pairs: Vec<(&str, &str)> = installed
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.get("name").and_then(Value::as_str)?,
+                    p.get("version").and_then(Value::as_str)?,
+                ))
+            })
+            .collect();
+        issues.extend(phpcs_issue(project_dir, &pairs, |_| false, root_manifest));
+        for p in installed {
             let (Some(name), Some(version)) = (
                 p.get("name").and_then(Value::as_str),
                 p.get("version").and_then(Value::as_str),
@@ -852,6 +925,9 @@ pub fn analyze(
         report
             .issues
             .extend(aliased_listing_issue(lock, root_manifest, with_dev));
+        report
+            .issues
+            .extend(phpcs_lock_issue(project_dir, lock, root_manifest, with_dev));
     }
     report.issues.extend(
         config_issues(root_manifest, lock, with_dev)
@@ -1507,26 +1583,121 @@ mod tests {
         };
         assert!(issues(&lock("v1.2.1", "1.4.3"), true).is_empty());
         assert!(issues(&lock("v1.0.0", "1.4.0"), true).is_empty());
-        let found = issues(&lock("v0.7.2", "1.3.1"), true);
+        let found = issues(&lock("v0.7.1", "1.3.1"), true);
         assert_eq!(found.len(), 2);
         assert!(found[0].starts_with(
-            "plugin dealerdirect/phpcodesniffer-composer-installer v0.7.2 is not emulated in this version (versions read: 1.0.0, 1.1.1, 1.1.2, 1.2.0, 1.2.1;"
+            "plugin dealerdirect/phpcodesniffer-composer-installer v0.7.1 is not emulated in this version (versions read: 0.7.2, 1.0.0, 1.1.1, 1.1.2, 1.2.0, 1.2.1;"
         ));
         assert!(found[1].contains("1.3.x writes no PHPSTAN_VERSION_CONSTRAINT"));
         // v1.1.0, a dev branch, a version not released yet.
         assert_eq!(issues(&lock("v1.1.0", "dev-main"), true).len(), 2);
         assert_eq!(issues(&lock("v1.3.0", "1.5.0"), true).len(), 2);
         // Not loaded: --no-plugins, or not allowed.
-        assert!(issues(&lock("v0.7.2", "1.3.1"), false).is_empty());
+        assert!(issues(&lock("v0.7.1", "1.3.1"), false).is_empty());
+        assert!(issues(&lock("v0.7.2", "1.4.3"), true).is_empty());
         let refused = json!({"config": {"allow-plugins": {
             "dealerdirect/phpcodesniffer-composer-installer": false,
             "phpstan/extension-installer": false}}});
         assert!(
-            analyze(&proj(), &lock("v0.7.2", "1.3.1"), &refused, true, true)
+            analyze(&proj(), &lock("v0.7.1", "1.3.1"), &refused, true, true)
                 .issues
                 .iter()
                 .all(|i| !i.to_string().contains("in this version"))
         );
+    }
+
+    #[test]
+    fn dealerdirect_configurations_not_reproduced_are_handed_over() {
+        let manifest = |extra: Value| {
+            json!({"config": {"allow-plugins": {
+                "dealerdirect/phpcodesniffer-composer-installer": true}}, "extra": extra})
+        };
+        let lock = |dd: &str, phpcs: Option<&str>, aliased: bool| {
+            let mut packages = vec![
+                json!({"name": "dealerdirect/phpcodesniffer-composer-installer",
+                "version": dd, "type": "composer-plugin",
+                "dist": {"type": "zip", "url": "https://x/y.zip", "reference": "r"}}),
+            ];
+            if let Some(v) = phpcs {
+                packages.push(zip_pkg("squizlabs/php_codesniffer", "library"));
+                packages[1]["version"] = json!(v);
+            }
+            let aliases = if aliased {
+                json!([{"package": "squizlabs/php_codesniffer", "version": "dev-master",
+                        "alias": "3.99.0", "alias_normalized": "3.99.0.0"}])
+            } else {
+                json!([])
+            };
+            Lock::parse(
+                &json!({"packages": packages, "packages-dev": [], "aliases": aliases}).to_string(),
+            )
+            .expect("lock")
+        };
+        let found = |l: &Lock, m: &Value| -> Vec<String> {
+            analyze(&proj(), l, m, true, true)
+                .issues
+                .iter()
+                .map(ToString::to_string)
+                .filter(|i| {
+                    i.contains("phpcodesniffer-composer-installer with")
+                        || i.contains(" with squizlabs/")
+                })
+                .collect()
+        };
+        let plain = manifest(json!({}));
+        assert!(found(&lock("v0.7.2", Some("3.13.6"), false), &plain).is_empty());
+        assert!(found(&lock("v1.2.1", Some("2.9.2"), false), &plain).is_empty());
+        // No phpcs: the listener does nothing, whatever the depth.
+        assert!(found(
+            &lock("v0.7.2", None, false),
+            &manifest(json!({"phpcodesniffer-search-depth": "x"}))
+        )
+        .is_empty());
+        let one = |l: &Lock, m: &Value| {
+            let f = found(l, m);
+            assert_eq!(f.len(), 1, "{f:?}");
+            f[0].clone()
+        };
+        assert!(one(&lock("v0.7.2", Some("2.9.2"), false), &plain).contains("./scripts/phpcs"));
+        assert!(one(&lock("v1.0.0", Some("2.9.2"), false), &plain).contains("./scripts/phpcs"));
+        assert!(one(&lock("v1.1.2", Some("2.9.2"), false), &plain).contains("./scripts/phpcs"));
+        assert!(
+            one(&lock("v1.2.1", Some("dev-master"), false), &plain).contains("constraint matching")
+        );
+        assert!(
+            one(&lock("v1.2.1", Some("4.0.0-RC1"), false), &plain).contains("constraint matching")
+        );
+        assert!(one(&lock("v1.2.1", Some("3.13.6"), true), &plain).contains("3.13.6 aliased"));
+        for bad in [
+            json!("4"),
+            json!(0),
+            json!(-1),
+            json!(2.0),
+            json!(null),
+            json!(true),
+        ] {
+            assert!(one(
+                &lock("v0.7.2", Some("3.13.6"), false),
+                &manifest(json!({"phpcodesniffer-search-depth": bad}))
+            )
+            .contains("extra.phpcodesniffer-search-depth"));
+        }
+        // phpcs 2: the minimum depth is 1, so 1 is refused and 2 read.
+        assert!(!found(
+            &lock("v1.2.1", Some("2.9.2"), false),
+            &manifest(json!({"phpcodesniffer-search-depth": 1}))
+        )
+        .is_empty());
+        assert!(found(
+            &lock("v1.2.1", Some("2.9.2"), false),
+            &manifest(json!({"phpcodesniffer-search-depth": 2}))
+        )
+        .is_empty());
+        assert!(found(
+            &lock("v0.7.2", Some("3.13.6"), false),
+            &manifest(json!({"phpcodesniffer-search-depth": 1}))
+        )
+        .is_empty());
     }
 
     #[test]

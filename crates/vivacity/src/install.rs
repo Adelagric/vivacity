@@ -1848,7 +1848,7 @@ pub(crate) fn emulate_phpcs(
             layout,
             &installed,
             manifest,
-            phpcs::keeps_cwd_relative_paths(own.version()),
+            phpcs::variant(own.version()),
         )?;
         if let Some(line) = change.line() {
             vivacity_core::out!("{line}");

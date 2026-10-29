@@ -25,6 +25,7 @@ to the Rust code ported from them.
 | [symfony/filesystem](https://github.com/symfony/filesystem), [symfony/finder](https://github.com/symfony/finder) | MIT | Fabien Potencier | `docs/reference/symfony-Filesystem.php`, `docs/reference/symfony-finder-Glob.php` (`LICENSE.symfony`) | `vivacity-core` (`path_install`: the mirror of a `path` package, `Glob::toRegex` of the `.gitattributes` patterns) |
 | [pestphp/pest-plugin](https://github.com/pestphp/pest-plugin) v5.0.0 | MIT | Nuno Maduro | `docs/reference/plugins/pest-plugin/` (`LICENSE.md`; `Manager.php`, `DumpCommand.php` — not in the phar, no drift twin) | `vivacity-core` (`pest_plugin`: `vendor/pest-plugins.json` at autoload-dump time) |
 | [PHPCSStandards/composer-installer](https://github.com/PHPCSStandards/composer-installer) v1.2.1 (`dealerdirect/phpcodesniffer-composer-installer`) | MIT | Franck Nijhof, Juliette Reinders Folmer | `docs/reference/plugins/phpcodesniffer-composer-installer/` (`LICENSE`; `Plugin.php` — not in the phar, no drift twin) | `vivacity-core` (`phpcs_installer`: `installed_paths` of PHP_CodeSniffer, `CodeSniffer.conf` in its var_export format) |
+| [PHPCSStandards/composer-installer](https://github.com/PHPCSStandards/composer-installer) v0.7.2 (`1c968e5`, `dealerdirect/phpcodesniffer-composer-installer`) | MIT | Dealerdirect B.V. | `docs/reference/plugins/phpcodesniffer-composer-installer-v0.7.2/` (`LICENSE.md`; `src/Plugin.php` as `Plugin.php` — not in the phar, no drift twin) | `vivacity-core` (`phpcs_installer`: the search of the whole project, `phpcs_installer::variant`); the walk follows symfony/finder v5.4.45 as the Composer 2.10.3 phar bundles it (`Finder::searchInDirectory`, `RecursiveDirectoryIterator`, read, not copied) |
 | [phpstan/extension-installer](https://github.com/phpstan/extension-installer) 1.4.3 | MIT | Ondřej Mirtes | `docs/reference/plugins/phpstan-extension-installer/` (`LICENSE`; `Plugin.php` — no drift twin) | `vivacity` (`extension_installers`: `src/GeneratedConfig.php`) |
 | [rector/extension-installer](https://github.com/rectorphp/extension-installer) 0.11.2 | MIT | Tomas Votruba | `docs/reference/plugins/rector-extension-installer/` (`LICENSE`; `Plugin.php`, `PluginInstaller.php` — no drift twin) | `vivacity` (`extension_installers`: `src/GeneratedConfig.php`) |
 | [yiisoft/yii2-composer](https://github.com/yiisoft/yii2-composer) 2.0.11 | BSD-3-Clause | Yii Software LLC | `docs/reference/plugins/yii2-composer/` (`LICENSE.md`; `Plugin.php`, `Installer.php` — no drift twin) | `vivacity-core` (`yii2_composer`: `vendor/yiisoft/extensions.php` at install and dump time) |
@@ -73,3 +74,13 @@ Releases 0.3.0 to 0.5.0
 shipped an emulation of `drupal/core-composer-scaffold` (GPL-2.0-or-later)
 ported from its source; it was removed in 0.6.0 for that reason, and the
 `vivace*` crates were deleted from crates.io (only 0.5.0 had been published).
+
+The corpus (`fixtures/corpus/`) holds the manifests and locks of real
+projects, some of them GPL. Since 2026-10-29 the PHP files of chamilo-lms
+(GPL-3.0-or-later) that its root autoload loads are not committed: their
+paths and SHA-256 sums are (`fixtures/corpus/chamilo-lms/UPSTREAM`), and
+`harness/corpus.sh` downloads them at the pinned commit when it measures
+(`public/legacy.php`, previously committed, was removed from the tree that
+day; it remains in the history). Other entries still carry a few `files`
+autoload scripts copied verbatim, under their projects' licences
+(`fixtures/corpus/README.md`).
