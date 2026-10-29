@@ -1,26 +1,36 @@
 #!/usr/bin/env sh
 # Installs the vivacity binary from the latest GitHub release.
 #   curl -fsSL https://raw.githubusercontent.com/Adelagric/vivacity/main/install.sh | sh
-# Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows x86_64 under Git
-# Bash / MSYS2 (for PowerShell, see install.ps1).
+# Linux (x86_64, aarch64: glibc 2.17 or later, or musl — Alpine — with the
+# static build), macOS (arm64, x86_64), Windows x86_64 under Git Bash / MSYS2
+# (for PowerShell, see install.ps1).
 # Variables: VIVACITY_VERSION (default: latest), VIVACITY_INSTALL_DIR
 #            (default: ~/.local/bin; on Windows %LOCALAPPDATA%\Programs\vivacity),
 #            VIVACITY_DOWNLOAD_BASE (default: the GitHub release downloads —
 #            a directory or URL holding the assets, used by the CI self-test).
 set -eu
 REPO="Adelagric/vivacity"
+need_curl() {
+  command -v curl >/dev/null 2>&1 || { echo "vivacity: curl is required (Alpine: apk add curl)" >&2; exit 1; }
+}
 os=$(uname -s); arch=$(uname -m)
 exe=""
-case "$os" in
-  Linux)  os="unknown-linux-gnu" ;;
-  Darwin) os="apple-darwin" ;;
-  MINGW*|MSYS*|CYGWIN*) os="pc-windows-msvc"; exe=".exe" ;;
-  *) echo "vivacity: unsupported OS: $os" >&2; exit 1 ;;
-esac
 case "$arch" in
   x86_64|amd64) arch="x86_64" ;;
   arm64|aarch64) arch="aarch64" ;;
   *) echo "vivacity: unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+case "$os" in
+  Linux)
+    os="unknown-linux-gnu"
+    # musl (Alpine) gets the static build. Asked of ldd, not of the
+    # /lib/ld-musl-* loader alone: Debian's musl package installs that too.
+    if { ldd --version 2>&1 || true; } | grep -qi musl || [ -e "/lib/libc.musl-$arch.so.1" ]; then
+      os="unknown-linux-musl"
+    fi ;;
+  Darwin) os="apple-darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) os="pc-windows-msvc"; exe=".exe" ;;
+  *) echo "vivacity: unsupported OS: $os" >&2; exit 1 ;;
 esac
 target="$arch-$os"
 case "$target" in
@@ -38,6 +48,7 @@ if [ -n "${VIVACITY_VERSION:-}" ]; then
 else
   # The `releases/latest` redirect carries the tag in its Location header —
   # no API call, no rate limit.
+  need_curl
   tag=$(curl -fsSI -o /dev/null -w '%{redirect_url}' "https://github.com/$REPO/releases/latest" | sed 's|.*/tag/||')
   [ -n "$tag" ] || { echo "vivacity: could not determine the latest release" >&2; exit 1; }
 fi
@@ -45,14 +56,28 @@ name="vivacity-$tag-$target.tar.gz"
 base="${VIVACITY_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download/$tag}"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 echo "vivacity: downloading $name" >&2
+missing() {
+  echo "vivacity: could not fetch $name from $base" >&2
+  case "$target" in
+    *-musl) echo "vivacity: (musl builds, for Alpine, exist from the release after v0.25.0 on)" >&2 ;;
+  esac
+  exit 1
+}
 case "$base" in
   http://*|https://*|file://*)
-    curl -fsSL -o "$tmp/$name" "$base/$name"
-    curl -fsSL -o "$tmp/$name.sha256" "$base/$name.sha256" ;;
+    need_curl
+    curl -fsSL -o "$tmp/$name" "$base/$name" || missing
+    curl -fsSL -o "$tmp/$name.sha256" "$base/$name.sha256" || missing ;;
   *)
-    cp "$base/$name" "$base/$name.sha256" "$tmp/" ;;
+    cp "$base/$name" "$base/$name.sha256" "$tmp/" || missing ;;
 esac
-(cd "$tmp" && { command -v sha256sum >/dev/null 2>&1 && sha256sum -c --quiet "$name.sha256" || shasum -a 256 -c --quiet "$name.sha256"; })
+# Output dropped rather than `--quiet`, which BusyBox's sha256sum (Alpine)
+# does not have; a mismatch still exits non-zero, with its line on stderr.
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$tmp" && sha256sum -c "$name.sha256" >/dev/null)
+else
+  (cd "$tmp" && shasum -a 256 -c "$name.sha256" >/dev/null)
+fi
 mkdir -p "$DIR"
 # Assets up to v0.6.0 were archived with a `./` prefix, which GNU tar does
 # not match against a bare member name (bsdtar does).
