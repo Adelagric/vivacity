@@ -621,6 +621,25 @@ forwards every argument to vivacity compiled into the same binary, so
 links PHP points `VIVACITY_PHP` at itself and answers as php-cli, so those
 need no system PHP either.
 
+`VIVACITY_PHP` is the way in for any program that embeds vivacity and
+carries its own PHP. It names the executable vivacity runs where Composer
+would read its own runtime: the platform probe of `update`, `require` and
+`remove`, the PHP version behind Composer's deprecation lines, and the
+check of the lock's platform requirements in `install`. The default is
+`php` on the `PATH`. The contract is php-cli's:
+`$VIVACITY_PHP <file>.php` runs that script, prints its JSON on stdout
+and exits 0. Whatever `config.platform` does not override (the PHP
+version, the extensions and their versions) is read from the PHP that
+answers, so point it at the PHP that will run the application. The probe's result is cached only
+when that executable is the one the probe reports as `PHP_BINARY` and the
+files it loaded can be listed; otherwise it runs each time (~40 ms).
+Without any PHP, `install` from a lock still works (it ignores the
+requirements on php, its extensions and libraries, as there is no runtime
+to check them against); `update`, `require`, `remove`, and an `install`
+with no lock, exit 1 (`cannot run php`). A hand-over to
+Composer, for what vivacity does not reproduce, still needs `composer` and
+its PHP on the `PATH`.
+
 Embedding brings in vivacity's HTTP stack (reqwest over rustls). The default
 feature `rustls-tls-ring` bundles the ring crypto provider — right for the
 standalone binary, wrong for a host that already links another rustls

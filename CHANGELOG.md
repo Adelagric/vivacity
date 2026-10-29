@@ -221,6 +221,10 @@ byte-identical-output promise are the public API.
   the Laravel fixture) is quoted with its conditions, as his numbers. The
   Embedding section follows ePHPm to v0.13: vivacity 0.23.0, and
   `update`/`require`/`remove` without a system PHP since ephpm#558.
+  `VIVACITY_PHP`, the executable vivacity runs where Composer reads its
+  own PHP, is documented there as the entry point for any embedder that
+  carries its own PHP: what it is used for, its php-cli contract, when the
+  probe is cached, and what works with no PHP at all.
 - **Why the GitHub Action does not cache vivacity's class map records**
   ([bench/M8-classmap-cache.md](bench/M8-classmap-cache.md)). The README
   said that restoring them did not make the install faster, but that was
