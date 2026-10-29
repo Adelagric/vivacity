@@ -95,6 +95,13 @@ pub(crate) fn dump_depends_on_listeners(
 ) -> bool {
     vendor_cleaner(local, manifest, dev_mode, plugins_enabled).is_some()
         || active(local, manifest, dev_mode, plugins_enabled, fx::CAKEPHP)
+        || active(
+            local,
+            manifest,
+            dev_mode,
+            plugins_enabled,
+            fx::CLASS_ALIAS_LOADER,
+        )
 }
 
 /// The local repository as liborm85 walks it: every package (dev ones
@@ -130,8 +137,10 @@ pub(crate) fn pre_autoload_dump(
     let mut root = manifest.clone();
     let mut counts = None;
     let cleaner = vendor_cleaner(local, manifest, dev_mode, plugins_enabled);
-    let order =
-        crate::plugin_order::listeners_in_order(listeners, &[fx::VENDOR_CLEANER, fx::CAKEPHP]);
+    let order = crate::plugin_order::listeners_in_order(
+        listeners,
+        &[fx::VENDOR_CLEANER, fx::CAKEPHP, fx::CLASS_ALIAS_LOADER],
+    );
     for plugin in order {
         if plugin == fx::VENDOR_CLEANER {
             let Some(config) = cleaner.as_ref() else {
@@ -152,9 +161,45 @@ pub(crate) fn pre_autoload_dump(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let real = vivacity_core::cakephp_plugins::real_vendor(&layout.vendor_dir())?;
             root = vivacity_core::cakephp_plugins::root_with_app_plugins(&root, &real, &paths)?;
+        } else if plugin == fx::CLASS_ALIAS_LOADER
+            && active(
+                local,
+                manifest,
+                dev_mode,
+                plugins_enabled,
+                fx::CLASS_ALIAS_LOADER,
+            )
+        {
+            root = class_alias_loader(manifest, &root, layout)?;
         }
     }
     Ok((root, counts))
+}
+
+/// typo3/class-alias-loader's `generateAliasMapFiles` (a run with class
+/// alias maps, a `vendor-dir`, or a suffix that is not a string was handed
+/// over by `effect_plugins::issues`): the suffix read from
+/// `vendor/autoload.php` before the dump rewrites it, the two files, the
+/// line, and the root's autoload with the include file. Without
+/// `always-add-alias-loader`, nothing.
+fn class_alias_loader(
+    manifest: &serde_json::Value,
+    root: &serde_json::Value,
+    layout: &vivacity_core::layout::Layout,
+) -> anyhow::Result<serde_json::Value> {
+    use vivacity_core::class_alias_loader as cal;
+    if !cal::always_add(manifest) {
+        return Ok(root.clone());
+    }
+    let vendor = layout.vendor_dir();
+    let configured = cal::configured_suffix(manifest).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let existing = std::fs::read(vendor.join("autoload.php"))
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    let suffix = cal::pick_suffix(configured, existing.as_deref(), cal::random_suffix);
+    cal::write_files(&vendor, &suffix, manifest)?;
+    vivacity_core::out!("Generating empty class alias map file");
+    cal::root_with_include(root, "vendor").map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// liborm85's `cleanupBinary` and `finishCleanup` (its last three lines).
@@ -269,26 +314,50 @@ pub(crate) fn vendor_cleaner_finish(
     finish_vendor_cleaner(&mut c, layout)
 }
 
-/// drupol/composer-packages with `--run-scripts` and a `post-autoload-dump`
-/// script in composer.json: `composer run-script post-autoload-dump`
-/// dispatches the event again, the plugins' listeners included — the
-/// classes and the two lines a second time, where Composer's own run has
-/// them once.
-pub(crate) fn drupol_replay_issue(
+/// The emulated plugins whose listener prints or writes every time it runs,
+/// and the script events `composer run-script` would dispatch to it again
+/// under `--run-scripts` (`scripts.rs`: the plugins' own listeners of an
+/// event run again through `run-script`) — where Composer's own run has
+/// them once. Decided before the first script.
+const REPLAYED: &[(&str, &[&str])] = &[
+    (fx::DRUPOL, &[crate::scripts::POST_AUTOLOAD_DUMP]),
+    (
+        crate::extension_installers::INFECTION,
+        &[crate::scripts::POST_INSTALL_CMD],
+    ),
+    (fx::CLASS_ALIAS_LOADER, &[crate::scripts::PRE_AUTOLOAD_DUMP]),
+    (
+        fx::PATCHER,
+        &[
+            crate::scripts::PRE_INSTALL_CMD,
+            crate::scripts::POST_INSTALL_CMD,
+        ],
+    ),
+];
+
+/// A plugin of [`REPLAYED`] with `--run-scripts` and one of its events
+/// declared in composer.json's `scripts` and run by this command
+/// (`commands_events`: install runs the four, dump-autoload the two
+/// autoload events).
+pub(crate) fn replay_issue(
     manifest: &serde_json::Value,
     local: &vivacity_core::lock::Lock,
     with_dev: bool,
     plugins_enabled: bool,
     run_scripts: bool,
+    commands_events: &[&str],
 ) -> Option<String> {
-    (run_scripts
-        && crate::scripts::declared_events(manifest).contains(crate::scripts::POST_AUTOLOAD_DUMP)
-        && active(local, manifest, with_dev, plugins_enabled, fx::DRUPOL))
-    .then(|| {
-        format!(
-            "plugin {} would run again through `composer run-script post-autoload-dump` (not emulated)",
-            fx::DRUPOL
-        )
+    if !run_scripts {
+        return None;
+    }
+    let declared = crate::scripts::declared_events(manifest);
+    REPLAYED.iter().find_map(|(plugin, events)| {
+        let event = events
+            .iter()
+            .find(|e| declared.contains(**e) && commands_events.contains(e))?;
+        active(local, manifest, with_dev, plugins_enabled, plugin).then(|| {
+            format!("plugin {plugin} would run again through `composer run-script {event}` (not emulated)")
+        })
     })
 }
 

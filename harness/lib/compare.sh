@@ -24,6 +24,14 @@
 #     seuls chiffres de cette ligne exacte deviennent `<t>` des deux côtés,
 #     puis la comparaison reste stricte (une ligne absente ou dédoublée
 #     diffère toujours) ;
+#   - `class ClassAliasLoaderStaticInit<32 hex>` **dans
+#     <vendor>/composer/autoload_classaliasmap_static.php** et
+#     `…ClassAliasLoaderStaticInit<32 hex>::$aliasMap);` **dans
+#     <vendor>/typo3/alias-loader-include.php** (typo3/class-alias-loader) :
+#     sur un vendor vierge, le plugin tire son suffixe de
+#     `md5(uniqid('', true))` ; les 32 chiffres de ces deux lignes exactes
+#     deviennent `<s>` des deux côtés. Le suffixe lu dans autoload.php (un
+#     no-op) est vérifié à part par le harnais du plugin ;
 #   - le chemin absolu du projet dans un fichier généré : remplacé par
 #     `<project>` de chaque côté avant comparaison ;
 #   - vendor/pest-plugins.json : le plugin lit le dépôt local dans l'ordre
@@ -117,6 +125,12 @@ compare_vendor() {
             # du vendor et nulle part ailleurs.
             "$runtime_dir_ref/drupol/composer-packages/build/Packages.php"|"$runtime_dir_ref/drupol/composer-packages/build/Types.php"|"$runtime_dir_ref/drupol/composer-packages/build/Directories.php"|"$runtime_dir_ref/drupol/composer-packages/build/Versions.php"|"$runtime_dir_ref/drupol/composer-packages/build/Dependencies.php")
               gen=(-e 's/^(    public const GENERATED_AT = )[0-9]+;$/\1<t>;/') ;;
+            # Le suffixe aléatoire de typo3/class-alias-loader, dans ses deux
+            # fichiers et nulle part ailleurs.
+            "$runtime_dir_ref/composer/autoload_classaliasmap_static.php")
+              gen=(-e 's/^(class ClassAliasLoaderStaticInit)[0-9a-f]{32}$/\1<s>/') ;;
+            "$runtime_dir_ref/typo3/alias-loader-include.php")
+              gen=(-e 's/^(\$classAliasLoader->setAliasMap\(TYPO3\\ClassAliasLoader\\ClassAliasLoaderStaticInit)[0-9a-f]{32}(::\$aliasMap\);)$/\1<s>\2/') ;;
           esac
           # `${a[@]+"${a[@]}"}` : sous `set -u`, le bash 3.2 de macOS refuse
           # `"${a[@]}"` quand le tableau est vide.

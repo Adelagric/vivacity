@@ -374,12 +374,13 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             lock_data: lock_data.as_ref(),
         };
         let mut issues = vivacity_core::effect_plugins::issues(&ctx);
-        issues.extend(crate::effect_plugins::drupol_replay_issue(
+        issues.extend(crate::effect_plugins::replay_issue(
             &manifest,
             &local_all,
             true,
             true,
             args.run_scripts,
+            &[scripts::PRE_AUTOLOAD_DUMP, scripts::POST_AUTOLOAD_DUMP],
         ));
         if !issues.is_empty() {
             vivacity_core::say_always!(

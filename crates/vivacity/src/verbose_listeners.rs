@@ -131,6 +131,14 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
         class: "PHPStan\\ExtensionInstaller\\Plugin",
         listeners: &[(POST_INSTALL_CMD, "process"), (POST_UPDATE_CMD, "process")],
     },
+    // docs/plans/remaining-fallbacks.md: 0.1.2 read (the only version the
+    // install emulates).
+    VerbosePlugin {
+        name: "infection/extension-installer",
+        versions: ">=0.1.2 <=0.1.2",
+        class: "Infection\\ExtensionInstaller\\Plugin",
+        listeners: &[(POST_INSTALL_CMD, "process"), (POST_UPDATE_CMD, "process")],
+    },
     VerbosePlugin {
         name: "rector/extension-installer",
         versions: ">=0.10.0 <=0.10.2 || >=0.11.0 <=0.11.2 || >=1.0.0 <=1.0.0",
@@ -220,6 +228,14 @@ pub(crate) const VERBOSE_DELEGATED: &[(&str, &str)] = &[
     (
         "dealerdirect/phpcodesniffer-composer-installer",
         "it prints the output of phpcs --config-set at -v",
+    ),
+    (
+        "typo3/class-alias-loader",
+        "it writes a line from inside its pre-autoload-dump listener, among typo3/cms-composer-installers' listener lines",
+    ),
+    (
+        "typo3/cms-composer-installers",
+        "it writes a line of its own between its post-autoload-dump listeners (observed)",
     ),
     (
         "wikimedia/composer-merge-plugin",

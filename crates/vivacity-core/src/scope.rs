@@ -26,6 +26,9 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     "dealerdirect/phpcodesniffer-composer-installer",
     "phpstan/extension-installer",
     "rector/extension-installer",
+    // docs/plans/remaining-fallbacks.md: `POST_INSTALL_CMD` /
+    // `POST_UPDATE_CMD`, 0.1.2 only.
+    "infection/extension-installer",
     "wikimedia/composer-merge-plugin",
     "composer/package-versions-deprecated",
     // At install: `POST_INSTALL_CMD` copies `.env` from its `.dist` and
@@ -66,6 +69,10 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     crate::effect_plugins::CAKEPHP,
     // docs/plans/duration-drupol-collector.md: `POST_AUTOLOAD_DUMP` only.
     crate::effect_plugins::DRUPOL,
+    // docs/plans/remaining-fallbacks.md: `PRE_AUTOLOAD_DUMP`; and the
+    // TYPO3 installers, inert under the root `typo3/cms` (observed).
+    crate::effect_plugins::CLASS_ALIAS_LOADER,
+    crate::effect_plugins::CMS_INSTALLERS,
 ];
 
 /// The versions of the listeners vivacity reproduces whose code changed
@@ -83,6 +90,11 @@ pub const EMULATED_VERSIONS: &[(&str, &[&str], &str)] = &[
         "rector/extension-installer",
         &["0.11.0.0", "0.11.1.0", "0.11.2.0", "1.0.0.0"],
         "0.10.x writes another template",
+    ),
+    (
+        "infection/extension-installer",
+        &["0.1.2.0"],
+        "other versions were not read",
     ),
     (
         "dealerdirect/phpcodesniffer-composer-installer",
@@ -132,7 +144,8 @@ fn aliased_listing_issue(lock: &Lock, root_manifest: &Value, with_dev: bool) -> 
     };
     let phpstan = active("phpstan/extension-installer");
     let rector = active("rector/extension-installer");
-    if !phpstan && !rector {
+    let infection = active("infection/extension-installer");
+    if !phpstan && !rector && !infection {
         return None;
     }
     for p in lock.wanted_packages(with_dev) {
@@ -150,7 +163,9 @@ fn aliased_listing_issue(lock: &Lock, root_manifest: &Value, with_dev: bool) -> 
                     .contains(&p.name()))))
             || (rector
                 && (p.package_type() == "rector-extension"
-                    || extra.and_then(|e| e.get("rector")).is_some()));
+                    || extra.and_then(|e| e.get("rector")).is_some()))
+            // infection keys its valid and invalid extensions by name too.
+            || (infection && p.package_type() == "infection-extension");
         if !listed {
             continue;
         }
@@ -366,6 +381,7 @@ pub const RESOLUTION_INERT: &[&str] = &[
     "dealerdirect/phpcodesniffer-composer-installer",
     "phpstan/extension-installer",
     "rector/extension-installer",
+    "infection/extension-installer",
     "composer/package-versions-deprecated",
     "ergebnis/composer-normalize",
     // `POST_INSTALL_CMD` / `POST_UPDATE_CMD` copy `c3.php` to the root:
@@ -415,6 +431,10 @@ pub const RESOLUTION_INERT: &[&str] = &[
     crate::effect_plugins::CAKEPHP,
     // docs/plans/duration-drupol-collector.md: `POST_AUTOLOAD_DUMP` only.
     crate::effect_plugins::DRUPOL,
+    // docs/plans/remaining-fallbacks.md: `PRE_AUTOLOAD_DUMP`; and the
+    // TYPO3 installers, inert under the root `typo3/cms` (observed).
+    crate::effect_plugins::CLASS_ALIAS_LOADER,
+    crate::effect_plugins::CMS_INSTALLERS,
 ];
 
 /// A resolution command, for the per-plugin rules below.
@@ -524,6 +544,7 @@ pub const POST_UPDATE_FILE_LISTENERS: &[&str] = &[
     "dealerdirect/phpcodesniffer-composer-installer",
     "phpstan/extension-installer",
     "rector/extension-installer",
+    "infection/extension-installer",
 ];
 
 /// The plugins Composer would load for a resolution command, and what

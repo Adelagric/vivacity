@@ -180,6 +180,7 @@ pub(crate) fn issues_before_resolution(
         vivacity_core::phpcs_installer::PLUGIN_NAME,
         extension_installers::PHPSTAN,
         extension_installers::RECTOR,
+        extension_installers::INFECTION,
         vivacity_core::c3_plugin::PLUGIN_NAME,
     ];
     if let Some(global) = plugin_order::global_composer_dir() {
@@ -280,6 +281,7 @@ pub(crate) fn post_update_listeners(
         vivacity_core::phpcs_installer::PLUGIN_NAME,
         extension_installers::PHPSTAN,
         extension_installers::RECTOR,
+        extension_installers::INFECTION,
         vivacity_core::c3_plugin::PLUGIN_NAME,
         "symfony/flex",
     ];
@@ -342,6 +344,15 @@ pub(crate) fn post_update_listeners(
             }
             extension_installers::RECTOR => {
                 extension_installers::rector(layout, &repo.lock, manifest, true, plugins_enabled)?;
+            }
+            extension_installers::INFECTION => {
+                extension_installers::infection(
+                    layout,
+                    &repo.lock,
+                    manifest,
+                    true,
+                    plugins_enabled,
+                )?;
             }
             _ => {}
         }

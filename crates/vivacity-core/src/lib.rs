@@ -7,6 +7,7 @@ pub mod bamarni_bin;
 pub mod binproxy;
 pub mod c3_plugin;
 pub mod cakephp_plugins;
+pub mod class_alias_loader;
 pub mod clone;
 pub mod composer_cleaner;
 pub mod composer_packages;

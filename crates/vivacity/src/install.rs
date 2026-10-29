@@ -451,12 +451,18 @@ fn pre_install_cmd(run: Run<'_>) -> anyhow::Result<Flow<Run<'_>>> {
     // Decided before the first script runs: a hand-over after it would
     // have Composer run it a second time.
     if runner.is_some() {
-        if let Some(issue) = crate::effect_plugins::drupol_replay_issue(
+        if let Some(issue) = crate::effect_plugins::replay_issue(
             &run.manifest,
             &run.lock,
             run.with_dev,
             !args.no_plugins,
             true,
+            &[
+                scripts::PRE_INSTALL_CMD,
+                scripts::POST_INSTALL_CMD,
+                scripts::PRE_AUTOLOAD_DUMP,
+                scripts::POST_AUTOLOAD_DUMP,
+            ],
         ) {
             let report = vivacity_core::scope::ScopeReport {
                 issues: vec![vivacity_core::scope::ScopeIssue::Layout(issue)],
@@ -1639,6 +1645,7 @@ fn post_install(
             vivacity_core::phpcs_installer::PLUGIN_NAME,
             extension_installers::PHPSTAN,
             extension_installers::RECTOR,
+            extension_installers::INFECTION,
             vivacity_core::c3_plugin::PLUGIN_NAME,
             "symfony/flex",
             vivacity_core::effect_plugins::DG_CLEANER,
@@ -1713,6 +1720,13 @@ fn post_install_listener(
             !args.no_plugins,
         )?,
         extension_installers::RECTOR => extension_installers::rector(
+            layout,
+            local,
+            &run.manifest,
+            run.with_dev,
+            !args.no_plugins,
+        )?,
+        extension_installers::INFECTION => extension_installers::infection(
             layout,
             local,
             &run.manifest,
