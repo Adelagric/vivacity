@@ -1420,6 +1420,10 @@ pub struct InstallVerification {
     /// `composer-*` packages kept.
     pub php_missing: bool,
     pub verdict: InstallVerdict,
+    /// `runSat`'s duration (`Solver::sat_time`): the
+    /// `Dependency resolution completed` line of `doInstall`, which leaves
+    /// out the list filter, the platform, the pool and the rules.
+    pub resolution: std::time::Duration,
 }
 
 /// The lock's settings `Installer` reads when it does not update
@@ -1679,14 +1683,16 @@ impl LockedPool<'_> {
     }
 
     /// The pool around the real root, less what the list filter removed,
-    /// then `Solver::solve` and, on failure, `getPrettyString`.
+    /// then `Solver::solve` and, on failure, `getPrettyString`; with the
+    /// SAT's duration, measured whatever the verdict (Composer writes the
+    /// line before it throws).
     fn solve(
         &self,
         arena: &mut Vec<Package>,
         root: &RootPackage,
         filtered: Option<Filtered>,
         probed: Option<&[Value]>,
-    ) -> Result<InstallVerdict, SessionError> {
+    ) -> Result<(InstallVerdict, std::time::Duration), SessionError> {
         let (set, request, mut pool) = self.build(arena, root)?;
         if let Some((removed, records)) = filtered {
             // The filter saw every locked package; the pool holds those the
@@ -1733,14 +1739,18 @@ impl LockedPool<'_> {
             self.settings.prefer_lowest.unwrap_or(false),
             None,
         );
-        let solved = Solver::new(&pool, arena).solve(&request, &mut policy, &self.filter);
-        match solved {
+        let (solved, sat_time) = {
+            let mut solver = Solver::new(&pool, arena);
+            let solved = solver.solve(&request, &mut policy, &self.filter);
+            (solved, solver.sat_time)
+        };
+        let verdict = match solved {
             Ok(transaction) => {
                 // `LockTransaction::setResultPackages` validates every kept
                 // package, as in `update`.
                 for &idx in &transaction.all {
                     if let Err(e) = crate::lockfile::validate_package(&arena[idx]) {
-                        return Ok(InstallVerdict::Invalid(e));
+                        return Ok((InstallVerdict::Invalid(e), sat_time));
                     }
                 }
                 Ok(if transaction.transaction.operations.is_empty() {
@@ -1768,7 +1778,8 @@ impl LockedPool<'_> {
                 )))
             }
             Err(SolveError::Bug(b)) => Err(SessionError::new(b)),
-        }
+        }?;
+        Ok((verdict, sat_time))
     }
 }
 
@@ -1929,11 +1940,13 @@ pub fn verify_install(
     let root = RootPackage::load_with_version(&input.root_manifest, rv)
         .map_err(|e| SessionError::new(e.0))?;
     abandoned()?;
-    let verdict = locked_pool.solve(&mut arena, &root, filtered, probed.as_deref())?;
+    let (verdict, resolution) =
+        locked_pool.solve(&mut arena, &root, filtered, probed.as_deref())?;
     Ok(InstallVerification {
         warnings,
         php_missing: probed.is_none(),
         verdict,
+        resolution,
     })
 }
 
@@ -2169,7 +2182,7 @@ mod tests {
             }
             (removed, records)
         });
-        let verdict = pool
+        let (verdict, _) = pool
             .solve(&mut arena, &root, filtered, Some(&probed()))
             .expect("solve");
         (verdict, request)
@@ -2469,5 +2482,51 @@ mod tests {
             .expect(&text);
         assert!(nope < bad, "{text}");
         assert!(!text.contains("acme/dev"), "{text}");
+    }
+
+    /// `doInstall`'s `Dependency resolution completed` line times `runSat`
+    /// alone (Solver.php:225-228): the wait before it — here the root
+    /// version, which the command sends 200 ms after the thread started —
+    /// is not in the duration `verify_install` reports.
+    #[test]
+    fn the_resolution_duration_is_the_sats_alone() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let package = json!({
+            "name": "acme/lib", "version": "1.0.0", "version_normalized": "1.0.0.0",
+            "type": "library",
+            "dist": {"type": "zip", "url": "https://example.invalid/lib.zip", "reference": "abc"},
+        });
+        let lock = lock_with(json!([package]), json!([]), json!({}), json!({}));
+        std::fs::write(tmp.path().join("composer.lock"), lock.to_string()).expect("lock");
+        let manifest = json!({"name": "acme/root", "require": {"acme/lib": "^1.0"}});
+        let input = InstallVerifyInput {
+            project_dir: tmp.path().to_path_buf(),
+            composer_home: None,
+            http: None,
+            cache_repo_dir: None,
+            manifest_text: manifest.to_string(),
+            root_manifest: manifest,
+            dev_mode: true,
+            no_blocking: true,
+            ignore_platform_reqs: true,
+            ignore_platform_req: Vec::new(),
+            prepended_repositories: Vec::new(),
+            abandoned: std::sync::Arc::default(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            tx.send(root_version()).expect("send");
+        });
+        let verified = verify_install(input, rx).expect("verify");
+        sender.join().expect("sender");
+        assert_eq!(verified.verdict, InstallVerdict::Installable);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+        assert!(
+            verified.resolution < std::time::Duration::from_millis(50),
+            "{:?}",
+            verified.resolution
+        );
     }
 }

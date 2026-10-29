@@ -6,11 +6,13 @@ use super::*;
 /// `Installer::doInstall` solves the lock again (`Solver.php:231`): its
 /// duration at VERBOSE, after the stale-lock warning and the missing
 /// requirements, before the problems or the operation count. Never for the
-/// install that follows an update (`$alreadySolved`).
-fn say_lock_resolution(since: std::time::Instant) {
+/// install that follows an update (`$alreadySolved`). The duration is the
+/// SAT's alone, measured on the verification thread, as Composer's timer
+/// wraps `runSat` only.
+fn say_lock_resolution(sat: std::time::Duration) {
     vivacity_core::say_verbose!(
         "Dependency resolution completed in {:.3} seconds",
-        since.elapsed().as_secs_f64()
+        sat.as_secs_f64()
     );
 }
 
@@ -58,7 +60,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `Installer::run`.
     let run = proceed!(pre_install_cmd(run)?);
     // `Installer::doInstall`.
-    let verify_start = proceed!(headline(&run)?);
+    proceed!(headline(&run)?);
     let verification = spawn_verification(&run)?;
     let root = verification.as_ref().map(|v| root_package(&run, v));
     let tx = local_repository_transaction(&run, root.as_ref())?;
@@ -85,7 +87,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     if let Some(verification) = verification {
         let mut verification = verification;
         proceed!(report_missing(&run, &tx.missing, &mut verification)?);
-        proceed!(join_verification(&run, verification, verify_start)?);
+        proceed!(join_verification(&run, verification)?);
     }
     report_operations(&tx);
     if args.dry_run {
@@ -497,9 +499,8 @@ pub(crate) fn bamarni_command_event(
 /// `Installer::doInstall`: the headline, the locked repository (which a lock
 /// without `packages-dev` refuses in dev mode), then the platform
 /// verification notice (the lock is solved against the platform when not
-/// coming straight from an update), then the freshness warning. Returns
-/// when the verification started, for the resolution line.
-fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
+/// coming straight from an update), then the freshness warning.
+fn headline(run: &Run<'_>) -> anyhow::Result<Flow> {
     let config_lock = config_lock_enabled(&run.manifest_text);
     if config_lock {
         vivacity_core::say!(
@@ -519,10 +520,6 @@ fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
     if run.with_dev && !run.args.after_update() {
         refuse_lock_without_dev(run)?;
     }
-    // The resolution line `-v` shows measures from here to the join: the
-    // solve runs on the verification thread, alongside the local
-    // repository's transaction.
-    let verify_start = std::time::Instant::now();
     if !run.args.after_update() {
         vivacity_core::say!("Verifying lock file contents can be installed on current platform.");
         // Lock freshness: same behaviour as Composer, a warning.
@@ -538,7 +535,7 @@ fn headline(run: &Run<'_>) -> anyhow::Result<Flow<std::time::Instant>> {
             }
         }
     }
-    Ok(Flow::Continue(verify_start))
+    Ok(Flow::Continue(()))
 }
 
 /// `Locker::getLockedRepository(true)` on a lock without `packages-dev`
@@ -1024,11 +1021,7 @@ fn plan_autoload_early(
 /// filter's warnings (written while the pool was built), the resolution
 /// line (`-v`), then the problems (`SolverProblemsException`, exit
 /// `max(1, 2)`) or the operations a solved lock should not have (exit 4).
-fn join_verification(
-    run: &Run<'_>,
-    verification: Verification,
-    verify_start: std::time::Instant,
-) -> anyhow::Result<Flow> {
+fn join_verification(run: &Run<'_>, verification: Verification) -> anyhow::Result<Flow> {
     use vivacity_resolver::session::InstallVerdict;
     let mut verification = verification;
     let Some(handle) = verification.handle.take() else {
@@ -1061,7 +1054,7 @@ fn join_verification(
              (--ignore-platform-reqs silences this warning)"
         );
     }
-    say_lock_resolution(verify_start);
+    say_lock_resolution(verified.resolution);
     match verified.verdict {
         InstallVerdict::Installable => Ok(Flow::Continue(())),
         InstallVerdict::Problems(pretty) => {

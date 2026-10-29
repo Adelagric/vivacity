@@ -125,6 +125,11 @@ pub struct Solver<'a> {
     learned_pool: Vec<Vec<usize>>,
     /// learned rule -> `why`.
     learned_why: HashMap<usize, usize>,
+    /// How long `run_sat` took: what Composer's
+    /// `Dependency resolution completed in %.3f seconds` measures
+    /// (`$before = microtime(true); $this->runSat();`, Solver.php:225-228),
+    /// neither the rules nor the pool.
+    pub sat_time: std::time::Duration,
 }
 
 impl<'a> Solver<'a> {
@@ -141,6 +146,7 @@ impl<'a> Solver<'a> {
             problems: Vec::new(),
             learned_pool: Vec::new(),
             learned_why: HashMap::new(),
+            sat_time: std::time::Duration::ZERO,
         }
     }
 
@@ -275,7 +281,10 @@ impl<'a> Solver<'a> {
             self.watch_graph.insert(&self.rules, node);
         }
         self.make_assertion_rule_decisions()?;
-        self.run_sat(policy)?;
+        let before = std::time::Instant::now();
+        let sat = self.run_sat(policy);
+        self.sat_time = before.elapsed();
+        sat?;
         if !self.problems.is_empty() {
             let problems = std::mem::take(&mut self.problems);
             return Err(SolveError::Problems(
