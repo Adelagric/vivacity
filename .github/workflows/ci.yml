@@ -136,6 +136,8 @@ jobs:
         run: harness/net-retry.sh harness/package-versions.sh
       - name: Plugin installers' lines and their order (phpstan, rector, dealerdirect, c3, package-versions)
         run: harness/net-retry.sh harness/plugin-lines.sh
+      - name: dealerdirect v0.7.2 (rulesets searched in the whole project, Finder rules)
+        run: harness/net-retry.sh harness/dealerdirect-07.sh
       - name: allow-plugins at plugin load (refusals, warnings) and php-http/discovery after an update
         run: harness/net-retry.sh harness/allow-plugins.sh
       - name: symfony/flex at install (.env from .env.dist, its lines, symfony-pack)

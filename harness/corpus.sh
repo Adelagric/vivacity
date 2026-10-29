@@ -63,15 +63,49 @@ for d in "$ROOT"/fixtures/corpus/*/; do
 done
 [ ${#entries[@]} -gt 0 ] || { echo "corpus vide"; exit 1; }
 
+# Les fichiers de projet qu'une entrée ne commite pas (fixtures/corpus/
+# <nom>/UPSTREAM : en-tête `# <owner/repo>@<sha>`, puis `<sha256>  <chemin>`
+# par fichier — sources sous la licence du projet, tirées au commit épinglé,
+# jamais versées dans le dépôt ; tools/corpus-upstream.sh écrit la liste).
+# Cache sous $WORK/cache/upstream, rangé après vérification (temporaire,
+# somme, `mv`) et revérifié à chaque usage. Échec : le chemin en cause sur
+# stdout, code 1.
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+upstream_fetch() { # nom, destination
+  local list="$ROOT/fixtures/corpus/$1/UPSTREAM" head repo sha sum p cache tmp
+  [ -f "$list" ] || return 0
+  head="$(sed -n '1s/^# \([^@ ]*\)@\([0-9a-f]\{40\}\)$/\1 \2/p' "$list")"
+  repo="${head% *}"; sha="${head#* }"
+  [ -n "$head" ] || { echo "UPSTREAM: missing '# <owner/repo>@<sha>' header"; return 1; }
+  while read -r sum p; do
+    case "$sum" in ''|'#'*) continue ;; esac
+    case "/$p/" in *"/../"*|//*) echo "$p (not a relative path)"; return 1 ;; esac
+    cache="$WORK/cache/upstream/$repo/$sha/$p"
+    if [ ! -f "$cache" ] || [ "$(sha256 < "$cache")" != "$sum" ]; then
+      mkdir -p "$(dirname "$cache")"; tmp="$cache.part.$$"
+      if ! curl -fsSL --retry 3 -o "$tmp" "https://raw.githubusercontent.com/$repo/$sha/$p" \
+         || [ "$(sha256 < "$tmp")" != "$sum" ]; then
+        rm -f "$tmp"; echo "$p"; return 1
+      fi
+      mv -f "$tmp" "$cache"
+    fi
+    mkdir -p "$2/$(dirname "$p")"; cp "$cache" "$2/$p"
+  done < "$list"
+}
+
 # Une copie de l'entrée avec un dépôt git identique des deux côtés (version
-# racine devinée, comme diff-vendor.sh).
-stage() { # nom, destination
+# racine devinée, comme diff-vendor.sh) ; `fetch` : avec ses fichiers
+# UPSTREAM, avant le commit (le scan reste hors ligne, sans eux).
+# Code 1 : un fichier UPSTREAM manque (son chemin sur stdout) ; 2 : la copie
+# elle-même a échoué (un bug du harnais, jamais classé `unavailable`).
+stage() { # nom, destination[, fetch]
   rm -rf "$2"; mkdir -p "$2"
-  (cd "$ROOT/fixtures/corpus/$1" && tar -cf - --exclude=PROVENANCE .) | (cd "$2" && tar -xf -)
+  (cd "$ROOT/fixtures/corpus/$1" && tar -cf - --exclude=PROVENANCE --exclude=UPSTREAM .) | (cd "$2" && tar -xf -) || return 2
+  if [ "${3:-}" = fetch ]; then upstream_fetch "$1" "$2" || return 1; fi
   (cd "$2" && git init -q -b main && git add -A >/dev/null 2>&1 && \
     GIT_AUTHOR_NAME=vivacity GIT_AUTHOR_EMAIL=v@v GIT_AUTHOR_DATE="2026-09-10T00:00:00Z" \
     GIT_COMMITTER_NAME=vivacity GIT_COMMITTER_EMAIL=v@v GIT_COMMITTER_DATE="2026-09-10T00:00:00Z" \
-    git commit -q -m fixture)
+    git commit -q -m fixture) || return 2
 }
 
 json_escape() { jq -Rs . ; }
@@ -122,7 +156,14 @@ run_one() { # nom, mode, ligne JSON du scan
   # satisfait pas (PHP local trop récent pour le lock), d'après le scan.
   local ignore=(--ignore-platform-req='ext-*')
   if echo "$scan" | jq -e '.platform_failures | map(select(startswith("php "))) | length > 0' >/dev/null; then ignore+=(--ignore-platform-req=php); fi
-  stage "$n" "$ref"; stage "$n" "$viv"
+  local missing="" staged=0
+  missing="$(stage "$n" "$ref" fetch)" || staged=$?
+  if [ "$staged" = 0 ]; then missing="$(stage "$n" "$viv" fetch)" || staged=$?; fi
+  case "$staged" in
+    0) ;;
+    1) ref_code=97 ;;
+    *) echo "FAIL : copie de l'entrée $n impossible" >&2; return 1 ;;
+  esac
   t0=$(date +%s)
   # wikimedia/composer-merge-plugin actif : sur un vendor vierge le plugin
   # lance un `composer update` partiel et réécrit le lock (non
@@ -130,7 +171,7 @@ run_one() { # nom, mode, ligne JSON du scan
   # `--no-plugins` (le plugin devient un paquet installé), puis l'install
   # avec plugins — fusion dès INIT, pas de mise à jour implicite. Valable
   # sans plugin de disposition (composer/installers…), vérifié.
-  if jq -e '(.config["allow-plugins"]["wikimedia/composer-merge-plugin"] == true) and (.extra["merge-plugin"] != null)' "$ref/composer.json" >/dev/null 2>&1; then
+  if [ "$ref_code" = 0 ] && jq -e '(.config["allow-plugins"]["wikimedia/composer-merge-plugin"] == true) and (.extra["merge-plugin"] != null)' "$ref/composer.json" >/dev/null 2>&1; then
     if jq -e '.config["allow-plugins"]["composer/installers"] == true' "$ref/composer.json" >/dev/null 2>&1; then
       ref_code=99
     else
@@ -144,9 +185,13 @@ run_one() { # nom, mode, ligne JSON du scan
     ref_code=98
   fi
   t_ref=$(( $(date +%s) - t0 )); t0=$(date +%s)
-  (cd "$viv" && "$VIVACITY" install --no-fallback "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.vivacity.log" 2>"$WORK/$n.$mode.vivacity.err") || viv_code=$?
+  if [ "$ref_code" != 97 ]; then
+    (cd "$viv" && "$VIVACITY" install --no-fallback "${ignore[@]}" "${flags[@]+"${flags[@]}"}" >"$WORK/$n.$mode.vivacity.log" 2>"$WORK/$n.$mode.vivacity.err") || viv_code=$?
+  fi
   t_viv=$(( $(date +%s) - t0 ))
-  if [ "$ref_code" = 99 ]; then
+  if [ "$ref_code" = 97 ]; then
+    bucket="unavailable"; detail="fixture upstream file unavailable: $missing"
+  elif [ "$ref_code" = 99 ]; then
     bucket="unavailable"; detail="merge-plugin with a layout plugin: no deterministic reference recipe"
   elif [ "$ref_code" = 98 ]; then
     bucket="unavailable"; detail="the reference rewrote composer.lock (merge-plugin implicit update)"

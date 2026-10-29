@@ -62,7 +62,17 @@ case "$kind" in
   *) echo "kind inconnu : $kind"; exit 1 ;;
 esac
 
-dest="$CORPUS/$name"; rm -rf "$dest"; mkdir -p "$dest"
+dest="$CORPUS/$name"
+# Les fichiers qu'une entrée tire au moment de la mesure (UPSTREAM, voir
+# tools/corpus-upstream.sh) ne sont pas recopiés ; la liste est réécrite au
+# nouveau commit à la fin.
+upstream=()
+if [ -f "$dest/UPSTREAM" ]; then
+  cp "$dest/UPSTREAM" "$work/UPSTREAM.old"
+  while read -r sum p; do case "$sum" in ''|'#'*) continue ;; esac; upstream+=("$p"); done < "$dest/UPSTREAM"
+fi
+is_upstream() { local u; for u in ${upstream[@]+"${upstream[@]}"}; do [ "$u" = "$1" ] && return 0; done; return 1; }
+rm -rf "$dest"; mkdir -p "$dest"
 cp "$tree/composer.json" "$tree/composer.lock" "$dest/"
 # Ce que l'autoload de la racine exige sur le disque.
 jq -r '[.autoload, .["autoload-dev"]] | map(select(. != null)) | .[] |
@@ -72,8 +82,9 @@ jq -r '[.autoload, .["autoload-dev"]] | map(select(. != null)) | .[] |
   "$tree/composer.json" | sort -u | while IFS=$'\t' read -r what p; do
   p="${p#./}"; p="${p%/}"
   case "$what" in
-    file) if [ -f "$tree/$p" ]; then mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"; fi ;;
-    path) if [ -f "$tree/$p" ]; then mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"
+    file) if is_upstream "$p"; then mkdir -p "$dest/$(dirname "$p")"
+          elif [ -f "$tree/$p" ]; then mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"; fi ;;
+    path) if [ -f "$tree/$p" ]; then is_upstream "$p" || { mkdir -p "$dest/$(dirname "$p")"; cp "$tree/$p" "$dest/$p"; }
           else mkdir -p "$dest/$p" && touch "$dest/$p/.gitkeep"; fi ;;
     dir)  if [ -n "$p" ]; then mkdir -p "$dest/$p" && touch "$dest/$p/.gitkeep"; fi ;;
   esac
@@ -120,5 +131,12 @@ fi
 t="$(jq -r '.extra.runtime.autoload_template // empty' "$tree/composer.json")"
 if [ -n "$t" ] && [ -f "$tree/$t" ]; then mkdir -p "$dest/$(dirname "$t")"; cp "$tree/$t" "$dest/$t"; fi
 echo "$provenance" > "$dest/PROVENANCE"
+# Un fichier disparu au nouveau commit : l'ancienne liste est remise (son
+# en-tête garde l'ancien commit, la mesure reste reproductible) et la liste
+# est à refaire à la main — la référence peut avoir besoin d'autres fichiers.
+if [ ${#upstream[@]} -gt 0 ] && ! "$ROOT/tools/corpus-upstream.sh" "$name" "${upstream[@]}"; then
+  cp "$work/UPSTREAM.old" "$dest/UPSTREAM"
+  echo "AVERTISSEMENT $name : UPSTREAM non réécrit au nouveau commit (ancienne liste remise) — à refaire avec tools/corpus-upstream.sh"
+fi
 n="$(jq '(.packages | length) + (.["packages-dev"] | length)' "$dest/composer.lock")"
 echo "OK   $name : $n paquets, $(find "$dest" -type f | wc -l | tr -d ' ') fichiers — $provenance"

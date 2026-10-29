@@ -29,7 +29,7 @@
 #   ensemble), -q, -v (rendu à Composer), --no-autoloader, --no-dev,
 #   --no-plugins, `update` ;
 # - dealerdirect v1.0.0 : un chemin enregistré relatif au projet gardé ;
-# - les versions dont le code n'a pas été lu (dealerdirect v0.7.2, phpstan
+# - les versions dont le code n'a pas été lu (dealerdirect v0.7.1, phpstan
 #   1.3.1, rector 0.10.2, package-versions 1.11.99.1), une extension aliasée
 #   et drupal/core-project-message avec un message : rendus à Composer (code
 #   3 sous --no-fallback, la raison, rien d'écrit) ;
@@ -296,7 +296,7 @@ expect phpcs-v100-cwd-relative "$PHPCS"'set to \.\./\.\./phpcsstandards/phpcsuti
 
 # --- les versions non lues : rendues à Composer, nommées -------------------
 lock old-versions '{"name": "vivacity/plugin-lines-old-versions",
-  "require": {"dealerdirect/phpcodesniffer-composer-installer": "v0.7.2", "squizlabs/php_codesniffer": "3.13.6",
+  "require": {"dealerdirect/phpcodesniffer-composer-installer": "v0.7.1", "squizlabs/php_codesniffer": "3.13.6",
     "phpstan/extension-installer": "1.3.1", "phpstan/phpstan": "1.12.33", "rector/extension-installer": "0.10.2",
     "composer/package-versions-deprecated": "1.11.99.1"},
   "config": {"allow-plugins": {"dealerdirect/phpcodesniffer-composer-installer": true,
@@ -304,7 +304,7 @@ lock old-versions '{"name": "vivacity/plugin-lines-old-versions",
     "composer/package-versions-deprecated": true}}}'
 viv="$WORK/old-versions-viv"; fresh old-versions "$viv"
 v_code=0; (cd "$viv" && "$VIVACITY" "${V[@]}" >"$WORK/old-versions.vivacity.all" 2>&1) || v_code=$?
-n=$(grep -cE '^  - plugin (dealerdirect/phpcodesniffer-composer-installer v0\.7\.2|phpstan/extension-installer 1\.3\.1|rector/extension-installer 0\.10\.2|composer/package-versions-deprecated 1\.11\.99\.1) is not emulated in this version' "$WORK/old-versions.vivacity.all" || true)
+n=$(grep -cE '^  - plugin (dealerdirect/phpcodesniffer-composer-installer v0\.7\.1|phpstan/extension-installer 1\.3\.1|rector/extension-installer 0\.10\.2|composer/package-versions-deprecated 1\.11\.99\.1) is not emulated in this version' "$WORK/old-versions.vivacity.all" || true)
 if [ "$v_code" = 3 ] && [ "$n" = 4 ] && [ ! -e "$viv/vendor" ]; then
   echo "OK   old-versions : quatre versions non lues rendues à Composer, nommées, rien d'écrit"
 else
@@ -585,7 +585,7 @@ expect_not ni-all-quiet '.'
 # Replis : les versions non lues des trois écouteurs (package-versions,
 # muet sans dump, n'est pas nommé).
 ni_base_composer old old-versions
-ni_refused ni-old-versions '^  - plugin (dealerdirect/phpcodesniffer-composer-installer v0\.7\.2|phpstan/extension-installer 1\.3\.1|rector/extension-installer 0\.10\.2) is not emulated in this version' 3 "${NI[@]}" --no-fallback
+ni_refused ni-old-versions '^  - plugin (dealerdirect/phpcodesniffer-composer-installer v0\.7\.1|phpstan/extension-installer 1\.3\.1|rector/extension-installer 0\.10\.2) is not emulated in this version' 3 "${NI[@]}" --no-fallback
 if grep -q '^  - plugin composer/package-versions-deprecated' "$WORK/ni-old-versions.vivacity.all"; then echo "FAIL ni-old-versions : package-versions nommé"; status=1; fi
 # php-http/discovery : son `postUpdate` interroge le dépôt local, pas le
 # lock, et peut éditer composer.json puis relancer un `Installer` (mesuré :

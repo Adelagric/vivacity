@@ -95,6 +95,16 @@ byte-identical-output promise are the public API.
   written. Seven corpus entries become native (cakephp-app, fossbilling,
   laminas-mvc-skeleton, mezzio-skeleton, owncloud-core, sculpin,
   spiral-app).
+- **dealerdirect/phpcodesniffer-composer-installer v0.7.2 is emulated.**
+  It searches the whole project for `ruleset.xml` files, vendor/ included
+  (a library that ships one at its root is registered too, as Composer
+  does), down to `extra.phpcodesniffer-search-depth`. Handed to Composer,
+  named: phpcs 2 (with v0.7.2 to v1.1.2), phpcs at a dev or aliased
+  version, a search depth that is not an integer above the minimum, the
+  bin-dir already in the `PATH` after another `phpcs` or no `php` in the
+  `PATH` (v0.7.2 reads the configuration through the `phpcs` of the
+  `PATH`), `-v`, the other 0.x versions. fixtures/corpus/chamilo-lms
+  becomes native in dev mode.
 
 ### Changed
 - **The Linux release binaries run on glibc 2.17 or later** (CentOS/RHEL 7
@@ -131,6 +141,13 @@ byte-identical-output promise are the public API.
   fails to compile instead of silently getting no header.
 - **`install.sh` on BusyBox** (Alpine): the checksum check used
   `sha256sum -c --quiet`, which BusyBox's `sha256sum` does not accept.
+- **dealerdirect's ruleset search follows Composer's Finder** (all
+  emulated versions): a path component starting with a dot is skipped
+  (relative to each search path), a symbolic link to a directory is not
+  descended into, and a dangling `ruleset.xml` link counts as a file.
+  vivacity used to register a standard under `.github/` or behind a link,
+  which Composer never does (seen with a root package of type
+  `phpcodesniffer-standard`).
 - **The GitHub Action cached a dead store.** It saved vivacity's store
   next to Composer's cache under fixed paths; since the store's layout
   moved to `v3` (05193b7) the restored `store/v2` was never read (run
@@ -209,6 +226,12 @@ byte-identical-output promise are the public API.
   the store was rebuilt from, so it could list other files. To get the
   Linux and Windows figures, run the `classmap-cache` workflow by hand
   (`bench/classmap-cache.sh`).
+- **The corpus fetches what it must not commit**: an entry's
+  `UPSTREAM` lists project files (path, SHA-256, pinned commit) that
+  `harness/corpus.sh` downloads when it measures (`tools/corpus-upstream.sh`
+  writes the list). chamilo-lms's fifteen legacy PHP files (GPL-3.0-or-later,
+  903 KB) come this way, so the reference can run phpcs on it;
+  `public/legacy.php` leaves the committed tree.
 - **[docs/deployer.md](docs/deployer.md)**: vivacity as Deployer's
   `bin/composer`, the options to pass, what `dep -v`/`-vv` do to the
   install, the Symfony recipe's `dump-env`. Run with Deployer 7.5.12's

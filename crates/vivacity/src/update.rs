@@ -789,6 +789,11 @@ pub(crate) fn resolve_and_lock(
             )
             .or_else(|| crate::discovery::resolved_issue(m, &lock, installer_dev_mode))
             .or_else(|| {
+                // dealerdirect's configurations not reproduced, on the
+                // packages the install will leave.
+                vivacity_core::scope::phpcs_lock_issue(&project, &parsed, m, installer_dev_mode)
+            })
+            .or_else(|| {
                 // The second round of emulated plugins
                 // (docs/plans/plugins-round2.md), on the packages the
                 // install will leave.

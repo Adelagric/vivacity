@@ -128,13 +128,16 @@ How much of the real world that covers is measured, not assumed:
 committed lock, pinned — `fixtures/corpus/`). On 2026-10-29 (after
 0.25.0), against Composer 2.10.3 `--no-scripts` with its
 plugins active, `vivacity install` laid out **95 of 106 projects (90 %)
-natively with `--no-dev`** and 94 of 106 (89 %) with the dev packages,
+natively with `--no-dev`** and 95 of 106 (90 %) with the dev packages,
 byte-identical down to file modes and link targets (`.git` directories
 of git-only packages included), and **no diff in either mode**: every
 other project was handed to Composer before any write, for reasons the
 report ranks — the Drupal plugins (the scaffold is GPL, not ported),
-mautic's and silverstripe's own logic, then plugins one by one. Earlier
-that day it was 93 and 91, before `infection/extension-installer`
+mautic's and silverstripe's own logic, then plugins one by one. The dev
+count rose from 94 when `dealerdirect/phpcodesniffer-composer-installer`
+v0.7.2 was emulated and chamilo-lms's fixture started fetching the legacy
+files its autoload loads (the thirteen entries that use dealerdirect
+replayed, the rest carried from the run before). Earlier that day it was 93 and 91, before `infection/extension-installer`
 (roave-backwardcompatibilitycheck), the TYPO3 plugins (typo3) and
 `mlocati/composer-patcher` (concretecms); before that 92 and 90, before
 `drupol/composer-packages` (bolt-project);
@@ -293,7 +296,8 @@ real ones: `symfony/runtime`, `composer/installers` (versions
 WordPress and Drupal included; 1.12.0's PHP 8.4 deprecation lines
 included), `pestphp/pest-plugin` (`vendor/pest-plugins.json`),
 `dealerdirect/phpcodesniffer-composer-installer` (PHP_CodeSniffer's
-`installed_paths`, versions 1.0.0–1.2.1 but 1.1.0), `phpstan/extension-installer`
+`installed_paths`, versions 0.7.2 and 1.0.0–1.2.1 but 1.1.0; 0.7.2 searches
+the whole project for rulesets, vendor/ included), `phpstan/extension-installer`
 (1.4.x) and `rector/extension-installer` (0.11.x, 1.0.0) (their
 `GeneratedConfig.php`), and
 `wikimedia/composer-merge-plugin` (the included manifests merged into the
