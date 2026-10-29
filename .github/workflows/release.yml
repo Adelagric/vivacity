@@ -56,8 +56,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # zig compiles the C parts on Linux: not the objects of a gcc build.
-          key: ${{ runner.os == 'Linux' && 'zigbuild' || '' }}
+          # Per target: two Linux rows share a runner image, and zig's
+          # objects must not mix with an older gcc build's.
+          key: ${{ matrix.target }}-zig
       - if: runner.os != 'Linux'
         run: cargo build --release --locked --target ${{ matrix.target }} -p vivacity
       # Not the runner's glibc (2.39 on ubuntu 24.04, which v0.25.0's

@@ -62,9 +62,12 @@ status=0
 fail() { echo "FAIL $*"; status=1; }
 
 check_elf() {
-  local bin="$1" od="${OBJDUMP:-objdump}" headers format
-  headers="$("$od" -p "$bin")"
-  format="$("$od" -f "$bin" | sed -n 's/.*file format //p')"
+  local bin="$1" od="${OBJDUMP:-objdump}" headers format sections
+  # Read whole, then searched: a `grep -q` on objdump's pipe can SIGPIPE it
+  # (141 under pipefail), which an `if` would read as "not found".
+  headers="$("$od" -p "$bin" 2>&1)" || { fail "objdump -p: $headers"; return; }
+  sections="$("$od" -h "$bin" 2>&1)" || { fail "objdump -h: $sections"; return; }
+  format="$("$od" -f "$bin" 2>&1 | sed -n 's/.*file format //p')"
   case "$arch:$format" in
     x86_64:elf64-x86-64|aarch64:elf64-littleaarch64) echo "OK   $format" ;;
     *) fail "$bin is '$format', not a $arch ELF" ;;
@@ -72,7 +75,7 @@ check_elf() {
   local needed
   needed="$(echo "$headers" | awk '$1 == "NEEDED" {printf "%s ", $2}')"
   if [ $libc = musl ]; then
-    if [ -n "$needed" ] || "$od" -h "$bin" | grep -q ' \.interp '; then
+    if [ -n "$needed" ] || echo "$sections" | grep -q ' \.interp '; then
       fail "not static: NEEDED [$needed]"
     else
       echo "OK   static (no NEEDED, no interpreter)"
@@ -80,8 +83,13 @@ check_elf() {
     return
   fi
   # All the GLIBC_ versions the loader checks, weak ones included.
-  local refs max
-  refs="$(echo "$headers" | sed -n '/^Version References:/,/^$/p' | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -uV)"
+  local verrefs refs max other
+  verrefs="$(echo "$headers" | sed -n '/^Version References:/,/^$/p')"
+  refs="$(echo "$verrefs" | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -uV)"
+  # Non-numeric nodes (GLIBC_PRIVATE, GLIBC_ABI_DT_RELR from 2.36) have no
+  # place in a binary meant for 2.17.
+  other="$(echo "$verrefs" | { grep -oE 'GLIBC_[A-Z][A-Z0-9_]*' || true; } | sort -u)"
+  [ -z "$other" ] || fail "non-numeric glibc version nodes: $(echo "$other" | tr '\n' ' ')"
   max="$(echo "$refs" | tail -n 1)"
   if [ -z "$max" ]; then
     fail "no GLIBC_ version reference found (wrong binary, or objdump output not understood)"
@@ -89,7 +97,7 @@ check_elf() {
     echo "OK   highest glibc version required: GLIBC_$max (floor $GLIBC_FLOOR)"
   else
     fail "requires GLIBC_$max, above the floor $GLIBC_FLOOR:"
-    echo "$headers" | sed -n '/^Version References:/,/^$/p' | grep -E 'GLIBC_[0-9.]+' | while read -r _ flags _ v; do
+    echo "$verrefs" | grep -E 'GLIBC_[0-9.]+' | while read -r _ flags _ v; do
       [ "$(printf '%s\n%s\n' "${v#GLIBC_}" "$GLIBC_FLOOR" | sort -V | tail -n 1)" = "$GLIBC_FLOOR" ] || echo "       $v (flags $flags)"
     done
   fi
@@ -115,7 +123,7 @@ if "$v" --version > /tmp/version.out 2> /tmp/version.err && [ ! -s /tmp/version.
 else
   echo "FAIL --version:"; cat /tmp/version.out /tmp/version.err; exit 1
 fi
-cp -R /src /p && cd /p
+cp -R /src /p && cd /p || { echo "FAIL fixture copy"; exit 1; }
 # 2. A child process: -vv is handed to Composer, here a stand-in.
 mkdir -p /tmp/bin
 printf "#!/bin/sh\necho \"stand-in composer: \$*\"\nexit 7\n" > /tmp/bin/composer

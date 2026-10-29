@@ -119,7 +119,7 @@ jobs:
           test "$CACHE_DIR_CC" = "$expected_cc"
 
   installers:
-    name: installers (${{ matrix.os }})
+    name: installers (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -187,7 +187,7 @@ jobs:
             -e TARGET=${{ matrix.target }} "$image" sh -c '
               set -eu
               export VIVACITY_VERSION=v0.0.0-ci
-              VIVACITY_DOWNLOAD_BASE=/assets VIVACITY_INSTALL_DIR=/opt/a sh /install.sh 2> log
+              VIVACITY_DOWNLOAD_BASE=/assets VIVACITY_INSTALL_DIR=/opt/a sh /install.sh 2> log || { cat log; exit 1; }
               cat log; grep -q "downloading vivacity-v0.0.0-ci-$TARGET.tar.gz" log
               /opt/a/vivacity --version
               case "$TARGET" in *-musl)

@@ -4931,3 +4931,18 @@ alpine (le musl aarch64 n'a tourné que dans `php:8.4-cli`, Debian, pour le
 banc ; le musl x86_64 nulle part), `install.sh` dans centos:7 et alpine.
 Ils sont laissés au run `release` en `workflow_dispatch` et au job
 `installers`.
+
+**Revue indépendante** (sous-agent frais, sur `git diff 5768dc9..`) :
+aucun défaut haut. Intégrés : `grep -q` sur le tuyau d'`objdump -h` (un
+SIGPIPE lu comme « pas de `.interp` » : sortie lue en entier d'abord) ;
+nœuds de version non numériques (`GLIBC_PRIVATE`, `GLIBC_ABI_DT_RELR` de
+2.36) refusés ; un `objdump` en échec dit `FAIL` et laisse tourner le
+conteneur ; copie du fixture gardée ; la ligne `FAILED` d'un hachage faux
+rendue sur stderr par `install.sh` ; `log` imprimé quand `install.sh` échoue
+dans le conteneur ; clé `rust-cache` par cible dans release.yml (deux lignes
+Linux partageaient la même) ; job `installers` nommé par cible — **les
+noms de contrôle changent** (`installers (x86_64-unknown-linux-gnu)` au
+lieu de `installers (ubuntu-latest)`), à reporter dans une protection de
+branche qui les exigerait. Laissé : les zipballs d'`api.github.com` du
+fixture, appelés sans jeton depuis le conteneur (2 requêtes par essai,
+limite de 60 par heure et par IP).

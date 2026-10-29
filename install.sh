@@ -71,12 +71,12 @@ case "$base" in
   *)
     cp "$base/$name" "$base/$name.sha256" "$tmp/" || missing ;;
 esac
-# Output dropped rather than `--quiet`, which BusyBox's sha256sum (Alpine)
-# does not have; a mismatch still exits non-zero, with its line on stderr.
+# Output kept for a mismatch rather than `--quiet`, which BusyBox's
+# sha256sum (Alpine) does not have.
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp" && sha256sum -c "$name.sha256" >/dev/null)
+  sum=$(cd "$tmp" && sha256sum -c "$name.sha256" 2>&1) || { echo "$sum" >&2; exit 1; }
 else
-  (cd "$tmp" && shasum -a 256 -c "$name.sha256" >/dev/null)
+  sum=$(cd "$tmp" && shasum -a 256 -c "$name.sha256" 2>&1) || { echo "$sum" >&2; exit 1; }
 fi
 mkdir -p "$DIR"
 # Assets up to v0.6.0 were archived with a `./` prefix, which GNU tar does
