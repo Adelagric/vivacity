@@ -93,7 +93,7 @@ $patches = [
 $pGitty = "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,3 @@\n alpha\n beta\n+gamma\n";
 $files = ["p/lib.patch" => $pLib, "p/lib2.patch" => $pLib2, "p/lib2b.patch" => $pLib2b, "p/cm.patch" => $pCm, "p/gitty.patch" => $pGitty];
 $make("acme/patches", "1.0.0", "library", ["patches" => $patches], $files);
-$make("acme/patches-bad", "1.0.0", "library", ["patches" => ["acme/lib" => ["Broken" => "p/bad.patch"]]], ["p/bad.patch" => $bad]);
+$make("acme/patches-bad", "1.0.0", "library", ["patches" => ["acme/lib" => ["Broken" => ["path" => "p/bad.patch", "levels" => ["-p1"]]]]], ["p/bad.patch" => $bad]);
 $make("acme/patches-remote", "1.0.0", "library", ["patches" => ["acme/lib" => ["Far" => "https://example.invalid/x.patch"]]], []);
 ' "$ART" || { echo "FAIL : fabrication des zips"; exit 1; }
 
@@ -273,7 +273,11 @@ store_clean pt-no-dev-store
 fresh pt-a "$WORK/pt-late-ref" "$WORK/pt-late-viv"
 for d in "$WORK/pt-late-ref" "$WORK/pt-late-viv"; do (cd "$d" && composer install --no-scripts --no-plugins --no-interaction --no-ansi -q); done
 pstep "$WORK/pt-late-ref" "$WORK/pt-late-viv" pt-late "${I[@]}"
-# Un correctif qui échoue : la ligne d'erreur, pas de patches_applied.
+# Un correctif qui échoue : la ligne d'erreur, pas de patches_applied. Au seul
+# niveau -p1 : à -p0 le fichier `a/src/Lib.php` n'existe pas, et GNU patch
+# répond « Skipping patch. 1 out of 1 hunk ignored », que le plugin lit comme
+# « déjà appliqué » (PatchPatcher::patchIsAlreadyApplied) ; le patch de macOS
+# répond autrement et le cas échouait bien là seulement.
 lock pt-bad "{\"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/patches-bad\": \"1.0.0\", \"acme/lib\": \"1.0.0\"}, \"extra\": {\"allow-subpatches\": true}, $PT_CFG}"
 fresh pt-bad "$WORK/pt-bad-ref" "$WORK/pt-bad-viv"; pstep "$WORK/pt-bad-ref" "$WORK/pt-bad-viv" pt-failing "${I[@]}"
 grep -q 'Unable to apply the patch "Broken"' "$WORK/pt-failing.composer.out" || { echo "FAIL pt-failing : pas d'échec chez Composer (cas mal construit)"; status=1; }
