@@ -1,11 +1,15 @@
 //! vivacity: a fast, Composer-compatible installer.
-//! stdout: nothing for now (reserved for machine-readable output); all
-//! narrative goes to stderr. Exit codes: 0 ok, 1 runtime error,
+//! Each line goes to the stream Composer writes it on: stdout for the few
+//! Composer sends there (plugins' lines, GitHub Actions annotations), stderr
+//! for the rest of the narrative. Exit codes: 0 ok, 1 runtime error,
 //! 2 usage (clap), 3 out of scope with no fallback possible, 4 platform.
 //!
 //! The `vivacity` binary is just a call to [`run`]: another program can
 //! embed the commands as they are (`vivacity::run(["vivacity", "install", …])`)
 //! and get the same exit code.
+
+// stdout is written through `vivacity_core::out!` only (one write per line).
+#![deny(clippy::print_stdout)]
 
 mod extension_installers;
 mod install;

@@ -4465,3 +4465,32 @@ PHP envoie chaque ligne en un `fwrite`.
   de son fil (0,08–0,11 s sur ce projet) ; celle de Composer ne mesure que
   `Solver::solve` (0,000 s). Les octets diffèrent par la valeur, que les
   harnais masquent.
+
+**Addendum du 2026-10-29 — stdout aussi.** `println!` passe par le
+`LineWriter` de stdout (tampon de 1 Kio) : une ligne plus longue partait
+en plusieurs écritures. Compté avec un intercepteur de `write(2)` sur un
+lock insoluble avec `GITHUB_ACTIONS=1` : l'annotation `::error ::` de
+11 529 octets sortait en 10 + 11 518 + 1 octets chez vivacity, en une
+écriture chez Composer ; un lecteur de pipe l'a vue coupée 1 fois sur
+100 runs.
+
+- **Décision** : stdout passe par le même `write_line` que stderr (formatée,
+  puis un `write_all` ; tampon vide, le `LineWriter` la donne entière au flux
+  brut). `#![deny(clippy::print_stdout)]` sur les bibliothèques `vivacity` et
+  `vivacity-core` empêche un `println!` de revenir (vu rouge sur un
+  `println!` planté).
+- **Échec d'écriture ignoré sur stdout aussi** (relevé par la revue
+  adverse ; le plan gardait la panique de `println!`) : `dump-autoload`
+  vers un pipe déjà fermé paniquait (101) avant d'écrire
+  `vendor/autoload.php` ; Composer (`@fwrite`, `SIGPIPE` ignoré) finit en 0.
+  Le risque assumé le 28/10 (« un stdout fermé panique encore ») est levé ;
+  un embarqueur (ePHPm) ne reçoit plus cette panique. Reste : une ligne
+  peut être perdue sans bruit, comme sous PHP.
+- **Ce que la mesure dit et ne dit pas** : la même forme d'écriture que
+  Composer, pas « aucune ligne coupée » : un lecteur qui lit moins qu'une
+  ligne, ou un pipe presque plein, coupe aussi celles de Composer.
+- **Laissé** : les traces `VIVACITY_TRACE` gardent `eprintln!` (diagnostic ;
+  paniquent si stderr échoue) ; pas de test automatique du nombre
+  d'écritures (intercepteur macOS seulement ; un portage `LD_PRELOAD` ou
+  `strace -e write` sous Linux reste possible). Les tests en processus
+  affichent désormais les lignes de stdout que libtest capturait.

@@ -44,14 +44,25 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// One line on stderr in one write, as PHP's `fwrite` sends Composer's.
-/// `eprintln!` writes the unbuffered stderr piece by piece (the text around
-/// each argument, then the newline): a reader of the pipe that shows each
-/// read as a line (Deployer prefixes every chunk) splits the line there.
-fn err_line(line: impl std::fmt::Display) {
+/// One line on stdout or stderr in one write, as PHP's `fwrite` sends each
+/// of Composer's. `eprintln!` writes the unbuffered stderr piece by piece
+/// (the text around each argument, then the newline), and `println!` does
+/// the same with a line longer than stdout's 1 KiB buffer (a GitHub Actions
+/// annotation): a reader of the pipe that shows each read as a line
+/// (Deployer prefixes every chunk) splits the line there.
+///
+/// A failed write is ignored on both streams, as Composer ignores it
+/// (`StreamOutput::doWrite` is `@fwrite`, and PHP ignores `SIGPIPE`): a
+/// closed stdout no longer stops the run halfway.
+fn write_line(stdout: bool, line: impl std::fmt::Display) {
     let text = format!("{line}\n");
-    // Composer ignores a failed write to stderr too.
-    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+    // With nothing buffered (every line ends in a newline), stdout's
+    // `LineWriter` hands a whole line to the raw stream in one write.
+    let _ = if stdout {
+        std::io::stdout().lock().write_all(text.as_bytes())
+    } else {
+        std::io::stderr().lock().write_all(text.as_bytes())
+    };
 }
 
 /// A run's verbosity, or the level of a line.
@@ -124,11 +135,7 @@ pub fn release_deferred() {
     let mut slot = deferred();
     DEFERRING.store(false, Ordering::Release);
     for (stdout, line) in slot.drain(..) {
-        if stdout {
-            println!("{line}");
-        } else {
-            err_line(line);
-        }
+        write_line(stdout, line);
     }
 }
 
@@ -155,11 +162,7 @@ pub fn emit(stdout: bool, line: std::fmt::Arguments<'_>) {
             return;
         }
     }
-    if stdout {
-        println!("{line}");
-    } else {
-        err_line(line);
-    }
+    write_line(stdout, line);
 }
 
 /// The held stderr lines, in the order they were held, and whether there
@@ -249,12 +252,12 @@ pub fn release_held() {
         }
         drop(d);
         for line in lines {
-            err_line(line);
+            write_line(false, line);
         }
         return;
     }
     for line in lines {
-        err_line(line);
+        write_line(false, line);
     }
 }
 

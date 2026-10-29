@@ -1,5 +1,8 @@
 //! vivacity-core: manifests, platform, fetch and installation.
 
+// stdout is written through `out!` only (one write per line, `io`).
+#![deny(clippy::print_stdout)]
+
 pub mod bamarni_bin;
 pub mod binproxy;
 pub mod c3_plugin;

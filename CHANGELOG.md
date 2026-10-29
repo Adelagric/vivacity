@@ -54,6 +54,16 @@ byte-identical-output promise are the public API.
   `Dependency resolution completed in` from its duration. Measured with a
   pipe reader on a Laravel install at `-v --no-progress`: 5 to 15 reads
   ended mid-line, Composer 0, now 0.
+- **Long stdout lines go out in one write too.** A stdout line longer
+  than 1 KiB (the `::error ::` annotation under GitHub Actions, 11,529
+  bytes on an unsolvable lock) left in several writes (three for that
+  one); Composer sends it in one, and so does vivacity now (counted per
+  write call).
+- **A closed stdout no longer stops the run.** `vivacity dump-autoload`
+  piped into a reader that had already closed panicked (exit 101) before
+  writing `vendor/autoload.php`; Composer ignores the failed write and
+  finishes (exit 0), as vivacity now does. The same held for `install`
+  with a plugin whose line goes to stdout before its work.
 
 ### Documentation
 - **[docs/deployer.md](docs/deployer.md)**: vivacity as Deployer's
