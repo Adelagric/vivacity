@@ -6,7 +6,9 @@
 //!   packages (two lines), cakephp/plugin-installer adds the application
 //!   plugins to the root's autoload;
 //! - `POST_AUTOLOAD_DUMP`: cakephp/plugin-installer writes
-//!   `cakephp-plugins.php`;
+//!   `cakephp-plugins.php`; drupol/composer-packages regenerates its five
+//!   classes (with the printing listeners, in activation order:
+//!   `install::post_autoload_dump_printers`);
 //! - `POST_INSTALL_CMD` / `POST_UPDATE_CMD`: laminas-skeleton-installer at
 //!   priority 1000 (before every listener at 0), then dg/composer-cleaner
 //!   and liborm85's bin directory and summary in their plugins' activation
@@ -265,4 +267,79 @@ pub(crate) fn vendor_cleaner_finish(
     let mut c = vivacity_core::vendor_cleaner::Cleaner::new(&config);
     c.counts = counts.clone();
     finish_vendor_cleaner(&mut c, layout)
+}
+
+/// drupol/composer-packages in this run: active (plugins on, allowed, in
+/// the local repository the dump reads), with the lock data its exporters
+/// read and whether Flex lays `symfony-pack` packages out as metapackages.
+pub(crate) struct DrupolRun<'a> {
+    lock: &'a serde_json::Value,
+    flex_packs: bool,
+}
+
+pub(crate) fn drupol_run<'a>(
+    lock_data: Option<&'a serde_json::Value>,
+    local: &vivacity_core::lock::Lock,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+) -> Option<DrupolRun<'a>> {
+    if !active(local, manifest, with_dev, plugins_enabled, fx::DRUPOL) {
+        return None;
+    }
+    Some(DrupolRun {
+        lock: lock_data?,
+        flex_packs: local.flex_packs(manifest, with_dev, plugins_enabled),
+    })
+}
+
+/// drupol/composer-packages' `Plugin::regeneration`: its two lines around
+/// the five classes (`vivacity_core::composer_packages`), written under
+/// `<vendor>/drupol/composer-packages/build/`. The run was checked before
+/// anything was written (`effect_plugins::issues`).
+pub(crate) fn composer_packages(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    run: &DrupolRun<'_>,
+) -> anyhow::Result<()> {
+    use vivacity_core::composer_packages as cp;
+    vivacity_core::out!("drupol/composer-packages: Regenerating classes...");
+    // `RootPackage::getName()`: lower case, `__root__` without a name.
+    let root_name = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| "__root__".to_owned(), str::to_ascii_lowercase);
+    // `LibraryInstaller`: `realpath()` of the configured vendor directory,
+    // itself `Config::get('vendor-dir')` joined to the working directory
+    // (`getcwd()`, physical).
+    let base = vivacity_core::pathutil::canonicalize(project)?;
+    let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .vendor_dir(&base);
+    let vendor_real = cp::php_realpath(&vendor)?;
+    let vendor_real = vendor_real
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{}: not UTF-8", vendor_real.display()))?;
+    let generated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let classes = cp::render(
+        run.lock,
+        &cp::Input {
+            root_name: &root_name,
+            vendor_real,
+            flex_packs: run.flex_packs,
+            generated_at,
+        },
+    )?;
+    cp::write(
+        &vendor
+            .join("drupol")
+            .join("composer-packages")
+            .join("build"),
+        &classes,
+    )?;
+    vivacity_core::out!("drupol/composer-packages: Done.");
+    Ok(())
 }

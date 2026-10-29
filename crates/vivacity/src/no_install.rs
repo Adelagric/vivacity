@@ -233,6 +233,9 @@ pub(crate) fn issues_before_resolution(
         plugins_enabled: true,
         global: &global,
         aliases: false,
+        // No dump without an install: drupol/composer-packages is inert.
+        lock_data: None,
+        run_scripts_post_dump: false,
     };
     issues.extend(
         vivacity_core::effect_plugins::issues(&ctx)

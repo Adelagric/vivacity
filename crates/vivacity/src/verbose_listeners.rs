@@ -111,6 +111,14 @@ pub(crate) const VERBOSE_PLUGINS: &[VerbosePlugin] = &[
             (POST_UPDATE_CMD, "postUpdate"),
         ],
     },
+    // drupol/composer-packages 2.0.0: `regeneration`, a static method
+    // (`get_class` of the subscriber all the same); 1.x was not read.
+    VerbosePlugin {
+        name: "drupol/composer-packages",
+        versions: ">=2.0.0 <=2.0.0",
+        class: "drupol\\ComposerPackages\\Plugin",
+        listeners: &[(POST_AUTOLOAD_DUMP, "regeneration")],
+    },
     VerbosePlugin {
         name: "composer/package-versions-deprecated",
         versions: ">=1.8.0 <=1.8.2 || >=1.10.0 <=1.10.99.1 || >=1.11.0 <=1.11.99.5",

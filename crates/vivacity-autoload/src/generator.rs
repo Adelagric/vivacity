@@ -83,6 +83,11 @@ pub struct ClassmapCacheConfig {
     /// deletes single files there (liborm85/composer-vendor-cleaner) is or
     /// was configured.
     pub verify_files: bool,
+    /// Packages whose copy under vendor/ gains files after the install
+    /// (drupol/composer-packages generates its classes into `build/` at
+    /// `POST_AUTOLOAD_DUMP`): never mapped to their store entry — the
+    /// per-file cache serves them, as it serves the project's own sources.
+    pub mutable_copies: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -302,6 +307,9 @@ pub fn plan(
                     // entry holds (a clone keeps export-ignored files, and
                     // its files can change).
                     if p.raw.get("installation-source").and_then(|v| v.as_str()) == Some("source") {
+                        return None;
+                    }
+                    if cfg.mutable_copies.iter().any(|n| n == p.name()) {
                         return None;
                     }
                     let install = install_abs(p.name())?;

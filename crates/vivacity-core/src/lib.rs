@@ -9,6 +9,7 @@ pub mod c3_plugin;
 pub mod cakephp_plugins;
 pub mod clone;
 pub mod composer_cleaner;
+pub mod composer_packages;
 pub mod constraint;
 pub mod content_hash;
 pub mod custom_installers;

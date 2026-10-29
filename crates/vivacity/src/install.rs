@@ -942,6 +942,10 @@ fn analyze_scope(run: &Run<'_>) -> Option<vivacity_core::scope::ScopeReport> {
             plugins_enabled: !args.no_plugins,
             global: &global,
             aliases: !run.lock.aliases.is_empty(),
+            lock_data: Some(&run.lock_value),
+            run_scripts_post_dump: run.runner.is_some()
+                && crate::scripts::declared_events(&run.manifest)
+                    .contains(crate::scripts::POST_AUTOLOAD_DUMP),
         };
         report.issues.extend(
             vivacity_core::effect_plugins::issues(&ctx)
@@ -1516,7 +1520,14 @@ fn post_autoload_dump_plugins(
         run.with_dev,
         !args.no_plugins,
     )?;
-    // The two that print, in their plugins' activation order.
+    // The ones that print, in their plugins' activation order.
+    let drupol = crate::effect_plugins::drupol_run(
+        Some(&run.lock_value),
+        local,
+        &run.manifest,
+        run.with_dev,
+        !args.no_plugins,
+    );
     post_autoload_dump_printers(
         &run.project,
         local,
@@ -1524,14 +1535,16 @@ fn post_autoload_dump_plugins(
         run.with_dev,
         !args.no_plugins,
         &tx.listeners,
+        drupol.as_ref(),
     )
 }
 
 /// The `POST_AUTOLOAD_DUMP` listeners that write lines —
-/// bamarni/composer-bin-plugin's deprecations (stderr) and
-/// composer/package-versions-deprecated's two lines (stdout) — in the
-/// order their plugins were activated (`plugin_order`). The silent ones
-/// (pest-plugin, yii2-composer) depend on nothing the others do.
+/// bamarni/composer-bin-plugin's deprecations (stderr),
+/// composer/package-versions-deprecated's two lines and
+/// drupol/composer-packages' two lines (stdout) — in the order their
+/// plugins were activated (`plugin_order`). The silent ones (pest-plugin,
+/// yii2-composer) depend on nothing the others do.
 pub(crate) fn post_autoload_dump_printers(
     project: &std::path::Path,
     local: &vivacity_core::lock::Lock,
@@ -1539,12 +1552,14 @@ pub(crate) fn post_autoload_dump_printers(
     with_dev: bool,
     plugins_enabled: bool,
     listeners: &[String],
+    drupol: Option<&crate::effect_plugins::DrupolRun<'_>>,
 ) -> anyhow::Result<()> {
     // The printers, and under -v every listener of the event: each plugin's
     // `> post-autoload-dump: …` line precedes what it prints.
     let mut emulated = vec![
         vivacity_core::bamarni_bin::PLUGIN_NAME,
         vivacity_core::package_versions::PLUGIN_NAME,
+        vivacity_core::effect_plugins::DRUPOL,
     ];
     let event = crate::verbose_listeners::POST_AUTOLOAD_DUMP;
     for name in crate::verbose_listeners::listening_to(event) {
@@ -1565,6 +1580,10 @@ pub(crate) fn post_autoload_dump_printers(
             }
         } else if plugin == vivacity_core::package_versions::PLUGIN_NAME {
             emulate_package_versions(project, local, manifest, with_dev, plugins_enabled)?;
+        } else if plugin == vivacity_core::effect_plugins::DRUPOL {
+            if let Some(run) = drupol {
+                crate::effect_plugins::composer_packages(project, manifest, run)?;
+            }
         }
     }
     Ok(())

@@ -64,6 +64,8 @@ pub const EMULATED_PLUGINS: &[&str] = &[
     crate::effect_plugins::DG_CLEANER,
     crate::effect_plugins::VENDOR_CLEANER,
     crate::effect_plugins::CAKEPHP,
+    // docs/plans/duration-drupol-collector.md: `POST_AUTOLOAD_DUMP` only.
+    crate::effect_plugins::DRUPOL,
 ];
 
 /// The versions of the listeners vivacity reproduces whose code changed
@@ -411,6 +413,8 @@ pub const RESOLUTION_INERT: &[&str] = &[
     crate::effect_plugins::DG_CLEANER,
     crate::effect_plugins::VENDOR_CLEANER,
     crate::effect_plugins::CAKEPHP,
+    // docs/plans/duration-drupol-collector.md: `POST_AUTOLOAD_DUMP` only.
+    crate::effect_plugins::DRUPOL,
 ];
 
 /// A resolution command, for the per-plugin rules below.

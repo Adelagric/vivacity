@@ -174,9 +174,13 @@ pub fn php_var_export(v: &Value, indent: usize) -> String {
             if let Some(i) = n.as_i64() {
                 i.to_string()
             } else {
+                // `var_export` writes the exponent with `E` (`smart_str_append_double`),
+                // where `json_encode` writes `e`, and keeps a `.0`.
                 let f = n.as_f64().unwrap_or(0.0);
-                let s = crate::phpjson::php_double(f).unwrap_or_default();
-                if s.contains('.') || s.contains('E') || s.contains('e') {
+                let s = crate::phpjson::php_double(f)
+                    .unwrap_or_default()
+                    .replace('e', "E");
+                if s.contains('.') || s.contains('E') {
                     s
                 } else {
                     format!("{s}.0")
@@ -236,6 +240,19 @@ mod tests {
         assert_eq!(
             php_var_export(&json!({"debug": true, "env": "prod", "n": 3, "list": ["a"], "sub": {"k": null}}), 0),
             "array (\n  'debug' => true,\n  'env' => 'prod',\n  'n' => 3,\n  'list' => \n  array (\n    0 => 'a',\n  ),\n  'sub' => \n  array (\n    'k' => NULL,\n  ),\n)"
+        );
+    }
+
+    #[test]
+    fn var_export_floats_like_php() {
+        // php -r 'var_export([1e20, 1.5e-7, 18446744073709551615, 3.0, 0.1, 1e15, 1e16, 1.0E+25]);'
+        let v: Value = serde_json::from_str(
+            "[1e20, 1.5e-7, 18446744073709551615, 3.0, 0.1, 1e15, 1e16, 1.0E+25]",
+        )
+        .unwrap();
+        assert_eq!(
+            php_var_export(&v, 0),
+            "array (\n  0 => 1.0E+20,\n  1 => 1.5E-7,\n  2 => 1.8446744073709552E+19,\n  3 => 3.0,\n  4 => 0.1,\n  5 => 1000000000000000.0,\n  6 => 10000000000000000.0,\n  7 => 1.0E+25,\n)"
         );
     }
 

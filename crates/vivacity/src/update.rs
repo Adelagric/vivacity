@@ -818,6 +818,10 @@ pub(crate) fn resolve_and_lock(
                     plugins_enabled: true,
                     global: &global,
                     aliases: !parsed.aliases.is_empty(),
+                    // The lock this update writes (or keeps virtual):
+                    // what `Locker::getLockData` returns to the install.
+                    lock_data: Some(&lock),
+                    run_scripts_post_dump: false,
                 };
                 vivacity_core::effect_plugins::issues(&ctx)
                     .into_iter()

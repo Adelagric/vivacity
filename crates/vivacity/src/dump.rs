@@ -76,6 +76,9 @@ pub(crate) fn dump_autoload_plan(
                             p.get("name").and_then(serde_json::Value::as_str)
                                 == Some(vivacity_core::effect_plugins::VENDOR_CLEANER)
                         }),
+                // Its generated classes stay under vendor/ whether the
+                // plugin runs or not (`--no-plugins`, refused, removed).
+                mutable_copies: vec![vivacity_core::effect_plugins::DRUPOL.to_owned()],
             })
         },
     };
@@ -222,6 +225,16 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
     // lock may be stale or absent, or no composer.lock) installed.json is
     // the source, split by its `dev-package-names`.
     let lock_path = project.join("composer.lock");
+    // `Locker::getLockData()` as a plugin calls it here: the lock file,
+    // unless the lock is disabled (a `Locker` on `/dev/null`) or absent —
+    // then it throws.
+    let lock_data: Option<serde_json::Value> = if config_lock_enabled(&manifest_text) {
+        std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+    } else {
+        None
+    };
     let mut lock = if config_lock_enabled(&manifest_text) && lock_path.exists() {
         vivacity_core::lock::Lock::read(&lock_path)?
     } else {
@@ -358,6 +371,9 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             plugins_enabled: true,
             global: &global,
             aliases: false,
+            lock_data: lock_data.as_ref(),
+            run_scripts_post_dump: args.run_scripts
+                && scripts::declared_events(&manifest).contains(scripts::POST_AUTOLOAD_DUMP),
         };
         let issues = vivacity_core::effect_plugins::issues(&ctx);
         if !issues.is_empty() {
@@ -508,6 +524,15 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             &[],
             !args.no_plugins,
         )?;
+        // drupol/composer-packages: loaded from installed.json, dev
+        // packages included whatever `--no-dev` says.
+        let drupol = crate::effect_plugins::drupol_run(
+            lock_data.as_ref(),
+            &local_all,
+            &manifest,
+            true,
+            !args.no_plugins,
+        );
         post_autoload_dump_printers(
             &project,
             &lock,
@@ -515,6 +540,7 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             dev_mode,
             !args.no_plugins,
             &listeners,
+            drupol.as_ref(),
         )?;
     }
     if let Some(r) = &runner {
