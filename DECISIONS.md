@@ -5165,3 +5165,45 @@ Corpus (`docs/corpus/2026-10-29-chamilo-dealerdirect.md`) : les treize
 entrées à dealerdirect rejouées dans les deux modes (chamilo-lms aussi sous
 PHP 8.4), les 93 autres reprises du passage précédent : **95/106 natives
 en `--no-dev`, 95/106 en dev** (94 avant), 0 diff, 0 unavailable.
+
+## 2026-10-29 — Un banc Windows à part, à la manière de la mesure de Luther (docs/plans/bench-windows.md)
+
+**Constat.** La seule mesure externe de vivacity (Luther Monson,
+2026-10-14 : Windows 11, Defender actif, Laravel, vivacity 0.17 dans ePHPm)
+n'avait pas d'équivalent rejouable ; `bench.yml` ne tourne que sous Linux,
+et le store comme la matérialisation ont changé depuis 0.17.
+
+**Décision : un banc et un workflow dédiés**, `bench/windows-bench.sh` et
+`bench-windows.yml` (`workflow_dispatch`), plutôt qu'une ligne
+`windows-latest` dans la matrice de `bench.yml`. Raisons : `bench.yml`
+tourne à chaque push ou PR qui touche `crates/**`, et une install Composer
+`vendor/` supprimé prend des minutes sous Windows (107 s chez Luther) ;
+`gate.py` agrège par fixture et scénario, sans OS, et une ligne Windows se
+mêlerait à la baseline Linux ; `ci-bench.sh` partage un répertoire entre
+les deux outils, lance `composer` par son nom (un `.bat` que hyperfine `-N`
+ne lance pas) et ne prouve pas l'égalité des sorties. Généraliser
+`ci-bench.sh` aurait fait un script à deux régimes ; refusé.
+
+**Méthode.** Les drapeaux de Luther des deux côtés (`--no-interaction
+--no-scripts -q --ignore-platform-reqs`, plugins actifs), plus
+`--no-blocking` sur `install` pour la raison de `ci-bench.sh` (2026-09-19) ;
+Composer en `php composer.phar`. hyperfine `-N`, une chauffe. Une copie du
+projet par outil, renommée au même chemin absolu le temps que son outil
+travaille : sur Sylius, rector/extension-installer écrit des chemins
+absolus dans `vendor/` (vu au passage macOS, deux copies côte à côte
+différaient d'une ligne). Avant les mesures et après, les deux `vendor/`
+doivent avoir le même manifeste (sha256 par fichier, cible par lien) et
+vivacity ne doit rien avoir délégué, sinon le job échoue sans chiffre ;
+les trois arrêts vus rouges. Le résumé relève CPU, Windows, Defender
+(`Get-MpComputerStatus`, `Get-MpPreference`), volumes et lecteurs. Deux
+dispositions en matrice : `split` (projet sur `D:`, caches sur `C:` : ce
+que voit un utilisateur CI, et vivacity copie au lieu de lier) et `same`
+(tout sur `C:`, un poste à un disque).
+
+**Non fait.** Pas de gate (le ratio de `bench.yml` bouge de 15–50 %
+entre runs identiques sur runner partagé et ne fait que rapporter) ; on ne bascule pas Defender, on relève son
+état ; pas d'ePHPm. Passage macOS (M4 Max, `BENCH_RUNS=2`, trois
+fixtures) vert : arbres identiques, Laravel `fresh` 3,0 s contre 0,19 s.
+Le chemin Windows (cygpath, PowerShell, `rm.exe` sous `-N`, le phar de
+setup-php) n'a tourné que sous des doublures sur ce Mac ; les chiffres
+Windows viendront du premier run (`bench/M9-windows.md`).

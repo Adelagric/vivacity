@@ -196,7 +196,10 @@ tolerance 15 % past `bench/results/baseline-ratio.json`) and writes the
 verdict into the job summary. It **reports**, it does not block: the ratio
 moves 15–50 % between identical runs on shared runners (six false alarms on
 2026-09-19/20), so the `bench` job stays green and a real regression is
-caught by `hyperfine` before the commit.
+caught by `hyperfine` before the commit. A Windows bench in the shape of
+Luther Monson's measurement (Laravel, warm caches, both `vendor/` trees
+proven identical) runs on demand (`bench-windows` workflow,
+[bench/M9-windows.md](bench/M9-windows.md)).
 
 ## The resolver
 

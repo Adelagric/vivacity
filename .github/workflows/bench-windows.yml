@@ -1,0 +1,97 @@
+name: bench-windows
+
+# On demand: vivacity against Composer on a Windows runner, in the shape of
+# Luther Monson's measurement (Windows 11, Laravel, warm caches,
+# --ignore-platform-reqs on both sides; bench/M9-windows.md,
+# docs/plans/bench-windows.md). Three scenarios (no-op, vendor/ deleted,
+# dump-autoload -o), both vendor/ trees proven identical before and after
+# the timings, the runner's conditions (CPU, Windows build, Defender,
+# drives) in the job summary. Not in bench.yml: a Composer install takes
+# minutes here, and the ratio gate's baseline is Linux's.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "hyperfine runs per scenario (at least; plus 1 warm-up)"
+        required: false
+        default: "5"
+      fixtures:
+        description: "fixtures, space-separated (laravel symfony sylius)"
+        required: false
+        default: "laravel"
+      layouts:
+        description: 'JSON list: "split" = project on D: (RUNNER_TEMP), caches on C:; "same" = both on C:'
+        required: false
+        default: '["split", "same"]'
+
+# Read-only: the bench installs third-party packages with the job's token
+# within reach (COMPOSER_AUTH below), as ci.yml does.
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench-windows (${{ matrix.layout }})
+    runs-on: windows-latest
+    timeout-minutes: 240
+    # ~100-300 zipballs from api.github.com while warming the caches: with
+    # the job's token, not anonymously from a shared runner IP
+    # (DECISIONS 2026-10-29).
+    env:
+      COMPOSER_AUTH: ${{ format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: ${{ fromJSON(inputs.layouts) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deep fixture trees (sylius) can overflow MAX_PATH (windows.yml).
+      - name: Allow long git paths
+        run: git config --system core.longpaths true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          # Pinned like the other workflows: the bench proves both vendor/
+          # trees identical, and its numbers name a Composer version.
+          tools: composer:2.10.3
+          # windows.yml's list: Sylius's lock requires gd, exif, sodium,
+          # intl; pdo_sqlite/sqlite3 are separate DLLs on Windows.
+          extensions: mbstring, intl, gd, exif, bcmath, sodium, xml, curl, zip, fileinfo, pdo_sqlite, sqlite3
+          ini-values: memory_limit=1G
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
+      - name: Build
+        run: cargo build --release -p vivacity
+
+      # The network half (Composer's zips): one more run on a network error,
+      # none on GitHub refusing requests (harness/net-retry.sh).
+      - name: Prepare (fixture copies, caches warmed)
+        run: harness/net-retry.sh bench/windows-bench.sh prepare
+        env:
+          BENCH_FIXTURES: ${{ inputs.fixtures }}
+          BENCH_LAYOUT: ${{ matrix.layout }}
+
+      - name: Measure (proof, timings, proof)
+        run: bench/windows-bench.sh measure
+        env:
+          BENCH_RUNS: ${{ inputs.runs }}
+          BENCH_FIXTURES: ${{ inputs.fixtures }}
+          BENCH_LAYOUT: ${{ matrix.layout }}
+          BENCH_RESULTS_DIR: ${{ runner.temp }}/bench-windows-results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-windows-${{ matrix.layout }}
+          path: ${{ runner.temp }}/bench-windows-results
+          if-no-files-found: warn

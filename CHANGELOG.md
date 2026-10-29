@@ -225,6 +225,16 @@ byte-identical-output promise are the public API.
   own PHP, is documented there as the entry point for any embedder that
   carries its own PHP: what it is used for, its php-cli contract, when the
   probe is cached, and what works with no PHP at all.
+- **A Windows bench, run on demand** (`bench-windows` workflow,
+  `bench/windows-bench.sh`, [bench/M9-windows.md](bench/M9-windows.md)):
+  the shape of Luther Monson's measurement (Laravel, warm caches,
+  `--ignore-platform-reqs`, plugins on, plus `--no-blocking` on both
+  sides) on a `windows-latest` runner. No-op, install with `vendor/`
+  deleted and `dump-autoload -o`, under hyperfine. The two `vendor/`
+  trees are proven identical, a sha256 per file, before and after the
+  timings. The summary records Defender's state, the CPU and the drives,
+  with the project on `D:` and the caches on `C:`, or both on `C:`. No
+  Windows figures yet; the writeup has their place.
 - **Why the GitHub Action does not cache vivacity's class map records**
   ([bench/M8-classmap-cache.md](bench/M8-classmap-cache.md)). The README
   said that restoring them did not make the install faster, but that was
