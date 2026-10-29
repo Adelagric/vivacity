@@ -49,8 +49,13 @@ The action caches Composer's cache directory only (dist zips, VCS mirrors,
 repository metadata), keyed on the hash of the `composer.lock` files.
 vivacity reads that cache and feeds it, and rebuilds its own store from the
 zips without the network (dists only: a package installed from git may
-still fetch), so its store and class map records are not cached: restored, they did not make the install faster (DECISIONS
-2026-10-29), and a store written by an older layout is never read. The
+still fetch), so its store is not cached: restored, it did not make the install faster (DECISIONS
+2026-10-29), and a store written by an older layout is never read. Its
+class map records are not cached either. They would save the class scan
+of an `-o` install (1.4 s on Laravel, 2.8 s on Sylius, on an M4 Max:
+[bench/M8-classmap-cache.md](bench/M8-classmap-cache.md)), but a record is
+keyed on a package's version and reference, not on the archive the store
+was just rebuilt from, so a restored one could list other files. The
 directory is the one `vivacity config --global cache-dir` prints — the
 same value as `composer config --global cache-dir` — exposed as the
 `composer-cache-dir` output and resolved once, when the action runs. Set

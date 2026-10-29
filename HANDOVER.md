@@ -343,10 +343,23 @@ comportement, non vendorés.
   `action` (trois OS, `action-test.yml`) n'est exercé qu'en CI : la
   branche Windows (`cygpath -m` d'une valeur en `/c/…`, `%LOCALAPPDATA%`)
   n'a tourné que dans les tests unitaires (hôte injecté). Points ouverts :
-  - les **enregistrements de classmap** hors du cache : leur clé contient
-    le chemin du store (donc `LAYOUT`), leur gain avec `-o` n'est pas
-    mesuré ; mesure à faire (zips seuls contre zips + classmap, Laravel et
-    Sylius, `-o`, trois OS) ;
+  - les **enregistrements de classmap** hors du cache (2026-10-29,
+    `docs/plans/classmap-cache.md`, `bench/M8-classmap-cache.md`) : leur clé
+    (chemin de l'entrée de store) survit à la reconstruction du store, ils
+    servent sur un runner neuf ; gain mesuré sur M4 Max avec `-o` : 1,4 s
+    (Laravel), 2,8 s (Sylius), ~0,2 s sans `-o`. Laissés dehors pour une
+    raison de correction : la clé ne porte ni l'URL de la dist ni les règles
+    d'extraction, un enregistrement restauré peut décrire d'autres fichiers
+    que le store reconstruit. Reste ouvert : les chiffres Linux et Windows
+    (lancer le workflow `classmap-cache`, `workflow_dispatch`), puis, s'ils
+    le justifient, une clé qui porte l'identité de l'archive (cœur) et une
+    clé de cache liée au binaire (action) — conditions au bench M8 ;
+  - **générateur et installeur ne nomment pas l'entrée de store pareil** :
+    `dist_reference()` côté `generator.rs`, `store_reference()` (repli sur
+    le sha1 de l'URL) côté installeur ; une dist sans référence (tar
+    d'asset-packagist) n'a jamais d'enregistrement de classmap de store,
+    rescannée à chaque install (relevé par la méta du 2026-10-29, vérifié
+    dans le code, non mesuré, non corrigé) ;
   - **le ménage du cache de Composer** : vivacity n'en fait jamais,
     Composer si (fichiers de plus de 6 mois, `cache-files-maxsize` de 300
     Mio) ; un cache restauré par restore-key grossit donc d'un run à
