@@ -199,6 +199,16 @@ byte-identical-output promise are the public API.
   with a plugin whose line goes to stdout before its work.
 
 ### Documentation
+- **Why the GitHub Action does not cache vivacity's class map records**
+  ([bench/M8-classmap-cache.md](bench/M8-classmap-cache.md)). The README
+  said that restoring them did not make the install faster, but that was
+  never measured for the records alone. Measured now on an M4 Max: they
+  save 1.4 s on an `-o` install of Laravel and 2.8 s on Sylius, but only
+  about 0.2 s without `-o`. They stay out of the cache because a restored
+  record is keyed on the package version and reference, not on the archive
+  the store was rebuilt from, so it could list other files. To get the
+  Linux and Windows figures, run the `classmap-cache` workflow by hand
+  (`bench/classmap-cache.sh`).
 - **[docs/deployer.md](docs/deployer.md)**: vivacity as Deployer's
   `bin/composer`, the options to pass, what `dep -v`/`-vv` do to the
   install, the Symfony recipe's `dump-env`. Run with Deployer 7.5.12's

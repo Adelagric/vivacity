@@ -5025,3 +5025,65 @@ lieu de `installers (ubuntu-latest)`), à reporter dans une protection de
 branche qui les exigerait. Laissé : les zipballs d'`api.github.com` du
 fixture, appelés sans jeton depuis le conteneur (2 requêtes par essai,
 limite de 60 par heure et par IP).
+
+## 2026-10-29 — Les enregistrements de classmap restent hors du cache de l'action (docs/plans/classmap-cache.md)
+
+**Question.** L'action ne met en cache que le répertoire de cache de
+Composer ; y ajouter `<cache vivacity>/classmap/` (et `classmap-files/`)
+accélère-t-il l'install d'un runner froid (checkout neuf, `vendor/` absent,
+zips restaurés, pas de store) ?
+
+**Ce que dit le code.** La clé d'un enregistrement de store est
+`sha1(CACHE_FORMAT, chemin de l'entrée, sous-répertoire)` ; le chemin
+(`<cache vivacity>/store/<LAYOUT>/<paquet>/<version>-<12 caractères de la
+référence>`) ne dépend ni du contenu ni de la date de l'entrée. Un store
+reconstruit depuis les zips redonne les mêmes clés : un enregistrement
+restauré au même chemin absolu sert (117 sur 117, Laravel `-o`), sous un
+autre chemin non (117 réécrits). `classmap-files/` est clé sur
+`(mtime ns, taille)` : un checkout neuf n'y trouve rien (4 sur 4 réécrits).
+
+**Mesure** (`bench/classmap-cache.sh`, `bench/M8-classmap-cache.md` ; M4 Max,
+APFS, hyperfine 10 runs + chauffe, médianes) : avec `-o`, 2 384 → 1 026 ms
+sur Laravel, 8 178 → 5 382 ms sur Sylius (le scan : 1,9 s → 0,02 s ;
+4,2 s → 0,1 s) ; sans `-o`, ~0,2 s sur Laravel, dans le bruit sur Sylius.
+Coût : ≤ 3 Mo d'artefact, 14-110 ms d'extraction. Pas de chiffre Linux
+local (disque du Mac plein pendant le banc, démon Docker en erreur d'E/S
+depuis) ; le workflow `classmap-cache` (`workflow_dispatch`, trois OS,
+Windows avec les caches sur `C:` et le projet sur `D:`) le donnera.
+
+**Décision.** `action.yml` ne change pas — pour une raison de correction,
+pas de performance (méta-analyse, point 1). En CI, le store est réextrait
+par le binaire du jour depuis le zip du jour, et la restore-key ramène des
+enregistrements écrits par un autre lock ou un autre vivacity ; leur clé
+ne porte ni l'URL de la dist (un miroir qui applique `archive.exclude` sert
+la même référence avec d'autres fichiers) ni les règles d'extraction
+(7e53145 et ed02f07 ont changé les noms Windows sans bump de `LAYOUT`).
+Un enregistrement servi n'est pas recontrôlé contre `vendor/` (sauf plugin
+nettoyeur) : la classmap listerait des fichiers absents ou en oublierait,
+peut-être dans l'artefact d'un `install --no-dev -o`. Sur un poste,
+l'entrée et son enregistrement vieillissent ensemble ; le risque est propre
+à la CI, et 1-3 s ne le paient pas. La règle de décision écrite avant la
+mesure (« un gain sous Linux au moins ») n'est pas remplie non plus.
+
+Conditions d'une inclusion future (bench M8) : une clé d'enregistrement
+qui porte l'identité de l'archive et des règles d'extraction (cœur, bump
+de `CACHE_FORMAT`) ; une clé de cache liée au binaire, sans restore-key
+entre versions ; les jobs en matrice qui partagent une clé (le premier à
+sauver fixe le jeu `-o`/`--no-dev`) ; un gain Linux mesuré.
+
+La phrase du README « restored, they did not make the install faster » ne
+valait que pour le store : M7 mesurait store et enregistrements ensemble.
+Corrigée.
+
+**Méta-analyse** (sous-agent frais, plan et code) : quinze points. Outre
+le point 1 : le banc ne tournait pas sous Windows (`cygpath -w` donne un
+chemin à espace et contre-obliques que hyperfine découpe ; corrigé en
+barres obliques entre guillemets, vu rouge puis vert sur un chemin à
+espace), Windows mesurait tout sur `D:` (caches déplacés sous
+`%LOCALAPPDATA%`), « servis » compte aussi les enregistrements non
+utilisés (la colonne ne vaut qu'avec la chute de `dump scan` ; le banc
+s'arrête si rien n'est écrit ou si l'install est rendue à Composer, deux
+contrôles vus rouges). Relevé et vérifié, non corrigé (HANDOVER) : le
+générateur cherche l'entrée par `dist_reference()`, l'installeur l'écrit
+par `store_reference()` ; une dist sans référence n'a jamais
+d'enregistrement de store.
