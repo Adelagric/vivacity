@@ -73,7 +73,11 @@ foreach (["1.0.0", "1.0.1"] as $v) {
     $make("acme/lib", $v, "library", [], ["src/Lib.php" => $lib($v)], ["autoload" => ["psr-4" => ["Acme\\Lib\\" => "src/"]]]);
 }
 $make("acme/lib2", "1.0.0", "library", [], ["lib2.txt" => "one\ntwo\nthree\n"]);
-$make("acme/cm", "1.0.0", "library", [], ["lib/Base.php" => "<?php\nclass AcmeCmBase {}\n"], ["autoload" => ["classmap" => ["lib/"]]]);
+foreach (["1.0.0", "1.0.1"] as $v) {
+    $make("acme/cm", $v, "library", [], ["lib/Base.php" => "<?php\nclass AcmeCmBase {}\n"], ["autoload" => ["classmap" => ["lib/"]]]);
+}
+// Un dist qui porte un dépôt git : GitPatcher (`git apply`).
+$make("acme/gitty", "1.0.0", "library", [], ["notes.txt" => "alpha\nbeta\n", ".git/HEAD" => "ref: refs/heads/main\n", ".git/config" => "[core]\n\trepositoryformatversion = 0\n\tbare = false\n", ".git/objects/.keep" => "", ".git/refs/heads/.keep" => ""]);
 $pLib = "--- a/src/Lib.php\n+++ b/src/Lib.php\n@@ -2,5 +2,5 @@\n namespace Acme\\Lib;\n class Lib\n {\n-    public function a() { return 1; }\n+    public function a() { return 2; }\n     public function v() { return \"1.0.0\"; }\n";
 $pLib2 = "--- lib2.txt\n+++ lib2.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
 $pLib2b = "--- lib2.txt\n+++ lib2.txt\n@@ -1,3 +1,3 @@\n-one\n+ONE\n TWO\n three\n";
@@ -84,8 +88,10 @@ $patches = [
     "acme/lib2" => ["Shout two" => ["path" => "p/lib2.patch", "levels" => ["-p1", "-p0"]], "Shout one" => "p/lib2b.patch"],
     "acme/lib:^2" => ["Never" => "p/lib.patch"],
     "acme/cm" => ["Add a class" => "p/cm.patch"],
+    "acme/gitty" => ["Gamma" => "p/gitty.patch"],
 ];
-$files = ["p/lib.patch" => $pLib, "p/lib2.patch" => $pLib2, "p/lib2b.patch" => $pLib2b, "p/cm.patch" => $pCm];
+$pGitty = "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,3 @@\n alpha\n beta\n+gamma\n";
+$files = ["p/lib.patch" => $pLib, "p/lib2.patch" => $pLib2, "p/lib2b.patch" => $pLib2b, "p/cm.patch" => $pCm, "p/gitty.patch" => $pGitty];
 $make("acme/patches", "1.0.0", "library", ["patches" => $patches], $files);
 $make("acme/patches-bad", "1.0.0", "library", ["patches" => ["acme/lib" => ["Broken" => "p/bad.patch"]]], ["p/bad.patch" => $bad]);
 $make("acme/patches-remote", "1.0.0", "library", ["patches" => ["acme/lib" => ["Far" => "https://example.invalid/x.patch"]]], []);
@@ -105,6 +111,8 @@ lock() {
   else
     printf '%s\n' "$2" | jq ${INDENT:-} --arg art "$ART" '.repositories = [{"type": "artifact", "url": $art}] | .name //= "vivacity/patcher-project"' > "$d/composer.json"
   fi
+  # `NONAME` : une racine sans nom (`__root__`).
+  if [ -n "${NONAME:-}" ]; then jq 'del(.name)' "$d/composer.json" > "$d/c.json" && mv "$d/c.json" "$d/composer.json"; fi
   (cd "$d" && composer update --no-install --no-plugins --no-scripts --no-audit --no-security-blocking --no-interaction --no-ansi -q) \
     || { echo "FAIL lock $1 : Composer n'a pas résolu le projet"; exit 1; }
 }
@@ -201,7 +209,13 @@ run() {
 norm_out() {
   local s='s#PCH[A-Za-z0-9]+#PCH<tmp>#g'
   if [ -n "${SORTED:-}" ]; then
-    sed -E "$s" "$1" | awk '/^Applying patch /{ i = index($0, " to "); r = substr($0, i + 4); k = substr(r, 1, index(r, "...") - 1); printf "%s\t%08d\t%s\n", k, NR, $0; next } { printf "~\t%08d\t%s\n", NR, $0 }' | sort -t "$(printf '\t')" -k1,1 -k2,2n | cut -f3-
+    # Chaque suite contiguë de lignes « Applying patch » triée (stable) par
+    # paquet visé ; les autres lignes restent à leur place.
+    sed -E "$s" "$1" | awk '
+      function flush() { if (n > 0) { cmd = "sort -s -t \"\t\" -k1,1 | cut -f2-"; for (i = 1; i <= n; i++) print buf[i] | cmd; close(cmd); n = 0 } }
+      /^Applying patch / { i = index($0, " to "); r = substr($0, i + 4); k = substr(r, 1, index(r, "...") - 1); buf[++n] = k "\t" $0; next }
+      { flush(); print }
+      END { flush() }'
   else
     sed -E "$s" "$1"
   fi
@@ -267,6 +281,28 @@ grep -q 'Unable to apply the patch "Broken"' "$WORK/pt-failing.composer.out" || 
 lock pt-none "{\"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/lib\": \"1.0.0\"}, $PT_CFG}"
 fresh pt-none "$WORK/pt-none-ref" "$WORK/pt-none-viv"; pstep "$WORK/pt-none-ref" "$WORK/pt-none-viv" pt-none "${I[@]}"
 pstep "$WORK/pt-none-ref" "$WORK/pt-none-viv" pt-none-no-op "${I[@]}"
+# Une cible mise à jour alors qu'une autre, avant elle par le nom, reste :
+# Composer la parcourt en dernier (installed.json moins les mises à jour,
+# puis les opérations).
+lock pt-up-order "{\"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/patches\": \"1.0.0\", \"acme/lib\": \"1.0.0\", \"acme/lib2\": \"1.0.0\"}, \"require-dev\": {\"acme/cm\": \"1.0.1\"}, $PT_EXTRA, $PT_CFG}"
+fresh pt-a "$WORK/pt-uo-ref" "$WORK/pt-uo-viv"
+for d in "$WORK/pt-uo-ref" "$WORK/pt-uo-viv"; do (cd "$d" && composer install --no-scripts --no-interaction --no-ansi -q); done
+stage pt-up-order "$WORK/pt-uo-ref" "$WORK/pt-uo-viv"; pstep "$WORK/pt-uo-ref" "$WORK/pt-uo-viv" pt-update-order "${I[@]}"
+grep -n 'to acme/cm\.\.\.' "$WORK/pt-update-order.composer.out" | tail -1 | grep -q "^$(wc -l < "$WORK/pt-update-order.composer.out" | tr -d ' '):" \
+  || { echo "FAIL pt-update-order : acme/cm pas en dernier chez Composer (cas mal construit)"; status=1; }
+# La racine fournit des correctifs (nommée, puis sans nom : `__root__`).
+pt_root_tree() { printf -- '--- lib2.txt\n+++ lib2.txt\n@@ -1,3 +1,3 @@\n one\n two\n-three\n+THREE\n' > "$1/root.patch"; }
+lock pt-rootsrc "{\"name\": \"acme/site\", \"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/lib2\": \"1.0.0\"}, \"extra\": {\"patches\": {\"acme/lib2\": {\"Root three\": \"root.patch\"}}}, $PT_CFG}"
+TREE=pt_root_tree fresh pt-rootsrc "$WORK/pt-rs-ref" "$WORK/pt-rs-viv"; pstep "$WORK/pt-rs-ref" "$WORK/pt-rs-viv" pt-root-source "${I[@]}"
+pstep "$WORK/pt-rs-ref" "$WORK/pt-rs-viv" pt-root-source-no-op "${I[@]}"
+NONAME=1 lock pt-rootanon "{\"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/lib2\": \"1.0.0\"}, \"extra\": {\"patches\": {\"acme/lib2\": {\"Root three\": \"root.patch\"}}}, $PT_CFG}"
+TREE=pt_root_tree fresh pt-rootanon "$WORK/pt-ra-ref" "$WORK/pt-ra-viv"; pstep "$WORK/pt-ra-ref" "$WORK/pt-ra-viv" pt-root-anonymous "${I[@]}"
+grep -q 'Gathering patches from __root__' "$WORK/pt-root-anonymous.composer.out" || { echo "FAIL pt-root-anonymous : pas de __root__ chez Composer (cas mal construit)"; status=1; }
+# Un dist qui porte un `.git` : `git apply` (GitPatcher).
+lock pt-git "{\"require\": {\"mlocati/composer-patcher\": \"1.2.6\", \"acme/patches\": \"1.0.0\", \"acme/gitty\": \"1.0.0\"}, $PT_EXTRA, $PT_CFG}"
+fresh pt-git "$WORK/pt-git-ref" "$WORK/pt-git-viv"; pstep "$WORK/pt-git-ref" "$WORK/pt-git-viv" pt-git "${I[@]}"
+[ -d "$WORK/pt-git-ref/vendor/acme/gitty/.git" ] || { echo "FAIL pt-git : pas de .git chez Composer (cas mal construit)"; status=1; }
+pstep "$WORK/pt-git-ref" "$WORK/pt-git-viv" pt-git-no-op "${I[@]}"
 
 # Rendus.
 handed pt-a pt-verbose 'mlocati/composer-patcher 1\.2\.6 is active \(its listeners. lines: it writes a line per package' "${I[@]}" -v

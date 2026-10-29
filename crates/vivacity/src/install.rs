@@ -98,7 +98,13 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // native (a hand-over after them would have Composer print them again);
     // nothing else reaches stdout before this point.
     if !args.after_update() {
-        crate::effect_plugins::patcher_pre(&run.project, &run.manifest, &layout, !args.no_plugins)?;
+        crate::effect_plugins::patcher_pre(
+            &run.project,
+            &run.manifest,
+            &layout,
+            run.with_dev,
+            !args.no_plugins,
+        )?;
     }
     let installed = proceed!(execute_operations(&run, &tx, &layout)?);
     // `Installer::run`, after `doInstall`.
@@ -117,7 +123,7 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         &run,
         &layout,
         &installed.report,
-        &tx.listeners,
+        &tx,
         cleaner_counts.as_ref()
     )?);
     say_summary(&run, &installed.report, &autoload_note);
@@ -1482,17 +1488,12 @@ fn dump_autoloader(
     Ok(Flow::Continue((autoload_note, cleaner_counts)))
 }
 
-/// Plugins listening to post-autoload-dump, emulated: the local
-/// repository's order is the previous installed.json order minus
-/// the removed and updated packages, then the operations' order.
-fn post_autoload_dump_plugins(
-    run: &Run<'_>,
-    tx: &LocalTransaction,
-    local: &vivacity_core::lock::Lock,
-    layout: &vivacity_core::layout::Layout,
-) -> anyhow::Result<()> {
+/// The local repository's order after the transaction (the previous
+/// installed.json order minus the removed and updated packages, then the
+/// operations' order), with the names the transaction removed or updated
+/// and those it installed or updated.
+fn local_order(tx: &LocalTransaction) -> (Vec<&str>, Vec<&str>, Vec<&str>) {
     use vivacity_resolver::transaction::Operation;
-    let args = run.args;
     let arena = &tx.arena;
     let previous: Vec<&str> = match &tx.unchanged_names {
         Some(names) => names.iter().map(String::as_str).collect(),
@@ -1512,7 +1513,29 @@ fn post_autoload_dump_plugins(
         }
     }
     let order = vivacity_core::pest_plugin::local_repository_order(&previous, &gone, &fresh);
-    let previously_present = previous.contains(&vivacity_core::pest_plugin::PLUGIN_NAME);
+    (order, gone, fresh)
+}
+
+/// Plugins listening to post-autoload-dump, emulated: the local
+/// repository's order is the previous installed.json order minus
+/// the removed and updated packages, then the operations' order.
+fn post_autoload_dump_plugins(
+    run: &Run<'_>,
+    tx: &LocalTransaction,
+    local: &vivacity_core::lock::Lock,
+    layout: &vivacity_core::layout::Layout,
+) -> anyhow::Result<()> {
+    let args = run.args;
+    let (order, gone, fresh) = local_order(tx);
+    let previously_present = match &tx.unchanged_names {
+        Some(names) => names
+            .iter()
+            .any(|n| n == vivacity_core::pest_plugin::PLUGIN_NAME),
+        None => tx
+            .present
+            .iter()
+            .any(|&i| tx.arena[i].name == vivacity_core::pest_plugin::PLUGIN_NAME),
+    };
     emulate_pest_plugin(
         &run.project,
         local,
@@ -1637,10 +1660,12 @@ fn post_install(
     run: &Run<'_>,
     layout: &vivacity_core::layout::Layout,
     report: &vivacity_core::installer::InstallReport,
-    listeners: &[String],
+    tx: &LocalTransaction,
     cleaner_counts: Option<&vivacity_core::vendor_cleaner::Counts>,
 ) -> anyhow::Result<Flow> {
     let args = run.args;
+    let listeners = &tx.listeners;
+    let (order, _, _) = local_order(tx);
     print_funding(&run.project, &run.manifest);
     let local = report.local_repository.as_ref().unwrap_or(&run.lock);
     if !args.no_plugins {
@@ -1675,7 +1700,7 @@ fn post_install(
             if listeners.iter().any(|n| n == plugin) {
                 crate::verbose_listeners::announce(plugin, event, &run.manifest);
             }
-            post_install_listener(run, layout, local, plugin, cleaner_counts)?;
+            post_install_listener(run, layout, local, &order, plugin, cleaner_counts)?;
         }
     }
     if let Some(r) = &run.runner {
@@ -1693,6 +1718,7 @@ fn post_install_listener(
     run: &Run<'_>,
     layout: &vivacity_core::layout::Layout,
     local: &vivacity_core::lock::Lock,
+    order: &[&str],
     plugin: &str,
     cleaner_counts: Option<&vivacity_core::vendor_cleaner::Counts>,
 ) -> anyhow::Result<()> {
@@ -1736,6 +1762,7 @@ fn post_install_listener(
         extension_installers::INFECTION => extension_installers::infection(
             layout,
             local,
+            order,
             &run.manifest,
             run.with_dev,
             !args.no_plugins,
@@ -1746,6 +1773,7 @@ fn post_install_listener(
                 &run.manifest,
                 layout,
                 local,
+                order,
                 run.with_dev,
                 !args.no_plugins,
             )? {

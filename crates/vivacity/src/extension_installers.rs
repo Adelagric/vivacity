@@ -378,17 +378,31 @@ pub fn rector(
     Ok(())
 }
 
+/// `packages` in the local repository's `order` (names it does not hold
+/// last, in their own order). After a fresh install Composer's own order
+/// is that of its parallel extractions: vivacity writes the operations'.
+pub fn in_order<'a>(mut packages: Vec<&'a LockPackage>, order: &[&str]) -> Vec<&'a LockPackage> {
+    packages.sort_by_key(|p| {
+        order
+            .iter()
+            .position(|n| *n == p.name())
+            .unwrap_or(usize::MAX)
+    });
+    packages
+}
+
 /// infection's `Plugin::process` (`POST_INSTALL_CMD` / `POST_UPDATE_CMD`),
 /// its lines included. An extension listed twice in the local repository
 /// (an alias) was handed over by `scope` (`aliased_listing_issue`).
 pub fn infection(
     layout: &Layout,
     local: &Lock,
+    order: &[&str],
     manifest: &Value,
     with_dev: bool,
     plugins_enabled: bool,
 ) -> Result<()> {
-    let packages: Vec<&LockPackage> = local.wanted_packages(with_dev).collect();
+    let packages = in_order(local.wanted_packages(with_dev).collect(), order);
     if !plugins_enabled
         || !packages.iter().any(|p| p.name() == INFECTION)
         || !matches!(plugin_allowed(manifest, INFECTION), PluginVerdict::Allowed)

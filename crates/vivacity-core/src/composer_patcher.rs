@@ -28,8 +28,12 @@
 //!   sorted `sha1_file`s joined by a space, and installed.json written
 //!   again.
 //!
+//! A package directory that holds a `.git` directory is patched as
+//! `GitPatcher` does: the same dry run with `patch`, then `git -C <dir>
+//! apply <level> --check -v <file>` and `git -C <dir> apply <level> <file>`.
+//!
 //! What is handed over before anything is written is decided by
-//! [`config_issue`], [`pre_issue`] and the caller (`effect_plugins`).
+//! [`config_issue`] and the caller (`effect_plugins`).
 
 use crate::error::{Error, Result};
 use serde_json::{Map, Value};
@@ -181,10 +185,12 @@ fn is_remote(path: &str) -> bool {
 /// over (a shape that prints an error line, a remote path, a constraint
 /// vivacity does not read).
 fn explicit_list(source: &Source<'_>, patches: &Value) -> std::result::Result<Vec<Patch>, String> {
-    let from_name = name_of(source.package).to_owned();
+    // `getName()` (lower case) in the lines and messages,
+    // `getPrettyString()` (pretty name and version) in `patches_applied`.
+    let from_name = name_of(source.package).to_ascii_lowercase();
     let from_pretty = format!(
         "{} {}",
-        from_name,
+        name_of(source.package),
         source
             .package
             .get("version")
@@ -274,6 +280,27 @@ fn explicit_list(source: &Source<'_>, patches: &Value) -> std::result::Result<Ve
     Ok(out)
 }
 
+/// The root package as the plugin sees it (`$composer->getPackage()`):
+/// its name (`__root__` without one) and its pretty version — the alias's
+/// when the root is aliased (`RootAliasPackage`) —, with its `extra`.
+pub fn root_entry(manifest: &Value, root: &crate::state::RootPackage) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("name".into(), Value::String(root.name.clone()));
+    m.insert(
+        "version".into(),
+        Value::String(
+            root.aliases
+                .first()
+                .cloned()
+                .unwrap_or_else(|| root.pretty_version.clone()),
+        ),
+    );
+    if let Some(extra) = manifest.get("extra") {
+        m.insert("extra".into(), extra.clone());
+    }
+    m
+}
+
 /// `collectPatches($rootPackage, $packages)`: `packages` in the local
 /// repository's order.
 pub fn collect(
@@ -286,7 +313,7 @@ pub fn collect(
         if let Some(patches) = isset(source.package.get("extra"), "patches") {
             c.lines.push(format!(
                 "Gathering patches from {} (extra.patches).",
-                name_of(source.package)
+                name_of(source.package).to_ascii_lowercase()
             ));
             c.patches.extend(explicit_list(source, patches)?);
         }
@@ -295,7 +322,7 @@ pub fn collect(
     from(root_source, &mut c)?;
     let allowed = allowed_sources(root);
     for p in packages {
-        if allowed.allows(name_of(p.package)) {
+        if allowed.allows(&name_of(p.package).to_ascii_lowercase()) {
             from(p, &mut c)?;
         }
     }
@@ -452,6 +479,9 @@ pub struct Patcher {
     /// `checkCommandExists('patch')`: `None` until tried, then its result.
     command: Option<std::result::Result<(), String>>,
     no_backup: Option<bool>,
+    /// `new GitPatcher` → `checkCommandExists('git')`, then its own
+    /// `PatchPatcher`'s `checkCommandExists('patch')`.
+    git: Option<std::result::Result<(), String>>,
     volatile: Option<tempfile::TempDir>,
     counter: usize,
 }
@@ -467,6 +497,7 @@ impl Patcher {
             path_env,
             command: None,
             no_backup: None,
+            git: None,
             volatile: None,
             counter: 0,
         }
@@ -549,39 +580,105 @@ impl Patcher {
         Ok(rc == 1 && text.contains("Skipping patch.") && hunks_ignored(&text))
     }
 
-    /// `Patcher::applyPatch` without its line: the outcome.
-    pub fn apply(&mut self, patch: &Patch, base: &Path) -> Result<Outcome> {
-        // `new PatchPatcher` → `checkCommandExists('patch')`.
-        if self.command.is_none() {
-            let (rc, _, err) = self.run("patch --version");
-            self.command = Some(if rc == 0 {
-                Ok(())
-            } else if err.is_empty() {
-                Err("Unable to find the command \"patch\".".to_owned())
-            } else {
-                Err(err)
-            });
+    /// `checkCommandExists($name)`: `CommandNotFound`'s message on failure.
+    fn command_exists(&self, name: &str) -> std::result::Result<(), String> {
+        let (rc, _, err) = self.run(&format!("{name} --version"));
+        if rc == 0 {
+            Ok(())
+        } else if err.is_empty() {
+            Err(format!("Unable to find the command \"{name}\"."))
+        } else {
+            Err(err)
         }
-        if let Some(Err(e)) = &self.command {
-            return Ok(Outcome::Failed(e.clone()));
+    }
+
+    /// `Patcher::applyPatch` without its line: the outcome. `GitPatcher`
+    /// when the package directory holds a `.git` directory, `PatchPatcher`
+    /// otherwise; each built once, its command checked then.
+    pub fn apply(&mut self, patch: &Patch, base: &Path) -> Result<Outcome> {
+        let git = base.join(".git").is_dir();
+        if git {
+            if self.git.is_none() {
+                let checked = self
+                    .command_exists("git")
+                    .and_then(|()| self.command_exists("patch"));
+                self.git = Some(checked);
+            }
+            if let Some(Err(e)) = &self.git {
+                return Ok(Outcome::Failed(e.clone()));
+            }
+        } else {
+            // `new PatchPatcher` → `checkCommandExists('patch')`.
+            if self.command.is_none() {
+                self.command = Some(self.command_exists("patch"));
+            }
+            if let Some(Err(e)) = &self.command {
+                return Ok(Outcome::Failed(e.clone()));
+            }
         }
         let mut first_error: Option<String> = None;
         for level in &patch.levels {
             if self.already_applied(patch, base, level)? {
                 return Ok(Outcome::AlreadyApplied);
             }
-            let command = self.build(&patch.local_path, base, level, false)?;
-            let (rc, out, err) = self.run(&command);
-            if rc == 0 {
-                return Ok(Outcome::Done);
+            let failure = if git {
+                self.git_apply(patch, base, level)
+            } else {
+                self.patch_apply(patch, base, level)?
+            };
+            match failure {
+                None => return Ok(Outcome::Done),
+                Some(reason) => {
+                    first_error.get_or_insert(format!(
+                        "Unable to apply the patch \"{}\" provided by \"{}\": {reason}",
+                        patch.description, patch.from_name
+                    ));
+                }
             }
-            let reason = if err.is_empty() { out } else { err };
-            first_error.get_or_insert(format!(
-                "Unable to apply the patch \"{}\" provided by \"{}\": failed to apply the patch with the patch command: {reason}",
-                patch.description, patch.from_name
-            ));
         }
         Ok(Outcome::Failed(first_error.unwrap_or_default()))
+    }
+
+    /// `PatchPatcher::applyPatchLevel` after the dry run: `None` when
+    /// applied, the reason otherwise.
+    fn patch_apply(&mut self, patch: &Patch, base: &Path, level: &str) -> Result<Option<String>> {
+        let command = self.build(&patch.local_path, base, level, false)?;
+        let (rc, out, err) = self.run(&command);
+        if rc == 0 {
+            return Ok(None);
+        }
+        let reason = if err.is_empty() { out } else { err };
+        Ok(Some(format!(
+            "failed to apply the patch with the patch command: {reason}"
+        )))
+    }
+
+    /// `GitPatcher::applyPatchLevel` after the dry run: `git -C <dir>
+    /// apply <level> --check -v <file>`, then without `--check -v`; a
+    /// failure (its stderr alone) or a stderr that starts with `Skipped`
+    /// ends it.
+    fn git_apply(&mut self, patch: &Patch, base: &Path, level: &str) -> Option<String> {
+        for testing in [true, false] {
+            // `implode(' ', ['git', '-C ', …])`: two spaces after `-C`.
+            let mut command = format!(
+                "git -C  {} apply {}",
+                escape(&base.to_string_lossy()),
+                escape(level)
+            );
+            if testing {
+                command.push_str(" --check -v");
+            }
+            command.push(' ');
+            command.push_str(&escape(&patch.local_path.to_string_lossy()));
+            let (rc, _, err) = self.run(&command);
+            if rc != 0 {
+                return Some(format!("failed to apply the patch with GIT: {err}"));
+            }
+            if err.starts_with("Skipped") {
+                return None;
+            }
+        }
+        None
     }
 }
 

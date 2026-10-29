@@ -76,6 +76,8 @@ $make("acme/lib2", "1.0.0", "library", [], ["src/Lib2.php" => $cls("Acme\\Lib2",
 $make("acme/inf-bad", "1.0.0", "infection-extension", ["infection" => ["note" => "no class"]], []);
 $make("acme/inf-bad2", "1.0.0", "infection-extension", ["infection" => "Acme\\Bad2"], []);
 $make("acme/inf-other", "1.0.0", "library", ["infection" => ["class" => "Acme\\NotAnExtension"]], []);
+$make("acme/inf-zbad", "1.0.0", "infection-extension", [], []);
+$make("acme/inf-abad", "1.0.0", "infection-extension", ["infection" => ["class" => null]], []);
 // phpcodesniffer-standard : dealerdirect imprime sa ligne au même événement.
 $make("acme/cs-std", "1.0.0", "phpcodesniffer-standard", [], ["AcmeStd/ruleset.xml" => "<?xml version=\"1.0\"?>\n<ruleset name=\"AcmeStd\"><description>x</description></ruleset>\n"]);
 // typo3/class-alias-loader : un paquet qui déclare des cartes d alias.
@@ -219,6 +221,12 @@ lock inf-two "{\"require\": {\"infection/extension-installer\": \"0.1.2\", \"acm
 fresh inf-two "$WORK/inf-two-ref" "$WORK/inf-two-viv"
 for d in "$WORK/inf-two-ref" "$WORK/inf-two-viv"; do (cd "$d" && composer install --no-scripts --no-plugins --no-interaction --no-ansi -q); done
 step "$WORK/inf-two-ref" "$WORK/inf-two-viv" inf-two-no-op "${I[@]}"
+# Une invalide en prod, une en dev, dans l'ordre inverse des noms : le dépôt
+# local d'un no-op est installed.json, trié par nom tous paquets confondus.
+lock inf-split "{\"require\": {\"infection/extension-installer\": \"0.1.2\", \"acme/inf-zbad\": \"1.0.0\"}, \"require-dev\": {\"acme/inf-abad\": \"1.0.0\"}, $INF_CFG}"
+fresh inf-split "$WORK/inf-split-ref" "$WORK/inf-split-viv"
+for d in "$WORK/inf-split-ref" "$WORK/inf-split-viv"; do (cd "$d" && composer install --no-scripts --no-plugins --no-interaction --no-ansi -q); done
+step "$WORK/inf-split-ref" "$WORK/inf-split-viv" inf-split-no-op "${I[@]}"
 # Sans extension : « No extensions found » (l'entrée roave du corpus).
 lock inf-none "{\"require\": {\"acme/lib\": \"1.0.0\"}, \"require-dev\": {\"infection/extension-installer\": \"0.1.2\"}, $INF_CFG}"
 run inf-none inf-none inf-none inf-none vendor/infection/extension-installer/src/GeneratedExtensionsConfig.php
@@ -254,7 +262,10 @@ lock t3-a "{$T3_ROOT, \"require\": {$T3_PLUG, \"acme/lib\": \"1.0.0\", \"acme/li
 lock t3-b "{$T3_ROOT, \"require\": {$T3_PLUG, \"acme/lib\": \"1.0.1\", \"acme/lib2\": \"1.0.0\"}, $T3_EXTRA, $T3_CFG}"
 lock t3-c "{$T3_ROOT, \"require\": {$T3_PLUG, \"acme/lib\": \"1.0.1\"}, $T3_EXTRA, $T3_CFG}"
 run t3 t3-a t3-b t3-c vendor/typo3/alias-loader-include.php
-check_suffix t3-no-op-suffix "$WORK/t3-ref" "$WORK/t3-viv"
+# Le suffixe juste après le no-op (le run ci-dessus le relit ensuite).
+fresh t3-a "$WORK/t3-s-ref" "$WORK/t3-s-viv"; step "$WORK/t3-s-ref" "$WORK/t3-s-viv" t3-s-install "${I[@]}"
+step "$WORK/t3-s-ref" "$WORK/t3-s-viv" t3-s-no-op "${I[@]}"
+check_suffix t3-no-op-suffix "$WORK/t3-s-ref" "$WORK/t3-s-viv"
 step "$WORK/t3-ref" "$WORK/t3-viv" t3-dump dump-autoload
 step "$WORK/t3-ref" "$WORK/t3-viv" t3-dump-o dump-autoload -o
 check_suffix t3-dump-suffix "$WORK/t3-ref" "$WORK/t3-viv"
@@ -280,7 +291,9 @@ lock t3-maps "{$T3_ROOT, \"require\": {$T3_PLUG, \"acme/aliased\": \"1.0.0\"}, $
 TREE=t3_tree handed t3-maps t3-maps 'class alias maps of acme/aliased' "${I[@]}"
 TREE=t3_tree handed t3-a t3-verbose 'typo3/class-alias-loader v2\.0\.1 is active \(its listeners. lines: it writes a line' "${I[@]}" -v
 lock t3-vdir "{\"name\": \"typo3/cms\", \"require\": {$T3_PLUG}, $T3_EXTRA, \"config\": {\"vendor-dir\": \"lib\", \"allow-plugins\": {\"typo3/class-alias-loader\": true, \"typo3/cms-composer-installers\": true}}}"
-handed t3-vdir t3-vendor-dir 'typo3/class-alias-loader with config.vendor-dir' "${I[@]}"
+handed t3-vdir t3-vendor-dir 'typo3/class-alias-loader with a vendor-dir other than' "${I[@]}"
+# Le même par l'environnement.
+TREE=t3_tree COMPOSER_VENDOR_DIR=lib handed t3-a t3-env-vendor-dir 'typo3/class-alias-loader with a vendor-dir other than' "${I[@]}"
 lock t3-scripts "{\"name\": \"typo3/cms\", \"require\": {$T3_PLUG}, $T3_EXTRA, \"scripts\": {\"pre-autoload-dump\": \"@php -r 'echo 1;'\"}, $T3_CFG}"
 handed t3-scripts t3-scripts 'typo3/class-alias-loader would run again' install --run-scripts
 relock t3-a t3-old typo3/class-alias-loader v2.0.0

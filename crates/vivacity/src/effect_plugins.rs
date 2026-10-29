@@ -199,6 +199,9 @@ fn class_alias_loader(
     let suffix = cal::pick_suffix(configured, existing.as_deref(), cal::random_suffix);
     cal::write_files(&vendor, &suffix, manifest)?;
     vivacity_core::out!("Generating empty class alias map file");
+    // `Config::get('vendor-dir', RELATIVE_PATHS)`: a run whose vendor
+    // directory is not `vendor` (composer.json, the environment or the
+    // global config) was handed over.
     cal::root_with_include(root, "vendor").map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -323,6 +326,11 @@ const REPLAYED: &[(&str, &[&str])] = &[
     (fx::DRUPOL, &[crate::scripts::POST_AUTOLOAD_DUMP]),
     (
         crate::extension_installers::INFECTION,
+        &[crate::scripts::POST_INSTALL_CMD],
+    ),
+    // "Extensions installed" on every run, whether the file changed or not.
+    (
+        crate::extension_installers::PHPSTAN,
         &[crate::scripts::POST_INSTALL_CMD],
     ),
     (fx::CLASS_ALIAS_LOADER, &[crate::scripts::PRE_AUTOLOAD_DUMP]),
@@ -451,21 +459,20 @@ fn path_with_bin_dir(bin: &std::path::Path) -> Option<std::ffi::OsString> {
     std::env::join_paths(std::iter::once(real).chain(std::env::split_paths(&path))).ok()
 }
 
-fn patcher_loaded_at_start(
+/// The root package as composer-patcher reads it (name, pretty version).
+fn patcher_root(
     project: &std::path::Path,
     manifest: &serde_json::Value,
-    plugins_enabled: bool,
-) -> Option<Vec<serde_json::Value>> {
-    if !plugins_enabled || !allowed(manifest, fx::PATCHER) {
-        return None;
-    }
-    let installed = crate::plugin_order::installed_json_packages(
-        &crate::manifest::composer_dir_of(project, manifest),
-    );
-    installed
-        .iter()
-        .any(|p| p.get("name").and_then(serde_json::Value::as_str) == Some(fx::PATCHER))
-        .then_some(installed)
+    with_dev: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let root = vivacity_core::state::RootPackage::detect(manifest, project, with_dev);
+    vivacity_core::composer_patcher::root_entry(manifest, &root)
+}
+
+fn package_name(p: &serde_json::Map<String, serde_json::Value>) -> &str {
+    p.get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
 }
 
 /// mlocati/composer-patcher's `preOperation` (`PRE_INSTALL_CMD`), the
@@ -475,21 +482,25 @@ pub(crate) fn patcher_pre(
     project: &std::path::Path,
     manifest: &serde_json::Value,
     layout: &vivacity_core::layout::Layout,
+    with_dev: bool,
     plugins_enabled: bool,
 ) -> anyhow::Result<()> {
     use vivacity_core::composer_patcher as cp;
-    let Some(installed) = patcher_loaded_at_start(project, manifest, plugins_enabled) else {
+    if !plugins_enabled || !allowed(manifest, fx::PATCHER) {
         return Ok(());
-    };
-    let Some(root) = manifest.as_object() else {
-        return Ok(());
-    };
-    let mut entries: Vec<&serde_json::Map<String, serde_json::Value>> = installed
-        .iter()
-        .filter_map(serde_json::Value::as_object)
-        .collect();
-    entries.sort_by(|a, b| package_name(a).cmp(package_name(b)));
+    }
+    let installed = crate::plugin_order::installed_json_packages(
+        &crate::manifest::composer_dir_of(project, manifest),
+    );
     let vendor = layout.vendor_dir();
+    // The local repository Composer loads: purged of the packages whose
+    // directory is gone (the plugin's own included), in installed.json's
+    // order (by name).
+    let mut entries = fx::present_installed(&installed, &vendor);
+    if !entries.iter().any(|p| package_name(p) == fx::PATCHER) {
+        return Ok(());
+    }
+    entries.sort_by(|a, b| package_name(a).cmp(package_name(b)));
     let sources: Vec<cp::Source<'_>> = entries
         .iter()
         .map(|p| cp::Source {
@@ -497,8 +508,9 @@ pub(crate) fn patcher_pre(
             dir: vendor.join(package_name(p)),
         })
         .collect();
+    let root = patcher_root(project, manifest, with_dev);
     let root_source = cp::Source {
-        package: root,
+        package: &root,
         dir: project.to_path_buf(),
     };
     let collection =
@@ -509,24 +521,21 @@ pub(crate) fn patcher_pre(
     Ok(())
 }
 
-fn package_name(p: &serde_json::Map<String, serde_json::Value>) -> &str {
-    p.get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-}
-
 /// mlocati/composer-patcher's `postOperation` (`POST_INSTALL_CMD`): the
 /// collection from the packages the install leaves, its lines, each
-/// patch applied by `patch` (vivacity_core::composer_patcher), and the
-/// local repository with `extra.patches_applied` set on the packages whose
-/// patches all passed — `Some` when installed.json must be written again.
-/// The packages in installed.json's order (by name): Composer's own order
-/// after a fresh install is that of its parallel extractions.
+/// patch applied by `patch` or `git apply` (vivacity_core::composer_patcher),
+/// and the local repository with `extra.patches_applied` set on the
+/// packages whose patches all passed — `Some` when installed.json must be
+/// written again. The packages in the local repository's `order`
+/// (`install::local_order`): after an install, Composer's own order for
+/// the packages the transaction installs is that of its parallel
+/// extractions.
 pub(crate) fn patcher_post(
     project: &std::path::Path,
     manifest: &serde_json::Value,
     layout: &vivacity_core::layout::Layout,
     local: &vivacity_core::lock::Lock,
+    order: &[&str],
     with_dev: bool,
     plugins_enabled: bool,
 ) -> anyhow::Result<Option<vivacity_core::lock::Lock>> {
@@ -534,12 +543,8 @@ pub(crate) fn patcher_post(
     if !active(local, manifest, with_dev, plugins_enabled, fx::PATCHER) {
         return Ok(None);
     }
-    let Some(root) = manifest.as_object() else {
-        return Ok(None);
-    };
-    let mut packages: Vec<&vivacity_core::lock::LockPackage> =
-        local.wanted_packages(with_dev).collect();
-    packages.sort_by(|a, b| a.name().cmp(b.name()));
+    let packages =
+        crate::extension_installers::in_order(local.wanted_packages(with_dev).collect(), order);
     let sources: Vec<cp::Source<'_>> = packages
         .iter()
         .map(|p| cp::Source {
@@ -549,8 +554,9 @@ pub(crate) fn patcher_post(
                 .unwrap_or_else(|| layout.vendor_dir().join(p.name())),
         })
         .collect();
+    let root = patcher_root(project, manifest, with_dev);
     let root_source = cp::Source {
-        package: root,
+        package: &root,
         dir: project.to_path_buf(),
     };
     let collection =
@@ -565,7 +571,7 @@ pub(crate) fn patcher_post(
     let mut patcher = cp::Patcher::new(path_with_bin_dir(&layout.bin_dir()));
     let mut records: Vec<(String, serde_json::Value)> = Vec::new();
     for p in &packages {
-        let patches = collection.for_package(p.name(), p.version());
+        let patches = collection.for_package(&p.name().to_ascii_lowercase(), p.version());
         if patches.is_empty() {
             continue;
         }
@@ -581,7 +587,7 @@ pub(crate) fn patcher_post(
                 "Applying patch {}/{} to {}... {}",
                 patch.from_name,
                 patch.description,
-                p.name(),
+                p.name().to_ascii_lowercase(),
                 outcome.text()
             );
             if matches!(outcome, cp::Outcome::Failed(_)) {

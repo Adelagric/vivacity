@@ -346,9 +346,13 @@ pub(crate) fn post_update_listeners(
                 extension_installers::rector(layout, &repo.lock, manifest, true, plugins_enabled)?;
             }
             extension_installers::INFECTION => {
+                // The local repository as loaded: installed.json's order.
+                let order = installed_order(project, manifest);
+                let order: Vec<&str> = order.iter().map(String::as_str).collect();
                 extension_installers::infection(
                     layout,
                     &repo.lock,
+                    &order,
                     manifest,
                     true,
                     plugins_enabled,
@@ -363,6 +367,15 @@ pub(crate) fn post_update_listeners(
         print()?;
     }
     Ok(())
+}
+
+/// The names of installed.json, in its order.
+fn installed_order(project: &std::path::Path, manifest: &serde_json::Value) -> Vec<String> {
+    plugin_order::installed_json_packages(&composer_dir_of(project, manifest))
+        .iter()
+        .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]

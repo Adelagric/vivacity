@@ -862,10 +862,29 @@ fn by_name<'a>(entries: &[&'a Map<String, Value>]) -> Vec<&'a Map<String, Value>
     v
 }
 
+/// installed.json's packages as `Factory::purgePackages` leaves them: those
+/// whose install directory exists (a metapackage, without one, stays).
+pub fn present_installed<'a>(installed: &'a [Value], vendor: &Path) -> Vec<&'a Map<String, Value>> {
+    let composer = vendor.join("composer");
+    installed
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|p| match p.get("install-path").and_then(Value::as_str) {
+            None => true,
+            Some(rel) => composer.join(rel).exists(),
+        })
+        .collect()
+}
+
 fn patcher_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
+    let Ok(dirs) = crate::dirs::Dirs::resolve(ctx.manifest) else {
+        return;
+    };
+    let vendor = dirs.vendor_dir(ctx.project);
+    let present = present_installed(ctx.installed, &vendor);
     let loaded = ctx.plugins_enabled
         && allowed(ctx.manifest, PATCHER)
-        && ctx.installed_entry(PATCHER).is_some();
+        && present.iter().any(|p| name_of(p) == PATCHER);
     let active = ctx.active(PATCHER);
     if (!loaded && !active) || matches!(ctx.command, Command::DumpAutoload) {
         return;
@@ -884,25 +903,20 @@ fn patcher_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
         out.push(reason(format!("with {why} (not emulated)")));
         return;
     }
-    let Some(root) = ctx.manifest.as_object() else {
-        return;
-    };
-    let Ok(dirs) = crate::dirs::Dirs::resolve(ctx.manifest) else {
-        return;
-    };
-    let vendor = dirs.vendor_dir(ctx.project);
+    let root_package = crate::state::RootPackage::detect(ctx.manifest, ctx.project, ctx.dev_mode);
+    let root = crate::composer_patcher::root_entry(ctx.manifest, &root_package);
     let root_source = crate::composer_patcher::Source {
-        package: root,
+        package: &root,
         dir: ctx.project.to_path_buf(),
     };
-    let root_name = name_of(root).to_ascii_lowercase();
+    let root_name = root_package.name.to_ascii_lowercase();
     // `PRE_INSTALL_CMD`, the plugin loaded from installed.json: the
     // collection from the packages installed at the start (and the files
     // of those versions), and the packages it would uninstall.
     let installed: Vec<&Map<String, Value>> =
         ctx.installed.iter().filter_map(Value::as_object).collect();
     if loaded {
-        let installed = by_name(&installed);
+        let installed = by_name(&present);
         let sources = patch_sources(installed.iter().copied(), &vendor);
         match crate::composer_patcher::collect(ctx.manifest, &root_source, &sources) {
             Err(e) => {
@@ -995,6 +1009,21 @@ fn patcher_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
             )));
             return;
         }
+        // `Patch::isForPackage` matches a constraint against the normalized
+        // version: one vivacity's version parser does not read (a dev
+        // branch) is not decided here.
+        let version = p.get("version").and_then(Value::as_str).unwrap_or_default();
+        if crate::version::Version::parse(version).is_err()
+            && collection
+                .patches
+                .iter()
+                .any(|c| c.for_name == target && c.for_constraint.is_some())
+        {
+            out.push(reason(format!(
+                "would match a version constraint against {target} {version} (not emulated)"
+            )));
+            return;
+        }
     }
     if let Some(p) = local
         .iter()
@@ -1067,14 +1096,12 @@ fn class_alias_loader_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
     if !crate::class_alias_loader::always_add(ctx.manifest) {
         return; // returns at once: nothing written
     }
-    if ctx
-        .manifest
-        .get("config")
-        .and_then(|c| c.get("vendor-dir"))
-        .is_some_and(|v| !v.is_null())
-    {
+    // `Config::get('vendor-dir', RELATIVE_PATHS)` goes into the root's
+    // autoload: only `vendor` was measured — from composer.json, the
+    // environment (`COMPOSER_VENDOR_DIR`) or the global config alike.
+    if crate::dirs::Dirs::resolve(ctx.manifest).map_or(true, |d| d.vendor_rel() != "vendor") {
         out.push(reason(
-            "with config.vendor-dir set (the path it adds to the root's autoload is not measured; not emulated)".to_owned(),
+            "with a vendor-dir other than `vendor` (the path it adds to the root's autoload is not measured; not emulated)".to_owned(),
         ));
         return;
     }
@@ -1088,11 +1115,7 @@ fn class_alias_loader_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
 }
 
 fn cms_installers_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
-    // Observed listeners: `pre-autoload-dump` and `post-autoload-dump`.
-    if !ctx.active(CMS_INSTALLERS)
-        || ctx.no_autoloader
-        || matches!(ctx.command, Command::UpdateNoInstall)
-    {
+    if !ctx.active(CMS_INSTALLERS) || windows_issue(ctx, CMS_INSTALLERS, out) {
         return;
     }
     let root_name = ctx
@@ -1100,10 +1123,14 @@ fn cms_installers_issues(ctx: &Context<'_>, out: &mut Vec<String>) {
         .get("name")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
-    if root_name.as_deref() == Some("typo3/cms") {
+    let core_installed = ctx.local.iter().any(|p| name_of(p) == "typo3/cms-core");
+    // Observed inert: a root named `typo3/cms` without typo3/cms-core
+    // installed (the TYPO3 repository replaces it). Anything else, flags
+    // or not, was not observed inert.
+    if root_name.as_deref() == Some("typo3/cms") && !core_installed {
         return;
     }
-    if ctx.local.iter().any(|p| name_of(p) == "typo3/cms-core") {
+    if core_installed {
         out.push(format!(
             "plugin {CMS_INSTALLERS} with typo3/cms-core installed would serialize TYPO3's package objects into vendor/typo3/PackageArtifact.php (in an order Composer does not reproduce from run to run) and publish the extensions' assets (not emulated)"
         ));
