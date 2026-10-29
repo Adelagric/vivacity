@@ -5224,3 +5224,28 @@ schémas ; `hyperfine@2.0.0` épinglé dans le workflow. Vu rouge sur le Mac
 arrête le bras `fresh`, ce qui prouve aussi que la préparation supprime
 bien `vendor/`. Hors de ce correctif, même cause : `bench/classmap-cache.sh`
 lit le schéma 1 et son workflow prend hyperfine sans version.
+
+## 2026-10-29 — Le run trois OS de `classmap-cache` (40915941883) est nul pour ses temps ; hyperfine épinglé, lecture des deux schémas
+
+**Constat.** Vert sur les trois OS, mais toutes les cellules de temps
+vides et un gain de 0 : hyperfine 2.0.0, installé sans version par
+`taiki-e/install-action`, écrit un JSON au schéma 2 (nom de `-n` dans
+`name`, statistiques sous `summary.time_wall_clock`) que
+`bench/classmap-cache.sh` lisait au schéma 1 sans échouer sur un résultat
+absent. Les JSON n'étaient pas téléversés : les temps sont perdus. Ce qui
+ne vient pas de hyperfine (un run tracé par bras pour `dump scan`, le
+compte et la taille des enregistrements) reste lisible et est consigné
+dans M8 comme une indication.
+
+**Fait.** `classmap-cache.sh` et `windows-bench.sh` lisent les deux
+schémas et s'arrêtent sur une valeur absente ou non numérique (chaque
+valeur lue une fois hors de `$(…)`, où un `exit` n'arrête rien) ;
+`hyperfine@2.0.0` épinglé dans `classmap-cache.yml` comme dans
+`bench-windows.yml`. Vu : l'ancien script, rejoué sur un JSON au schéma 2,
+reproduit exactement les cellules vides et le gain 0 du run, en vert ; le
+nouveau lit ce schéma, et s'arrête (exit 1, fichier et nom cités) sur un
+schéma inconnu. `ci-bench.sh` et `gate.py` prennent le hyperfine d'apt
+(1.x) sur ubuntu : non touchés. Le verdict de M8 (l'action reste
+inchangée) tenait à une raison de correction, pas à ces temps : il ne
+bouge pas ; la condition « un gain Linux mesuré » reste à remplir en
+relançant le workflow.

@@ -42,7 +42,25 @@ rm -rf "$WORK" "$CACHES"; mkdir -p "$WORK" "$CACHES/ccache"
 export COMPOSER_CACHE_DIR="$CACHES/ccache" COMPOSER_NO_INTERACTION=1
 unset VIVACITY_TRACE VIVACITY_NO_CLASSMAP_CACHE
 
-ms() { jq -r ".results[] | select(.command==\"$2\") | (.$3*1000|round)" "$1"; }
+# A statistic of one hyperfine result, in ms. hyperfine 1.x JSON: the -n
+# name in `command`, statistics at the top of a result; 2.x (schema 2): the
+# name in `name`, statistics under `summary.time_wall_clock`. A missing
+# value stops the bench: run 40915941883 (hyperfine 2.0 read as 1.x) printed
+# empty cells and a gain of 0 on all three OSes, and stayed green.
+ms() {
+  local v
+  v=$(jq -r --arg n "$2" --arg f "$3" \
+    '[.results[] | select((.name // .command) == $n) | (.summary.time_wall_clock // .) | .[$f] | numbers]
+     | if length == 1 then (.[0] * 1000 | round) else empty end' "$1") || v=""
+  [ -n "$v" ] || { echo "$1: no $3 for '$2' (unreadable hyperfine result; JSON schema?)" >&2; exit 1; }
+  printf '%s\n' "$v"
+}
+# The cells below read ms() inside $(…), where its exit stops nothing:
+# every value is read once here first, in this shell.
+check_json() { # file name…
+  local j="$1" n f; shift
+  for n; do for f in median stddev min max; do ms "$j" "$n" "$f" > /dev/null; done; done
+}
 # A failing install says why (its stderr), instead of a bare exit code.
 install_quiet() {
   "$VIVACITY" install >/dev/null 2>"$WORK/last-install.txt" || { cat "$WORK/last-install.txt" >&2; return 1; }
@@ -79,6 +97,7 @@ for fx in $FIXTURES; do
     hyperfine --shell="$SH" --style basic --warmup 1 --min-runs "$RUNS" --export-json "$J" \
       --prepare "$cold" -n zips-only "'$VIVACITY' install" \
       --prepare "$warm" -n zips-classmap "'$VIVACITY' install" >/dev/null
+    check_json "$J" zips-only zips-classmap
 
     # One traced run per arm; then count the records the second arm rewrote.
     T="$WORK/$fx-$mode"
@@ -98,6 +117,7 @@ for fx in $FIXTURES; do
       hyperfine --shell="$SH" --style basic --warmup 1 --min-runs "$RUNS" --export-json "$WORK/$fx-$mode/restore.json" \
         --prepare "rm -rf '$R/classmap'" \
         -n restore "zstd -d -q -c '$WORK/$fx-$mode/cm.tar.zst' | tar -xf - -C '$R'" >/dev/null
+      check_json "$WORK/$fx-$mode/restore.json" restore
       restore="$(ms "$WORK/$fx-$mode/restore.json" restore median) ms"
     fi
     a_med=$(ms "$J" zips-only median); b_med=$(ms "$J" zips-classmap median)

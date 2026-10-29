@@ -112,3 +112,49 @@ générateur cherche l'entrée de store par `dist_reference()`
 le sha1 de l'URL quand la dist n'a pas de référence, `lock.rs`). Une dist
 sans référence (tar d'asset-packagist) n'a donc jamais d'enregistrement de
 store : elle est rescannée à chaque install. Non corrigé ici.
+
+## Le run trois OS du 2026-10-29 (run 40915941883) : temps nuls
+
+Le workflow `classmap-cache` (commit c9d20fb, `BENCH_RUNS` 10) est passé
+vert sur ubuntu, macOS et Windows, mais **ses colonnes de temps sont
+vides et doivent être tenues pour nulles** : « zips seuls », « zips +
+classmap », le gain (0 partout, une soustraction de deux vides) et la
+restauration. `taiki-e/install-action` avait installé hyperfine 2.0.0
+(sorti le 2026-10-07), dont le JSON (schéma 2) range le nom de `-n` dans
+`name` et les statistiques sous `summary.time_wall_clock` ; le script
+cherchait `command` et `median` (schéma 1), ne trouvait rien, et
+n'échouait pas. Les mesures elles-mêmes ont tourné (bash passé par
+`--shell`, préparation comprise), mais leurs JSON n'étaient ni imprimés
+ni téléversés : les temps sont perdus.
+
+Corrigé (même jour) : lecture des deux schémas, un résultat illisible ou
+absent arrête le banc (vu rouge sur un JSON au schéma inconnu ; le script
+d'avant, rejoué sur un JSON au schéma 2, ressort exactement les cellules
+vides et le gain 0 du run, en vert), hyperfine épinglé à 2.0.0 dans le
+workflow. Les trois chiffres restent à reprendre en relançant le workflow.
+
+Ce qui reste lisible dans ce run ne vient pas de hyperfine : un run tracé
+par bras (`VIVACITY_TRACE=1`) pour `dump scan`, le compte des
+enregistrements et la taille de `classmap/`. Une indication, un run par
+case :
+
+| OS (runner) | fixture | autoloader | `dump scan` (seuls → + classmap) | servis | `classmap/` |
+|---|---|---|---|---|---|
+| ubuntu, 4 cœurs | laravel | normal | 28 → 1 ms | 32/32 | 248 Ko |
+| ubuntu | laravel | `-o` | 156 → 3 ms | 117/117 | 980 Ko |
+| ubuntu | sylius | normal | 29 → 1 ms | 34/34 | 240 Ko |
+| ubuntu | sylius | `-o` | 447 → 8 ms | 301/301 | 2 948 Ko |
+| macOS arm64, 3 cœurs | laravel | normal | 332 → 15 ms | 32/32 | 244 Ko |
+| macOS | laravel | `-o` | 1 502 → 13 ms | 117/117 | 968 Ko |
+| macOS | sylius | normal | 474 → 8 ms | 34/34 | 236 Ko |
+| macOS | sylius | `-o` | 6 963 → 163 ms | 301/301 | 2 924 Ko |
+| Windows (build 26100), 4 cœurs | laravel | normal | 763 → 6 ms | 32/32 | 204 Ko |
+| Windows | laravel | `-o` | 1 090 → 30 ms | 117/117 | 873 Ko |
+| Windows | sylius | normal | 651 → 7 ms | 34/34 | 182 Ko |
+| Windows | sylius | `-o` | 3 626 → 607 ms | 301/301 | 2 793 Ko |
+
+Lu avec prudence (un run, pas de dispersion) : sous Linux le scan que
+les enregistrements évitent est court (0,16 s Laravel `-o`, 0,45 s Sylius
+`-o` — le scan parallèle de `parallel_io`), bien plus que sur le runner
+macOS (1,5 s et 7,0 s) ou Windows (1,1 s et 3,6 s). Ce n'est pas le gain
+d'install, que seules les colonnes de temps diraient.

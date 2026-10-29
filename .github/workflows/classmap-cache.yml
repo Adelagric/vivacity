@@ -45,7 +45,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: hyperfine
+          # Pinned: 2.0 changed the JSON schema; the unpinned run 40915941883
+          # read it as 1.x and printed empty timings, green (bench/M8).
+          tool: hyperfine@2.0.0
       - name: zstd and jq
         run: |
           if [ "$RUNNER_OS" = macOS ]; then

@@ -244,7 +244,9 @@ byte-identical-output promise are the public API.
   record is keyed on the package version and reference, not on the archive
   the store was rebuilt from, so it could list other files. To get the
   Linux and Windows figures, run the `classmap-cache` workflow by hand
-  (`bench/classmap-cache.sh`).
+  (`bench/classmap-cache.sh`). Its first three-OS run printed no timings:
+  it read hyperfine 2.0's JSON as 1.x and stayed green. The bench now reads
+  both formats, stops on a missing value, and pins hyperfine 2.0.0.
 - **The corpus fetches what it must not commit**: an entry's
   `UPSTREAM` lists project files (path, SHA-256, pinned commit) that
   `harness/corpus.sh` downloads when it measures (`tools/corpus-upstream.sh`

@@ -213,6 +213,7 @@ time_tool() { # fixture tool
     --prepare "rm -rf '$d/vendor'" -n fresh "$(cmdline "$t" "${INSTALL[@]}" -q)") >> "$log" 2>&1 \
     || { echo "hyperfine failed on $fx/$t (fresh):" >&2; tail -20 "$log" >&2; exit 1; }
   jq -s '{results: (map(.results) | add)}' "$RESULTS/$fx-$t-steady.json" "$RESULTS/$fx-$t-fresh.json" > "$RESULTS/$fx-$t.json"
+  check_json "$RESULTS/$fx-$t.json" noop dump-o fresh
   leave "$fx" "$t"
 }
 
@@ -262,9 +263,21 @@ conditions() {
 # hyperfine 1.x JSON: the -n name in `command`, statistics at the top of a
 # result; 2.x (schema 2): the name in `name`, statistics under
 # `summary.time_wall_clock`.
+# A missing value stops the bench (classmap-cache.sh's run 40915941883
+# printed empty cells, green, when hyperfine 2.0 changed the schema).
 ms() {
-  jq -r --arg n "$2" --arg f "$3" \
-    '.results[] | select((.name // .command) == $n) | (.summary.time_wall_clock // .) | (.[$f] * 1000 | round)' "$1"
+  local v
+  v=$(jq -r --arg n "$2" --arg f "$3" \
+    '[.results[] | select((.name // .command) == $n) | (.summary.time_wall_clock // .) | .[$f] | numbers]
+     | if length == 1 then (.[0] * 1000 | round) else empty end' "$1") || v=""
+  [ -n "$v" ] || { echo "$1: no $3 for '$2' (unreadable hyperfine result; JSON schema?)" >&2; exit 1; }
+  printf '%s\n' "$v"
+}
+# cell() reads ms() inside $(…), where its exit stops nothing: every value
+# is read once first, in this shell.
+check_json() { # file name…
+  local j="$1" n f; shift
+  for n; do for f in median stddev min max; do ms "$j" "$n" "$f" > /dev/null; done; done
 }
 cell() { echo "$(ms "$1" "$2" median) ($(ms "$1" "$2" stddev), $(ms "$1" "$2" min)–$(ms "$1" "$2" max))"; }
 
