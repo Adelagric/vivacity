@@ -296,3 +296,65 @@ mis à jour (93/106 `--no-dev` attendu ; dev selon le scan).
 - La ligne de `update` (règles comprises dans la durée).
 - L'attribute-collector (résultat négatif ci-dessus).
 - drupol avec d'autres installeurs, sous Windows, avec les nettoyeurs.
+
+## Revue indépendante (sous-agent frais, `git diff 5735721..HEAD`)
+
+1 majeur, 4 mineurs, rendus mesurés contre Composer dans une copie ; ce qui
+a changé :
+
+- **M1 `--run-scripts`** : le repli « run-script relancerait l'écouteur »
+  tombait après le script `pre-install-cmd`, que Composer relançait (fichier
+  témoin écrit deux fois). → décidé avant le premier script
+  (`drupol_replay_issue`, à `install` et à `dump-autoload`) ; le banc pose un
+  `pre-install-cmd` à effet visible. Le même ordre vaut pour tout repli de
+  l'analyse de portée sous `--run-scripts` : défaut préexistant, laissé,
+  consigné.
+- **m2 masquage** : n'importe quels chiffres passaient. → le banc exige que
+  la valeur de vivacity tombe dans la fenêtre de son passage.
+- **m3 `symfony-pack`** : le chemin vient de `SymfonyPackInstaller`, absent
+  des vieux Flex. → repli quand un pack est dans le lock.
+- **m4 échecs après écriture** : chemin du projet non UTF-8 (Linux) ou
+  `vendor-dir` illisible → repli décidé avant.
+- **m5** une contrainte invalide dans `packages-dev` d'un lock retouché, sous
+  `--no-dev` : Composer lèverait dans le plugin. Non mesuré, laissé,
+  consigné.
+- Vus par la revue, préexistants, laissés : `target-dir: "0"`, un
+  `vendor-dir` à travers un répertoire absent, un zip `artifact` refabriqué
+  à version égale servi par le store.
+
+## Résultat (session de travail, macOS)
+
+`Darwin MacStudio-de-Adel-5.local 25.6.0 arm64`, PHP 8.5.12 et 8.4.27,
+Composer 2.10.3, bash 3.2.
+
+**Commits** (branche `duration-drupol-collector`, depuis main 5735721) :
+6d1e675 (plan), 8e29606 (méta-analyse), 0191558 (A), 9fc3266 (banc rouge,
+masquage, ci.yml), 957b2b7 (port), 8923583 (retours de la revue), puis les
+docs.
+
+**A** : 0.000 des deux côtés sur laravel (vivacity 0.065–0.239 avant) ; SAT
+de vivacity 10–24 µs, `runSat` de Composer 231–371 µs.
+
+**B** : porté. `harness/composer-packages.sh` : 29 cas ; avant le port,
+18 étapes rouges sur 18 (rendues : plugin inconnu), puis 29 verts sous
+PHP 8.5 et 8.4. Mutations vues rouges : sans `mutable_copies` (classmap du
+no-op), sans l'échappement de `&` (Directories). bolt-project natif dans
+les deux modes, stdout et stderr identiques par script (install vierge et
+no-op, `--no-ansi`, lignes `Downloading` mises à part).
+
+**C** : résultat négatif (ci-dessus), aucun code.
+
+**Corpus** (`docs/corpus/2026-10-29-duration-drupol-collector.md`, complet) :
+**93/106 natifs en `--no-dev`, 91/106 en dev, 0 diff, 0 indisponible**
+(92 et 90 avant) ; seule bolt-project change de seau. Passage complet sur
+957b2b7 ; après la revue, `--only bolt-project,phpstan-src` rejoué sur
+8923583 : même verdict dans les deux modes.
+
+**Barrières** : `cargo fmt --check` 0 ; clippy `-D warnings` hôte et
+`x86_64-pc-windows-gnu` 0 ; `fixtures/make.sh` puis `cargo test
+--workspace` 0 (431 tests) ; les lancements de `ci.yml` et
+`root-manifest.sh` à 0 sous PHP 8.5 par `net-retry.sh` (sur 957b2b7 ;
+après la revue, rejoués : `composer-packages`, `scripts`, `plugins-round2`,
+`compare-selftest`, `transitions`, `plugin-lines`, `package-versions`, et
+sous PHP 8.4 `composer-packages`, `plugins-round2`, `plugin-lines`,
+`custom-installers`).

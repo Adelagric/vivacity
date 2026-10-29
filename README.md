@@ -91,16 +91,17 @@ phar on the same inputs. `tests/`, `harness/`, `tools/oracle-*.php` and
 How much of the real world that covers is measured, not assumed:
 [docs/corpus/](docs/corpus/) holds the latest run of `harness/corpus.sh` on
 106 real PHP projects (application templates and applications with a
-committed lock, pinned — `fixtures/corpus/`). On 2026-10-28 (after
+committed lock, pinned — `fixtures/corpus/`). On 2026-10-29 (after
 0.25.0), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **92 of 106 projects (87 %)
-natively with `--no-dev`** and 90 of 106 (85 %) with the dev packages,
+plugins active, `vivacity install` laid out **93 of 106 projects (88 %)
+natively with `--no-dev`** and 91 of 106 (86 %) with the dev packages,
 byte-identical down to file modes and link targets (`.git` directories
 of git-only packages included), and **no diff in either mode**: every
 other project was handed to Composer before any write, for reasons the
 report ranks — the Drupal plugins (the scaffold is GPL, not ported),
-mautic's and silverstripe's own logic, then plugins one by one. Earlier
-that day (0.25.0) it was 85 and 83, the seven plugins that act at script
+mautic's and silverstripe's own logic, then plugins one by one. The day
+before it was 92 and 90, before `drupol/composer-packages` (bolt-project);
+earlier that day (0.25.0), 85 and 83, the seven plugins that act at script
 events making the difference; on 2026-10-21, 76 and 74, before eight
 custom installer plugins and git-only packages. The
 reasons that headed that list three days earlier (`symfony/thanks`,
@@ -303,7 +304,11 @@ minimal install: composer.json rewritten), and, where they do nothing,
 `laminas/laminas-component-installer` 3.5.0–3.8.0 — a publish command, a
 theme, a configuration file to inject into, the skeleton installer's
 removal (Composer loops on it), and the other cases the plan names go to
-Composer. The lines these plugins print are
+Composer — and `drupol/composer-packages` 2.0.0
+(`docs/plans/duration-drupol-collector.md`: its five classes generated from
+the lock under `vendor/drupol/composer-packages/build/`; its removal, an
+installer plugin or a cleaner beside it, Twig 2 and the other cases the
+plan names go to Composer). The lines these plugins print are
 printed too, in the order Composer calls their listeners (the order it
 activated the plugins: installed.json sorted by `PackageSorter`, then those
 the command installs) — on `update`, `require` and `remove` with

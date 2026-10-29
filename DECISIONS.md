@@ -4494,3 +4494,119 @@ lock insoluble avec `GITHUB_ACTIONS=1` : l'annotation `::error ::` de
   d'écritures (intercepteur macOS seulement ; un portage `LD_PRELOAD` ou
   `strace -e write` sous Linux reste possible). Les tests en processus
   affichent désormais les lignes de stdout que libtest capturait.
+
+## 2026-10-29 — La durée de la résolution, drupol/composer-packages, l'attribute-collector (docs/plans/duration-drupol-collector.md)
+
+**La ligne `Dependency resolution completed in N seconds` d'`install -v`
+ne mesure plus que le SAT.** Le minuteur de Composer n'entoure que
+`runSat` (`Solver.php:225-228`) : ni le pool, ni la liste de blocage, ni la
+plateforme, ni les règles. Celui de vivacity partait de « Verifying… » et
+s'arrêtait à la jointure du fil de vérification : attente réseau, sonde de
+PHP, version racine, pool, règles, et ce que le fil principal faisait en
+parallèle.
+
+- **Décision** : `Solver::solve` garde la durée de son `run_sat`
+  (`sat_time`), `verify_install` la rend (`InstallVerification::resolution`)
+  quel que soit le verdict — Composer écrit la ligne avant de lever ses
+  problèmes —, `join_verification` l'imprime. Le fil n'a pas eu à changer.
+- **Mesure** (fixtures/projects/laravel, 76 paquets, MacStudio M4 Max,
+  PHP 8.5.12) : Composer imprime 0.000 (4 runs ; son `runSat` à six
+  décimales, phar extrait au format seul modifié : 0,000231–0,000371 s) ;
+  vivacity imprimait 0.239 (vierge), 0.074, 0.065, 0.069 ; il imprime
+  0.000 (SAT : 0,000010–0,000024 s, 5 runs).
+- **Preuve** : un test de `verify_install` où la version racine arrive
+  200 ms après le départ du fil exige une durée sous 50 ms ; vu rouge
+  (208,9 ms) avec l'ancien point de départ rebranché.
+- **Laissé (consigne)** : la ligne de `update` (session.rs) chronomètre
+  tout `Solver::solve`, règles comprises. `sat_time` permettrait la même
+  correction en trois lignes.
+
+**drupol/composer-packages 2.0.0 est émulé** (MIT, Pol Dellaiera ; copie
+de référence et gabarits Twig verbatim, NOTICE.md). À `post-autoload-dump`,
+ses cinq classes sous `vendor/drupol/composer-packages/build/`, depuis les
+données du lock (`packages` puis `packages-dev`, quel que soit
+`--no-dev`), et ses deux lignes stdout dans l'ordre d'activation.
+
+- **Les gabarits gardés tels quels**, rendus par un port du sous-ensemble
+  de Twig qu'ils emploient (texte, `{{ }}` échappé en HTML, filtres
+  `export` et `camelize`, `for`, la fin de ligne qui suit un `%}` retirée,
+  l'indentation qui précède gardée) plutôt que réécrits à la main : la règle
+  d'espaces de Twig s'applique alors au vrai texte.
+- **`var_export` écrit l'exposant en `E`** (`1.0E+20`), `json_encode` en
+  `e` : `runtime_stub::php_var_export` reprenait l'encodeur JSON. Corrigé
+  pour tous ses appelants (le stub de symfony/runtime aussi), test sur des
+  valeurs mesurées sous PHP.
+- **Chemins** : `getInstallPath` de LibraryInstaller sous le `realpath` de
+  PHP — liens suivis, casse donnée gardée (`std::fs::canonicalize` prend
+  celle du disque sur macOS) — et `Package::getTargetDir()` porté (regex de
+  Composer, `"0"` faux) ; `NULL` pour un métapaquet.
+- **Le cache de classmap par entrée du store** : au no-op suivant, le dump
+  de Composer trouve les cinq classes générées sous `build/` (bolt est en
+  `optimize-autoloader`) ; l'enregistrement du store, fait d'une copie
+  vierge, les ignorait. Le paquet n'est plus jamais rattaché à son entrée
+  du store (`ClassmapCacheConfig::mutable_copies`), aussi sous
+  `--no-plugins` ou plugin retiré : le cache par fichier le sert. Vu rouge
+  sans (le no-op du banc perd les quatre classes de la classmap).
+- **Comparaison** : `compare.sh` remplace par `<t>` les seuls chiffres de
+  `    public const GENERATED_AT = <entier>;` dans ces cinq fichiers du
+  vendor, puis compare strictement (une ligne absente ou dédoublée diffère
+  encore ; auto-tests). Le banc vérifie en plus que la valeur de vivacity
+  tombe dans la fenêtre de son passage.
+- **Rendus, nommés, avant toute écriture** : une autre version (au lock ou
+  chargée), un plugin global, Windows, son retrait (son `uninstall` fait
+  `unlink` du répertoire `build/` : Composer échoue, code 1, mesuré), un
+  plugin installeur (composer/installers, wordpress-core-installer, mnsami,
+  les huit installeurs personnalisés) ou un nettoyeur (dg, liborm85) actif,
+  un paquet `symfony-pack` dans le lock (le chemin dépend de la version de
+  Flex), un dépôt `path` ou une installation depuis la source, aucun lock
+  lisible (`dump-autoload` sans lock ou sous `config.lock: false` : le
+  plugin lève une `LogicException`), `--run-scripts` avec un script racine
+  `post-autoload-dump` (`run-script` relancerait l'écouteur ; décidé avant
+  le script `pre-install-cmd`), Twig hors 3.x, et un lock que l'on ne
+  relit pas comme PHP (clé `packages-dev` absente, nom sans exactement un
+  `/`, type numérique, nom en double, octet NUL, zéro négatif — `-0`
+  entier et `-0.0` flottant sont indiscernables une fois lus).
+- **Banc** `harness/composer-packages.sh` : 29 cas, Composer et vivacity au
+  même chemin absolu (le chemin entre dans `Directories.php` sous
+  `var_export` et sous l'échappement HTML) ; 18 étapes comparées (install,
+  no-op, mise à jour, retrait, `dump-autoload` ×3, `--no-plugins` ×2,
+  `--no-dev` ×2, `-v`, sans nom racine, plugin refusé, `update`,
+  `require -v`, `remove -v` — classes renommées `_composer_tmpN` —,
+  `config.lock: false`) et 11 rendus.
+
+**ondrejmirtes/composer-attribute-collector 1.2.0 reste rendu (résultat
+négatif, aucun code).** Spike borné (moins de deux heures) sur la source au
+tag (BSD-3-Clause) et phpstan-src au commit du corpus.
+
+- Sous PHP ≥ 8.0 le plugin collecte par **réflexion** :
+  `new ReflectionClass($class)` charge (exécute) chaque classe et ses
+  parents, `getMethods()`/`getProperties()` héritées, et
+  `ReflectionAttribute::getArguments()` **évalue** les arguments — des
+  expressions constantes — avant de les `var_export`er. L'AST de
+  nikic/php-parser ne sert que sous PHP 7. Avant tout,
+  `require_once vendor/autoload.php` exécute les `files` de la racine et
+  de tous les paquets dans le processus de Composer.
+- phpstan-src (0e91c3d) : 1 152 fichiers de `src/` contiennent `#[`, avec
+  des arguments comme `tag: self::EXTENSION_TAG`,
+  `RegistryFactory::COLLECTOR_TAG`, `as: Foo::class`. La parité du fichier
+  généré demande un analyseur PHP, la résolution des noms, l'héritage
+  (parents, traits, interfaces, dans vendor/ aussi) et un évaluateur
+  d'expressions constantes : hors de portée sans port d'un analyseur.
+- **Écarté aussi** : le cas vide. La fixture du corpus n'a pas de classe
+  sous `src/` : `attributes.php` y est fixe (quatre `array (\n)`), mais
+  ses deux lignes stdout portent une durée, l'autoloader est exécuté, et
+  l'émuler ne rendrait natif que l'artefact du corpus — le vrai projet a
+  1 152 fichiers à attributs. En dev, phpstan-src est de toute façon rendu
+  pour cweagans/composer-patches.
+
+**Vus, laissés (sans lien avec ces trois chantiers, mesurés par le banc ou
+la revue)** : un chemin de projet qui contient `'` fait écrire à vivacity
+`autoload_static.php` en chemins absolus là où Composer écrit
+`__DIR__ . '/..' . …` ; un nom de paquet à majuscules est écrit tel quel
+comme clé d'installed.php (Composer : `getName()`, en minuscules, à sa
+place triée) ; `-0` dans un lock devient `-0` dans installed.json (Composer
+le relit comme l'entier 0) ; sous `--run-scripts`, un repli décidé par
+l'analyse de portée arrive après le script `pre-install-cmd`, que Composer
+relance ; `target-dir: "0"` et un `vendor-dir` à travers un répertoire
+absent divergent ; un zip `artifact` refabriqué à version égale reste servi
+par le store.

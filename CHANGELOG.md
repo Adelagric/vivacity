@@ -7,6 +7,21 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **drupol/composer-packages 2.0.0 is emulated.** Its five classes under
+  `vendor/drupol/composer-packages/build/` (`Packages`, `Types`,
+  `Directories`, `Versions`, `Dependencies`), generated from the lock data
+  at post-autoload-dump (dev packages included whatever `--no-dev` says)
+  through its own Twig templates, and its two lines, in the plugin's
+  activation order, on `install`, `update`, `require`, `remove` and
+  `dump-autoload`, `-v` included. Only `GENERATED_AT = time()` differs
+  between two runs, of Composer as of vivacity. Another version, a global
+  plugin, Windows, its removal (its uninstall hook makes Composer fail), an
+  installer plugin or a cleaner beside it, a `symfony-pack` in the lock, a
+  path or source install, no readable lock, `--run-scripts` with a
+  `post-autoload-dump` script, Twig other than 3, and lock data PHP would
+  read differently (a negative zero, a NUL byte, a numeric type) go to
+  Composer before anything is written. fixtures/corpus/bolt-project
+  becomes native in both modes.
 - **Seven plugins that act at script events are emulated.**
   dg/composer-cleaner v2.2.2 (its clean of vendor/ at post-install-cmd and
   post-update-cmd, `cleaner-ignore`, its one line), liborm85/composer-vendor-cleaner
@@ -34,6 +49,13 @@ byte-identical-output promise are the public API.
   spiral-app).
 
 ### Fixed
+- **`Dependency resolution completed in N seconds` (`install -v`) times the
+  SAT alone**, as Composer's `Solver` does. It covered the whole lock
+  verification up to the join of its thread (the network wait, the
+  platform probe, the pool and the rules): 0.065 to 0.239 s on a Laravel
+  project where Composer prints 0.000; vivacity prints 0.000 too now.
+- **`var_export` writes a float's exponent with `E`** (`1.0E+20`), as PHP
+  does, where the JSON encoder it reused writes `e`.
 - **A class map record of the store is no longer built from a cleaned
   copy.** A scan of a vendor/ package a cleaner had pruned was stored as
   the record of the immutable store entry, which other projects then
