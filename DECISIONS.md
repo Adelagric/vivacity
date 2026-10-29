@@ -4610,3 +4610,122 @@ l'analyse de portée arrive après le script `pre-install-cmd`, que Composer
 relance ; `target-dir: "0"` et un `vendor-dir` à travers un répertoire
 absent divergent ; un zip `artifact` refabriqué à version égale reste servi
 par le store.
+
+## 2026-10-29 — Les replis restants du corpus : trois plugins portés, un inerte observé, trois résultats négatifs (docs/plans/remaining-fallbacks.md)
+
+Les verdicts du 2026-10-28 (« rendus », une ligne chacun) ont été repris
+plugin par plugin : source lue au tag verrouillé quand la licence le
+permet, comportement mesuré contre Composer 2.10.3 sur l'entrée du corpus
+et sur des projets synthétiques (macOS 26, Apple Silicon, PHP 8.5.12 et
+8.4.27, `/usr/bin/patch` « 2.0-12u11-Apple », git 2.54.0).
+
+- **infection/extension-installer 0.1.2 — porté** (BSD-3-Clause). Le
+  verdict « inconnu » ne tenait qu'à l'absence d'étude : c'est l'écriture
+  de phpstan/extension-installer sans comparaison md5 (le fichier et les
+  lignes à chaque passage). La liste des extensions invalides suit l'ordre
+  du dépôt local, non trié : après un install, celui de vivacity est
+  l'ordre des opérations, celui de Composer l'achèvement des extractions
+  (même limite que pest-plugin, comparée au no-op seulement).
+- **typo3/class-alias-loader v2.0.1 — porté** (MIT). « Suffixe aléatoire
+  sur vendor vierge » est exact mais ne bloque pas : le plugin tire
+  `md5(uniqid('', true))` parce que `vendor/autoload.php` n'existe pas
+  encore au `pre-autoload-dump` (deux installs de Composer : deux
+  suffixes) ; vivacity tire le sien et le comparateur masque ces deux
+  lignes-là, ancrées, comme `GENERATED_AT` de drupol. Dès qu'autoload.php
+  existe, le suffixe est celui de Composer, vérifié strictement par le
+  harnais. « Cartes d'alias PHP exécutées » tient : un paquet (ou la
+  racine) qui déclare `class-alias-maps` est rendu ; l'entrée typo3 n'en a
+  pas (`always-add-alias-loader` seul), typo3-cms-base-distribution en a
+  quatre.
+- **typo3/cms-composer-installers v5.0.2 — inerte sous la racine
+  `typo3/cms`, sa source non ouverte dans ce chantier** (GPL-2.0-or-later ;
+  le tour du 2026-10-28 l'avait lue pour la classer). La règle vient
+  d'installs `-v` avec le plugin autorisé puis refusé, comparés : la racine
+  `typo3/cms` (le dépôt TYPO3, l'entrée du corpus ; une racine synthétique
+  de ce nom avec un paquet `typo3-cms-extension`, `extra.typo3/cms.web-dir`,
+  un `vendor-dir` ; `dump-autoload`) donne le même arbre ; toute autre
+  racine (nue, extension, `web-dir`, typo3/cms-cli, `extra.typo3/cms` d'un
+  paquet, racine de type `typo3-cms-core` ou `typo3-cms-extension`, racine
+  qui `replace` typo3/cms-core) reçoit `vendor/typo3/autoload-include.php`,
+  inscrit dans l'autoload de la racine sous un identifiant qui dépend du
+  chemin absolu. Rendus : toute autre racine, typo3/cms-core installé,
+  `-v` (quatre lignes d'écouteurs et « Executing TYPO3 installer scripts »).
+- **typo3-cms-base-distribution — négatif.** Avec typo3/cms-core installé,
+  le plugin écrit `vendor/typo3/PackageArtifact.php` (des objets
+  `TYPO3\CMS\Core\Package\Package` sérialisés : le code de typo3/cms-core,
+  GPL lui aussi), publie les ressources des extensions
+  (`public/_assets/<md5>`) et crée `public/index.php` et `var/` ; et
+  **l'ordre de `composerNameToPackageKeyMap` change d'un run de Composer à
+  l'autre** dans le même répertoire (trois runs, trois ordres). La parité
+  n'a pas de cible.
+- **mlocati/composer-patcher 1.2.6 — porté** (MIT). « `patch`/`git apply`,
+  installed.json réécrit » est exact et ne bloque pas : vivacity lance **le
+  même binaire avec les mêmes lignes de commande, dans le même ordre**
+  (`patch --version`, `patch --help`, puis par niveau un essai à blanc et
+  l'application, le compteur des fichiers `.rej` compris ; `git -C … apply`
+  pour un paquet qui porte un `.git`) — rien d'un correctif n'est
+  interprété. Seul le nom du répertoire temporaire du plugin
+  (`tempnam(…, 'PCH')`) diffère, dans les messages d'échec de `patch` ; le
+  harnais le ramène à un marqueur. Mesuré : le `patch` de macOS ne
+  reconnaît pas un correctif déjà appliqué comme le plugin l'attend (pas de
+  « Skipping patch. ») — un no-op y imprime un échec par correctif, chez
+  Composer comme chez vivacity ; GNU patch (Linux, la CI) le reconnaît.
+  Avant que `patch` écrive, la copie du paquet est détachée du store
+  (chaque fichier lié recopié, nouvel inode — un test unitaire, vu rouge en
+  neutralisant le détachement ; sous macOS le clonage est déjà en
+  copie-sur-écriture) ; ses classes sont relues sur disque (le cache de
+  classmap du store ne sert plus une copie corrigée). Rendus : `update`,
+  `-v`, `patches-file`, un correctif distant, une racine ou un paquet
+  aliasé visés, une cible `path` ou installée depuis la source, une
+  contrainte sur une version de branche, une cible que le
+  `pre-install-cmd` désinstallerait (hash changé), `--run-scripts` avec un
+  script d'install, Windows.
+- **contao/manager-plugin 2.13.6 — négatif** (LGPL-3.0-or-later, non lu).
+  Une instruction ajoutée en tête du fichier de la classe
+  `Contao\NewsBundle\ContaoManager\Plugin` installée laisse sa trace
+  pendant un `composer install` no-op : le `post-install-cmd` du plugin
+  charge le code des paquets. L'ordre de `.generated/plugins.php` n'est ni
+  celui du lock, ni l'alphabétique, ni un tri topologique des `require`
+  (core-bundle, dont les sept autres dépendent, arrive septième sur huit).
+- **dealerdirect v0.7.2 — portable, non porté.** Le diff avec v1.2.1 est
+  petit (recherche toujours depuis la racine du projet, `phpcs` du `PATH`
+  pour `--config-show`, `./scripts/phpcs` pour phpcs 2, messages `-v`).
+  Mais sur l'entrée du corpus, **la référence échoue** : phpcs charge
+  `vendor/autoload.php`, dont l'autoload `files` de la racine
+  (`public/legacy.php`) `require` treize fichiers absents de la fixture ;
+  ajoutés, ils appellent `Database`, d'un répertoire `classmap` absent lui
+  aussi. Composer imprime « Failed to set PHP CodeSniffer installed_paths
+  Config » et le corpus classe l'entrée `unavailable` — contre la barrière
+  « 0 unavailable ». La note du HANDOVER qui attribuait cet échec à phpcs
+  sous PHP 8.5 est fausse : phpcs 3.13.6 tourne, c'est le PHP du projet qui
+  échoue. Plus largement, `phpcs` exécute les `autoload.files` du projet,
+  dont vivacity ne peut prédire l'échec (vrai aussi pour 1.x). Suites
+  possibles : compléter la fixture (le code legacy de chamilo et ses
+  classes, plusieurs Mo) ou porter v0.7.2 et accepter l'entrée hors mesure.
+- **installed.php d'une racine aliasée** : Composer parcourt aussi le
+  `RootAliasPackage`, et ses `replace` à `self.version` y prennent la
+  version de l'alias — la racine typo3 (`dev-main` aliasée en
+  `15.0.x-dev`) liste les deux versions pour chacun des cinquante paquets
+  qu'elle remplace. vivacity n'en listait qu'une : un écart de cœur que
+  seule cette entrée montrait, corrigé parce qu'il bloquait typo3 (la même
+  règle pour un paquet aliasé du dépôt local, signalée par la revue, n'est
+  pas reproduite ni corrigée : HANDOVER).
+- **`--run-scripts`** : la garde de drupol devient `replay_issue`, une
+  table des plugins dont l'écouteur imprime ou écrit à chaque passage
+  (drupol, infection, phpstan — « Extensions installed » à chaque fois —,
+  class-alias-loader, composer-patcher) et des événements que
+  `composer run-script` rejouerait, par commande.
+
+Harnais : `harness/plugins-round3.sh` (infection, typo3) et
+`harness/composer-patcher.sh`, vus rouges sur main ad1c338 puis verts sous
+PHP 8.5 et 8.4 (comptes au plan) ; `compare-selftest.sh` : la tolérance du
+suffixe, rouge avec le comparateur de main, verte ensuite, et ancrée (une
+autre ligne, un suffixe court, le même fichier ailleurs, la même ligne dans
+un autre fichier : vus).
+
+Corpus (`docs/corpus/2026-10-29-remaining-fallbacks.md`, les deux modes,
+binaire 5afb474) : **95/106 natives en `--no-dev`, 94/106 en dev** (93 et
+91 avant), 0 diff, 0 unavailable ; roave-backwardcompatibilitycheck
+(dev), typo3 et concretecms (deux modes) deviennent natives ; restent
+rendues dans le champ typo3-cms-base-distribution, contao-managed-edition
+et chamilo-lms (dev).

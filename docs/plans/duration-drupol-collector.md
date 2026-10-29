@@ -305,7 +305,7 @@ a changé :
 - **M1 `--run-scripts`** : le repli « run-script relancerait l'écouteur »
   tombait après le script `pre-install-cmd`, que Composer relançait (fichier
   témoin écrit deux fois). → décidé avant le premier script
-  (`drupol_replay_issue`, à `install` et à `dump-autoload`) ; le banc pose un
+  (`drupol_replay_issue`, devenue `replay_issue` le 2026-10-29, à `install` et à `dump-autoload`) ; le banc pose un
   `pre-install-cmd` à effet visible. Le même ordre vaut pour tout repli de
   l'analyse de portée sous `--run-scripts` : défaut préexistant, laissé,
   consigné.

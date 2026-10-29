@@ -93,14 +93,17 @@ How much of the real world that covers is measured, not assumed:
 106 real PHP projects (application templates and applications with a
 committed lock, pinned — `fixtures/corpus/`). On 2026-10-29 (after
 0.25.0), against Composer 2.10.3 `--no-scripts` with its
-plugins active, `vivacity install` laid out **93 of 106 projects (88 %)
-natively with `--no-dev`** and 91 of 106 (86 %) with the dev packages,
+plugins active, `vivacity install` laid out **95 of 106 projects (90 %)
+natively with `--no-dev`** and 94 of 106 (89 %) with the dev packages,
 byte-identical down to file modes and link targets (`.git` directories
 of git-only packages included), and **no diff in either mode**: every
 other project was handed to Composer before any write, for reasons the
 report ranks — the Drupal plugins (the scaffold is GPL, not ported),
-mautic's and silverstripe's own logic, then plugins one by one. The day
-before it was 92 and 90, before `drupol/composer-packages` (bolt-project);
+mautic's and silverstripe's own logic, then plugins one by one. Earlier
+that day it was 93 and 91, before `infection/extension-installer`
+(roave-backwardcompatibilitycheck), the TYPO3 plugins (typo3) and
+`mlocati/composer-patcher` (concretecms); before that 92 and 90, before
+`drupol/composer-packages` (bolt-project);
 earlier that day (0.25.0), 85 and 83, the seven plugins that act at script
 events making the difference; on 2026-10-21, 76 and 74, before eight
 custom installer plugins and git-only packages. The
@@ -250,7 +253,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Twenty-nine plugins are emulated and checked against the
+Thirty-three plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 1.12.0 and 2.0.0–2.3.0, frameworks that only use the plugin's path table —
 WordPress and Drupal included; 1.12.0's PHP 8.4 deprecation lines
@@ -308,7 +311,16 @@ Composer — and `drupol/composer-packages` 2.0.0
 (`docs/plans/duration-drupol-collector.md`: its five classes generated from
 the lock under `vendor/drupol/composer-packages/build/`; its removal, an
 installer plugin or a cleaner beside it, Twig 2 and the other cases the
-plan names go to Composer). The lines these plugins print are
+plan names go to Composer), and, after `docs/plans/remaining-fallbacks.md`,
+`infection/extension-installer` 0.1.2 (its `GeneratedExtensionsConfig.php`),
+`typo3/class-alias-loader` v2.0.1 (its two files and the include file in
+the root's autoload; packages with class alias maps — PHP code — go to
+Composer) with `typo3/cms-composer-installers` v5.0.2 where it was
+observed to do nothing (a root named `typo3/cms`; its source is GPL and
+was not read), and `mlocati/composer-patcher` 1.2.6 (patches applied by
+the `patch` binary with the plugin's own command lines, `patches_applied`
+in installed.json; `update`, remote patches and the other cases the plan
+names go to Composer). The lines these plugins print are
 printed too, in the order Composer calls their listeners (the order it
 activated the plugins: installed.json sorted by `PackageSorter`, then those
 the command installs) — on `update`, `require` and `remove` with

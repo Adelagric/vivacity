@@ -37,6 +37,9 @@ to the Rust code ported from them.
 | [liborm85/composer-vendor-cleaner](https://github.com/liborm85/composer-vendor-cleaner) 1.7.1, with its copy of Symfony's `Finder\Glob` | MIT | Libor M.; Fabien Potencier (`Finder/Glob.php`) | `docs/reference/plugins/composer-vendor-cleaner/` (`LICENSE`, `Finder/LICENSE`; `Plugin.php`, `Cleaner.php`, `DevFilesFinder.php`, `GlobFilter.php`, `Directory.php`, `Filesystem.php`, `Package.php`, `Finder/Glob.php` — no drift twin) | `vivacity-core` (`vendor_cleaner`; `path_install::glob_to_regex_with`) |
 | [cakephp/plugin-installer](https://github.com/cakephp/plugin-installer) 2.0.2 | MIT | Cake Software Foundation, Inc. | `docs/reference/plugins/cakephp-plugin-installer/` (`LICENSE.txt`; `Plugin.php` — no drift twin) | `vivacity-core` (`cakephp_plugins`: the root autoload, `cakephp-plugins.php`) |
 | [drupol/composer-packages](https://github.com/drupol/composer-packages) 2.0.0 | MIT | Pol Dellaiera | `docs/reference/plugins/composer-packages/` (`LICENSE`; `composer.json`, `src/` with its five Twig templates — no drift twin) and the templates, verbatim, with the licence, in `crates/vivacity-core/assets/composer-packages/` | `vivacity-core` (`composer_packages`: the exporters, `Name::camelize`, the templates rendered by a port of the Twig subset they use), `vivacity` (`effect_plugins::composer_packages`) |
+| [infection/extension-installer](https://github.com/infection/extension-installer) 0.1.2 | BSD-3-Clause | Maks Rafalko | `docs/reference/plugins/infection-extension-installer/` (`LICENSE`; `Plugin.php` — no drift twin) | `vivacity` (`extension_installers::infection`: `src/GeneratedExtensionsConfig.php` and its lines) |
+| [typo3/class-alias-loader](https://github.com/TYPO3/class-alias-loader) v2.0.1 | MIT | Helmut Hummel | `docs/reference/plugins/class-alias-loader/` (`LICENSE`; `Plugin.php`, `ClassAliasMapGenerator.php`, `Config.php`, `IncludeFile.php`, `IncludeFile/*.php`, `alias-loader-include.tmpl.php` — no drift twin) | `vivacity-core` (`class_alias_loader`: the include file from its template, the empty alias map, the suffix), `vivacity` (`effect_plugins`) |
+| [mlocati/composer-patcher](https://github.com/mlocati/composer-patcher) 1.2.6 | MIT | Michele Locati | `docs/reference/plugins/composer-patcher/` (`LICENSE`; `src/` — no drift twin) | `vivacity-core` (`composer_patcher`: the collection, the hash, the `patch` command lines and the reading of their output), `vivacity` (`effect_plugins::patcher_pre`, `patcher_post`) |
 | [laminas/laminas-skeleton-installer](https://github.com/laminas/laminas-skeleton-installer) 1.3.0 | BSD-3-Clause | Laminas Project a Series of LF Projects, LLC. | `docs/reference/plugins/laminas-skeleton-installer/` (`LICENSE.md`, `COPYRIGHT.md`; `Plugin.php`, `OptionalPackagesInstaller.php`, `OptionalPackage.php`, `ComposerJsonRetrievalTrait.php`, `Collection.php`, `Uninstaller.php` — no drift twin) | `vivacity-core` (`effect_plugins`: the minimal install, composer.json rewritten) |
 | [laminas/laminas-component-installer](https://github.com/laminas/laminas-component-installer) 3.8.0 | BSD-3-Clause | Laminas Project a Series of LF Projects, LLC. | `docs/reference/plugins/laminas-component-installer/` (`LICENSE.md`, `COPYRIGHT.md`; `ComponentInstaller.php`, `ConfigDiscovery.php`, `ConfigDiscovery/*.php` — no drift twin) | `vivacity-core` (`effect_plugins`: when it is inert) |
 | [spiral/composer-publish-plugin](https://github.com/spiral/composer-publish-plugin) v1.1.2 | MIT | Spiral Scout | `docs/reference/plugins/spiral-composer-publish-plugin/` (`LICENSE`; `PublishPlugin.php` — no drift twin) | `vivacity-core` (`effect_plugins`: when it is inert) |
@@ -57,8 +60,12 @@ and contao-components/installer (LGPL-3.0-or-later) is reimplemented from
 what they do, measured against Composer; none of their source is copied or
 vendored. typo3/cms-composer-installers (GPL-2.0-or-later) and
 contao/manager-plugin (LGPL-3.0-or-later) were read to classify them
-(docs/plans/plugins-round2.md) and are not emulated; nothing of them is
-copied either. Until 2026-10-28 this file listed roots/wordpress-core-installer
+(docs/plans/plugins-round2.md); nothing of them is copied either.
+contao/manager-plugin is not emulated. typo3/cms-composer-installers is
+reproduced only where it does nothing — under a root package named
+`typo3/cms` —, a rule taken from Composer runs with the plugin allowed and
+refused (docs/plans/remaining-fallbacks.md), its source left unopened in
+that work. Until 2026-10-28 this file listed roots/wordpress-core-installer
 as MIT, with a copy of its source under `docs/reference/`; it is
 GPL-2.0-or-later, so that copy was removed and `layout::wp_core_dir`
 rewritten from the plugin's measured behaviour (DECISIONS 2026-10-28).

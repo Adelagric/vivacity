@@ -323,3 +323,54 @@ Huit failles, toutes retenues :
   `--run-scripts`.
 - B : la raison consignée est l'exécution du PHP du projet par `phpcs`
   (l'échec de la référence sur la fixture en est l'illustration mesurée).
+
+## Revue indépendante (sous-agent frais, `git diff ad1c338..HEAD`, sources GPL non ouvertes)
+
+Onze points ; suites :
+
+| point | gravité | suite |
+|---|---|---|
+| Correctifs fournis par la racine : `from-package` bâti sur le champ `version` brut (Composer : `getPrettyString()` de la racine — version détectée, ou celle de l'alias), nom vide au lieu de `__root__` ; aucun cas natif au harnais | majeure | la racine passe par `RootPackage::detect` (`composer_patcher::root_entry`) ; noms en `getName()` (minuscules) dans les lignes, nom joli dans `patches_applied` ; deux cas natifs (racine nommée, racine sans nom) |
+| Ordre des lignes du patcher après une mise à jour (Composer : installed.json moins les mises à jour, puis les opérations) ; la tolérance triée déplaçait toutes les autres lignes | moyenne | ordre du dépôt local (`install::local_order`, celui de pest) pour le patcher et infection ; tri limité à chaque suite contiguë de lignes « Applying » ; cas `pt-update-order` (une cible mise à jour passe en dernier) |
+| infection : extensions invalides en ordre `packages` puis `packages-dev` au no-op | moyenne | même ordre du dépôt local (`update --no-install` : installed.json) ; cas prod/dev croisés au no-op ; à l'install vierge, l'ordre de Composer reste l'achèvement des extractions (documenté, comme pest) |
+| class-alias-loader : `vendor-dir` venu de l'environnement ou de la config globale non vu | moyenne | repli sur `Dirs::resolve(…).vendor_rel() != "vendor"` |
+| Contrainte de correctif sur une version de branche (`1.x-dev`) : jamais appliquée par vivacity | moyenne/mineure | repli nommé |
+| GitPatcher annoncé rendu au plan, absent du code | mineure | porté (`git -C  <dir> apply …`, le même essai à blanc de `patch`) ; cas `pt-git` (un dist qui porte un `.git`) |
+| `pre-install-cmd` sur un installed.json non purgé | mineure | `present_installed` : les paquets dont le répertoire existe (le plugin compris) |
+| cms-composer-installers : garde plus large que l'observé (`--no-autoloader` hors `typo3/cms`, typo3/cms-core installé sous `typo3/cms`, pas de garde Windows) | mineure | inerte seulement sous `typo3/cms` sans typo3/cms-core ; tout le reste rendu ; garde Windows |
+| installed.php : `self.version` des paquets *aliasés* du dépôt local | mineure, préexistant | non reproduit, non corrigé : HANDOVER |
+| `--run-scripts` : phpstan imprime à chaque passage | mineure, préexistant | ajouté à `replay_issue` (la table annonçait couvrir ces plugins) |
+| Le suffixe vérifié après tout le run, pas juste après le no-op | mineure | une vérification juste après un no-op |
+
+## Résultat (session de travail, macOS)
+
+| plugin | issue |
+|---|---|
+| infection/extension-installer 0.1.2 | porté |
+| typo3/class-alias-loader v2.0.1 | porté (cartes d'alias rendues) |
+| typo3/cms-composer-installers v5.0.2 | inerte sous `typo3/cms` sans typo3/cms-core (observé) ; le reste rendu |
+| mlocati/composer-patcher 1.2.6 | porté (`patch`, et `git apply` pour un dist à `.git`) ; `update`, distant, `patches-file`, etc. rendus |
+| contao/manager-plugin 2.13.6 | négatif mesuré |
+| typo3-cms-base-distribution | négatif mesuré (PackageArtifact.php non reproductible par Composer lui-même) |
+| dealerdirect v0.7.2 | non porté : la référence échoue sur la fixture chamilo |
+
+- Harnais : `plugins-round3.sh` 52 cas, `composer-patcher.sh` 30 cas,
+  verts sous PHP 8.5.12 et 8.4.27 ; contre le binaire de main ad1c338 :
+  48 lignes FAIL / 5 OK et 28 FAIL / 3 OK (les OK : `--no-plugins`,
+  `--no-dev` sans le plugin dev, le store intact). Les premières versions
+  (avant la revue) : 43 FAIL / 6 OK et 21 FAIL / 3 OK.
+- `compare-selftest.sh` : `cal-suffix` rouge avec le comparateur de main,
+  vert ensuite ; 4 cas d'ancrage.
+- Un test unitaire du détachement du store, rouge en neutralisant
+  `detach`.
+- Les 37 lancements de harnais de `ci.yml` verts sur le binaire d'avant la
+  revue ; après la revue, les nouveaux et ceux qu'elle touche
+  (plugin-lines, yii2-composer, plugins-round2, composer-packages,
+  scripts, compare-selftest, package-versions, removal) verts.
+- `cargo fmt --check`, `clippy -D warnings` (macOS et
+  `x86_64-pc-windows-gnu`), `fixtures/make.sh`, `cargo test --workspace` :
+  441 tests, 0 échec.
+- Corpus (`docs/corpus/2026-10-29-remaining-fallbacks.md`) : 95/106
+  natives en `--no-dev`, 94/106 en dev, 0 diff, 0 unavailable.
+- Non vérifié ici : la voie GNU patch (Linux, la CI) — aucun `patch` GNU
+  sur cette machine.

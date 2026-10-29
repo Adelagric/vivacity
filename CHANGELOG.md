@@ -7,6 +7,42 @@ byte-identical-output promise are the public API.
 ## [Unreleased]
 
 ### Added
+- **infection/extension-installer 0.1.2 is emulated.** Its
+  `src/GeneratedExtensionsConfig.php` (the `infection-extension` packages:
+  install path, `extra.infection`, version) and its lines ("No extensions
+  found", the installed and the invalid extensions) at post-install-cmd and
+  post-update-cmd, `update --no-install` and `-v` included. Another
+  version, an aliased extension and `--run-scripts` with a
+  `post-install-cmd` script go to Composer.
+  fixtures/corpus/roave-backwardcompatibilitycheck becomes native in dev
+  mode.
+- **typo3/class-alias-loader v2.0.1 is emulated, and
+  typo3/cms-composer-installers v5.0.2 where it was observed to do
+  nothing.** class-alias-loader's two files
+  (`vendor/typo3/alias-loader-include.php`,
+  `vendor/composer/autoload_classaliasmap_static.php`), its line and the
+  include file appended to the root's autoload at pre-autoload-dump
+  (`install` and `dump-autoload`); its suffix is drawn at random on a
+  fresh vendor/ by the plugin itself (read from autoload.php otherwise).
+  cms-composer-installers (GPL-2.0-or-later, its source not read) writes
+  nothing under a root named `typo3/cms` — the TYPO3 repository — and goes
+  to Composer under any other root. Class alias maps (PHP code of the
+  packages), a `vendor-dir`, `-v`, another version and `--run-scripts` with
+  a `pre-autoload-dump` script go to Composer. fixtures/corpus/typo3
+  becomes native in both modes; typo3-cms-base-distribution stays with
+  Composer (its PackageArtifact.php changes order from one Composer run to
+  the next).
+- **mlocati/composer-patcher 1.2.6 is emulated.** The patches of the root
+  and of the allowed packages (`extra.patches`, `allow-subpatches`) are
+  applied by the `patch` binary, with the plugin's own command lines in
+  its order (dry run, then apply, per level), its lines ("Gathering
+  patches…", "Applying patch … done." / "patch was already applied." / the
+  error), and `extra.patches_applied` in installed.json. The patched copy
+  is detached from the store first and its classes are scanned from the
+  files. `update`, `-v`, `patches-file`, a remote patch, a root or aliased
+  target, a path or source target, a target the plugin would uninstall to
+  patch it again, and `--run-scripts` with an install script go to
+  Composer. fixtures/corpus/concretecms becomes native in both modes.
 - **drupol/composer-packages 2.0.0 is emulated.** Its five classes under
   `vendor/drupol/composer-packages/build/` (`Packages`, `Types`,
   `Directories`, `Versions`, `Dependencies`), generated from the lock data
@@ -49,6 +85,10 @@ byte-identical-output promise are the public API.
   spiral-app).
 
 ### Fixed
+- **An aliased root lists both versions of its `self.version` replaces in
+  installed.php**, as Composer does (it walks the root's alias too): a
+  root on `dev-main` aliased to `15.0.x-dev` replaced each subtree package
+  at `dev-main` only.
 - **`Dependency resolution completed in N seconds` (`install -v`) times the
   SAT alone**, as Composer's `Solver` does. It covered the whole lock
   verification up to the join of its thread (the network wait, the
