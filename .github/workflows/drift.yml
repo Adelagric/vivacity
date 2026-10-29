@@ -17,9 +17,12 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
 
+# The drift job runs third-party Composer plugins with the token within
+# reach (setup-php writes it into auth.json): it gets read access only. The
+# issue is opened by the report job, which checks nothing out and runs no
+# plugin.
 permissions:
   contents: read
-  issues: write
 
 jobs:
   drift:
@@ -85,39 +88,92 @@ jobs:
           done
           exit $status
 
-      - name: Report
+      # Handed to the report job as an artifact: one file per channel,
+      # four lines (channel, version, twins, harness), re-validated there
+      # since this job ran third-party code.
+      - name: Record the drift
+        id: record
         if: steps.twins.outcome == 'failure' || steps.harness.outcome == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
           COMPOSER_VERSION: ${{ steps.composer.outputs.version }}
           CHANNEL: ${{ matrix.composer }}
           TWINS: ${{ steps.twins.outcome }}
           HARNESS: ${{ steps.harness.outcome }}
+        run: |
+          rm -rf "$RUNNER_TEMP/drift-report"; mkdir -p "$RUNNER_TEMP/drift-report"
+          printf '%s\n' "$CHANNEL" "$COMPOSER_VERSION" "$TWINS" "$HARNESS" > "$RUNNER_TEMP/drift-report/$CHANNEL.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.record.outcome == 'success'
+        with:
+          name: drift-${{ matrix.composer }}
+          path: ${{ runner.temp }}/drift-report/${{ matrix.composer }}.txt
+
+      - name: Drift found
+        if: steps.twins.outcome == 'failure' || steps.harness.outcome == 'failure'
+        run: exit 1
+
+  report:
+    name: report
+    needs: drift
+    # `needs` alone would skip this job exactly when it is wanted.
+    if: ${{ !cancelled() && needs.drift.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        # A drift job that failed before recording (a build error) leaves
+        # nothing to download, and nothing to report.
+        continue-on-error: true
+        with:
+          pattern: drift-*
+          path: drift-report
+          merge-multiple: true
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh label create drift --color B60205 --description "Output drifted from a newer Composer" --force
-          # One open issue per channel, the version in the body: the snapshot
-          # channel's version string carries a build ref and changes every
-          # week, so putting it in the title opened a new issue each run.
-          # A drift that comes back after being fixed does open a fresh issue,
-          # since only OPEN ones are looked up.
-          title="Drift against Composer ($CHANNEL)"
-          body="Composer **$COMPOSER_VERSION** · reference twins: **$TWINS** · tests + harness: **$HARNESS** · run: $RUN_URL
+          labelled=0
+          for f in drift-report/v2.txt drift-report/snapshot.txt; do
+            [ -f "$f" ] || continue
+            { read -r CHANNEL; read -r COMPOSER_VERSION; read -r TWINS; read -r HARNESS; } < "$f" || true
+            # Written by a job that ran third-party code: only the values
+            # that job can legitimately produce go any further.
+            case "$CHANNEL" in v2|snapshot) ;; *) echo "::warning::$f: unexpected channel, ignored"; continue ;; esac
+            [ "$f" = "drift-report/$CHANNEL.txt" ] || { echo "::warning::$f: channel mismatch, ignored"; continue; }
+            case "$TWINS" in success|failure|skipped|cancelled) ;; *) echo "::warning::$f: bad twins outcome, ignored"; continue ;; esac
+            case "$HARNESS" in success|failure|skipped|cancelled) ;; *) echo "::warning::$f: bad harness outcome, ignored"; continue ;; esac
+            if ! [[ "$COMPOSER_VERSION" =~ ^[0-9A-Za-z.+@-]{1,64}$ ]]; then COMPOSER_VERSION="(unreadable)"; fi
+            if [ "$labelled" = 0 ]; then
+              gh label create drift --color B60205 --description "Output drifted from a newer Composer" --force
+              labelled=1
+            fi
+            # One open issue per channel, the version in the body: the snapshot
+            # channel's version string carries a build ref and changes every
+            # week, so putting it in the title opened a new issue each run.
+            # A drift that comes back after being fixed does open a fresh issue,
+            # since only OPEN ones are looked up.
+            title="Drift against Composer ($CHANNEL)"
+            body="Composer **$COMPOSER_VERSION** · reference twins: **$TWINS** · tests + harness: **$HARNESS** · run: $RUN_URL
 
           The vendored reference is Composer 2.10.3. A failing stage 1 names the file whose port must be re-read; a failing stage 2 with a passing stage 1 means behaviour changed outside the vendored files."
-          # Matched exactly rather than through the search index: the title
-          # holds parentheses, and `in:title` is a substring match. The second
-          # branch catches an issue opened under the old title, which carried
-          # the version — so this change migrates itself instead of opening a
-          # duplicate beside it.
-          existing=$(gh issue list --label drift --state open --limit 50 --json number,title \
-            | jq -r --arg t "$title" --arg c "($CHANNEL)" '
-                (map(select(.title == $t)) | .[0].number)
-                // (map(select(.title | startswith("Drift against Composer") and endswith($c))) | .[0].number)
-                // empty')
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
-          else
-            gh issue create --title "$title" --label drift --body "$body"
-          fi
-          exit 1
+            # Matched exactly rather than through the search index: the title
+            # holds parentheses, and `in:title` is a substring match. The second
+            # branch catches an issue opened under the old title, which carried
+            # the version — so this change migrates itself instead of opening a
+            # duplicate beside it.
+            existing=$(gh issue list --label drift --state open --limit 50 --json number,title \
+              | jq -r --arg t "$title" --arg c "($CHANNEL)" '
+                  (map(select(.title == $t)) | .[0].number)
+                  // (map(select(.title | startswith("Drift against Composer") and endswith($c))) | .[0].number)
+                  // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "$body"
+            else
+              gh issue create --title "$title" --label drift --body "$body"
+            fi
+          done

@@ -46,6 +46,14 @@ archive="$ROOT/fixtures/registry/$FX.tar.gz"
 reg="$WORK/registry"; mkdir -p "$reg"; tar -C "$reg" -xzf "$archive"
 write_snapshot_packages_json "$reg"
 home="$WORK/home"; mkdir -p "$home"
+# Le cache de fichiers habituel, partagé par les deux côtés (comme
+# plugin-lines.sh) : les dists de la fixture y sont déjà (fixtures/make.sh,
+# restauré par actions/cache en CI). Un cache vierge par run téléchargeait
+# ~150 zipballs de api.github.com à chaque passage, assez pour qu'un runner
+# macOS à IP partagée se fasse refuser par GitHub (2026-10-29). Les lignes
+# `  - Downloading` restent hors comparaison.
+CACHE_DIR="${COMPOSER_CACHE_DIR:-$(composer config --global cache-dir 2>/dev/null)}"
+[ -n "$CACHE_DIR" ] || { echo "cache de fichiers de Composer introuvable"; exit 1; }
 printf '{"repositories": %s}\n' "$(snapshot_repositories_json "$reg")" > "$home/config.json"
 status=0
 flex_index_serve index-recipes.json
@@ -234,7 +242,7 @@ prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony
     # n'est enregistrée, donc Flex ne télécharge aucune recette.
     cp "$ROOT/fixtures/projects/$FX/composer.lock" "$d/composer.lock"
     write_symfony_lock "$d"
-    (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+    (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
       composer update --no-scripts --no-interaction --no-audit --no-ansi --no-blocking --quiet >"$WORK/$name.$side.prepare.log" 2>&1) || {
         echo "FAIL $name : la préparation a échoué ($side)"
         # Les premières lignes, pas les dernières : Composer met son message
@@ -253,10 +261,10 @@ run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
   # Sur un cas de repli, Composer appliquerait la recette (réseau) : seule
   # la décision de vivacity est mesurée, et elle doit ne rien écrire.
   if [ "$expect" = native ]; then
-    (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+    (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
       composer update --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
   fi
-  (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+  (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
     "$VIVACITY" update $extra --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
   if [ "$expect" = fallback ]; then
     # Rien ne doit avoir bougé : ni le lock, ni symfony.lock.

@@ -5,6 +5,10 @@ name: ci-cache
 on:
   workflow_dispatch:
 
+# Read-only token: the benchmark installs third-party PHP packages.
+permissions:
+  contents: read
+
 jobs:
   ci-cache:
     runs-on: ubuntu-latest

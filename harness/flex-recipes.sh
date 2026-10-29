@@ -43,6 +43,14 @@ archive="$ROOT/fixtures/registry/$FX.tar.gz"
 reg="$WORK/registry"; mkdir -p "$reg"; tar -C "$reg" -xzf "$archive"
 write_snapshot_packages_json "$reg"
 home="$WORK/home"; mkdir -p "$home"
+# Le cache de fichiers habituel, partagé par les deux côtés (comme
+# plugin-lines.sh) : les dists de la fixture y sont déjà (fixtures/make.sh,
+# restauré par actions/cache en CI). Un cache vierge par run téléchargeait
+# ~150 zipballs de api.github.com à chaque passage, assez pour qu'un runner
+# macOS à IP partagée se fasse refuser par GitHub (2026-10-29). Les lignes
+# `  - Downloading` restent hors comparaison.
+CACHE_DIR="${COMPOSER_CACHE_DIR:-$(composer config --global cache-dir 2>/dev/null)}"
+[ -n "$CACHE_DIR" ] || { echo "cache de fichiers de Composer introuvable"; exit 1; }
 printf '{"repositories": %s}\n' "$(snapshot_repositories_json "$reg")" > "$home/config.json"
 status=0
 flex_index_serve configurators/recipes/index.json
@@ -160,7 +168,7 @@ prepare() { # nom, forme (`-` : aucune), paquets à omettre de symfony.lock
     # Un symfony.lock complet AVANT la convergence : rien n'est enregistré,
     # donc aucune recette ne s'applique pendant la préparation.
     write_symfony_lock "$d"
-    (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+    (cd "$d" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
       composer update --no-scripts --no-interaction --no-audit --no-ansi --no-blocking --quiet >"$WORK/$name.$side.prepare.log" 2>&1) || {
         echo "FAIL $name : la préparation a échoué ($side)"; sed -n '1,8p' "$WORK/$name.$side.prepare.log"; status=1; return 1; }
     write_symfony_lock "$d" "$@"
@@ -195,9 +203,9 @@ run() {
     [ "$f" = - ] && continue
     if [ -f "$ref/$f" ]; then cksum < "$ref/$f"; else echo absent; fi > "$sums/$(printf '%s' "$f" | tr '/' '_')"
   done
-  (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+  (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
     composer update --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >"$WORK/$name.composer.out" 2>"$WORK/$name.composer.err") || c=$?
-  (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$home/cache" COMPOSER_ROOT_VERSION="$root_version" \
+  (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
     "$VIVACITY" update $extra --no-fallback --no-blocking >"$WORK/$name.vivacity.out" 2>"$WORK/$name.vivacity.err") || v=$?
   # L'oracle d'abord : ce que Composer + Flex ont vraiment fait.
   local applied=0

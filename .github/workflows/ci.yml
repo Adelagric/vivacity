@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# The harnesses run third-party Composer plugins (PHP) with the job's token
+# within reach (COMPOSER_AUTH below, setup-php's auth.json, checkout's git
+# config): it may read the repository and nothing else.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,12 +18,29 @@ jobs:
   parity:
     name: parity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The job's token for GitHub's dists (api.github.com), on both sides of
+    # every harness — Composer and vivacity read COMPOSER_AUTH alike — so that
+    # no harness downloads anonymously from a runner IP shared with others
+    # (macOS, 2026-10-29). Issued for every run, read-only on a fork's PR.
+    env:
+      COMPOSER_AUTH: ${{ format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+
+      # /rate_limit costs nothing. Read at both ends of the job, anonymous
+      # and with the token: what the harnesses spent of each budget.
+      - name: GitHub API budget (start)
+        run: |
+          for who in anonymous token; do
+            if [ "$who" = token ]; then h=(-H "Authorization: token $GH_TOKEN"); else h=(); fi
+            printf '%s ' "$who"; curl -fsS "${h[@]}" https://api.github.com/rate_limit | jq -c '.resources.core' || echo unavailable
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -127,6 +150,10 @@ jobs:
         run: harness/net-retry.sh harness/artifact-repo.sh
       - name: The comparator's own tolerances (anchored, not substrings)
         run: harness/net-retry.sh harness/compare-selftest.sh
+      - name: net-retry.sh on scripted failures and the captured GitHub refusal (no retry, cause named)
+        run: harness/net-retry-selftest.sh
+      - name: Where a github-oauth token goes (api.github.com only, redirects, GHE, COMPOSER_AUTH last) and that it changes no output
+        run: harness/net-retry.sh harness/auth-hosts.sh
       - name: unzip fails then ZipArchive resumes (duplicates, file/dir collisions)
         run: harness/net-retry.sh harness/two-stage.sh
       - name: Transport failures exit 100 (404 dist, dead repository, missing local dist)
@@ -146,3 +173,13 @@ jobs:
 
       - name: Reference twins still match the pinned Composer
         run: harness/net-retry.sh harness/drift-reference.sh
+
+      - name: GitHub API budget (end)
+        if: always()
+        run: |
+          for who in anonymous token; do
+            if [ "$who" = token ]; then h=(-H "Authorization: token $GH_TOKEN"); else h=(); fi
+            printf '%s ' "$who"; curl -fsS "${h[@]}" https://api.github.com/rate_limit | jq -c '.resources.core' || echo unavailable
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}

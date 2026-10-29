@@ -8,6 +8,10 @@ on:
   pull_request:
     paths: ["crates/**", "bench/ci-bench.sh", "bench/gate.py", "bench/results/baseline-ratio.json", ".github/workflows/bench.yml"]
 
+# Read-only token: the benchmarks install and run third-party PHP packages.
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: hyperfine (${{ matrix.os }})

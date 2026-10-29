@@ -14,6 +14,10 @@ on:
         description: Modes (dev,no-dev)
         default: dev,no-dev
 
+# Read-only token: the corpus runs third-party Composer plugins.
+permissions:
+  contents: read
+
 jobs:
   corpus:
     runs-on: ubuntu-latest
@@ -35,9 +39,9 @@ jobs:
         run: cargo build --release
       - name: Corpus subset
         env:
-          # A PAT raises the GitHub zipball rate limit; unset, the run
-          # still works on a small subset.
-          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH }}
+          # A PAT raises the GitHub zipball rate limit; without the
+          # secret, the job's own token (never anonymous).
+          COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH || format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
         run: harness/corpus.sh --only "${{ inputs.entries }}" --modes "${{ inputs.modes }}"
       - name: Report
         if: always()

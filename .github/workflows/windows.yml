@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: the parity job runs third-party Composer plugins (ci.yml).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -72,6 +76,9 @@ jobs:
   parity:
     name: parity oracle (windows-latest)
     runs-on: windows-latest
+    # The job's token for GitHub's dists, on both sides (ci.yml).
+    env:
+      COMPOSER_AUTH: ${{ format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
     defaults:
       run:
         shell: bash
