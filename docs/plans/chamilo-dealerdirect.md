@@ -236,3 +236,32 @@ confirmé à la lecture).
 | Harnais : stdout et stderr fusionnés seulement ; instantané de `handed` sur les noms ; Windows (`ln -s`) ; pas dans `ci.yml` | basse | `ci.yml` : une étape ; le reste noté (même méthode que `plugin-lines.sh`) |
 | Docs en retard (HANDOVER, DECISIONS « non porté », CHANGELOG sans la correction du Finder, 912 Ko au lieu de 903 Ko) | basse | corrigés |
 | Chemins d'UPSTREAM non assainis | très basse | un chemin absolu ou à `..` est refusé |
+
+## Résultat (session de travail, macOS)
+
+- Commits : `faceed9` (la fixture : UPSTREAM, `corpus.sh`, outils),
+  `11de6a6` (le port, le Finder, les gardes, le harnais), puis les
+  documents et le rapport.
+- `harness/dealerdirect-07.sh` : 35 cas (31 comparés à Composer, 4
+  rendus), verts sous PHP 8.5.12 et 8.4.27. Rouge contre main 5768dc9, sur
+  les 33 cas d’alors (31 FAIL, 2 OK : `-v` et v0.7.1, déjà rendus). Mutations, une par
+  règle : liens de répertoire suivis 13 FAIL, `search_project` faux 23,
+  `is_file` 3, filtre des points sur le chemin absolu 2 (`dd-dot-parent`,
+  `dd-dot-vendor-dir`), sans filtre des points 14, gardes de la revue
+  retirées 2 (`dd-path-foreign`, `dd-v112-phpcs2`).
+- Corpus : UPSTREAM vu rouge (une somme faussée : `unavailable`, le chemin
+  nommé). chamilo-lms native dans les deux modes sous PHP 8.5 et 8.4
+  (« set to ../../mpdf,../../slevomat/coding-standard » des deux côtés) ;
+  les douze autres entrées à dealerdirect inchangées (onze natives dans
+  les deux modes, drupal rendue pour ses propres plugins). Comptes :
+  **95/106 `--no-dev`, 95/106 dev, 0 diff, 0 unavailable**
+  (`docs/corpus/2026-10-29-chamilo-dealerdirect.md` ; les 93 autres
+  entrées reprises du passage précédent, non rejouées).
+- Harnais existants rejoués : `plugin-lines.sh` 118 OK (binaire final),
+  `plugins-round3.sh` 52, `allow-plugins.sh` 58, `verbosity.sh` 310 (binaire
+  d'avant la revue, dont les ajouts ne sont que des gardes 0.7.2 et
+  phpcs 2).
+- `cargo fmt --check`, `clippy --all-targets -D warnings`, `cargo test`
+  (455 tests, 0 échec), `fixtures/make.sh`.
+- Non vérifié : Linux et Windows ; stdout et stderr séparément (le harnais
+  compare la sortie fusionnée, comme `plugin-lines.sh`).

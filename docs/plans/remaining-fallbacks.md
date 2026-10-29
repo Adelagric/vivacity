@@ -86,6 +86,12 @@ celle de la dernière entrée du nom) part à Composer. `EMULATED_VERSIONS` :
 
 ### B. dealerdirect v0.7.2 — portable, non porté (mesure impossible sur le corpus)
 
+> **Suite (2026-10-29, `docs/plans/chamilo-dealerdirect.md`)** : porté, et la
+> fixture chamilo complétée au moment de la mesure (quinze fichiers legacy
+> tirés au commit épinglé, sommes commitées dans `UPSTREAM`, rien de GPL
+> commité) ; chamilo-lms native dans les deux modes. Le texte ci-dessous
+> est l'état du 2026-10-29 avant ce chantier.
+
 Différences avec v1.2.1 (diff lu) : la recherche part **toujours** de la
 racine du projet (`$searchPaths = [cwd]`, pas seulement quand la racine est
 de type `phpcodesniffer-standard`) ; `--config-show` par `phpcs` du `PATH`

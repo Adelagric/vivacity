@@ -4826,3 +4826,81 @@ d'une délégation (doc). Laissés, consignés au HANDOVER : `config` refuse
 sort en 1 et `config` répond (hors du cache) ; la branche `cygpath -m` presque morte (MSYS
 convertit déjà `/c/…` pour un binaire natif), gardée comme demandé. La notice à chaque run sous `cache: 'false'` a été retirée à la
 vérification : un cache coupé exprès se dit dans le journal, pas en annotation.
+
+## 2026-10-29 — chamilo-lms : dealerdirect v0.7.2 porté, la fixture complétée au moment de la mesure (docs/plans/chamilo-dealerdirect.md)
+
+**Constat.** chamilo-lms (dev) restait rendue : dealerdirect v0.7.2 non
+émulé, et la référence échouait sur la fixture (phpcs charge
+`vendor/autoload.php`, dont `public/legacy.php` `require` treize fichiers
+absents, puis la classe `Database` d'un répertoire `classmap` absent).
+Porter seul aurait fait passer l'entrée de `fallback` à `unavailable`.
+Choix de l'utilisateur : les deux.
+
+**La fixture.** Mesuré : les treize fichiers + `database.lib.php`
+suffisent ; la référence écrit alors « set to
+../../mpdf,../../slevomat/coding-standard » (`vendor/mpdf/mpdf/ruleset.xml`,
+une bibliothèque, à la profondeur 3 : la recherche dans tout le projet
+propre à 0.7.2). Ces fichiers sont GPL-3.0-or-later : ils ne sont **pas
+commités**. `fixtures/corpus/chamilo-lms/UPSTREAM` porte le commit
+épinglé et la somme SHA-256 de chaque fichier ; `harness/corpus.sh` les
+télécharge (`raw.githubusercontent.com`) au moment du double install,
+avant le commit git de la copie, les range en cache après vérification et
+les revérifie à chaque usage ; un fichier manquant ou altéré classe
+l'entrée `unavailable`, nommée. Quinze fichiers, 903 Ko : `legacy.php`
+lui-même (commité jusque-là, il reste dans l'historique) y passe. Le scan
+hors ligne n'en a pas besoin (vérifié). `tools/corpus-upstream.sh` écrit
+la liste ; `tools/corpus-add.sh` la réécrit au nouveau commit d'un
+rafraîchissement. Alternative écartée (proposée par la méta-analyse) : des
+fichiers vides à la place — sans réseau ni GPL, et Composer écrit la même
+chose, mais la fixture mesurerait un projet qui n'existe pas ; la consigne
+était les vrais fichiers au commit épinglé, et deux classes de plus
+entrent dans la classmap (comparée à l'octet).
+
+**Le port.** Lu au tag (`1c968e5`, MIT, copie sous
+`docs/reference/plugins/phpcodesniffer-composer-installer-v0.7.2/`), diff
+contre 1.2.1 : la racine du projet est toujours un chemin de recherche ;
+`$alternativePath` comme v1.0–1.2.0 ; `--config-show` par le `phpcs` du
+`PATH`. `phpcs_installer::variant` porte les deux différences. En lisant
+le Finder que Composer 2.10.3 embarque (symfony/finder v5.4.45), trois
+écarts de `find_rulesets`, vrais pour toutes les versions : les
+composants à point sont écartés (relativement à chaque racine de
+recherche), les liens de répertoire ne sont pas parcourus (une racine qui
+est un lien est lue), un `ruleset.xml` lien pendant compte. Invisibles
+pour 1.x tant que les standards n'ont ni dossier à point ni lien,
+décisifs pour 0.7.2 qui parcourt `.github/`, `node_modules/`… Corrigés
+pour toutes les versions (cas 1.2.1 à racine standard au harnais, rouge
+sur main).
+
+**Gardes** (rendus nommés, avant toute écriture, aussi sur le lock résolu
+d'un `update`) : phpcs 2 avec une version avant v1.2.0 (`./scripts/phpcs`,
+non mesuré — v1.0.0 à v1.1.2 ont la même branche) ; phpcs en version de
+branche, instable ou aliasé (`isPHPCodeSnifferInstalled('>= 3.0.0')`
+suit les contraintes de Composer) ; `extra.phpcodesniffer-search-depth`
+autre qu'un entier supérieur à la profondeur minimale (le plugin lève, ou
+convertit une chaîne) ; pour 0.7.2, le bin-dir déjà dans le `PATH` après
+un autre `phpcs` (`ensureBinDirIsInPath` ne préfixe pas un répertoire
+présent : Composer lit alors la conf de cet autre phpcs, mesuré par la
+revue) et un `PATH` sans `php`.
+
+**Ce qui reste vrai.** `phpcs` exécute le PHP du projet : quand il plante,
+Composer imprime « Failed to set … » sans rien écrire, vivacity écrit la
+conf. Imprévisible sans exécuter phpcs, pour toutes les versions ; le
+corpus classe ce cas `unavailable` (c'était chamilo). Piste non suivie
+ici : exécuter phpcs comme le plugin (vivacity lance déjà `patch` pour
+composer-patcher), qui reproduirait l'échec au lieu de le supposer absent.
+
+Méta-analyse (douze failles) et revue indépendante (dix points) : au plan.
+
+Harnais `harness/dealerdirect-07.sh` (35 cas) : vert sous PHP 8.5.12 et
+8.4.27 ; contre le binaire de main 5768dc9, sur les 33 cas d’alors : 31 FAIL / 2 OK (`-v` et
+v0.7.1, déjà rendus) ; chaque règle du Finder et chaque garde de la revue
+vue rouge en la retirant (liens suivis : 13 FAIL, recherche du projet
+coupée : 23, `is_file` : 3, filtre des points sur le chemin absolu : 2,
+sans filtre : 14, gardes `PATH` et phpcs 2 : 2). `plugin-lines.sh` (118),
+`plugins-round3.sh` (52), `allow-plugins.sh` (58), `verbosity.sh` (310)
+verts. `cargo test` : 455 tests, 0 échec.
+
+Corpus (`docs/corpus/2026-10-29-chamilo-dealerdirect.md`) : les treize
+entrées à dealerdirect rejouées dans les deux modes (chamilo-lms aussi sous
+PHP 8.4), les 93 autres reprises du passage précédent : **95/106 natives
+en `--no-dev`, 95/106 en dev** (94 avant), 0 diff, 0 unavailable.
