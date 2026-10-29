@@ -22,6 +22,8 @@ mod fallback;
 use fallback::*;
 mod flex_install;
 use flex_install::*;
+mod config;
+use config::*;
 mod dump;
 use dump::*;
 mod remove;
@@ -63,6 +65,8 @@ enum Cli {
     /// Add packages to composer.json, then update (drop-in `composer require`).
     #[command(alias = "r")]
     Require(RequireArgs),
+    /// Print Composer's cache directory as vivacity uses it (`config --global cache-dir` only).
+    Config(ConfigArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -632,7 +636,9 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // whole, before anything is read or written — at every level, for every
     // type of root (the version reaches installed.php). No working copy of
     // them above the project (the common case): a few `stat`s, no process.
-    if let Ok(project) = project_dir(cli.working_dir()) {
+    // `config --global` loads no root package.
+    let loads_root = !matches!(cli, Cli::Config(_));
+    if let (true, Ok(project)) = (loads_root, project_dir(cli.working_dir())) {
         if let Some(vcs) = foreign_vcs_root(&project) {
             return delegate_for_verbosity(
                 tail,
@@ -753,6 +759,7 @@ impl Cli {
             Cli::Update(a) => a.working_dir.as_deref(),
             Cli::Remove(a) => a.working_dir.as_deref(),
             Cli::Require(a) => a.working_dir.as_deref(),
+            Cli::Config(_) => None,
         }
     }
 
@@ -763,7 +770,7 @@ impl Cli {
             Cli::Update(a) => !a.no_install && !a.dry_run,
             Cli::Require(a) => !a.no_install && !a.no_update && !a.dry_run,
             Cli::Remove(a) => !a.no_install && !a.no_update && !a.dry_run,
-            Cli::Install(_) | Cli::DumpAutoload(_) => false,
+            Cli::Install(_) | Cli::DumpAutoload(_) | Cli::Config(_) => false,
         }
     }
 
@@ -772,7 +779,7 @@ impl Cli {
         match self {
             Cli::Install(a) => a.run_scripts,
             Cli::DumpAutoload(a) => a.run_scripts,
-            Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) => false,
+            Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) | Cli::Config(_) => false,
         }
     }
 
@@ -783,6 +790,7 @@ impl Cli {
             Cli::Update(a) => a.no_plugins,
             Cli::Remove(a) => a.no_plugins,
             Cli::Require(a) => a.no_plugins,
+            Cli::Config(_) => true,
         }
     }
 
@@ -791,9 +799,10 @@ impl Cli {
     /// cache directory under `--working-dir`, which Composer resolves from
     /// there (`Config::realpath`, after `Application::doRun`'s `chdir`)
     /// where vivacity, which never changes directory, would not.
-    /// `dump-autoload` reads no cache.
+    /// `dump-autoload` reads no cache; `config` answers on its own.
     fn cache_dir_hand_over(&self) -> Option<String> {
         let reads_cache = match self {
+            Cli::Config(_) => return None,
             Cli::DumpAutoload(_) => false,
             Cli::Install(_) | Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) => true,
         };
@@ -814,6 +823,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Cli::Update(args) => run_update(&args),
         Cli::Remove(args) => run_remove(&args),
         Cli::Require(args) => require::run_require(&args),
+        Cli::Config(args) => run_config(&args),
     }
 }
 

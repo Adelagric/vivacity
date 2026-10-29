@@ -79,3 +79,33 @@ fn composer_global_options_parse_on_every_command() {
         2
     );
 }
+
+/// `config --global cache-dir` is answered (the cache directory, on
+/// stdout, exit 0, as `composer config --global cache-dir`); every other
+/// form of `config` stays a usage error.
+#[test]
+fn config_answers_the_global_cache_dir_only() {
+    assert_eq!(
+        vivacity::run(["vivacity", "config", "--global", "cache-dir"]),
+        0
+    );
+    assert_eq!(vivacity::run(["vivacity", "config", "-g", "cache-dir"]), 0);
+    assert_eq!(
+        vivacity::run(["vivacity", "config", "cache-dir", "--global"]),
+        0
+    );
+    for other in [
+        &["config"][..],
+        &["config", "cache-dir"],
+        &["config", "--global"],
+        &["config", "--global", "vendor-dir"],
+        &["config", "--list"],
+        &["config", "--global", "cache-dir", "extra"],
+        &["config", "--global", "cache-dir", "/new/value"],
+    ] {
+        let argv: Vec<&str> = std::iter::once("vivacity")
+            .chain(other.iter().copied())
+            .collect();
+        assert_eq!(vivacity::run(argv), 2, "{other:?}");
+    }
+}
