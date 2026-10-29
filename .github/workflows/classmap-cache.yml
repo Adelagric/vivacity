@@ -13,10 +13,19 @@ on:
         required: false
         default: "10"
 
+# Read-only: the bench installs third-party packages with the job's token
+# within reach (COMPOSER_AUTH below), as ci.yml does.
+permissions:
+  contents: read
+
 jobs:
   classmap-cache:
     name: classmap-cache (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # ~300 zipballs from api.github.com per run: with the job's token, not
+    # anonymously from a runner IP shared with others (DECISIONS 2026-10-29).
+    env:
+      COMPOSER_AUTH: ${{ format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
     defaults:
       run:
         shell: bash
