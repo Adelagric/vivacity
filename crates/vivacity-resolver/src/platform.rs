@@ -37,6 +37,64 @@ pub fn is_platform_package(name: &str) -> bool {
     re.is_match(name.as_bytes()).unwrap_or(false)
 }
 
+/// The PHP executable the probe runs: `VIVACITY_PHP`, else `php`.
+pub fn php_command() -> String {
+    std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned())
+}
+
+/// Whether a PHP can be started at all, as the probe starts it
+/// (`Command::new(php_command())`). The executable found by [`locate_php`]
+/// answers without a process; otherwise the start itself is tried and the
+/// child stopped at once — the OS's own lookup (`.exe` appended to an
+/// explicit Windows path, the application and system directories, the
+/// default path of `execvp`) has the last word. Only a start that fails
+/// because there is nothing to run (`NotFound`, `PermissionDenied`) means
+/// no PHP; a PHP that starts and then fails is not missing: its probe
+/// error is the answer.
+pub fn php_launchable() -> bool {
+    let php = php_command();
+    if locate_php(&php).is_some() {
+        return true;
+    }
+    match Command::new(&php)
+        .arg("-v")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        Err(e) => !matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        ),
+    }
+}
+
+/// Whether the platform repository answers the same for `name` with no
+/// PHP to probe as with any PHP (docs/plans/update-without-php.md): a name
+/// outside the platform, one of the three `composer*` packages, or a name
+/// `config.platform` gives a version to. Everything else — php*, hhvm,
+/// ext-*, lib-*, and a name disabled with `false` — depends on the PHP:
+/// `false` removes the package of that name only, while `ext-uuid` still
+/// replaces `lib-uuid` and libraries provide other `lib-*` names.
+pub fn known_without_php(name: &str, overrides: &Map<String, Value>) -> bool {
+    let lower = name.to_lowercase();
+    !is_platform_package(name)
+        || ["composer", "composer-plugin-api", "composer-runtime-api"].contains(&lower.as_str())
+        // The last key of that name wins (`PlatformRepository` lowercases
+        // the keys in order).
+        || overrides
+            .iter()
+            .rev()
+            .find(|(k, _)| k.to_lowercase() == lower)
+            .is_some_and(|(_, v)| v.is_string())
+}
+
 /// A raw probe entry.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Probed {
@@ -365,7 +423,7 @@ fn probe_cache_file() -> std::path::PathBuf {
 /// 40 ms where a stale cache costs a lock Composer would not write.
 /// `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it outright.
 pub fn probe() -> Result<Vec<Value>, PlatformError> {
-    let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
+    let php = php_command();
     if std::env::var_os("VIVACITY_NO_PLATFORM_CACHE").is_some() {
         return run_probe(&php).map(|r| r.entries);
     }
@@ -1208,6 +1266,71 @@ mod tests {
             locate_php(&dir.path().join("missing").to_string_lossy()),
             None
         );
+    }
+
+    #[test]
+    fn known_without_php_is_what_no_probe_can_change() {
+        let overrides: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"PHP": "8.1.0", "ext-intl": "72.1", "lib-uuid": false, "EXT-GD": "2.0", "ext-gd": false}"#,
+        )
+        .expect("json");
+        for known in [
+            "acme/lib",
+            "ext-foo/bar",
+            "composer",
+            "Composer-Plugin-API",
+            "composer-runtime-api",
+            "php",
+            "ext-intl",
+        ] {
+            assert!(super::known_without_php(known, &overrides), "{known}");
+        }
+        for unknown in [
+            "php-64bit",
+            "hhvm",
+            "ext-json",
+            "lib-icu",
+            // Disabled by name only: ext-uuid still replaces it.
+            "lib-uuid",
+            // The last key wins: disabled.
+            "ext-gd",
+        ] {
+            assert!(!super::known_without_php(unknown, &overrides), "{unknown}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn php_launchable_follows_the_start_not_the_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |php: &std::path::Path| {
+            std::process::Command::new(std::env::current_exe().expect("exe"))
+                .args([
+                    "--exact",
+                    "platform::tests::php_launchable_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("VIVACITY_PHP", php)
+                .output()
+                .expect("child")
+        };
+        let missing = run(&dir.path().join("absent"));
+        assert!(String::from_utf8_lossy(&missing.stdout).contains("launchable=false"));
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "").expect("write");
+        let not_executable = run(&plain);
+        assert!(String::from_utf8_lossy(&not_executable.stdout).contains("launchable=false"));
+        let fails = run(std::path::Path::new("/usr/bin/false"));
+        assert!(String::from_utf8_lossy(&fails.stdout).contains("launchable=true"));
+    }
+
+    /// Run by [`php_launchable_follows_the_start_not_the_lookup`] in a child
+    /// process, with its own `VIVACITY_PHP`.
+    #[test]
+    #[ignore]
+    fn php_launchable_child() {
+        println!("launchable={}", super::php_launchable());
     }
 
     #[test]

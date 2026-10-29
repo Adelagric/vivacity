@@ -85,6 +85,41 @@ impl SessionError {
     }
 }
 
+/// What vivacity does not reproduce: the reason, for the caller to name.
+fn unsupported(message: String) -> SessionError {
+    SessionError {
+        kind: SessionErrorKind::Unsupported,
+        ..SessionError::new(message)
+    }
+}
+
+/// `RuleSetGenerator`'s same-name rule (`getNames(false)`: the name and the
+/// `replace` targets, RuleSetGenerator.php:176-179 and 243-248) is not
+/// filtered by `--ignore-platform-reqs`: a package replacing a platform name
+/// conflicts with the fixed platform package of that name when the PHP has
+/// it. Without PHP that is unknowable: the first such package, named.
+fn replaced_platform_name(
+    packages: &[usize],
+    arena: &[Package],
+    overrides: &Map<String, Value>,
+) -> Option<String> {
+    packages.iter().find_map(|&idx| {
+        let p = &arena[idx];
+        if p.origin == Origin::Platform {
+            return None;
+        }
+        p.replaces
+            .iter()
+            .find(|l| !crate::platform::known_without_php(&l.target, overrides))
+            .map(|l| {
+                format!(
+                    "{} replaces {}, which conflicts with the platform package of that name when the PHP has it, and only a PHP can say",
+                    p.pretty_name, l.target
+                )
+            })
+    })
+}
+
 impl From<PoolError> for SessionError {
     fn from(e: PoolError) -> SessionError {
         let transport = e.is_transport();
@@ -379,6 +414,12 @@ pub struct UpdateOptions {
     /// `isLocked()` is false and the update runs without a locked
     /// repository, whatever composer.lock holds (Factory.php:423-429).
     pub ignore_lock: bool,
+    /// No PHP can be started and the command ignores every platform
+    /// requirement (docs/plans/update-without-php.md): no probe, the
+    /// platform is the `composer*` packages and `config.platform`'s
+    /// overrides, and what would depend on the real platform is refused
+    /// as [`SessionErrorKind::Unsupported`], named.
+    pub php_absent: bool,
 }
 
 impl UpdateOptions {
@@ -521,6 +562,8 @@ pub struct UpdateSession {
     /// `Installer::$devMode` (`--no-dev` / `--update-no-dev` clear it):
     /// only the `--no-dev` warning of an unsolvable set reads it.
     pub installer_dev_mode: bool,
+    /// [`UpdateOptions::php_absent`]: the platform was not probed.
+    pub php_absent: bool,
 }
 
 impl UpdateSession {
@@ -619,12 +662,31 @@ impl UpdateSession {
         // then become the pool's temporary constraints.
         let temporary_constraints =
             temporary_constraints(&options.temporary_requirements, &mut root)?;
-        let probed = probe().map_err(SessionError::from)?;
+        // `PoolBuilder` applies a temporary constraint to the fixed platform
+        // packages too (PoolBuilder.php:292-318): one that drops a probed
+        // package is Composer's `LogicException`, which no PHP means no
+        // way to reproduce.
+        if options.php_absent {
+            if let Some(name) = temporary_constraints
+                .keys()
+                .find(|n| !crate::platform::known_without_php(n, &config.platform))
+            {
+                return Err(unsupported(format!(
+                    "the temporary constraint on {name} applies to the platform package of that name, which only a PHP can report"
+                )));
+            }
+        }
+        let probed = if options.php_absent {
+            None
+        } else {
+            Some(probe().map_err(SessionError::from)?)
+        };
         // `PHP_MAJOR_VERSION.PHP_MINOR_VERSION.PHP_RELEASE_VERSION` of the
         // actual PHP (no `config.platform.php` here): the first three
         // numbers of PHP_VERSION.
         let php_version = probed
             .iter()
+            .flatten()
             .find(|p| p.get("name").and_then(Value::as_str) == Some("php"))
             .and_then(|p| p.get("version").and_then(Value::as_str))
             .map(|v| {
@@ -636,7 +698,8 @@ impl UpdateSession {
             })
             .unwrap_or_default();
         let platform_pkgs =
-            platform_packages(&probed, &config.platform).map_err(SessionError::from)?;
+            platform_packages(probed.as_deref().unwrap_or_default(), &config.platform)
+                .map_err(SessionError::from)?;
 
         let mut arena: Vec<Package> = Vec::new();
 
@@ -811,9 +874,16 @@ impl UpdateSession {
             prefer_lowest: false,
             php_version,
             policy_config,
-            ini_files: crate::platform::ini_files(&probed),
-            loaded_extensions: crate::platform::loaded_extensions(&probed),
+            ini_files: probed
+                .as_deref()
+                .map(crate::platform::ini_files)
+                .unwrap_or_default(),
+            loaded_extensions: probed
+                .as_deref()
+                .map(crate::platform::loaded_extensions)
+                .unwrap_or_default(),
             installer_dev_mode: true,
+            php_absent: options.php_absent,
         })
     }
 
@@ -958,6 +1028,9 @@ impl UpdateSession {
             Ok(t) => t,
             Err(SolveError::Problems(problems)) => {
                 drop(solver);
+                if let Some(reason) = self.extension_problem_without_php(&problems) {
+                    return Err(unsupported(reason));
+                }
                 // `Installer::extractDevPackages`: `$isDevExtraction`, on a
                 // request without lock built for this solve.
                 let pretty = {
@@ -993,6 +1066,21 @@ impl UpdateSession {
         };
         transaction.set_non_dev_packages(&self.arena, &non_dev);
         Ok(())
+    }
+
+    /// Without PHP, an unsolvable set whose explanation would end with the
+    /// extension hint (`getExtensionProblems`: a rule requiring a name that
+    /// starts with `ext-`), which lists the probed PHP's ini files.
+    fn extension_problem_without_php(
+        &self,
+        problems: &[crate::solver::SolvedProblem],
+    ) -> Option<String> {
+        if !self.php_absent {
+            return None;
+        }
+        crate::problem::extension_problem(&self.arena, problems).map(|name| {
+            format!("the explanation of this unsolvable set (a requirement on {name}) lists the PHP's ini files, which only a PHP can report")
+        })
     }
 
     /// `extractPlatformRequirements($links)`.
@@ -1068,14 +1156,26 @@ impl UpdateSession {
         };
         let mut policy = self.policy();
         let pool = self.create_filtered_pool()?;
-        // `Installer::doUpdate`: the pool is built (Flex's notice comes out
-        // of it), then `Updating dependencies`, then the policy filters'
-        // warnings as they happened.
+        if self.php_absent {
+            if let Some(reason) =
+                replaced_platform_name(&pool.packages, &self.arena, &self.config.platform)
+            {
+                return Err(unsupported(reason));
+            }
+        }
+        // `Installer::doUpdate`: the pool is built — the builder's own
+        // warnings as it loads (the update allow list, PoolBuilder.php:216;
+        // a root requirement kept locked, :539 and :569), then Flex's notice
+        // at `PRE_POOL_CREATE` (:328) — then `Updating dependencies`, then
+        // the policy filters' warnings as they happened.
+        for w in &pool.warnings {
+            vivacity_core::say!("{w}");
+        }
         if let Some(notice) = &pool.flex_notice {
             vivacity_core::say!("{notice}");
         }
         vivacity_core::say!("Updating dependencies");
-        for w in &pool.warnings {
+        for w in &pool.filter_warnings {
             vivacity_core::say!("{w}");
         }
         lap("pool", &t);
@@ -1094,6 +1194,9 @@ impl UpdateSession {
                 r
             }
             Err(SolveError::Problems(problems)) => {
+                if let Some(reason) = self.extension_problem_without_php(&problems) {
+                    return Err(unsupported(reason));
+                }
                 // `Solver::solve` wrote its duration before throwing.
                 say_event(&completed);
                 // `Installer::doUpdate`: the headline, the pretty problems,
@@ -1282,6 +1385,7 @@ impl UpdateSession {
         // The policy filters rebuild the pool: what PRE_POOL_CREATE noted
         // rides along.
         let flex_notice = pool.flex_notice.take();
+        let builder_warnings = std::mem::take(&mut pool.warnings);
         let mut warnings = Vec::new();
         pool = crate::pool_filters::security_advisory_filter(
             pool,
@@ -1302,7 +1406,9 @@ impl UpdateSession {
             &mut warnings,
         )
         .map_err(SessionError::from)?;
-        pool.warnings.extend(warnings);
+        pool.filter_warnings = std::mem::take(&mut pool.warnings);
+        pool.filter_warnings.extend(warnings);
+        pool.warnings = builder_warnings;
         pool.flex_notice = flex_notice;
         if std::env::var_os("VIVACITY_TRACE").is_some() {
             eprintln!(

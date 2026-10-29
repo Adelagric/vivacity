@@ -638,10 +638,31 @@ when that executable is the one the probe reports as `PHP_BINARY` and the
 files it loaded can be listed; otherwise it runs each time (~40 ms).
 Without any PHP, `install` from a lock still works (it ignores the
 requirements on php, its extensions and libraries, as there is no runtime
-to check them against); `update`, `require`, `remove`, and an `install`
-with no lock, exit 1 (`cannot run php`). A hand-over to
-Composer, for what vivacity does not reproduce, still needs `composer` and
-its PHP on the `PATH`.
+to check them against). `update`, `require`, `remove`, and an `install`
+with no lock, work under `--ignore-platform-reqs` (or
+`COMPOSER_IGNORE_PLATFORM_REQS=1`): Composer then skips every rule on a
+platform package, so its output with a PHP is the reference, and vivacity
+resolves on the `composer*` packages and the `config.platform` overrides
+alone. What still depends on the real platform stops with exit 3 and is
+named, never guessed: a `require` of php, an extension or a library with
+no version constraint; a package that `replace`s one of them; a `--with`
+constraint on one; an unsolvable set whose explanation would list the
+PHP's ini files; `-v`, whose counts include the platform packages. One
+line may differ, by choice: `N package suggestions were added by new
+dependencies`. Composer leaves out the suggestions its PHP provides
+(php-64bit, the extensions it loads); with no PHP, vivacity leaves out
+only the `composer*` packages and the `config.platform` names that have a
+version, so its N can be higher, never lower (Laravel's fixture from
+scratch: 95 against 49). Declaring, with a version in `config.platform`,
+the suggested platform names the PHP provides (php-64bit included) brings
+it back to Composer's. Nothing compiles composer/installers 1.x
+either, so its PHP 8.4 deprecation lines are not printed, as on a PHP
+below 8.4. Without `--ignore-platform-reqs` these
+commands exit 1 and say so (an `--ignore-platform-req` list or
+`config.platform` leaves the extensions to PHP). A hand-over to Composer,
+for what vivacity does not reproduce, needs `composer` and its PHP on the
+`PATH`; a run that resolves without PHP never hands over, it stops with
+exit 3 and its reasons.
 
 Embedding brings in vivacity's HTTP stack (reqwest over rustls). The default
 feature `rustls-tls-ring` bundles the ring crypto provider — right for the

@@ -33,6 +33,7 @@ mod effect_plugins;
 mod flex;
 mod flex_recipes;
 mod no_install;
+mod no_php;
 mod plugin_allow;
 mod plugin_order;
 mod require;
@@ -567,6 +568,8 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     if let Ok(mut a) = ARGV.lock() {
         *a = argv.clone();
     }
+    // The previous run's PHP decision (`vivacity::run` called again).
+    no_php::reset();
     // The run's verbosity, computed as Symfony Console computes Composer's
     // (`Application::configureIO`), and reset when the run ends.
     let tokens: Vec<String> = argv
@@ -599,6 +602,10 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // verbosity.
     let tail = &argv[1..];
     let check_scope = tail.iter().any(|t| t == "--check-scope");
+    // A command that will resolve without PHP: the hand-overs below stop
+    // instead (Composer would need a PHP too).
+    let (resolves, ignore_all) = cli.resolves_ignoring_platform();
+    no_php::decide_early(resolves && !check_scope, ignore_all);
     if requested >= 3 && !check_scope {
         let reason = "-vv/-vvv, Composer's debug output";
         return delegate_for_verbosity(tail, reason, &format!("drop {reason}"));
@@ -772,6 +779,26 @@ impl Cli {
             Cli::Remove(a) => !a.no_install && !a.no_update && !a.dry_run,
             Cli::Install(_) | Cli::DumpAutoload(_) | Cli::Config(_) => false,
         }
+    }
+
+    /// The command resolves (`update`, `require`, `remove` without
+    /// `--no-update`, an `install` with no composer.lock) and ignores every
+    /// platform requirement (`--ignore-platform-reqs`, or
+    /// `COMPOSER_IGNORE_PLATFORM_REQS`): what `no_php::decide_early` reads.
+    fn resolves_ignoring_platform(&self) -> (bool, bool) {
+        let (resolves, all, list) = match self {
+            Cli::Update(a) => (true, a.ignore_platform_reqs, &a.ignore_platform_req),
+            Cli::Require(a) => (true, a.ignore_platform_reqs, &a.ignore_platform_req),
+            Cli::Remove(a) => (!a.no_update, a.ignore_platform_reqs, &a.ignore_platform_req),
+            Cli::Install(a) => (
+                project_dir(a.working_dir.as_deref())
+                    .is_ok_and(|p| !p.join("composer.lock").exists()),
+                a.ignore_platform_reqs,
+                &a.ignore_platform_req,
+            ),
+            Cli::DumpAutoload(_) | Cli::Config(_) => return (false, false),
+        };
+        (resolves, platform_requirement_env(all, list, false).0)
     }
 
     /// `--run-scripts` (`install` and `dump-autoload` only).

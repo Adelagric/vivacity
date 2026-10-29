@@ -177,6 +177,14 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     if let Some(code) = refuse_missing_manifest(&project_dir(args.working_dir.as_deref())?) {
         return Ok(code);
     }
+    // PHP or not, decided before anything is printed or written.
+    let (ignore_all, _) =
+        platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, false);
+    if let crate::no_php::Decision::Stop(code) =
+        crate::no_php::decide("update", ignore_all, true, args.no_fallback)?
+    {
+        return Ok(code);
+    }
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
     for p in &args.packages {
@@ -531,6 +539,8 @@ pub(crate) fn resolve_and_lock(
     let mut options = options;
     // `config.lock: false`: the update runs without the lock's packages.
     options.ignore_lock |= !config_lock_enabled(&manifest_text);
+    // No PHP, decided by the command (`no_php::decide`).
+    options.php_absent = crate::no_php::absent();
     if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
         // `RootPackage::load` refuses these too, but through the error path,
         // which prefixes the message; here it is worded as Composer words it.
@@ -718,6 +728,13 @@ pub(crate) fn resolve_and_lock(
             activate()?;
             print_session_error(&e);
             return Ok(Resolved::stopped(2));
+        }
+        // Without PHP, what depends on the real platform (`no_php`).
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            return Ok(Resolved {
+                hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(e.message)),
+                ..Resolved::stopped(0)
+            });
         }
         Err(e) => return Err(session_error(e)),
     };
@@ -1047,6 +1064,31 @@ pub(crate) fn post_update_report(
     fresh_install: bool,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let count = counted_suggestions(session, ops, lock, manifest_text, fresh_install).len();
+    if count > 0 {
+        out.push(format!(
+            "{count} package suggestions were added by new dependencies, use `composer suggest` to see details."
+        ));
+    }
+    out.extend(abandoned_warnings(lock));
+    out
+}
+
+/// The suggestions `SuggestedPackagesReporter::outputMinimalistic` counts
+/// after an update, as (source pretty name, target): those of the packages
+/// this update installs, plus the root's own on a fresh install, minus the
+/// targets another installed package — of the new lock, the platform or the
+/// root — provides (`getFilteredSuggestions`). Without PHP the platform
+/// holds the `composer*` packages and `config.platform`'s versioned
+/// overrides only: any other platform name counts as not provided — an
+/// upper bound of Composer's count (DECISIONS 2026-10-29).
+fn counted_suggestions(
+    session: &vivacity_resolver::session::UpdateSession,
+    ops: &[vivacity_resolver::transaction::Operation],
+    lock: &serde_json::Value,
+    manifest_text: &str,
+    fresh_install: bool,
+) -> Vec<(String, String)> {
     use vivacity_resolver::transaction::Operation;
     let manifest: serde_json::Value = serde_json::from_str(manifest_text).unwrap_or_default();
     // (source pretty name, target)
@@ -1119,23 +1161,14 @@ pub(crate) fn post_update_report(
         }
         let root = &session.root.package;
         add_names(&root.name, root.names(true));
-        let count = suggestions
-            .iter()
-            .filter(|(source, target)| {
-                let source_lower = source.to_lowercase();
-                !installed_names
-                    .get(target)
-                    .is_some_and(|providers| providers.iter().any(|p| *p != source_lower))
-            })
-            .count();
-        if count > 0 {
-            out.push(format!(
-                "{count} package suggestions were added by new dependencies, use `composer suggest` to see details."
-            ));
-        }
+        suggestions.retain(|(source, target)| {
+            let source_lower = source.to_lowercase();
+            !installed_names
+                .get(target)
+                .is_some_and(|providers| providers.iter().any(|p| *p != source_lower))
+        });
     }
-    out.extend(abandoned_warnings(lock));
-    out
+    suggestions
 }
 
 /// Minimal `join_all` (no futures dependency): the tasks run concurrently

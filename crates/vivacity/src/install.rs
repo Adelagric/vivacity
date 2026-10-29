@@ -314,6 +314,17 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
             "Lockfile creation is disabled in config."
         }
     );
+    // PHP or not, decided before the resolution prints anything (not for
+    // `--check-scope`, which resolves nothing).
+    if !args.check_scope {
+        let (ignore_all, _) =
+            platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, false);
+        if let crate::no_php::Decision::Stop(code) =
+            crate::no_php::decide("install", ignore_all, true, args.no_fallback)?
+        {
+            return Ok(code);
+        }
+    }
     if args.check_scope || args.run_scripts {
         let report = vivacity_core::scope::ScopeReport {
             issues: vec![vivacity_core::scope::ScopeIssue::Layout(format!(
