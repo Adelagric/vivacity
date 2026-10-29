@@ -105,9 +105,10 @@ runs:
           why="the cache directory $dir disables Composer's cache"
         fi
         if [ "$VIVACITY_CACHE_INPUT" != "true" ]; then
-          why="cache is '$VIVACITY_CACHE_INPUT'"
-        fi
-        if [ -n "$why" ]; then
+          # Asked for: said in the log, not as an annotation on every run.
+          echo "Not cached: cache is '$VIVACITY_CACHE_INPUT'"
+          echo "cacheable=false" >> "$GITHUB_OUTPUT"
+        elif [ -n "$why" ]; then
           echo "::notice title=vivacity::Composer's cache directory is not cached: $why"
           echo "cacheable=false" >> "$GITHUB_OUTPUT"
         else

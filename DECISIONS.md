@@ -4823,6 +4823,6 @@ Windows dans la comparaison (soupçon), l'affirmation « stderr à l'octet »
 d'une délégation (doc). Laissés, consignés au HANDOVER : `config` refuse
 `-q`/`-n`/`--no-ansi`/`-d` (la consigne : toute autre forme sort en 2) ;
 `COMPOSER_BIN_COMPAT` invalide ou `./composer.json` invalide, où Composer
-sort en 1 et `config` répond (hors du cache) ; la notice à chaque run sous
-`cache: 'false'` (demandée) ; la branche `cygpath -m` presque morte (MSYS
-convertit déjà `/c/…` pour un binaire natif), gardée comme demandé.
+sort en 1 et `config` répond (hors du cache) ; la branche `cygpath -m` presque morte (MSYS
+convertit déjà `/c/…` pour un binaire natif), gardée comme demandé. La notice à chaque run sous `cache: 'false'` a été retirée à la
+vérification : un cache coupé exprès se dit dans le journal, pas en annotation.

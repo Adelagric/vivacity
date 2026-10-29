@@ -375,7 +375,7 @@ comportement, non vendorés.
     `COMPOSER_BIN_COMPAT` ou un `./composer.json` invalides font sortir
     Composer en 1, vivacity répond ; une délégation de `config` ajoute la
     ligne `vivacity: delegating to …` sur stderr ;
-  - l'action : `cache: 'false'` écrit une notice à chaque run ; une entrée
+  - l'action : `cache: 'false'` le dit dans le journal, sans notice ; une entrée
     `version:` antérieure à cette version n'a pas `config` et coupe le
     cache (notice) ; la valeur résolue l'est dans bash — MSYS convertit
     `/c/…` pour le binaire natif, si bien que `cygpath -m` ne sert presque
