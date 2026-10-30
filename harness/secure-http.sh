@@ -47,7 +47,7 @@ export COLUMNS=400 COMPOSER_HOME="$WORK/home" COMPOSER_NO_INTERACTION=1 COMPOSER
 echo '{}' > "$WORK/home/config.json"
 
 # Les zips : acme/<nom>, un fichier chacun.
-NAMES="a b c r s p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14"
+NAMES="a b c r s x p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14"
 for n in $NAMES; do
   php -r '
     $z = new ZipArchive();
@@ -79,6 +79,13 @@ printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "avail
 # seulement une fois la résolution faite.
 printf '{"packages": {"acme/t": [{"name": "acme/t", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "require": {"acme/a": "1.0.0"}, "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/t.json"
 printf '{"packages": {"acme/t": []}}\n' > "$WORK/srv/p2/acme/t~dev.json"
+# acme/x : 2.0.0 (dist local) et 1.0.0 (dist en `http://`), hors de `^2.0`.
+printf '{"packages": {"acme/x": [{"name": "acme/x", "version": "2.0.0", "version_normalized": "2.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}, {"name": "acme/x", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "http://old.test/x-1.zip"}}]}}\n' "$WORK/srv/dist/x.zip" > "$WORK/srv/p2/acme/x.json"
+printf '{"packages": {"acme/x": []}}\n' > "$WORK/srv/p2/acme/x~dev.json"
+# Un dépôt `file://` à la Satis : packages.json n'a que des `includes`.
+mkdir -p "$WORK/srvsatis/include"
+printf '{"packages": {"acme/a": {"1.0.0": {"name": "acme/a", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "http://dist.test/dist/a.zip"}}}}}\n' > "$WORK/srvsatis/include/all.json"
+printf '{"packages": [], "includes": {"include/all.json": {}}}\n' > "$WORK/srvsatis/packages.json"
 # Un dépôt `file://` dont l'`api-url` d'avis est en `http://`.
 mkdir -p "$WORK/srvadv"
 printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["acme/*"], "security-advisories": {"metadata": false, "api-url": "http://repo.test/api"}}\n' "$WORK/srv" > "$WORK/srvadv/packages.json"
@@ -163,6 +170,8 @@ seed samehost "{\"name\": \"vivacity/secure-http-samehost\", \"type\": \"project
 seed filemeta "{\"name\": \"vivacity/secure-http-filemeta\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvmeta\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\"}}"
 seed filel "{\"name\": \"vivacity/secure-http-filel\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 seed filet "{\"name\": \"vivacity/secure-http-filet\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/t\": \"1.0.0\"}}"
+seed filex "{\"name\": \"vivacity/secure-http-filex\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\", \"acme/x\": \"^2.0\"}}"
+seed satis "{\"name\": \"vivacity/secure-http-satis\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvsatis\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\"}}"
 seed adv "{\"name\": \"vivacity/secure-http-adv\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvadv\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 # Un dist sans requête (chemin local) : rien de non sûr.
 seed local "{\"name\": \"vivacity/secure-http-local\", \"type\": \"project\", \"repositories\": [{\"type\": \"package\", \"package\": {\"name\": \"acme/l\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"$WORK/srv/dist/a.zip\"}}}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
@@ -408,10 +417,19 @@ want update-file-repo && case_ update-file-repo filerepo 'delegates:secure-http'
 # … mais seulement ceux des paquets que la résolution lit : le dépôt sert
 # aussi acme/a, b, c (dists `http://`), que Composer ne lit pas ici.
 want update-file-repo-unrelated && case_ update-file-repo-unrelated filel native -- update
-# Un dist `http://` qu'une dépendance nouvelle amène (acme/t → acme/a) : vu
-# une fois la résolution faite, délégation tardive — les lignes écrites
-# doivent être le début de celles de Composer.
-want late-transitive && case_ late-transitive filet 'delegates:secure-http' late nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# Un dist `http://` qu'une dépendance amène (acme/t → acme/a) : la fermeture
+# des `require` sur les fichiers locaux, comme `PoolBuilder` la lit — rendu
+# avant tout.
+want transitive-file-repo && case_ transitive-file-repo filet 'delegates:secure-http' nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# Seuls les fichiers et les versions que le pool charge : `update acme/l`
+# laisse acme/x verrouillé (son fichier n'est pas lu), `update` lit acme/x
+# mais sa 1.0.0 (dist `http://`) est hors de `^2.0`.
+want partial-locked-http && case_ partial-locked-http filex native installed 'expect:Nothing to install, update or remove' -- update acme/l
+want full-outside-constraint && case_ full-outside-constraint filex native installed 'expect:Nothing to install, update or remove' -- update
+# Un dépôt local à `includes` (`loadIncludes`) : ses dists sont lus aussi.
+want satis-includes && case_ satis-includes satis 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# `allow_ssl_downgrade` : Composer relirait le dépôt en `http` — rendu.
+want ssl-downgrade && case_ ssl-downgrade filel 'delegates:allow_ssl_downgrade' 'jq:.repositories[0].allow_ssl_downgrade=true' -- update --no-install
 want require-file-repo && case_ require-file-repo filerepo 'delegates:secure-http' 'jq:del(.require["acme/a"])' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/a:1.0.0
 # 5. Des métadonnées `http://` derrière un dépôt `file://` : refusées au
 # chargement (l'avertissement du dépôt dégradé, puis l'exception, que
