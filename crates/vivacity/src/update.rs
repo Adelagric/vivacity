@@ -552,7 +552,9 @@ pub(crate) fn resolve_and_lock(
     let project = project_dir(args.working_dir.as_deref())?;
     refuse_alternate_manifest()?;
     let manifest_path = project.join("composer.json");
-    let manifest_text = std::fs::read_to_string(&manifest_path)
+    // `require`/`remove`'s edit, held back while the run holds its output
+    // (`io::write_held`), is the manifest.
+    let manifest_text = vivacity_core::io::read_held(&manifest_path)
         .with_context(|| format!("cannot read {}", manifest_path.display()))?;
     let installer_dev_mode = !(args.no_dev || env_no_dev());
     let mut options = options;
@@ -850,6 +852,12 @@ pub(crate) fn resolve_and_lock(
         }
         Err(e) => return Err(session_error(e)),
     };
+    // `require`/`remove`'s edit, held back until the pool (`io::write_held`),
+    // could not be written then: the error an immediate write would have
+    // given, before anything else is written.
+    if let Some(why) = vivacity_core::io::take_held_write_error() {
+        anyhow::bail!("{why}");
+    }
     trace("resolve", t0);
 
     // Under -v, a plugin the install phase would activate and whose lines

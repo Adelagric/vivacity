@@ -32,8 +32,11 @@ struct Files {
 }
 
 impl Files {
-    /// `revertComposerFile`.
+    /// `revertComposerFile`. An edit still held back (`io::write_held`) is
+    /// dropped first: Composer wrote it, then writes the original back —
+    /// as this does — or deletes the file it created (and the lock).
     fn revert(&self) -> anyhow::Result<()> {
+        vivacity_core::io::cancel_held_write();
         if self.newly_created {
             vivacity_core::say!("\nInstallation failed, deleting {}.", self.file_label);
             let _ = std::fs::remove_file(&self.json);
@@ -64,6 +67,12 @@ impl Files {
     /// hand-over to Composer decided once the resolution is solved: the
     /// lock is not written yet, so it stays as it is.
     fn undo_edit(&self) -> anyhow::Result<()> {
+        // Held back (`io::write_held`), or never edited (`--dry-run`): the
+        // file was never touched.
+        if vivacity_core::io::cancel_held_write() || !vivacity_core::io::manifest_written() {
+            return Ok(());
+        }
+        crate::fallback::manifest_restored(self.newly_created);
         if self.newly_created {
             let _ = std::fs::remove_file(&self.json);
         } else {
@@ -113,8 +122,8 @@ fn update_file(
     remove_key: &str,
     sort_packages: bool,
 ) -> anyhow::Result<()> {
-    let contents =
-        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let contents = vivacity_core::io::read_held(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
     let mut manipulator = JsonManipulator::new(&contents).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut clean = true;
     for (package, constraint) in new {
@@ -137,7 +146,7 @@ fn update_file(
         manipulator
             .remove_main_key_if_empty(remove_key)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        std::fs::write(path, manipulator.contents())
+        vivacity_core::io::write_held(path, &manipulator.contents())
             .with_context(|| format!("cannot write {}", path.display()))?;
         return Ok(());
     }
@@ -171,7 +180,8 @@ fn update_file(
         text = vivacity_resolver::config_source::reindent(&text, &indent);
     }
     text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    vivacity_core::io::write_held(path, &text)
+        .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
 }
 
@@ -338,6 +348,56 @@ fn find_best_version_and_name(
     )
 }
 
+/// The session `requireComposer()` gives `require`'s version discovery,
+/// on the manifest as it is (a created one included). `Err(code)`: how the
+/// command ends instead — handed to Composer for a repository vivacity
+/// cannot read as Composer does (nothing edited yet), or Composer's
+/// `TransportException` for one it cannot reach either (exit 100).
+fn discovery_session(
+    project: &Path,
+    args: &RequireArgs,
+    newly_created: bool,
+    files: &Files,
+    file_label: &str,
+) -> anyhow::Result<Result<UpdateSession, anyhow::Result<i32>>> {
+    let home = vivacity_core::fetch::composer_home();
+    let http = http_transport(project, args.offline)?;
+    let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
+    let session = UpdateSession::prepare_update(
+        project,
+        home.as_deref(),
+        true,
+        Some(http),
+        Some(&cache_repo_dir),
+        &UpdateOptions {
+            ignore_lock: true,
+            ..UpdateOptions::default()
+        },
+    );
+    Ok(match session {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            if newly_created {
+                files.undo_edit()?;
+            }
+            Err(crate::delegate_resolution(
+                &[vivacity_core::scope::ScopeIssue::Layout(e.message)],
+                args.no_fallback,
+            ))
+        }
+        Err(e) => {
+            if newly_created {
+                files.revert()?;
+                let message = format!("No composer.json present in the current directory ({file_label}), this may be the cause of the following exception.\n{e}");
+                return Ok(Err(Err(crate::session_error(
+                    vivacity_resolver::session::SessionError { message, ..e },
+                ))));
+            }
+            Err(Err(crate::session_error(e)))
+        }
+    })
+}
+
 pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `BaseCommand::initialize`: the root-version warning before anything
     // `RequireCommand` prints; written again by `doUpdate`, below.
@@ -371,6 +431,13 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // The lock, parsed once (`Locker::isLocked` below reads it): before the
     // edit, so that a partial update's fixed packages are judged on it then.
     let mut early_lock: Option<Result<Value, serde_json::Error>> = None;
+    // Whether the run holds its output (`secure-http` under its trigger):
+    // decided once for the run (`hold_trigger` keeps it).
+    let mut hold = false;
+    let pairs = parse_name_version_pairs(&args.packages);
+    // `--no-update` with every constraint given: no version to discover,
+    // nothing resolves, no repository opened.
+    let no_resolution = args.no_update && pairs.iter().all(|(_, v)| v.is_some());
     // Plugins that change what `require` resolves or writes: decided on
     // the manifest as it is, before this command edits it.
     if !newly_created {
@@ -416,7 +483,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             )? {
                 return Ok(code);
             }
-            if crate::config_lock_enabled_in(&manifest) {
+            // Not for `--no-update`, which resolves nothing.
+            if !args.no_update && crate::config_lock_enabled_in(&manifest) {
                 early_lock = std::fs::read_to_string(&lock)
                     .ok()
                     .map(|t| serde_json::from_str::<Value>(&t));
@@ -432,10 +500,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
                 &crate::PoolStart {
                     lock: early_lock.as_ref().and_then(|r| r.as_ref().ok()),
-                    added: parse_name_version_pairs(&args.packages)
-                        .into_iter()
-                        .map(|(n, v)| (n, v.unwrap_or_else(|| "*".to_owned())))
+                    added: pairs
+                        .iter()
+                        .map(|(n, v)| (n.clone(), v.clone().unwrap_or_else(|| "*".to_owned())))
                         .collect(),
+                    no_resolution,
                     mode: if args.update_with_all_dependencies
                         || args.with_all_dependencies
                         || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES")
@@ -458,16 +527,29 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             // version discovery, « has been updated », « Running composer
             // update », the resolution's loading — is held until the pool,
             // so that a hand-over then prints nothing (composer.json, edited
-            // by then, is put back).
-            if !args.no_update && crate::fallback::hold_trigger(&manifest) {
-                crate::fallback::start_holding("the pool is built");
+            // in memory by then, is never written).
+            hold = !args.no_update && crate::fallback::hold_trigger(&manifest);
+            if no_resolution {
+                if let Some(issue) = crate::fallback::unregistered_repository_issue(&manifest) {
+                    return crate::delegate_resolution(&[issue], args.no_fallback);
+                }
             }
         }
-    } else if !args.no_update && crate::fallback::hold_trigger(&serde_json::json!({})) {
+    } else {
+        let none = serde_json::json!({});
+        hold = !args.no_update && crate::fallback::hold_trigger(&none);
+        if no_resolution {
+            if let Some(issue) = crate::fallback::unregistered_repository_issue(&none) {
+                return crate::delegate_resolution(&[issue], args.no_fallback);
+            }
+        }
+    }
+    if hold {
         crate::fallback::start_holding("the pool is built");
     }
     if newly_created {
-        std::fs::write(&json, "{\n}\n")
+        // Held back under the hold, like the edit (`io::write_held`).
+        vivacity_core::io::write_held(&json, "{\n}\n")
             .with_context(|| format!("{file_label} could not be created."))?;
     }
     // An empty composer.json: `BaseCommand::initialize` (`tryComposer`)
@@ -478,11 +560,13 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         json: json.clone(),
         lock: lock.clone(),
         newly_created,
-        composer_backup: std::fs::read_to_string(&json)
+        composer_backup: vivacity_core::io::read_held(&json)
             .with_context(|| format!("{file_label} is not readable."))?,
-        // `if ($this->lockBackup)`: an empty lock does not count.
-        lock_backup: std::fs::read_to_string(&lock)
-            .ok()
+        // `if ($this->lockBackup)`: an empty lock does not count. Not read
+        // for `--no-update`, which never reverts it.
+        lock_backup: (!args.no_update)
+            .then(|| std::fs::read_to_string(&lock).ok())
+            .flatten()
             .filter(|t| !t.is_empty()),
     };
     let manifest: Value = serde_json::from_str(&files.composer_backup)
@@ -505,52 +589,29 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // `requireComposer()` + the composite repository [platform, repos]: the
     // resolution session provides both, on the current manifest. The lock
     // plays no part in choosing a version (`PackageDiscoveryTrait::getRepos`):
-    // it is first read by the update, after the edit.
-    let home = vivacity_core::fetch::composer_home();
-    let http = http_transport(&project, args.offline)?;
-    let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
-    let session = UpdateSession::prepare_update(
-        &project,
-        home.as_deref(),
-        true,
-        Some(http),
-        Some(&cache_repo_dir),
-        &UpdateOptions {
-            ignore_lock: true,
-            ..UpdateOptions::default()
-        },
-    );
-    let mut session = match session {
-        Ok(s) => s,
-        // A repository vivacity cannot read as Composer does: the command
-        // goes to Composer, nothing edited yet.
-        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
-            if newly_created {
-                let _ = std::fs::remove_file(&json);
-            }
-            return crate::delegate_resolution(
-                &[vivacity_core::scope::ScopeIssue::Layout(e.message)],
-                args.no_fallback,
-            );
-        }
-        // A repository Composer cannot reach either is its
-        // `TransportException`: exit 100 (`crate::session_error`), the
-        // message unchanged.
-        Err(e) => {
-            if newly_created {
-                files.revert()?;
-                let message = format!("No composer.json present in the current directory ({file_label}), this may be the cause of the following exception.\n{e}");
-                return Err(crate::session_error(
-                    vivacity_resolver::session::SessionError { message, ..e },
-                ));
-            }
-            return Err(crate::session_error(e));
+    // it is first read by the update, after the edit. `--no-update` with
+    // every constraint given: no version to discover, so no repository is
+    // queried (Composer instantiates them, nothing more) — none is opened
+    // here either; only the root's name is needed.
+    let mut session = if no_resolution {
+        None
+    } else {
+        match discovery_session(&project, args, newly_created, &files, &file_label)? {
+            Ok(s) => Some(s),
+            Err(ended) => return ended,
         }
     };
-    let preferred_stability = if session.root.prefer_stable {
-        "stable".to_owned()
-    } else {
-        session.root.minimum_stability.clone()
+    let preferred_stability = match &session {
+        Some(s) if s.root.prefer_stable => "stable".to_owned(),
+        Some(s) => s.root.minimum_stability.clone(),
+        None => String::new(),
+    };
+    let root_name = match &session {
+        Some(s) => s.root.package.name.clone(),
+        None => match manifest.get("name").and_then(Value::as_str) {
+            Some(name) => name.to_lowercase(),
+            None => "__root__".to_owned(),
+        },
     };
     let (ignore_all, ignore_list) = crate::platform_requirement_env(
         args.ignore_platform_reqs,
@@ -564,7 +625,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     } else {
         PlatformRequirementFilter::IgnoreNothing
     };
-    let platform_overrides = session.config.platform.clone();
+    let platform_overrides = session
+        .as_ref()
+        .map(|s| s.config.platform.clone())
+        .unwrap_or_default();
 
     // `determineRequirements`.
     for p in &args.packages {
@@ -588,7 +652,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             Some(v) => requirements.push((name, v)),
             None => {
                 let guessed = find_best_version_and_name(
-                    &mut session,
+                    session
+                        .as_mut()
+                        .expect("a version to discover opens the session"),
                     &name,
                     &filter,
                     &preferred_stability,
@@ -601,8 +667,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                     // recover from (`secure-http`): its run, nothing edited
                     // (a composer.json this run created goes).
                     Err(e) if e.downcast_ref::<crate::HandOverReason>().is_some() => {
+                        // Silently: Composer creates the file again (a
+                        // lock already there stays, for its partial update).
                         if newly_created {
-                            files.revert()?;
+                            files.undo_edit()?;
                         }
                         let reason = e.to_string();
                         return crate::delegate_resolution(
@@ -649,7 +717,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         }
     }
     for (name, constraint) in &requirements {
-        if name.to_lowercase() == session.root.package.name {
+        if name.to_lowercase() == root_name {
             vivacity_core::say!("Root package '{name}' cannot require itself in its composer.json");
             return Ok(1);
         }
@@ -714,7 +782,10 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         vivacity_core::say!("{line}");
     }
     if !args.no_plugins {
-        if let Some(written) = vivacity_core::jsonfile::read(&json) {
+        if let Some(written) = vivacity_core::io::read_held(&json)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        {
             for w in crate::plugin_allow::load_for(&project, &written).warnings {
                 vivacity_core::say!("{w}");
             }
@@ -921,7 +992,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             &json,
             &lock,
             &manifest,
-            &session,
+            session
+                .as_ref()
+                .expect("a guessed version opened the session"),
             resolved.lock.as_ref(),
             lock_enabled,
             &to_guess,

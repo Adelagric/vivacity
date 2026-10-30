@@ -614,7 +614,9 @@ impl UpdateSession {
     ) -> Result<UpdateSession, SessionError> {
         let partial_update = !options.allow_list.is_empty();
         let manifest_path = project_dir.join("composer.json");
-        let manifest_text = std::fs::read_to_string(&manifest_path)
+        // `require`/`remove`'s edit, held back while the run holds its
+        // output (`io::write_held`), is the manifest.
+        let manifest_text = vivacity_core::io::read_held(&manifest_path)
             .map_err(|e| SessionError::new(format!("{}: {e}", manifest_path.display())))?;
         let manifest: Value = serde_json::from_str(&manifest_text)
             .map_err(|e| SessionError::new(format!("{}: {e}", manifest_path.display())))?;

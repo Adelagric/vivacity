@@ -158,6 +158,23 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         crate::fallback::start_holding("the pool is built");
     }
     let backup = manifest_text.clone();
+    // Under the hold the edit is held back (`io::write_held`): a hand-over
+    // forgets it, the file untouched; otherwise the original goes back.
+    let undo_edit = || -> anyhow::Result<()> {
+        // Held back, or never edited (`--dry-run`, or no argument matched
+        // a link): the file was never touched.
+        if vivacity_core::io::cancel_held_write() || !vivacity_core::io::manifest_written() {
+            return Ok(());
+        }
+        crate::fallback::manifest_restored(false);
+        std::fs::write(&file, &backup).with_context(|| format!("cannot restore {}", file.display()))
+    };
+    // « Removal failed, reverting »: Composer wrote the edit, then writes
+    // the original back.
+    let revert = || -> anyhow::Result<()> {
+        vivacity_core::io::cancel_held_write();
+        std::fs::write(&file, &backup).with_context(|| format!("cannot restore {}", file.display()))
+    };
     let json = JsonConfigSource::new(&file);
     let (link_type, alt_type) = if args.dev {
         ("require-dev", "require")
@@ -250,7 +267,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     }
     // `allow-plugins`: the merged config (project then global); entries
     // whose key is a removed package are dropped from composer.json.
-    let updated: serde_json::Value = std::fs::read_to_string(&file)
+    let updated: serde_json::Value = vivacity_core::io::read_held(&file)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
@@ -272,8 +289,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
             None => None,
         };
         if let Some(issue) = issue {
-            std::fs::write(&file, &backup)
-                .with_context(|| format!("cannot restore {}", file.display()))?;
+            undo_edit()?;
             return crate::delegate_resolution(&[issue], args.no_fallback);
         }
     }
@@ -421,9 +437,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // counts.
     // An exception (transport, invalid manifest) propagates without a
     // restore; only a non-zero status from `Installer::run` restores.
-    let ended = run_update_resolved(&update_args, options, false, false, &|| {
-        std::fs::write(&file, &backup).with_context(|| format!("cannot restore {}", file.display()))
-    })?;
+    let ended = run_update_resolved(&update_args, options, false, false, &undo_edit)?;
     // Composer ran `remove` itself, from the manifest as it was.
     if ended.by_composer {
         return Ok(ended.status);
@@ -431,8 +445,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     let status = ended.status;
     if status != 0 {
         vivacity_core::say!("\nRemoval failed, reverting {file_label} to its original content.");
-        std::fs::write(&file, &backup)
-            .with_context(|| format!("cannot restore {}", file.display()))?;
+        revert()?;
     }
     // Is the package still in the local repository? That repository is
     // vendor/composer/installed.json minus the packages whose install path

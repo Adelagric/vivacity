@@ -123,6 +123,31 @@ pub(crate) fn resolution_fallback(
 /// `VIVACITY_HOLD_OUTPUT=force` holds whatever the configuration (the
 /// harnesses: no local `https` server stands in for a remote repository).
 pub(crate) fn hold_trigger(manifest: &serde_json::Value) -> bool {
+    // Decided once per run: `require`/`remove` before their edit, which
+    // touches no repository; the resolution and the install phase that
+    // follow ask again.
+    let mut memo = HOLD_TRIGGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(decided) = *memo {
+        return decided;
+    }
+    let decided = evaluate_hold_trigger(manifest);
+    *memo = Some(decided);
+    decided
+}
+
+/// [`hold_trigger`] for the run (`None`: not decided yet).
+static HOLD_TRIGGER: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// A new run decides again.
+pub(crate) fn forget_hold_trigger() {
+    *HOLD_TRIGGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+fn evaluate_hold_trigger(manifest: &serde_json::Value) -> bool {
     if std::env::var("VIVACITY_HOLD_OUTPUT").as_deref() == Ok("force") {
         return true;
     }
@@ -194,9 +219,57 @@ pub(crate) struct PoolStart<'a> {
     pub removed: Vec<String>,
     /// The lock, when the command has it in memory already (`remove`).
     pub lock: Option<&'a serde_json::Value>,
-    /// The command resolves nothing (`remove --no-update`): no repository
-    /// is opened, nothing about them counts.
+    /// The command resolves nothing (`remove --no-update`, `require
+    /// --no-update` with every constraint given): no repository is opened,
+    /// nothing about them counts.
     pub no_resolution: bool,
+}
+
+/// `require --no-update` with every constraint given resolves nothing, but
+/// `requireComposer()` (RequireCommand.php:193) still instantiates every
+/// repository of the merged configuration: one its `RepositoryManager`
+/// refuses — a type it does not register (`pear` included: removed in 2.x),
+/// no type, no `url` where the class needs one — stops Composer before the
+/// edit. The run is Composer's then. A test on the configuration in memory.
+pub(crate) fn unregistered_repository_issue(
+    manifest: &serde_json::Value,
+) -> Option<vivacity_core::scope::ScopeIssue> {
+    use serde_json::Value;
+    let home = vivacity_core::fetch::composer_home();
+    let issue = |why: String| Some(vivacity_core::scope::ScopeIssue::Layout(why));
+    let config = match vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return issue(e.message),
+    };
+    for repo in &config.repositories {
+        let def = &repo.definition;
+        let named = match &repo.key {
+            vivacity_resolver::session::RepoKey::Named(n) => n.clone(),
+            vivacity_resolver::session::RepoKey::Indexed(i) => i.to_string(),
+        };
+        let Some(kind) = def.get("type").and_then(Value::as_str) else {
+            return issue(format!("repository {named} has no type"));
+        };
+        match kind {
+            "package" => {}
+            "composer" | "vcs" | "git" | "bitbucket" | "git-bitbucket" | "github" | "gitlab"
+            | "svn" | "fossil" | "perforce" | "hg" | "artifact" | "path" => {
+                if !def
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| !u.is_empty())
+                {
+                    return issue(format!("repository {named} has no url"));
+                }
+            }
+            other => {
+                return issue(format!(
+                    "repository {named} of type \"{other}\", which Composer does not register"
+                ))
+            }
+        }
+    }
+    None
 }
 
 /// The first `composer` repository of the merged configuration (the global
@@ -603,6 +676,26 @@ fn pool_scope(
     }
 }
 
+/// composer.json written by `require`/`remove` and put back before a
+/// hand-over ([`manifest_restored`]): the `--no-fallback` reason says so.
+/// 0: nothing; 1: put back; 2: created by `require`, then removed.
+static MANIFEST_RESTORED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `require`/`remove` put composer.json back (it had been written), or
+/// removed the one `require` created: the reason of a run that stops says
+/// so rather than « nothing was written ».
+pub(crate) fn manifest_restored(created: bool) {
+    MANIFEST_RESTORED.store(
+        if created { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// A new run starts with nothing put back.
+pub(crate) fn forget_manifest_restored() {
+    MANIFEST_RESTORED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Prints the reasons, then re-runs the command under Composer (or stops
 /// with exit 3 under `--no-fallback`): the command line as it was given,
 /// through [`forwarded_arguments`] — `--no-scripts` added, vivacity never
@@ -648,7 +741,21 @@ pub(crate) fn delegate_resolution(
         reason_line(&format!("  - {issue}"));
     }
     if no_fallback {
-        vivacity_core::say_always!("--no-fallback given: stopping here (nothing was written).");
+        // What the run wrote to the project: nothing, or composer.json when
+        // `require`/`remove` edited it on disk (no hold) and put it back for
+        // this hand-over. Outside it, a hand-over decided once repositories
+        // were loaded leaves their cache (Composer's own) and vivacity's
+        // store probe.
+        let restored = MANIFEST_RESTORED.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if restored == 1 {
+            vivacity_core::say_always!("--no-fallback given: stopping here (composer.json was edited, then put back as it was; nothing else was written to the project).");
+        } else if restored == 2 {
+            vivacity_core::say_always!("--no-fallback given: stopping here (composer.json was created, then removed; nothing else was written to the project).");
+        } else {
+            vivacity_core::say_always!(
+                "--no-fallback given: stopping here (nothing was written to the project)."
+            );
+        }
         return Ok(3);
     }
     let Some(composer) = composer else {

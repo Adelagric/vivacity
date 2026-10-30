@@ -84,7 +84,8 @@ impl JsonConfigSource {
     /// `manipulateJson`: manipulator first, fallback to the full rewrite.
     fn manipulate(&self, edit: Edit<'_>) -> Result<()> {
         // `$this->file->exists()`: otherwise Composer starts from a skeleton.
-        let contents = match std::fs::read_to_string(&self.path) {
+        // An edit the run holds back is the file's content (`io::write_held`).
+        let contents = match vivacity_core::io::read_held(&self.path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 "{\n    \"config\": {\n    }\n}\n".to_owned()
@@ -175,14 +176,16 @@ impl JsonConfigSource {
         }
         text.push('\n');
         // `filePutContentsIfModified`.
-        if std::fs::read_to_string(&self.path).is_ok_and(|old| old == text) {
+        if vivacity_core::io::read_held(&self.path).is_ok_and(|old| old == text) {
             return Ok(());
         }
         self.write_text(&text)
     }
 
     fn write_text(&self, text: &str) -> Result<()> {
-        std::fs::write(&self.path, text).map_err(|source| ConfigSourceError::Write {
+        // Held back while the run holds its output: a hand-over decided
+        // before the pool leaves the file as it was.
+        vivacity_core::io::write_held(&self.path, text).map_err(|source| ConfigSourceError::Write {
             path: self.path.clone(),
             source,
         })

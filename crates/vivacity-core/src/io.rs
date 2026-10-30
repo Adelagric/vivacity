@@ -105,6 +105,10 @@ impl Drop for Scope {
         // Whatever a run still holds or defers is its own output: written,
         // not lost.
         release_output();
+        // A held edit whose write failed once nothing was left to stop on.
+        if let Some(why) = take_held_write_error() {
+            emit(false, format_args!("{why}"));
+        }
         release_deferred();
         drop_held();
         LEVEL.store(Verbosity::Normal as u8, Ordering::Relaxed);
@@ -204,6 +208,11 @@ fn flush_for_panic() {
     if holder != Some(std::thread::current().id()) {
         return;
     }
+    if let Ok(mut pending) = HELD_WRITE.try_lock() {
+        if let Some((path, text)) = pending.take() {
+            let _ = std::fs::write(path, text);
+        }
+    }
     if let Ok(mut deferred) = DEFERRED.try_lock() {
         DEFERRING.store(false, Ordering::Release);
         for (stdout, line) in deferred.drain(..) {
@@ -237,6 +246,9 @@ pub fn release_output() {
     if !HOLDING_OUTPUT.load(Ordering::Acquire) {
         return;
     }
+    // The run is its own: composer.json, edited in memory, goes to disk
+    // now, before the lines that follow its edit.
+    commit_held_write();
     release_held();
     let lines: Vec<(bool, String)> = {
         let mut slot = output();
@@ -254,9 +266,128 @@ pub fn drop_output() {
     if !HOLDING_OUTPUT.load(Ordering::Acquire) {
         return;
     }
+    // Composer edits composer.json itself, from the file as it was.
+    cancel_held_write();
     let mut slot = output();
     HOLDING_OUTPUT.store(false, Ordering::Release);
     slot.clear();
+}
+
+/// composer.json as `require`/`remove` edited it while the run holds its
+/// output: not on disk yet, so that a hand-over decided before the pool
+/// leaves the file untouched (the maintainer's contract: nothing written
+/// before a hand-over). Written by [`release_output`] — the pool is judged,
+/// or the run ends on its own (Composer leaves the edit on those exits) —
+/// and forgotten by [`drop_output`]. Everything that reads the file in
+/// between reads it here ([`read_held`]).
+static HELD_WRITE: Mutex<Option<(std::path::PathBuf, String)>> = Mutex::new(None);
+
+fn held_write() -> std::sync::MutexGuard<'static, Option<(std::path::PathBuf, String)>> {
+    HELD_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Writes `text` to `path`, or, while the run holds its output, keeps it
+/// for [`release_output`]. A file that could not be written then (not
+/// writable, or a directory that does not let it be created) is written
+/// now, so that the error is the one an immediate write gives.
+pub fn write_held(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if HOLDING_OUTPUT.load(Ordering::Acquire) && writable(path) {
+        *held_write() = Some((path.to_owned(), text.to_owned()));
+        return Ok(());
+    }
+    std::fs::write(path, text)?;
+    MANIFEST_WRITTEN.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Whether [`write_held`] wrote to disk in this run (a held edit counts
+/// once committed): a hand-over has something to put back.
+static MANIFEST_WRITTEN: AtomicBool = AtomicBool::new(false);
+
+/// See [`MANIFEST_WRITTEN`].
+pub fn manifest_written() -> bool {
+    MANIFEST_WRITTEN.load(Ordering::Acquire)
+}
+
+/// A held edit that could not be written when the output was released:
+/// the error, for the resolution to stop on ([`take_held_write_error`]).
+static HELD_WRITE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// The error of the held edit's write, if it failed.
+pub fn take_held_write_error() -> Option<String> {
+    HELD_WRITE_ERROR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+/// A new run: no edit held, none written, no error left.
+pub fn forget_held_write() {
+    held_write().take();
+    MANIFEST_WRITTEN.store(false, Ordering::Release);
+    take_held_write_error();
+}
+
+/// `path`'s content, the pending edit first ([`write_held`]).
+pub fn read_held(path: &std::path::Path) -> std::io::Result<String> {
+    if HOLDING_OUTPUT.load(Ordering::Acquire) {
+        if let Some((held, text)) = held_write().as_ref() {
+            if held.as_path() == path {
+                return Ok(text.clone());
+            }
+        }
+    }
+    std::fs::read_to_string(path)
+}
+
+/// Forgets the pending edit; `true` if there was one (the file on disk is
+/// then still as it was).
+pub fn cancel_held_write() -> bool {
+    held_write().take().is_some()
+}
+
+fn commit_held_write() {
+    let pending = held_write().take();
+    if let Some((path, text)) = pending {
+        match std::fs::write(&path, text) {
+            Ok(()) => MANIFEST_WRITTEN.store(true, Ordering::Release),
+            Err(e) => {
+                *HELD_WRITE_ERROR
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("cannot write {}: {e}", path.display()));
+            }
+        }
+    }
+}
+
+/// `is_writable` (an existing file), or whether the file can be created
+/// (its directory): `access(2)` where available, the read-only flag
+/// otherwise.
+fn writable(path: &std::path::Path) -> bool {
+    let target = if path.exists() {
+        path
+    } else {
+        match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => std::path::Path::new("."),
+        }
+    };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(target.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: a NUL-terminated path, read only.
+        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        std::fs::metadata(target).is_ok_and(|m| !m.permissions().readonly())
+    }
 }
 
 /// Keeps a line in the held output, if the run holds it; `false` otherwise.

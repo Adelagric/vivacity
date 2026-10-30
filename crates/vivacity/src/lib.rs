@@ -568,6 +568,9 @@ where
 fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // The configuration files are read once per run (`fetch::global_json`).
     vivacity_core::fetch::forget_global_files();
+    fallback::forget_manifest_restored();
+    fallback::forget_hold_trigger();
+    vivacity_core::io::forget_held_write();
     vivacity_resolver::repository::forget_preparsed();
     // Kept for the resolution fallback, which re-runs the whole command
     // under Composer with the same arguments.
@@ -869,12 +872,18 @@ impl Cli {
     /// `update-with-minimal-changes` for `update`, `require` and `remove`
     /// (`$input->getOption('minimal-changes') ||
     /// $config->get('update-with-minimal-changes')`): the option,
-    /// `COMPOSER_MINIMAL_CHANGES` (`(bool) getenv`), or the key as `Config`
-    /// merges it — composer.json's when set, the global config.json's
-    /// otherwise — in PHP truthiness (`"false"` is true: `Config::get`
-    /// leaves this key raw).
+    /// `COMPOSER_MINIMAL_CHANGES` (`(bool) getenv`), or the key as
+    /// `Factory` merges it under `config`, the last layer that sets it
+    /// winning — the global config.json, the global auth.json,
+    /// COMPOSER_AUTH, composer.json, the project's auth.json, COMPOSER_AUTH
+    /// again. The key is typed boolean in the schema: anything else fails
+    /// composer.json's validation and draws a warning from the other
+    /// layers', so the run is Composer's too (`"false"` included).
+    /// `--no-update` resolves nothing: the mode plays no part.
     fn minimal_changes(&self, manifest: Option<&serde_json::Value>) -> bool {
         let flag = match self {
+            Cli::Require(a) if a.no_update => return false,
+            Cli::Remove(a) if a.no_update => return false,
             Cli::Require(a) => a.minimal_changes,
             Cli::Remove(a) => a.minimal_changes,
             Cli::Update(a) => a.minimal_changes,
@@ -885,16 +894,58 @@ impl Cli {
         if flag || env {
             return true;
         }
-        let key = |c: Option<&serde_json::Value>| -> Option<serde_json::Value> {
-            c.and_then(|c| c.get("config"))
-                .and_then(|c| c.get("update-with-minimal-changes"))
-                .cloned()
+        const KEY: &str = "update-with-minimal-changes";
+        // One layer: its boolean, or `Err` for any other value.
+        let layer = |config: Option<&serde_json::Value>| -> Result<Option<bool>, ()> {
+            match config.and_then(|c| c.get(KEY)) {
+                None => Ok(None),
+                Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
+                Some(_) => Err(()),
+            }
         };
-        let value = key(manifest).or_else(|| {
-            vivacity_core::fetch::composer_home()
-                .and_then(|home| vivacity_core::fetch::with_global_json(&home, "config.json", key))
-        });
-        value.as_ref().is_some_and(crate::manifest::php_truthy)
+        let env_auth = match vivacity_core::fetch::composer_auth_env(
+            std::env::var("COMPOSER_AUTH").ok().as_deref(),
+        ) {
+            Ok(env) => env,
+            // Composer reports it (`startup_hand_over` hands it over first).
+            Err(_) => return true,
+        };
+        let home = vivacity_core::fetch::composer_home();
+        // The project's auth.json, kept for the run: the transport's
+        // `fetch::Auth::load` reads that copy, not the file again.
+        let project = project_dir(self.working_dir()).ok();
+        let mut layers: Vec<Result<Option<bool>, ()>> = Vec::with_capacity(6);
+        if let Some(home) = &home {
+            layers.push(vivacity_core::fetch::with_global_json(
+                home,
+                "config.json",
+                |c| layer(c.and_then(|c| c.get("config"))),
+            ));
+            layers.push(vivacity_core::fetch::with_global_json(
+                home,
+                "auth.json",
+                layer,
+            ));
+        }
+        layers.push(layer(env_auth.as_ref()));
+        layers.push(layer(manifest.and_then(|m| m.get("config"))));
+        if let Some(project) = &project {
+            layers.push(vivacity_core::fetch::with_global_json(
+                project,
+                "auth.json",
+                layer,
+            ));
+        }
+        layers.push(layer(env_auth.as_ref()));
+        let mut value = false;
+        for l in layers {
+            match l {
+                Ok(Some(b)) => value = b,
+                Ok(None) => {}
+                Err(()) => return true,
+            }
+        }
+        value
     }
 
     /// [`run_once`]'s whole-command hand-overs before anything: the cache

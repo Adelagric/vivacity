@@ -33,10 +33,12 @@ impl Auth {
 
     fn load_from(home: Option<&Path>, project_dir: &Path, composer_auth: Option<&str>) -> Auth {
         let mut auth = Auth::default();
+        // Through the run's copies (`global_json`): the startup reads them
+        // already (`update-with-minimal-changes`, `secure-http`).
         if let Some(home) = home {
-            auth.merge_json_file(&home.join("auth.json"));
+            auth.merge_json_file(home);
         }
-        auth.merge_json_file(&project_dir.join("auth.json"));
+        auth.merge_json_file(project_dir);
         if let Some(env) = composer_auth {
             if let Ok(v) = serde_json::from_str::<Value>(env) {
                 auth.merge_value(&v);
@@ -45,12 +47,13 @@ impl Auth {
         auth
     }
 
-    fn merge_json_file(&mut self, path: &Path) {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                self.merge_value(&v);
+    /// `dir`'s auth.json, when it is there and valid JSON.
+    fn merge_json_file(&mut self, dir: &Path) {
+        with_global_json(dir, "auth.json", |v| {
+            if let Some(v) = v {
+                self.merge_value(v);
             }
-        }
+        });
     }
 
     fn merge_value(&mut self, v: &Value) {
@@ -340,6 +343,9 @@ pub fn take_back_cached_dists() -> std::result::Result<(), String> {
 pub fn forget_global_files() {
     // (And the archives a previous run cached are its own.)
     let _ = take_cached_dists();
+    *COMPOSER_HOME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     GLOBAL_FILES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -689,8 +695,21 @@ fn cache_dir_hand_over_with(h: &dyn Host, reads_cache: bool) -> Option<String> {
 /// auth.json and composer.json (`Factory::getHomeDir`, expanded and
 /// trimmed). `None` where Composer stops.
 pub fn composer_home() -> Option<PathBuf> {
-    config_home(&RealHost).ok().map(PathBuf::from)
+    // Resolved once per run (`forget_global_files`): the trigger of the
+    // output hold, the configuration and auth readers all ask.
+    let mut memo = COMPOSER_HOME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(home) = memo.as_ref() {
+        return home.clone();
+    }
+    let home = config_home(&RealHost).ok().map(PathBuf::from);
+    *memo = Some(home.clone());
+    home
 }
+
+/// [`composer_home`] for the run (`None`: not resolved yet).
+static COMPOSER_HOME: std::sync::Mutex<Option<Option<PathBuf>>> = std::sync::Mutex::new(None);
 
 /// `composer config --global cache-dir`: the cache directory as Composer
 /// prints it (`Config::RELATIVE_PATHS`). `Err` (the reason) where Composer
