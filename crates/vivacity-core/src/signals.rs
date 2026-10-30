@@ -233,7 +233,9 @@ pub fn spawn_forwarding(
     };
     if forwarding {
         if let Ok(pid) = i32::try_from(child.id()) {
-            CHILD.store(pid, Ordering::Release);
+            // `SeqCst` on the four accesses of the `CHILD`/`PENDING` handover
+            // (here and in the thread): one side always sees the other's write.
+            CHILD.store(pid, Ordering::SeqCst);
             // The signals the caller ignores: the child has inherited the
             // ignore; one sent to vivacity alone is passed on from now.
             imp::install_ignored();
@@ -332,7 +334,14 @@ mod imp {
             if libc::getpid() == PID.load(Ordering::Relaxed) {
                 let mode = MODE.load(Ordering::Acquire);
                 let fd = WRITE_FD.load(Ordering::Acquire);
-                if mode != MODE_NONE && fd >= 0 && !(mode == MODE_FORWARD && from_terminal(info)) {
+                // A terminal signal is not forwarded once the child exists
+                // (it has it); before, it goes through `PENDING` like any.
+                if mode != MODE_NONE
+                    && fd >= 0
+                    && !(mode == MODE_FORWARD
+                        && CHILD.load(Ordering::SeqCst) != 0
+                        && from_terminal(info))
+                {
                     // Before anything else of the run goes on, as Composer's
                     // handler comes first.
                     if mode == MODE_REVERT && !ABORTING.swap(true, Ordering::AcqRel) {
@@ -421,8 +430,8 @@ mod imp {
                         // main thread, or here if its pid came meanwhile.
                         // (Several signals in that window: the last one.)
                         0 => {
-                            PENDING.store(signal, Ordering::Release);
-                            let pid = CHILD.load(Ordering::Acquire);
+                            PENDING.store(signal, Ordering::SeqCst);
+                            let pid = CHILD.load(Ordering::SeqCst);
                             if pid != 0 {
                                 forward_pending(pid);
                             }
@@ -526,7 +535,7 @@ mod imp {
 
     /// A signal that came while the child was being started.
     pub(super) fn forward_pending(pid: libc::c_int) {
-        let signal = PENDING.swap(0, Ordering::AcqRel);
+        let signal = PENDING.swap(0, Ordering::SeqCst);
         if signal != 0 {
             // SAFETY: the child this process just started.
             unsafe {
