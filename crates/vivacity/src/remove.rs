@@ -181,9 +181,6 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     } else {
         ("require", "require-dev")
     };
-    if args.update_with_dependencies {
-        vivacity_core::say!("You are using the deprecated option \"update-with-dependencies\". This is now default behaviour. The --no-update-with-dependencies option can be used to remove a package without its dependencies.");
-    }
     // `$composer[$linkType][strtolower($name)] = $name`: the lowercase keys
     // are added to the decoded array (the originals stay, and `array_keys`
     // sees them all).
@@ -228,6 +225,47 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     };
     let has_section = |section: &str| manifest.get(section).is_some_and(|v| !v.is_null());
     let dev_key = link_type == "require-dev";
+    // The second load of the plugins (RemoveCommand.php:216-222), on the
+    // manifest as the edit below leaves it: judged now, on that manifest in
+    // memory, so that one vivacity hands to Composer goes before the
+    // command's first line and before the edit — not after « has been
+    // updated », which Composer would print again. `--no-update` stops
+    // before that load; a dry run loads the manifest unedited.
+    let second_load = (!args.no_update && !args.no_plugins).then(|| {
+        let mut edited = manifest.clone();
+        if !dry_run {
+            let mut names: Vec<String> = Vec::new();
+            for package in &packages {
+                if let Some(name) = lookup(link_type, package) {
+                    names.push(name);
+                } else if lookup(alt_type, package).is_none() && has_section(link_type) {
+                    names.extend(grep(link_type, package));
+                }
+            }
+            if let Some(serde_json::Value::Object(section)) = edited.get_mut(link_type) {
+                section.retain(|k, _| !names.iter().any(|n| n.eq_ignore_ascii_case(k)));
+                if section.is_empty() {
+                    if let Some(root) = edited.as_object_mut() {
+                        root.shift_remove(link_type);
+                    }
+                }
+            }
+        }
+        crate::plugin_allow::load_for(&project, &edited)
+    });
+    if let Some(load) = &second_load {
+        let issue = match &load.hand_over {
+            Some(name) => Some(crate::plugin_allow::hand_over_issue(name)),
+            None if load.refusal.is_some() => crate::plugin_allow::root_issue(),
+            None => None,
+        };
+        if let Some(issue) = issue {
+            return crate::delegate_resolution(&[issue], args.no_fallback);
+        }
+    }
+    if args.update_with_dependencies {
+        vivacity_core::say!("You are using the deprecated option \"update-with-dependencies\". This is now default behaviour. The --no-update-with-dependencies option can be used to remove a package without its dependencies.");
+    }
     for package in &packages {
         if let Some(name) = lookup(link_type, package) {
             if dry_run {
@@ -281,18 +319,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         .into_iter()
         .flatten()
         .collect();
-    let second_load = (!args.no_plugins).then(|| crate::plugin_allow::load_for(&project, &updated));
-    if let Some(load) = &second_load {
-        let issue = match &load.hand_over {
-            Some(name) => Some(crate::plugin_allow::hand_over_issue(name)),
-            None if load.refusal.is_some() => crate::plugin_allow::root_issue(),
-            None => None,
-        };
-        if let Some(issue) = issue {
-            undo_edit()?;
-            return crate::delegate_resolution(&[issue], args.no_fallback);
-        }
-    }
+    // (`second_load`: judged before the edit, above.)
     for line in &held {
         vivacity_core::say!("{line}");
     }

@@ -296,6 +296,7 @@ fn held_write() -> std::sync::MutexGuard<'static, Option<(std::path::PathBuf, St
 /// writable, or a directory that does not let it be created) is written
 /// now, so that the error is the one an immediate write gives.
 pub fn write_held(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let _gate = crate::signals::write_gate();
     if HOLDING_OUTPUT.load(Ordering::Acquire) && writable(path) {
         *held_write() = Some((path.to_owned(), text.to_owned()));
         return Ok(());
@@ -352,6 +353,7 @@ pub fn cancel_held_write() -> bool {
 }
 
 fn commit_held_write() {
+    let _gate = crate::signals::write_gate();
     let pending = held_write().take();
     if let Some((path, text)) = pending {
         match std::fs::write(&path, text) {
@@ -423,6 +425,8 @@ fn pass_on(stdout: bool, line: String) {
 /// lines — or keeps it while the run holds or defers its output. The
 /// writing macros' body.
 pub fn emit(stdout: bool, line: std::fmt::Arguments<'_>) {
+    // A termination signal being handled: nothing more from this thread.
+    crate::signals::checkpoint();
     // Held output: the lines `Factory` held stay first, untouched, until
     // the output is released or dropped.
     if HOLDING_OUTPUT.load(Ordering::Acquire) && keep_output(stdout, &line.to_string()) {

@@ -970,7 +970,13 @@ impl Cli {
                     None,
                     vivacity_core::secure_http::disable_tls_reason(
                         manifest.as_ref().and_then(|m| m.get("config")),
-                    ),
+                    )
+                    .or_else(|| {
+                        crate::fallback::repository_construction_issue(
+                            project_dir(self.working_dir()).ok().as_deref(),
+                            manifest.as_ref(),
+                        )
+                    }),
                 );
             }
             Cli::DumpAutoload(_) => false,
@@ -990,6 +996,19 @@ impl Cli {
         .or_else(|| {
             self.minimal_changes(manifest.as_ref())
                 .then(|| "update-with-minimal-changes".to_owned())
+        })
+        // What creating the `Composer` refuses or warns about in a
+        // repository definition (`dump-autoload` checks it once it has read
+        // composer.json).
+        .or_else(|| {
+            reads_cache
+                .then(|| {
+                    crate::fallback::repository_construction_issue(
+                        project_dir(self.working_dir()).ok().as_deref(),
+                        manifest.as_ref(),
+                    )
+                })
+                .flatten()
         });
         if let Some(why) = vivacity_core::fetch::cache_dir_hand_over(reads_cache) {
             return (Some(why), tls);

@@ -1130,6 +1130,7 @@ pub(crate) fn resolve_and_lock(
     if write_lock && !args.dry_run {
         vivacity_core::say!("Writing lock file");
         if !unchanged {
+            let _gate = vivacity_core::signals::write_gate();
             std::fs::write(&lock_path, &text)
                 .with_context(|| format!("cannot write {}", lock_path.display()))?;
         }

@@ -649,6 +649,126 @@ fn take_preparsed(url: &str) -> Option<(Vec<u8>, Value)> {
     Some((bytes, value))
 }
 
+/// A local file, parsed: the copy a check of this run already keeps, or
+/// read and kept for the repository that reads it next.
+fn read_local(path: &str) -> Option<std::sync::Arc<Value>> {
+    let key = format!("file://{path}");
+    if HAS_PREPARSED.load(std::sync::atomic::Ordering::Acquire) {
+        if let Some((_, value)) = PREPARSED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Some(value.clone());
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let value = std::sync::Arc::new(serde_json::from_slice::<Value>(&bytes).ok()?);
+    keep_preparsed(key, bytes, value.clone());
+    Some(value)
+}
+
+/// What a local (`file://`) `composer` repository's packages.json declares
+/// that vivacity does not read, found where the run would stop on it later
+/// — decided on the file (read once, kept for the session), before the
+/// command prints anything. Each repository with its user `filter`
+/// configuration. For a resolution: the v1 protocol (`root_data`'s test:
+/// providers without `metadata-url`; refused when packages load from it —
+/// broader by a repository the pool would not query, a hand-over Composer
+/// would not need). Always: a list of `custom_lists` the repository
+/// advertises (`get_filter_lists`), which the pool filters refuse whether
+/// or not it blocks anything. For `install`, when the `malware` list blocks
+/// it: a filter `api-url` behind an advertised `malware` list — the
+/// `install` scope never loads metadata, so its list data would come from
+/// that API, not ported. `None` when a file cannot be read (the session
+/// reports it).
+pub fn local_unsupported(
+    repositories: &[(String, Option<Value>)],
+    custom_lists: &[String],
+    resolution: bool,
+    install_malware: bool,
+) -> Option<String> {
+    for (configured, user_filter) in repositories {
+        let urls = repo_urls(configured);
+        let Some(path) = urls.packages_json_url.strip_prefix("file://") else {
+            continue;
+        };
+        let Some(data) = read_local(path) else {
+            continue;
+        };
+        let non_empty = |k: &str| !php_empty(data.get(k));
+        let metadata = non_empty("metadata-url");
+        if resolution
+            && !metadata
+            && (non_empty("providers-url")
+                || non_empty("providers")
+                || non_empty("providers-includes")
+                || non_empty("providers-lazy-url"))
+        {
+            return Some(format!(
+                "{}: Composer v1 repository protocol (providers) is not supported by vivacity",
+                urls.url
+            ));
+        }
+        // `hasFilter()`: the filter is read with `metadata-url` only.
+        let Some(filter) = data
+            .get("filter")
+            .and_then(Value::as_object)
+            .filter(|f| metadata && !php_empty(f.get("metadata")))
+        else {
+            continue;
+        };
+        // The user `filter`: `false` turns the lists off, an object turns
+        // some off by name.
+        let disabled: Vec<String> = match user_filter {
+            Some(Value::Bool(false)) => continue,
+            Some(Value::Object(m)) => m
+                .iter()
+                .filter(|(_, v)| **v == Value::Bool(false))
+                .map(|(k, _)| k.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let advertised: Vec<&String> = filter
+            .get("lists")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(name, cfg)| {
+                cfg.as_object()
+                    .is_some_and(|c| !php_empty(c.get("enabled")))
+                    && !RESERVED_LIST_NAMES.contains(&name.as_str())
+                    && !name.starts_with("ignore")
+                    && !disabled.contains(name)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        // (`install` reads the lists only when `malware` blocks it.)
+        if let Some(list) = advertised
+            .iter()
+            .find(|l| (resolution || install_malware) && custom_lists.contains(l))
+        {
+            return Some(format!(
+                "custom policy list \"{list}\" is not supported by vivacity yet"
+            ));
+        }
+        if !resolution
+            && install_malware
+            && advertised.iter().any(|l| *l == "malware")
+            && filter
+                .get("api-url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty())
+        {
+            return Some(format!(
+                "{}: a filter api-url is not supported by vivacity yet",
+                urls.url
+            ));
+        }
+    }
+    None
+}
+
 /// A new run: what a previous one parsed is not its own.
 pub fn forget_preparsed() {
     if HAS_PREPARSED.swap(false, std::sync::atomic::Ordering::AcqRel) {
@@ -700,12 +820,7 @@ pub fn local_insecure_url(
         }
     };
     // Each file read once, kept for the repository that reads it next.
-    let read = |p: &str| -> Option<std::sync::Arc<Value>> {
-        let bytes = std::fs::read(p).ok()?;
-        let value = std::sync::Arc::new(serde_json::from_slice::<Value>(&bytes).ok()?);
-        keep_preparsed(format!("file://{p}"), bytes, value.clone());
-        Some(value)
-    };
+    let read = read_local;
     fn index_packages(
         into: &mut BTreeMap<String, Vec<(usize, String)>>,
         source: usize,

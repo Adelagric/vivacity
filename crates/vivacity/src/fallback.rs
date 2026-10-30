@@ -225,6 +225,234 @@ pub(crate) struct PoolStart<'a> {
     pub no_resolution: bool,
 }
 
+/// `install`'s pool filters on the lock (`verify_install`) on a local
+/// `composer` repository: a custom policy list it advertises, or a filter
+/// `api-url` its `malware` list would need (the `install` scope never loads
+/// metadata) — read now, before anything is printed. Nothing to do (no
+/// merge, no read) without a local `composer` repository in composer.json
+/// or the global config.json.
+pub(crate) fn local_install_issue(manifest: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    let local = |repos: Option<&Value>| -> bool {
+        let entries: Box<dyn Iterator<Item = &Value>> = match repos {
+            Some(Value::Array(a)) => Box::new(a.iter()),
+            Some(Value::Object(o)) => Box::new(o.values()),
+            _ => return false,
+        };
+        entries.into_iter().any(|r| {
+            r.get("type").and_then(Value::as_str) == Some("composer")
+                && r.get("url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|u| u.starts_with("file://") || !u.contains("://"))
+        })
+    };
+    let home = vivacity_core::fetch::composer_home();
+    let any = local(manifest.get("repositories"))
+        || home.as_deref().is_some_and(|h| {
+            vivacity_core::fetch::with_global_json(h, "config.json", |c| {
+                local(c.and_then(|c| c.get("repositories")))
+            })
+        });
+    if !any {
+        return None;
+    }
+    let config = vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref()).ok()?;
+    let policy = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy).ok()?;
+    let repos: Vec<(String, Option<Value>)> = config
+        .repositories
+        .iter()
+        .filter(|r| r.definition.get("type").and_then(Value::as_str) == Some("composer"))
+        .filter_map(|r| {
+            let url = r.definition.get("url").and_then(Value::as_str)?;
+            vivacity_resolver::repository::repo_urls(url)
+                .packages_json_url
+                .starts_with("file://")
+                .then(|| (url.to_owned(), r.definition.get("filter").cloned()))
+        })
+        .collect();
+    vivacity_resolver::repository::local_unsupported(
+        &repos,
+        &policy.custom_lists,
+        false,
+        policy.malware_blocks("install"),
+    )
+}
+
+/// What creating the `Composer` (every command) refuses or warns about in a
+/// repository definition, decided at startup on the JSON in memory —
+/// composer.json's `repositories` and the global config.json's (kept for
+/// the run): nothing to do without such a section. Broader than the merged
+/// list (a definition disabled by name still counts: a hand-over Composer
+/// would not need). `RepositoryManager::createRepository` warns about a
+/// `packagist` key set to false (every time the `Composer` is created:
+/// handed over rather than written); `RepositoryFactory::createRepos`, the
+/// `FilterRepository` and `ComposerRepository` constructors throw on a
+/// definition that is not an object, has no type, a bad `only`/`exclude`/
+/// `canonical`, a `composer` URL `parse_url` refuses (no host, a bad port)
+/// or a user `filter` that is not booleans by list name. A doubt hands
+/// over.
+pub(crate) fn repository_construction_issue(
+    project: Option<&std::path::Path>,
+    manifest: Option<&serde_json::Value>,
+) -> Option<String> {
+    use serde_json::Value;
+    let check = |repos: Option<&Value>| -> Option<String> {
+        let entries: Vec<(String, &Value)> = match repos {
+            None | Some(Value::Null) => return None,
+            Some(Value::Array(a)) => a
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i.to_string(), r))
+                .collect(),
+            Some(Value::Object(o)) => o.iter().map(|(k, r)| (k.clone(), r)).collect(),
+            Some(_) => return Some("\"repositories\" is not a list of definitions".to_owned()),
+        };
+        for (name, repo) in entries {
+            let def = match repo {
+                // `"name": false` disables a repository (`Config::merge`).
+                Value::Bool(false) => continue,
+                Value::Object(m) => m,
+                _ => return Some(format!("repository {name} is not a definition")),
+            };
+            // `{"packagist.org": false}`: the same, in a list.
+            if def.len() == 1 && def.values().next() == Some(&Value::Bool(false)) {
+                continue;
+            }
+            let Some(kind) = def.get("type") else {
+                return Some(format!("repository {name} has no type"));
+            };
+            if def.get("packagist") == Some(&Value::Bool(false)) {
+                return Some(format!(
+                    "repository {name} has a packagist key, which Composer warns about"
+                ));
+            }
+            let set = |k: &str| def.get(k).filter(|v| !v.is_null());
+            let array = |v: &Value| v.is_array() || v.is_object();
+            if set("only").is_some_and(|v| !array(v))
+                || set("exclude").is_some_and(|v| !array(v))
+                || (set("only").is_some() && set("exclude").is_some())
+                || set("canonical").is_some_and(|v| !v.is_boolean())
+            {
+                return Some(format!(
+                    "repository {name} has an only/exclude/canonical Composer refuses"
+                ));
+            }
+            if kind.as_str() != Some("composer") {
+                continue;
+            }
+            let refused = match def.get("url") {
+                Some(Value::String(url)) => composer_url_refused(project, url),
+                _ => true,
+            };
+            if refused {
+                return Some(format!(
+                    "repository {name} has a url Composer refuses for a composer repository"
+                ));
+            }
+            if def.get("filter").is_some_and(user_filter_refused) {
+                return Some(format!("repository {name} has a filter Composer refuses"));
+            }
+        }
+        None
+    };
+    if let Some(why) = check(manifest.and_then(|m| m.get("repositories"))) {
+        return Some(why);
+    }
+    let home = vivacity_core::fetch::composer_home()?;
+    vivacity_core::fetch::with_global_json(&home, "config.json", |c| {
+        check(c.and_then(|c| c.get("repositories")))
+    })
+}
+
+/// `ComposerRepository::__construct`'s URL: without `scheme://`, a path
+/// that exists becomes `file://`, anything else `http://`; then `rtrim`
+/// of `/` and `parse_url`, which must give a scheme. `true` where
+/// `parse_url` fails as far as cheaply mirrored — a scheme other than
+/// `file` without a host, a port that is not one to five digits up to
+/// 65535 — or on a doubt (an empty URL).
+fn composer_url_refused(project: Option<&std::path::Path>, url: &str) -> bool {
+    let bytes = url.as_bytes();
+    let word = bytes
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'.')
+        .count();
+    let after = if bytes.get(word) == Some(&b'?') {
+        word + 1
+    } else {
+        word
+    };
+    let owned;
+    let url = if word > 0 && url[after..].starts_with("://") {
+        url
+    } else {
+        let path = std::path::Path::new(url);
+        let exists = if path.is_absolute() {
+            path.exists()
+        } else {
+            project.is_some_and(|p| p.join(path).exists())
+        };
+        if exists {
+            return false;
+        }
+        owned = format!("http://{url}");
+        &owned
+    };
+    let url = url.trim_end_matches('/').replace('\\', "/");
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return true;
+    };
+    if scheme.eq_ignore_ascii_case("file") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    if host_port.is_empty() {
+        return true;
+    }
+    let port = if let Some(bracketed) = host_port.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((_, "")) => "",
+            Some((_, tail)) => match tail.strip_prefix(':') {
+                Some(port) => port,
+                None => return true,
+            },
+            None => return true,
+        }
+    } else {
+        match host_port.rsplit_once(':') {
+            Some(("", _)) => return true,
+            Some((_, port)) => port,
+            None => "",
+        }
+    };
+    !(port.is_empty()
+        || (port.len() <= 5
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u32>().is_ok_and(|p| p <= 65535)))
+}
+
+/// `parseUserFilterConfig`: `false`, `null`, `true`, or list names (PHP
+/// array keys: a numeric string is an integer there) mapped to booleans.
+fn user_filter_refused(filter: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    let integer_key = |k: &str| {
+        let digits = k.strip_prefix('-').unwrap_or(k);
+        k == "0"
+            || (!digits.is_empty()
+                && !digits.starts_with('0')
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && k.parse::<i64>().is_ok())
+    };
+    match filter {
+        Value::Null | Value::Bool(_) => false,
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(m) => m
+            .iter()
+            .any(|(k, v)| k.is_empty() || integer_key(k) || !v.is_boolean()),
+        _ => true,
+    }
+}
+
 /// `require --no-update` with every constraint given resolves nothing, but
 /// `requireComposer()` (RequireCommand.php:193) still instantiates every
 /// repository of the merged configuration: one its `RepositoryManager`
@@ -323,6 +551,7 @@ fn insecure_repository_issue(
         Verdict::Allowed | Verdict::Warn { .. } => None,
     };
     let mut local: Vec<String> = Vec::new();
+    let mut local_filters: Vec<(String, Option<Value>)> = Vec::new();
     // What a resolution cannot open (`open_repository`), decided on the
     // merged configuration before anything is printed or edited: the run is
     // Composer's (the session would hand it over too, later).
@@ -400,6 +629,7 @@ fn insecure_repository_issue(
         }
         if urls.packages_json_url.starts_with("file://") {
             local.push(url.to_owned());
+            local_filters.push((url.to_owned(), def.get("filter").cloned()));
         }
     }
     // A partial update fixes the locked packages outside its allow list:
@@ -429,12 +659,24 @@ fn insecure_repository_issue(
     if local.is_empty() {
         return None;
     }
+    let policy = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy).ok();
+    // What a local repository's packages.json declares that the session
+    // would refuse once loading (the v1 protocol, a custom policy list it
+    // advertises): read now, whatever `secure-http` says.
+    let custom_lists = policy
+        .as_ref()
+        .map(|p| p.custom_lists.clone())
+        .unwrap_or_default();
+    if let Some(why) =
+        vivacity_resolver::repository::local_unsupported(&local_filters, &custom_lists, true, false)
+    {
+        return Some(vivacity_core::scope::ScopeIssue::Layout(why));
+    }
     // `policy.ignore-unreachable` off for the resolution's filters: their
     // refusal stops Composer (a policy vivacity cannot read: counted).
-    let filters_fatal = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy)
-        .map_or(true, |p| {
-            !(p.ignore_unreachable.update && p.ignore_unreachable.install)
-        });
+    let filters_fatal = policy
+        .as_ref()
+        .is_none_or(|p| !(p.ignore_unreachable.update && p.ignore_unreachable.install));
     let scope = pool_scope(
         manifest,
         with_install,
@@ -843,6 +1085,9 @@ pub(crate) fn hand_over(
     offline: bool,
     reason: Option<&str>,
 ) -> std::io::Result<i32> {
+    // The Composer started here handles its own signals (`require`'s revert
+    // included): vivacity's handlers go first.
+    vivacity_core::signals::release();
     // The Composer started here writes its own root-version warning: what
     // vivacity still holds is dropped, not written twice.
     vivacity_core::io::drop_held();
@@ -1145,6 +1390,36 @@ pub(crate) fn which_composer() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn composer_urls_the_constructor_refuses() {
+        let refused = |u: &str| composer_url_refused(None, u);
+        assert!(refused("https:///x"));
+        assert!(refused("https://repo.test:99999"));
+        assert!(refused("https://repo.test:000443"));
+        assert!(refused("https://user@/x"));
+        assert!(refused("http://:80/x"));
+        assert!(!refused("https://repo.test:8443/"));
+        assert!(!refused("https://repo.test"));
+        assert!(!refused("https://[::1]:8080/x"));
+        assert!(!refused("file:///tmp/x"));
+        assert!(!refused("repo.test/x"));
+        assert!(!refused("https?://repo.test"));
+    }
+
+    #[test]
+    fn user_filters_the_constructor_refuses() {
+        use serde_json::json;
+        assert!(!user_filter_refused(&json!(false)));
+        assert!(!user_filter_refused(&json!(null)));
+        assert!(!user_filter_refused(&json!([])));
+        assert!(!user_filter_refused(&json!({"malware": false, "-0": true})));
+        assert!(user_filter_refused(&json!({"0": false})));
+        assert!(user_filter_refused(&json!({"12": true})));
+        assert!(user_filter_refused(&json!({"x": "no"})));
+        assert!(user_filter_refused(&json!(["x"])));
+        assert!(user_filter_refused(&json!("x")));
+    }
+
     use super::*;
 
     fn forward(tokens: &[&str], command: &str) -> Vec<String> {

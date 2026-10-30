@@ -223,6 +223,14 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
             args.no_fallback,
         );
     }
+    if let Some(reason) =
+        crate::fallback::repository_construction_issue(Some(&project), Some(&manifest))
+    {
+        return crate::delegate_resolution(
+            &[vivacity_core::scope::ScopeIssue::Layout(reason)],
+            args.no_fallback,
+        );
+    }
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }

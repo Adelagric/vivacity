@@ -70,6 +70,18 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             return fallback_or_fail(args, &scope);
         }
     }
+    // A local repository whose lists the `install` scope's filters cannot
+    // read as Composer does: before the command prints anything.
+    if !args.after_update() {
+        if let Some(reason) = crate::fallback::local_install_issue(&run.manifest) {
+            let scope = vivacity_core::scope::ScopeReport {
+                issues: vec![vivacity_core::scope::ScopeIssue::Layout(reason)],
+                skipped_plugins: vec![],
+                layout: None,
+            };
+            return fallback_or_fail(args, &scope);
+        }
+    }
     // `InstallCommand::execute` dispatches `PluginEvents::COMMAND` before
     // `Installer::run` (InstallCommand.php:111); `update`, `require` and
     // `remove` dispatch theirs before their resolution.
@@ -132,7 +144,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             !args.no_plugins,
         )?;
     }
-    let installed = proceed!(execute_operations(&run, &tx, &layout)?);
+    // `InstallationManager::execute` handles the signals itself while the
+    // operations run: `require`'s revert does not apply there.
+    vivacity_core::signals::suspend();
+    let executed = execute_operations(&run, &tx, &layout);
+    vivacity_core::signals::resume();
+    let installed = proceed!(executed?);
     // `Installer::run`, after `doInstall`.
     let (autoload_note, cleaner_counts) = if args.no_autoloader {
         (String::new(), None)

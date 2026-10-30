@@ -41,6 +41,7 @@ pub mod root_version;
 pub mod runtime_stub;
 pub mod scope;
 pub mod secure_http;
+pub mod signals;
 pub mod state;
 pub mod store;
 pub mod vendor_cleaner;

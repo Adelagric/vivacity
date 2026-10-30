@@ -22,6 +22,7 @@ use crate::{
 };
 
 /// What a run manipulates: paths, backups, creation state.
+#[derive(Clone)]
 struct Files {
     file_label: String,
     json: PathBuf,
@@ -36,9 +37,12 @@ impl Files {
     /// dropped first: Composer wrote it, then writes the original back —
     /// as this does — or deletes the file it created (and the lock).
     fn revert(&self) -> anyhow::Result<()> {
-        vivacity_core::io::cancel_held_write();
         if self.newly_created {
             vivacity_core::say!("\nInstallation failed, deleting {}.", self.file_label);
+            // A signal being handled reverts the files itself (the gate is
+            // taken after the line: a thread stopped there holds nothing).
+            let _gate = vivacity_core::signals::write_gate();
+            vivacity_core::io::cancel_held_write();
             let _ = std::fs::remove_file(&self.json);
             if self.lock.exists() {
                 let _ = std::fs::remove_file(&self.lock);
@@ -53,6 +57,8 @@ impl Files {
                 "\nInstallation failed, reverting {}{msg}original content.",
                 self.file_label
             );
+            let _gate = vivacity_core::signals::write_gate();
+            vivacity_core::io::cancel_held_write();
             std::fs::write(&self.json, &self.composer_backup)
                 .with_context(|| format!("cannot restore {}", self.json.display()))?;
             if let Some(lock) = &self.lock_backup {
@@ -67,6 +73,7 @@ impl Files {
     /// hand-over to Composer decided once the resolution is solved: the
     /// lock is not written yet, so it stays as it is.
     fn undo_edit(&self) -> anyhow::Result<()> {
+        let _gate = vivacity_core::signals::write_gate();
         // Held back (`io::write_held`), or never edited (`--dry-run`): the
         // file was never touched.
         if vivacity_core::io::cancel_held_write() || !vivacity_core::io::manifest_written() {
@@ -568,6 +575,28 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             .then(|| std::fs::read_to_string(&lock).ok())
             .flatten()
             .filter(|t| !t.is_empty()),
+    };
+    // `SignalHandler::create` (RequireCommand.php:160-164), right after the
+    // backups: until the command ends, SIGINT/SIGTERM/SIGHUP revert the
+    // files as `revertComposerFile` does — after what the run holds back,
+    // which Composer had written — then end the process by the signal.
+    let _signals = {
+        let files = files.clone();
+        let no_update = args.no_update;
+        vivacity_core::signals::on_termination(move || {
+            vivacity_core::io::cancel_held_write();
+            vivacity_core::io::release_output();
+            vivacity_core::io::release_deferred();
+            let mut files = files;
+            // Composer reads the lock backup whatever the options
+            // (RequireCommand.php:158); `--no-update` never touches it.
+            if no_update && !files.newly_created {
+                files.lock_backup = std::fs::read_to_string(&files.lock)
+                    .ok()
+                    .filter(|t| !t.is_empty());
+            }
+            let _ = files.revert();
+        })
     };
     let manifest: Value = serde_json::from_str(&files.composer_backup)
         .with_context(|| format!("{file_label} does not contain valid JSON"))?;
@@ -1107,6 +1136,7 @@ fn update_requirements_after_resolution(
             .with_context(|| format!("cannot read {}", json.display()))?;
         let new_text = locker_update_hash(&lock_text, &manifest_text, &flags)?;
         if new_text != lock_text {
+            let _gate = vivacity_core::signals::write_gate();
             std::fs::write(lock_path, new_text)
                 .with_context(|| format!("cannot write {}", lock_path.display()))?;
         }
