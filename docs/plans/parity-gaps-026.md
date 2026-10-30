@@ -462,10 +462,24 @@ Sept points confirmés, le point 5 en partie, trois nouveaux :
   relecteur propose un déclencheur étroit : un dépôt `composer` distant
   autre que packagist.org, sous `secure-http` vrai).
 
+## Quatrième passage de revue (2026-10-30)
+
+Aucune rupture de contrat. Corrigés : G1 (drapeaux de stabilité implicites,
+alias de branche et racine), G2 (paquet figé non installé, jugé sur le
+lock), G3 (déverrouillage `-w`/`-W` au chargement), G4 (une version jugée
+une fois, sans copie, et les fichiers lus par le contrôle gardés analysés
+pour le dépôt qui les relit : banc à 1 500 paquets × 20 versions, `secure-http`
+vrai au niveau de faux), G5 (retrait
+raté : `vendor/` rendu, `Error:` et sortie 1), G6 (cas `late` vivant,
+`late-path-dependency` ; cas Flex qui appelle Composer, `dist-then-recipe`).
+Cas rouges sur f4de2f8 puis verts : `dev-implicit-flag`, `dev-branch-alias`,
+`dev-root-alias`, `partial-fixed-missing`, `transitive-unlock` ;
+`dist-then-recipe` rouge sur fb31ab6.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -591,9 +605,11 @@ la décision revient au mainteneur.
     dists de Packagist, toutes en `https`.
 18f. **Contrôle local : plus large que le téléchargement** par les versions
     que le pool charge et que le solveur ne prend pas, et par le mode
-    transitif (`-w`/`-W`) approché par les liens du lock (Composer
-    déverrouille pendant le chargement) ; une dépendance qu'un paquet d'un
-    autre dépôt amène n'est jugée qu'au lock résolu (tardif).
+    transitif (`-w`/`-W`) élargi d'avance par les liens du lock en plus du
+    déverrouillage que Composer fait au chargement ; une dépendance qu'un
+    paquet d'un autre type de dépôt (`path`) amène n'est jugée qu'au lock
+    résolu (tardif, cas `late-path-dependency`) ; un paquet figé non
+    installé à dist `http://` hors dépôt local et hors `remove` aussi.
 18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
     `canonicalize` suivi de `/packages.json` (écart antérieur du
     transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y

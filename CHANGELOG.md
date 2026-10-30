@@ -144,14 +144,18 @@ byte-identical-output promise are the public API.
   files unread), the versions each constraint and the stabilities admit,
   then their `require` links, over a full repository's packages.json and
   includes or the per-package files of a local `metadata-url`; nothing is
-  read when `secure-http` cannot refuse — a dist of the lock not installed
-  yet, a
+  read when `secure-http` cannot refuse; implicit stability flags
+  (`dev-main`, the left side of `dev-main as 1.0.0`) and branch or root
+  aliases counted, and the locked packages `-w`/`-W` unlock as new
+  versions require them — a dist of the lock not installed yet (in a
+  partial update, a fixed package's locked dist), a
   Flex endpoint — goes to Composer before anything is printed, requested
   or written, the reason named (exit 3 under `--no-fallback`). What can
   only be seen once loaded is handed over late, after the lines already
   written (HANDOVER.md): the dists of the solved lock when a remote
-  repository serves `http://` archives (or a dependency another
-  repository provides brings one from a local repository), metadata a remote repository's packages.json points to over
+  repository serves `http://` archives (or a package another kind of
+  repository provides, a `path` one say, brings one from a local
+  repository), metadata a remote repository's packages.json points to over
   `http`, a remote policy filter's refusal under `ignore-unreachable`
   off, a redirect to an insecure URL. Before any hand-over, the archives
   the run put in Composer's files cache (the install, Flex reading dists)

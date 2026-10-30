@@ -5498,7 +5498,9 @@ packages.json et les `includes` d'un dépôt complet, ou les fichiers par
 paquet d'un `metadata-url` local (`~dev` quand le dev est admis). Restent
 plus larges que le téléchargement : les versions chargées que le solveur
 ne prend pas, et le mode transitif approché par le lock (Composer déverrouille
-pendant le chargement). Les archives mises dans le cache de fichiers par
+pendant le chargement — *corrigé au quatrième passage : l'approximation
+pouvait aussi être plus étroite ; le déverrouillage pendant le chargement
+est suivi depuis*). Les archives mises dans le cache de fichiers par
 ce run, d'où qu'elles viennent, sont notées (un canal, sans verrou) et
 retirées avant toute délégation ; une qui ne peut l'être arrête le run sur
 cette erreur — choisi plutôt qu'une délégation dont la sortie différerait
@@ -5520,4 +5522,56 @@ le banc partage le cache de fichiers de Composer entre les deux côtés
 (pour ne pas retélécharger ~150 archives de GitHub à chaque passage), donc
 ces lignes dépendent de l'ordre des côtés ; le resserrer demanderait un
 cache par côté.
+
+## 2026-10-30 — `secure-http`, quatrième passage de revue (docs/plans/parity-gaps-026.md)
+
+**Constat.** Aucune rupture de contrat ; six points, chacun une délégation
+tardive évitable (deux lignes avant la raison) ou un écart du banc :
+(G1) les drapeaux de stabilité implicites (`dev-main`, l'alias racine
+`dev-main as 1.0.0` — `RootPackageLoader::extractStabilityFlags`) et les
+alias (de branche, racine) n'étaient pas comptés : `~dev` non lu, une
+version aliasée jamais jugée ; (G2) un paquet figé par une mise à jour
+partielle, verrouillé à un dist `http://` et pas installé, se voyait après
+la résolution ; (G3) l'élargissement `-w`/`-W` par les liens du vieux lock
+pouvait être plus étroit que Composer, qui déverrouille une dépendance
+verrouillée quand une nouvelle version chargée l'exige ; (G4) vitesse —
+mesuré par le relecteur : un dépôt local de 1 500 paquets × 20 versions,
+`update` 40 % plus lent sous `secure-http` vrai, chaque version rejugée
+sous chaque contrainte et les listes de versions copiées à chaque tour ;
+(G5) un retrait d'archive raté dans l'installeur laissait le `vendor/` créé
+et sortait en 100, contre 1 dans `fallback::hand_over` ; (G6) aucun cas
+`late` vivant, et la reprise des archives de Flex sans cas.
+
+**Fait.** Drapeaux implicites (une contrainte qui nomme une version
+instable) et alias (de branche par `branch_alias`, racine par
+`<version> as <alias>`) : la version et ses alias sont confrontés à la
+contrainte. Les paquets figés d'une mise à jour partielle sont jugés sur le
+lock (`installed_as_locked`, `insecure_dist_reason`) quand il est en
+mémoire (`remove`) ou lu pour le contrôle local. Le contrôle déverrouille
+ce qu'une version chargée exige sous `-w`/`-W` (pas une exigence racine
+pour `-w`). Une version n'est jugée qu'une fois, les listes empruntées, et
+les fichiers que le contrôle lit sont gardés analysés pour le dépôt qui les
+relit ensuite (`fetch_cached`, `prefetch`) : plus de seconde analyse —
+mesuré sur le banc du relecteur (1 500 paquets × 20 versions, chacune trois
+exigences), `update` sous `secure-http` vrai au niveau de faux (temps
+utilisateur 0,931 s contre 0,932 s ; 1,045 s avant ce partage, 1,325 s sur
+f4de2f8). Le
+retrait raté : `vendor/` d'abord rendu, puis `Error:` et sortie 1, comme
+`hand_over`. Banc : un cas `late` vivant (`late-path-dependency`, un paquet
+`path` qui amène un dist `http://` d'un dépôt local) ; un cas Flex qui
+appelle vraiment Composer, cache de fichiers vide par côté, dist de psr/log
+local (`dist-then-recipe`).
+
+**Laissé.** Un paquet figé non installé à dist `http://` dans une mise à
+jour partielle sans dépôt local et hors `remove` : le lock n'est pas lu
+d'avance (une lecture de plus sur le chemin commun) — tardif. Le retrait
+raté n'est pas exerçable (il faut une redirection `https` et un fichier
+qu'on ne peut retirer).
+
+**Vu rouge (f4de2f8) puis vert.** `dev-implicit-flag`, `dev-branch-alias`,
+`dev-root-alias`, `partial-fixed-missing`, `transitive-unlock`.
+`late-path-dependency` passe des deux côtés (comportement inchangé) : sans
+`late`, ou avec un préfixe faussé, il échoue — la comparaison est vivante.
+`dist-then-recipe` : rouge sur fb31ab6 (avant la reprise centrale, qui est
+dans 83a60b8), vert sur f4de2f8 et après.
 
