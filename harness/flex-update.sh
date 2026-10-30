@@ -384,6 +384,10 @@ prepare remove-arg      - && run remove-arg native "" "symfony/uid --no-install"
 # création du `Composer`.
 prepare platform-env    - && RUN_ENV=COMPOSER_IGNORE_PLATFORM_REQ=ext-foo run platform-env native "" symfony/console update '^Warning: Accessing 127.0.0.1 over http'
 prepare remove-platform-env - && RUN_ENV=COMPOSER_IGNORE_PLATFORM_REQ=ext-foo run remove-platform-env native "" "symfony/uid --no-install" remove '^Warning: Accessing 127.0.0.1 over http'
+# La sortie retenue (`secure-http`, imposée) : Flex écrit ce qu'il écrit,
+# retenu puis rendu dans le même ordre.
+prepare held-symfony-arg - && RUN_ENV=VIVACITY_HOLD_OUTPUT=force run held-symfony-arg native "" symfony/console update '^Warning: Accessing 127.0.0.1 over http'
+prepare held-allow-list - && RUN_ENV=VIVACITY_HOLD_OUTPUT=force run held-allow-list native "" vendor/not-locked update '^Warning: Accessing 127.0.0.1 over http'
 # Flex actif sans être exigé par la racine : `Downloader::disable` ne vide
 # que `$enabled`, `initialize` lit l'index quand même.
 prepare not-required shape_not_required - && run not-required native "" "symfony/console --no-install" update '^Warning: Accessing 127.0.0.1 over http' 

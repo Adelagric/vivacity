@@ -96,8 +96,11 @@ printf '{"packages": {"acme/k": [{"name": "acme/k", "version": "1.0.0", "version
 for n in d e n q k; do printf '{"packages": {"acme/%s": []}}\n' "$n" > "$WORK/srv/p2/acme/$n~dev.json.tmp"; [ -e "$WORK/srv/p2/acme/$n~dev.json" ] || mv "$WORK/srv/p2/acme/$n~dev.json.tmp" "$WORK/srv/p2/acme/$n~dev.json"; rm -f "$WORK/srv/p2/acme/$n~dev.json.tmp"; done
 # Un dépôt `path` dont le paquet exige acme/a (dist `http://`, servi par un
 # dépôt local) : la fermeture n'y passe pas, jugé une fois le lock résolu.
-mkdir -p "$WORK/pathp"
+mkdir -p "$WORK/pathp" "$WORK/pathq"
 printf '{"name": "acme/p", "version": "1.0.0", "require": {"acme/a": "1.0.0"}}\n' > "$WORK/pathp/composer.json"
+printf '{"name": "acme/w", "version": "1.0.0"}\n' > "$WORK/pathq/composer.json"
+# Le dépôt `file://` déclare `acme/*` : Composer y cherche aussi p et w.
+for n in p w; do printf '{"packages": {"acme/%s": []}}\n' "$n" | tee "$WORK/srv/p2/acme/$n.json" > "$WORK/srv/p2/acme/$n~dev.json"; done
 # Un dépôt `file://` à la Satis : packages.json n'a que des `includes`.
 mkdir -p "$WORK/srvsatis/include"
 printf '{"packages": {"acme/a": {"1.0.0": {"name": "acme/a", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "http://dist.test/dist/a.zip"}}}}}\n' > "$WORK/srvsatis/include/all.json"
@@ -193,6 +196,10 @@ seed filee "{\"name\": \"vivacity/secure-http-filee\", \"type\": \"project\", \"
 seed filealias "{\"name\": \"vivacity/secure-http-filealias\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/d\": \"dev-main as 1.0.0\"}}"
 seed filexo "{\"name\": \"vivacity/secure-http-filexo\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\", \"acme/x\": \"1.0.0\"}}"
 seed filenq "{\"name\": \"vivacity/secure-http-filenq\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/n\": \"^1.0 || ^2.0\", \"acme/k\": \"1.0.0\"}}"
+seed pathq "{\"name\": \"vivacity/secure-http-pathq\", \"type\": \"project\", \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pathp\"}, {\"type\": \"path\", \"url\": \"$WORK/pathq\"}, {\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/w\": \"1.0.0\"}}"
+seed pathpq "{\"name\": \"vivacity/secure-http-pathpq\", \"type\": \"project\", \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pathp\"}, {\"type\": \"path\", \"url\": \"$WORK/pathq\"}, {\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/p\": \"1.0.0\", \"acme/w\": \"1.0.0\"}}"
+seed pathwa "{\"name\": \"vivacity/secure-http-pathwa\", \"type\": \"project\", \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pathq\"}, {\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/w\": \"1.0.0\", \"acme/a\": \"1.0.0\"}}"
+seed fileab "{\"name\": \"vivacity/secure-http-fileab\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\", \"acme/b\": \"1.0.0\"}}"
 seed pathp "{\"name\": \"vivacity/secure-http-pathp\", \"type\": \"project\", \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pathp\"}, {\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/p\": \"1.0.0\"}}"
 # Après les graines : n 2.0.0 (exige q) et q 1.1.0 (dist `http://`).
 printf '{"packages": {"acme/n": [{"name": "acme/n", "version": "2.0.0", "version_normalized": "2.0.0.0", "type": "library", "require": {"acme/q": "^1.0"}, "dist": {"type": "zip", "url": "%s"}}, {"name": "acme/n", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/n.json"
@@ -250,6 +257,7 @@ case_() {
         jq:*) jq "${p#jq:}" "$d/$side/composer.json" > "$d/$side/c.tmp" && mv "$d/$side/c.tmp" "$d/$side/composer.json" ;;
         nolock) rm -f "$d/$side/composer.lock" ;;
         authjson:*) printf '%s\n' "${p#authjson:}" > "$d/$side/auth.json" ;;
+        alt) cp "$d/$side/composer.json" "$d/$side/alt.json"; [ ! -e "$d/$side/composer.lock" ] || cp "$d/$side/composer.lock" "$d/$side/alt.lock" ;;
       esac
     done
     mkdir -p "$d/cache-$side"
@@ -308,8 +316,10 @@ case_() {
   fi
   # Le chemin du projet (un message de Composer peut le nommer) : celui de
   # chaque côté, ramené au même.
-  sed "s#$d/ref/#<projet>/#g" "$d/ref.err" > "$d/ref.err.n" && mv "$d/ref.err.n" "$d/ref.err"
-  sed "s#$d/viv/#<projet>/#g" "$d/viv.err.cmp" > "$d/viv.err.n" && mv "$d/viv.err.n" "$d/viv.err.cmp"
+  # Et le cache de chaque côté, les noms temporaires (`-vvv`).
+  local norm='s#tmp-[0-9a-f]\{32\}#tmp-<x>#g; s#vendor/composer/[0-9a-f]\{8\}#vendor/composer/<x>#g'
+  sed -e "s#$d/ref/#<projet>/#g" -e "s#$d/cache-ref/#<cache>/#g" -e "$norm" "$d/ref.err" > "$d/ref.err.n" && mv "$d/ref.err.n" "$d/ref.err"
+  sed -e "s#$d/viv/#<projet>/#g" -e "s#$d/cache-viv/#<cache>/#g" -e "$norm" "$d/viv.err.cmp" > "$d/viv.err.n" && mv "$d/viv.err.n" "$d/viv.err.cmp"
   local bad="$holdbad"
   [ -z "$expect" ] || grep -qE -- "$expect" "$d/ref.err" || bad="$bad Composer n'écrit pas « $expect » (cas mal choisi);"
   [ "$(cat "$d/ref.code")" = "$(cat "$d/viv.code")" ] || bad="$bad codes $(cat "$d/ref.code") vs $(cat "$d/viv.code");"
@@ -498,6 +508,9 @@ want dev-root-alias && case_ dev-root-alias filealias 'delegates:secure-http' 'e
 # Un paquet que la mise à jour partielle fige, verrouillé à un dist
 # `http://` et pas installé : téléchargé depuis le lock — rendu avant tout.
 want partial-fixed-missing && case_ partial-fixed-missing filexo 'delegates:secure-http' 'expect:does not allow connections to http://old.test/x-1.zip' -- update acme/l
+# … sans dépôt local (acme/a ne vient que du lock) : jugé sur le lock que
+# la session a lu, avant « Loading… » (la sonde de plateforme est écrite).
+want partial-fixed-no-local && case_ partial-fixed-no-local pathwa 'delegates:secure-http' loaded 'jq:.repositories |= map(select(.type != "composer"))' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update acme/w
 # `-W` : la nouvelle version d'acme/n exige acme/q, verrouillé ; Composer le
 # déverrouille et prend sa 1.1.0 (dist `http://`) — rendu avant tout.
 want transitive-unlock && case_ transitive-unlock filenq 'delegates:secure-http' 'expect:does not allow connections to http://old.test/q-1.1.zip' -- update acme/n -W
@@ -527,7 +540,9 @@ want hold-remote-https && trace_ hold-remote-https held '{"repositories": [{"typ
 want hold-remote-https-off && trace_ hold-remote-https-off free '{"repositories": [{"type": "composer", "url": "https://repo.test"}, {"packagist.org": false}], "require": {"acme/a": "1.0.0"}, "config": {"secure-http": false}}' -- update
 want hold-packagist-only && trace_ hold-packagist-only free '{"require": {"psr/log": "^3.0"}}' -- update
 want hold-install-packagist && trace_ hold-install-packagist free '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://api.github.com/repos/acme/a/zipball/abc}" -- install
-want hold-install-other-host && trace_ hold-install-other-host held '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://downloads.example.org/a.zip}" -- install
+# Packagist seul, un dist du lock sur un autre hôte `https` que GitHub
+# (downloads.wordpress.org, git.drupalcode.org le sont) : pas de retenue.
+want hold-install-other-host && trace_ hold-install-other-host free '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://downloads.wordpress.org/a.zip}" -- install
 # Retenue imposée (aucun dépôt `https` ici) : natif, octet pour octet, à
 # chaque niveau ; rendu, rien avant la raison.
 want hold-native && case_ hold-native filel native hold -- update
@@ -537,4 +552,39 @@ want hold-install && case_ hold-install local native hold -- install
 want hold-install-v && case_ hold-install-v local native hold -- install -v
 want hold-install-dists && case_ hold-install-dists pkg native hold 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing dist.test' -- install
 want hold-handover && case_ hold-handover pathp 'delegates:secure-http' hold loaded nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# … dès avant l'édition de `require`/`remove`, avant la ligne de l'install
+# sans lock : rien d'écrit avant la raison, composer.json rendu tel quel.
+want hold-require-handover && case_ hold-require-handover pathq 'delegates:secure-http' hold loaded 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/p:1.0.0
+# (acme/a, installé et figé, a un dist `http://` : le pool le juge — plus
+# large que le téléchargement, Composer mène le `remove` à bien.)
+want hold-remove-handover && case_ hold-remove-handover pathpq 'delegates:secure-http' hold loaded installed 'expect:Removing acme/w' -- remove acme/w
+want hold-lockless-handover && case_ hold-lockless-handover pathp 'delegates:secure-http' hold loaded nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- install
+# Natifs sous retenue : `require`, `remove`, l'install qui suit un update.
+want hold-require && case_ hold-require filel native hold anyreq 'jq:del(.require["acme/l"])' -- require acme/l:1.0.0
+want hold-remove && case_ hold-remove filex native hold installed -- remove acme/x
+want hold-update-install && case_ hold-update-install samehost native hold nolock 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing repo.test' -- update
+# Sans installation, rien n'est téléchargé : pas de jugement du pool,
+# natif comme Composer.
+want hold-update-no-install && case_ hold-update-no-install filerepo native hold -- update --no-install
+want hold-update-dry-run && case_ hold-update-dry-run filerepo native hold -- update --dry-run
+want hold-require-no-install && case_ hold-require-no-install filerepo native hold anyreq -- require acme/b:1.0.0 --no-install
+want hold-require-dry-run && case_ hold-require-dry-run filerepo native hold anyreq -- require acme/b:1.0.0 --dry-run
+want hold-remove-no-install && case_ hold-remove-no-install fileab native hold -- remove acme/b --no-install
+want hold-remove-dry-run && case_ hold-remove-dry-run fileab native hold -- remove acme/b --dry-run
+# -vv et -vvv : rendus au démarrage, avant la retenue.
+want hold-vv && case_ hold-vv filel 'delegates:-vv' 'env:VIVACITY_HOLD_OUTPUT=force' -- update -vv
+want hold-vvv && case_ hold-vvv filel 'delegates:-vv' 'env:VIVACITY_HOLD_OUTPUT=force' -- update -vvv
+# 8. Ce que vivacity ne lit pas à la résolution : rendu avant tout.
+want repo-type-package && case_ repo-type-package pkg 'delegates:type "package"' -- update --no-install
+want repo-filter-only && case_ repo-filter-only filel 'delegates:only/exclude/canonical' 'jq:.repositories[0].only=["acme/*"]' -- update --no-install
+want alt-manifest && case_ alt-manifest filel 'delegates:alternate manifest' alt 'env:COMPOSER=alt.json' -- update --no-install
+want update-lock && case_ update-lock filel 'delegates:update lock' -- update lock
+want minimal-changes-env && case_ minimal-changes-env filel 'delegates:minimal-changes' 'env:COMPOSER_MINIMAL_CHANGES=1' -- update --no-install
+# `Config::get` laisse cette clé brute : la chaîne "false" est vraie.
+want minimal-changes-string && case_ minimal-changes-string filel 'delegates:minimal-changes' 'jq:.config["update-with-minimal-changes"]="false"' -- update --no-install
+want minimal-changes-option && case_ minimal-changes-option filel 'delegates:minimal-changes' -- update -m --no-install
+# `remove --no-update` n'ouvre aucun dépôt : un dépôt `package` n'y change
+# rien, natif.
+want repo-type-package-no-update && case_ repo-type-package-no-update pkg native -- remove acme/b --no-update
+want minimal-changes-require && case_ minimal-changes-require filel 'delegates:minimal-changes' anyreq 'jq:del(.require["acme/l"])' -- require acme/l:1.0.0 --minimal-changes
 exit $status

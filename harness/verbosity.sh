@@ -521,6 +521,11 @@ ONLINE_CASES=(
   "bamarni|install @vendor:plugins @levels:-v @expect:^.bamarni-bin..Calling.onCommandEvent"
   "bamarni|dump-autoload @vendor:plugins @levels:-v"
   "bamarni|update --no-install @vendor:plugins @levels:-v"
+  # La sortie retenue (`secure-http`, imposée ici : aucun dépôt `https`
+  # local) : les lignes de l'événement `COMMAND` de bamarni retenues avec le
+  # reste, rendues dans le même ordre, à chaque niveau.
+  "bamarni|update @vendor:plugins @env:VIVACITY_HOLD_OUTPUT=force @levels:,-v,-q"
+  "bamarni|require psr/clock:1.0.0 @vendor:plugins @env:VIVACITY_HOLD_OUTPUT=force @levels:,-v"
   "bamarni|require psr/clock:1.0.0 @vendor:plugins @levels:-v @expect:BamarniBinPlugin_composer_tmp0->onCommandEvent$"
   # `command` part même sous --dry-run (seuls les événements de script sont
   # coupés), et `require`/`remove` rechargent les plugins.
