@@ -23,6 +23,7 @@ pub(crate) fn resolution_fallback(
     with_install: bool,
     post_update_cmd: bool,
     with_dev: bool,
+    extra_names: &[String],
 ) -> anyhow::Result<Option<i32>> {
     let mut issues = vivacity_core::scope::resolution_issues(
         project,
@@ -96,7 +97,13 @@ pub(crate) fn resolution_fallback(
     // the project's and the global config.json's, merged as `Config::merge`
     // merges them: decided here, before `require` or `remove` edit
     // composer.json and before anything is printed.
-    issues.extend(insecure_repository_issue(manifest, with_install));
+    issues.extend(insecure_repository_issue(
+        project,
+        manifest,
+        with_install,
+        with_dev,
+        extra_names,
+    ));
     if issues.is_empty() {
         return Ok(None);
     }
@@ -113,8 +120,11 @@ pub(crate) fn resolution_fallback(
 /// request. Over the common path (every repository `https`): a string test
 /// each, on files the run has read already.
 fn insecure_repository_issue(
+    project: &std::path::Path,
     manifest: &serde_json::Value,
     with_install: bool,
+    with_dev: bool,
+    extra_names: &[String],
 ) -> Option<vivacity_core::scope::ScopeIssue> {
     use serde_json::Value;
     use vivacity_core::secure_http::{classify, insecure, Verdict};
@@ -126,6 +136,13 @@ fn insecure_repository_issue(
         Verdict::HandOver(reason) => Some(format!("with {reason}")),
         Verdict::Allowed | Verdict::Warn { .. } => None,
     };
+    // `policy.ignore-unreachable` off for the resolution's filters: their
+    // refusal stops Composer (a policy vivacity cannot read: counted).
+    let filters_fatal = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy)
+        .map_or(true, |p| {
+            !(p.ignore_unreachable.update && p.ignore_unreachable.install)
+        });
+    let mut names: Option<Vec<String>> = None;
     for repo in &config.repositories {
         let def = &repo.definition;
         if def.get("type").and_then(Value::as_str) != Some("composer") {
@@ -148,8 +165,52 @@ fn insecure_repository_issue(
             }
             continue;
         }
+        if !urls.packages_json_url.starts_with("file://") {
+            continue;
+        }
+        // The names whose files the resolution reads for sure: the root's
+        // requirements, the locked packages, `require`'s arguments (read
+        // once, for the first local repository only).
+        let names = names.get_or_insert_with(|| {
+            let sections = if with_dev {
+                &["require", "require-dev"][..]
+            } else {
+                &["require"][..]
+            };
+            let mut names: Vec<String> = sections
+                .iter()
+                .filter_map(|k| manifest.get(*k).and_then(Value::as_object))
+                .flat_map(|o| o.keys().map(|k| k.to_lowercase()))
+                .chain(extra_names.iter().map(|n| n.to_lowercase()))
+                .collect();
+            if with_install {
+                if let Some(lock) = vivacity_core::jsonfile::read(&project.join("composer.lock")) {
+                    let lock_sections = if with_dev {
+                        &["packages", "packages-dev"][..]
+                    } else {
+                        &["packages"][..]
+                    };
+                    names.extend(
+                        lock_sections
+                            .iter()
+                            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+                            .flatten()
+                            .filter_map(|p| p.get("name").and_then(Value::as_str))
+                            .map(str::to_lowercase),
+                    );
+                }
+            }
+            names.sort();
+            names.dedup();
+            names
+        });
+        let scan = vivacity_resolver::repository::LocalScan {
+            names,
+            with_dists: with_install,
+            filters_fatal,
+        };
         if let Some((found, verdict)) =
-            vivacity_resolver::repository::local_insecure_url(url, with_install)
+            vivacity_resolver::repository::local_insecure_url(url, &scan)
         {
             if let Some(why) = why(verdict) {
                 return Some(vivacity_core::scope::ScopeIssue::Layout(format!(

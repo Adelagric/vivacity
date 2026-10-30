@@ -426,6 +426,10 @@ pub async fn install(
     // is silent: it is an optimisation, not an obligation.
     let sem = Arc::new(tokio::sync::Semaphore::new(opts.jobs.max(1)));
     let mut tasks = tokio::task::JoinSet::new();
+    // The archives this run put in Composer's files cache, sent as each
+    // download ends: taken back if the run goes to Composer, whose cache
+    // hits would otherwise drop the `  - Downloading` lines it prints.
+    let (cached_tx, cached_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
     let warm_names: std::collections::BTreeSet<&str> = to_warm.iter().map(|p| p.name()).collect();
     for p in to_install.iter().chain(to_warm.iter()) {
         if matches!(p.dist_kind(), DistKind::Path | DistKind::Missing) {
@@ -452,6 +456,7 @@ pub async fn install(
         })?;
         let shasum = p.dist_shasum().map(str::to_owned);
         let (store, fetcher, sem) = (store.clone(), fetcher.clone(), sem.clone());
+        let cached_tx = cached_tx.clone();
         let offline = opts.offline || warm_only;
         tasks.spawn(async move {
             let _permit = sem.acquire().await.map_err(|_| Error::Http {
@@ -466,7 +471,12 @@ pub async fn install(
                 .dist_bytes_of(&name, &url, dist_type, shasum.as_deref(), offline)
                 .await;
             let (bytes, provenance) = match fetched {
-                Ok(v) => v,
+                Ok(v) => {
+                    if v.1 == Provenance::Network {
+                        let _ = cached_tx.send(fetcher.dist_cache_file(&name, &url, dist_type));
+                    }
+                    v
+                }
                 // Warming: zip missing from the cache, do not insist.
                 Err(_) if warm_only => return Ok::<Option<Provenance>, Error>(None),
                 Err(e) => return Err(e),
@@ -493,11 +503,17 @@ pub async fn install(
             Ok(p) => p,
             // A download the run hands to Composer (a redirect `secure-http`
             // refuses): the other downloads stop, and a vendor/ this run
-            // created goes, so that the project is as it was. What reached
-            // the files cache stays: Composer downloads the same archives.
+            // created goes, so that the project is as it was, and so do the
+            // archives this run put in Composer's files cache: Composer would
+            // find them there and print no `  - Downloading` line for them
+            // (FileDownloader.php:180-193).
             Err(e @ Error::Unsupported(_)) => {
                 tasks.abort_all();
                 while tasks.join_next().await.is_some() {}
+                drop(cached_tx);
+                for path in cached_rx.try_iter() {
+                    let _ = std::fs::remove_file(path);
+                }
                 if let Some(top) = &created_from {
                     for dir in vendor.ancestors() {
                         if std::fs::remove_dir(dir).is_err() || dir == top.as_path() {

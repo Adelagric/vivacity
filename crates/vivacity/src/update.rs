@@ -257,6 +257,7 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
                 !(args.no_dev || env_no_dev()),
+                &[],
             )? {
                 return Ok(code);
             }

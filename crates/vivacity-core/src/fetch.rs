@@ -916,6 +916,12 @@ impl Fetcher {
     }
 
     /// `dist_bytes` for a given dist type (the cache file's extension).
+    /// Where [`Self::dist_bytes_of`] keeps a dist it fetched (Composer's
+    /// files cache).
+    pub fn dist_cache_file(&self, name: &str, url: &str, dist_type: &str) -> PathBuf {
+        dist_cache_path_of(&self.cache_root, name, url, dist_type)
+    }
+
     pub async fn dist_bytes_of(
         &self,
         name: &str,

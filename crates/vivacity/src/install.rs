@@ -369,6 +369,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         !args.dry_run,
         !args.dry_run,
         !(args.no_dev || env_no_dev()),
+        &[],
     )? {
         return Ok(code);
     }

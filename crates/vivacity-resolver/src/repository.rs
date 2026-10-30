@@ -568,27 +568,48 @@ pub fn repo_urls(url: &str) -> RepoUrls {
     }
 }
 
+/// What [`local_insecure_url`] looks at in a local repository.
+pub struct LocalScan<'a> {
+    /// The packages whose files the resolution reads for sure (the root's
+    /// requirements, the locked packages, `require`'s arguments),
+    /// lowercased: only their dists are judged, from their files only —
+    /// Composer reads no other.
+    pub names: &'a [String],
+    /// The command installs: the dists count.
+    pub with_dists: bool,
+    /// `policy.ignore-unreachable` off for the resolution: the policy
+    /// filters' URLs count too (their refusal is no longer caught).
+    pub filters_fatal: bool,
+}
+
 /// For a `composer` repository whose files are local (`file://`), the
-/// first URL its metadata names that a run would request and that
-/// `secure-http` does not let through as is (refused, or read from a
-/// setting vivacity hands over): the URLs of packages.json Composer
-/// requests to load packages (`metadata-url`, the v1 provider URLs and
-/// includes, `providers-api`, `includes`, the dist mirrors of `mirrors` —
-/// not the policy filters' URLs, whose refusal Composer catches under
-/// `policy.ignore-unreachable`), and the dists (with their
-/// mirrors) of the versions it holds when the command installs
-/// (`with_dists`) — inline, in its includes, and in the files under a local
-/// `metadata-url`. Read without a request, before
-/// the command prints or writes anything; broader than what Composer will
-/// request (every version, not the ones the resolution needs), which only
-/// costs a hand-over. `None` for a remote repository (its packages.json
-/// URL is judged on its own) or files that cannot be read (the session
-/// reports them).
+/// first URL a run would request from what it names that `secure-http`
+/// does not let through as is (refused, or read from a setting vivacity
+/// hands over) — decided before the command prints or writes anything,
+/// and nothing read unless the setting can refuse at all. Read: its
+/// packages.json (the URLs it requests to load packages — `metadata-url`,
+/// the v1 provider URLs and includes, `providers-api`, `includes`, the
+/// dist mirrors of `mirrors` — and, when `filters_fatal`, the policy
+/// filters' URLs), then, when the command installs, the dists of the
+/// versions of `names` — inline, or in their files under a local
+/// `metadata-url`. Nothing Composer would not read itself (a package the
+/// resolution adds that `names` does not hold is judged once the lock is
+/// solved — the late hand-over of HANDOVER.md). `None` for a remote
+/// repository (its packages.json URL is judged on its own) or files that
+/// cannot be read (the session reports them).
 pub fn local_insecure_url(
     configured: &str,
-    with_dists: bool,
+    scan: &LocalScan<'_>,
 ) -> Option<(String, vivacity_core::secure_http::Verdict)> {
     use vivacity_core::secure_http::{classify, insecure, Verdict};
+    // `secure-http` false (or offline): nothing can be refused, nothing to
+    // read.
+    if !matches!(
+        classify("http://localhost/"),
+        Verdict::Refuse | Verdict::HandOver(_)
+    ) {
+        return None;
+    }
     let urls = repo_urls(configured);
     let path = urls.packages_json_url.strip_prefix("file://")?.to_owned();
     let scheme_host = |u: &str| -> String {
@@ -619,7 +640,7 @@ pub fn local_insecure_url(
     let read = |p: &std::path::Path| -> Option<Value> {
         serde_json::from_slice(&std::fs::read(p).ok()?).ok()
     };
-    // The dists of every version an object of packages holds.
+    // The dists of every version a package's entry holds.
     fn dists<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
         let versions: Vec<&Value> = match v {
             Value::Array(a) => a.iter().collect(),
@@ -653,14 +674,29 @@ pub fn local_insecure_url(
             found.push(canonical(u));
         }
     }
-    // Not what the policy filters request (advisories, lists): Composer
-    // catches their refusal under `policy.ignore-unreachable` (the default)
-    // and vivacity writes it as Composer does; without it, the refusal
-    // reaches the session and the run is handed over then.
+    // The policy filters' URLs: Composer catches their refusal under
+    // `policy.ignore-unreachable` (the default) and vivacity writes it as
+    // Composer does; without it, the refusal stops Composer.
+    if scan.filters_fatal {
+        for (outer, inner) in [
+            ("security-advisories", "api-url"),
+            ("filter", "summary-url"),
+            ("filter", "api-url"),
+        ] {
+            if let Some(u) = root
+                .get(outer)
+                .and_then(|o| o.get(inner))
+                .and_then(Value::as_str)
+            {
+                found.push(canonical(u));
+            }
+        }
+    }
     for (include, _) in root
         .get("provider-includes")
-        .and_then(Value::as_object)
         .into_iter()
+        .chain(root.get("includes"))
+        .filter_map(Value::as_object)
         .flatten()
     {
         if include.contains("://") {
@@ -677,65 +713,23 @@ pub fn local_insecure_url(
             found.push(canonical(u));
         }
     }
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    for (include, _) in root
-        .get("includes")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-    {
-        let u = canonical(include);
-        let u = if u.contains("://") {
-            u
-        } else {
-            format!("{}/{}", urls.base_url, u.trim_start_matches('/'))
-        };
-        match u.strip_prefix("file://") {
-            Some(local) => files.push(local.into()),
-            None => found.push(u),
-        }
-    }
     for u in &found {
         if let Some(hit) = judge(u) {
             return Some(hit);
         }
     }
-    if !with_dists {
+    if !scan.with_dists {
         return None;
     }
-    // A local `metadata-url`: the files under the directory before
-    // `%package%`.
-    if let Some(dir) = root
-        .get("metadata-url")
-        .and_then(Value::as_str)
-        .map(canonical)
-        .and_then(|u| u.strip_prefix("file://").map(str::to_owned))
-        .and_then(|t| t.split("%package%").next().map(str::to_owned))
-        .map(|prefix| match prefix.rfind('/') {
-            Some(i) => prefix[..i].to_owned(),
-            None => prefix,
-        })
-    {
-        let mut stack = vec![std::path::PathBuf::from(dir)];
-        while let Some(d) = stack.pop() {
-            for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-                // Links not followed (a cycle would not end).
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                let p = entry.path();
-                if kind.is_dir() {
-                    stack.push(p);
-                } else if kind.is_file() && p.extension().is_some_and(|e| e == "json") {
-                    files.push(p);
-                }
-            }
-        }
-    }
+    // Inline: `initializePartialPackages` / `loadIncludes` key by the
+    // version's name; the entry of each name.
+    let wanted = |name: &str| scan.names.iter().any(|n| n.eq_ignore_ascii_case(name));
     let mut out = Vec::new();
     if let Some(packages) = root.get("packages").and_then(Value::as_object) {
-        for v in packages.values() {
-            dists(v, &mut out);
+        for (name, v) in packages {
+            if wanted(name) {
+                dists(v, &mut out);
+            }
         }
     }
     for u in &out {
@@ -743,13 +737,50 @@ pub fn local_insecure_url(
             return Some(hit);
         }
     }
-    for file in files {
-        let Some(data) = read(&file) else { continue };
+    // A local `metadata-url`: the file of each name the repository lists
+    // (`available-packages`, `available-package-patterns`: a name outside
+    // them is never requested), as `startCachedAsyncDownload` reads it.
+    let template = root
+        .get("metadata-url")
+        .and_then(Value::as_str)
+        .map(canonical)
+        .and_then(|u| u.strip_prefix("file://").map(str::to_owned))?;
+    let listed: Option<Vec<String>> = root
+        .get("available-packages")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_lowercase)
+                .collect()
+        });
+    let patterns: Vec<Regex> = root
+        .get("available-package-patterns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(package_name_regexp)
+        .collect();
+    let declared = listed.is_some() || !patterns.is_empty();
+    for name in scan.names {
+        let name = name.to_lowercase();
+        if is_platform_package(&name) {
+            continue;
+        }
+        let in_list = listed.as_ref().is_some_and(|l| l.contains(&name));
+        let in_patterns = patterns
+            .iter()
+            .any(|re| re.is_match(name.as_bytes()).unwrap_or(false));
+        if declared && !in_list && !in_patterns {
+            continue;
+        }
+        let Some(data) = read(std::path::Path::new(&template.replace("%package%", &name))) else {
+            continue;
+        };
         let mut out = Vec::new();
-        if let Some(packages) = data.get("packages").and_then(Value::as_object) {
-            for v in packages.values() {
-                dists(v, &mut out);
-            }
+        if let Some(v) = data.get("packages").and_then(|p| p.get(name.as_str())) {
+            dists(v, &mut out);
         }
         for u in &out {
             if let Some(hit) = judge(u) {

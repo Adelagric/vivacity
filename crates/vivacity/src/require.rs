@@ -423,6 +423,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
                 !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
+                &args
+                    .packages
+                    .iter()
+                    .map(|p| crate::package_of_requirement(p).to_owned())
+                    .collect::<Vec<_>>(),
             )? {
                 return Ok(code);
             }
