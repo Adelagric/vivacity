@@ -416,7 +416,7 @@ Sept points confirmés, le point 5 en partie, trois nouveaux :
   tardive, comparée par le cas `late-transitive`. Garde : le cas
   `update-file-repo-unrelated` (un dépôt qui sert d'autres paquets en
   `http`, que Composer ne lit pas : natif exigé), rouge sur a1b6684.
-  Mesuré : dépôt de 4 000 paquets × 30 versions, `update` 283 ms → 6 ms.
+  Mesuré (chiffres au rapport).
 - **N2, cache de fichiers.** Les archives qu'un run a mises dans le cache
   de Composer avant une délégation sont retirées (Composer, les trouvant,
   n'écrirait pas leur « Downloading »). Non exercé (redirection `https`).
@@ -427,8 +427,8 @@ Sept points confirmés, le point 5 en partie, trois nouveaux :
   lock résolu, métadonnées refusées) et (3) redirection pendant les
   téléchargements : **retenir la sortie n'est pas fait, le compromis est
   rapporté** — les octets et la durée totale seraient les mêmes, mais la
-  première ligne attendrait la fin de ce qui décide : mesuré, de 15-40 ms
-  à ~1,0 s (laravel), ~1,2 s (symfony), ~4,7 s (sylius) sur chaque
+  première ligne attendrait la fin de ce qui décide (mesuré, chiffres au
+  rapport) sur chaque
   `update` avec installation sous `secure-http` vrai ; pour (3), l'en-tête
   de l'installation attendrait la fin des téléchargements. À trancher par
   le mainteneur. Ces chemins restent tardifs et non comparés faute de
@@ -468,7 +468,7 @@ Aucune rupture de contrat. Corrigés : G1 (drapeaux de stabilité implicites,
 alias de branche et racine), G2 (paquet figé non installé, jugé sur le
 lock), G3 (déverrouillage `-w`/`-W` au chargement), G4 (une version jugée
 une fois, sans copie, et les fichiers lus par le contrôle gardés analysés
-pour le dépôt qui les relit : banc à 1 500 paquets × 20 versions, `secure-http`
+pour le dépôt qui les relit : banc du relecteur, `secure-http`
 vrai au niveau de faux), G5 (retrait
 raté : `vendor/` rendu, `Error:` et sortie 1), G6 (cas `late` vivant,
 `late-path-dependency` ; cas Flex qui appelle Composer, `dist-then-recipe`).
@@ -479,8 +479,8 @@ Cas rouges sur f4de2f8 puis verts : `dev-implicit-flag`, `dev-branch-alias`,
 ## Sortie retenue (2026-10-30, décision du mainteneur)
 
 Déclencheur : `secure-http` vrai et un dépôt `composer` distant autre que
-packagist.org (`fallback::hold_trigger`) ; pour `install`, aussi un dist
-du lock hors des hôtes sûrs (`install_hold_trigger`). Retenue distincte de
+packagist.org (`fallback::hold_trigger`) ; pour `install`, le même seul
+déclencheur (la garde par hôte, retirée à la cinquième revue). Retenue distincte de
 `-v` (`io::hold_output`), abandonnée à toute délégation. `update` : de
 « Loading… » au pool construit, ses dists jugés (`scan_pool_dists`) ;
 `install` : de l'en-tête à la fin des téléchargements. Bancs :
@@ -488,6 +488,54 @@ du lock hors des hôtes sûrs (`install_hold_trigger`). Retenue distincte de
 `VIVACITY_HOLD_OUTPUT=force` : natif sous normal, `-q`, `-v`, rendu sans
 rien avant la raison, mode `loaded`), et `verbosity.sh`, `steps.sh`,
 `flex-update.sh` passés avec la retenue imposée. Mesures dans DECISIONS.
+
+## Cinquième revue (f4de2f8..bd879c9) : plan
+
+- **F1, la retenue commence trop tard.** `update` : retenir avant
+  l'événement `COMMAND` (bamarni) et la ligne de l'install sans lock.
+  `require`/`remove` : décider le déclencheur avant l'édition et retenir dès
+  là ; une délégation au pool n'écrit rien à l'écran, composer.json est
+  rétabli à l'octet (le différer jusqu'au pool demanderait une résolution
+  sur un manifeste en mémoire de bout en bout : non fait, dit).
+- **F2.** Le balayage du pool seulement quand la commande installe
+  (`--no-install`, `--dry-run` : non) ; la retenue relâchée au pool quand
+  même.
+- **F3.** Plus de garde par hôte : `install` retient sous le seul
+  déclencheur du mainteneur. Le déclencheur devient un test bon marché sur
+  le JSON déjà en mémoire (composer.json, config.json global gardé), sans
+  `MergedConfig` ni passage sur le lock ; une seule évaluation par run.
+- **F4.** `update` partiel : le lock que la session a lu sert à juger les
+  paquets figés non installés, avant « Loading… » ; un test de chaîne par
+  paquet verrouillé, rien de plus sans URL non sûre.
+- **F5.** Une panique pendant la retenue : les lignes retenues écrites
+  avant le message (ordre chronologique), sans attendre de verrou.
+- **F6.** Cas : `require`/`remove`, install sans lock, install après
+  update, Flex, bamarni, `-vv`/`-vvv`, `--no-install`/`--dry-run` (natifs),
+  `install` Packagist seul à dist hors GitHub (pas de retenue).
+- **F7.** Retirer du dépôt tout chiffre de banc ou de délai non approuvé ;
+  les docs disent ce que fait le code.
+- **Dépôts `package` et autres « not supported … yet »** : rendus avant
+  toute sortie (types de dépôt autres que `composer`/`path`, filtres
+  `only`/`exclude`/`canonical`, listes de politique personnalisées,
+  `--minimal-changes`, `COMPOSER=` autre, `update lock|nothing|mirrors`) ;
+  ce qui ne se voit qu'au chargement (protocole v1, `api-url` de liste) :
+  délégation (tardive, retenue sous le déclencheur) au lieu de sortir en 1.
+
+### Méta et revue indépendante de la cinquième revue
+
+Méta (dix points) : retenir dès `resolution_fallback` passé pour
+`require`/`remove` (pas seulement à l'édition : découverte de version,
+lignes sur les paquets) ; fixation de `require` sur le lock lu avant
+l'édition ; panique limitée au fil qui retient, ordre de `release_output`,
+crochet chaîné ; `update --minimal-changes` et la clé fusionnée ; miroirs
+de dist du dépôt ; les lignes de `Factory` gardées hors de la retenue
+(sinon perdues sous `--no-fallback`) ; schéma d'URL et dépôt sans URL.
+Laissés : le refus du second chargement de `remove` (18g), la fixation
+après Flex (18h). Revue (six points) : vérité PHP de la clé
+minimal-changes, `update -m`, `remove --no-update` sans contrôle de
+dépôts, la liste de politique personnalisée laissée tardive (seul un dépôt
+qui la déclare la rend fatale), chemin `https` avant `repo_urls`, ordre du
+vidage sur panique.
 
 ## Résultats
 
@@ -627,6 +675,13 @@ la décision revient au mainteneur.
     paquet d'un autre type de dépôt (`path`) amène n'est jugée qu'au lock
     résolu (tardif, cas `late-path-dependency`) ; un paquet figé non
     installé à dist `http://` hors dépôt local et hors `remove` aussi.
+18g. **`remove` : refus du second chargement des plugins** rendu après
+    « has been updated » (la ligne écrite deux fois) — décidable avant
+    l'édition sur le manifeste édité en mémoire, comme `require`. Hors
+    `secure-http`. S.
+18h. **Fixation par `update` après une requête de Flex** : sur un projet
+    Flex, les paquets figés sont jugés après la lecture de l'index de Flex
+    à l'activation (la même requête que Composer).
 18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
     `canonicalize` suivi de `/packages.json` (écart antérieur du
     transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y

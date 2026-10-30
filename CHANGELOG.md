@@ -127,19 +127,36 @@ byte-identical-output promise are the public API.
 ### Fixed
 - **Output held while a `secure-http` hand-over may still come.** With
   `secure-http` true and a remote `composer` repository other than
-  packagist.org configured — such a repository may serve metadata or
-  dists over `http`, which only its files tell — `update`, `require` and
-  `remove` hold « Loading composer repositories… » and what loading
-  writes until the pool is built, then judge every dist the pool holds: a
-  refused one hands the run to Composer with nothing printed, otherwise the
+  packagist.org configured (in composer.json or the global config.json) —
+  such a repository may serve metadata or dists over `http`, which only its
+  files tell — `update` holds everything it writes from the start of its
+  resolution (the `COMMAND` event's lines, the install-without-lock line,
+  « Loading composer repositories… » and what loading writes), and
+  `require` and `remove` from before they edit composer.json, until the
+  pool is built. When the command installs, every dist the pool holds is
+  judged then: a refused one hands the run to Composer with nothing
+  printed (composer.json, edited by `require`/`remove`, is put back to its
+  exact bytes; the repository requests and their cache are Composer's
+  own); otherwise, and always under `--no-install` or `--dry-run`, the
   held lines go out unchanged, in order, at every verbosity. `install`
   holds its headline and what follows until the downloads end, under the
-  same trigger or when a dist of the lock sits on a host other than
-  api.github.com, codeload.github.com, bitbucket.org or gitlab.com (a
-  refused redirect then hands over with nothing printed). Packagist-only
-  projects see no change (measured: same first line, same total time); a
-  triggered run's first line waits for the loading (0.9 to 5 s on the
-  fixtures with a remote repository forced), its total time does not move.
+  same trigger. Packagist-only projects are untouched. The pool's
+  judgement is broader than the download (an installed or unchosen
+  version counts: a hand-over Composer would not need). Still late: a
+  refused redirect during the install that follows an `update` (the lock
+  is written by then) or on a project without such a repository, and a
+  preferred dist mirror declared by a single package's metadata (judged
+  on the solved lock).
+- **Commands vivacity cannot reproduce go to Composer instead of failing
+  with exit 1**: a repository of a type other than `composer` or `path`
+  (`package`, `vcs`, `artifact`…), `only`/`exclude`/`canonical`, a URL
+  scheme vivacity does not read, a repository without a URL — decided on
+  the merged configuration before anything is printed or edited; an
+  alternate manifest (`COMPOSER=`) and the minimal-changes mode
+  (`--minimal-changes`, now accepted by `update`, `COMPOSER_MINIMAL_CHANGES`,
+  `update-with-minimal-changes`) at startup; `update lock|nothing|mirrors`;
+  the v1 repository protocol, a filter `api-url` and custom policy lists,
+  which only loading reveals, as late hand-overs.
 - **`secure-http` is honoured.** Composer refuses to fetch an `http://`
   (or `git://`, `ftp://`) URL unless `config.secure-http` is false, and
   then warns once per host: « Warning: Accessing <host> over http which is

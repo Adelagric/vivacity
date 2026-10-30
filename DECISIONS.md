@@ -5435,8 +5435,7 @@ redirection refusée) et limite de 20 redirections : non vérifiées, faute de s
 **Constat.** Le second passage confirme sept points et en trouve trois :
 (N1) le contrôle d'un dépôt local lisait tout l'arbre de son
 `metadata-url`, et l'analysait avant tout test, même sous `secure-http`
-faux — mesuré : un dépôt `file://` de 4 000 paquets × 30 versions (78 Mo,
-tout en `https`), `update` : 283 ms sur a1b6684, 6 ms une fois corrigé ; (N2) les
+faux — mesuré sur un grand dépôt `file://` (chiffres au rapport, pas ici) ; (N2) les
 archives qu'une installation rendue après une redirection refusée avait
 mises dans le cache de fichiers changeaient la sortie de Composer (pas de
 « Downloading » pour un dist en cache) ; (D1) le README taisait l'exception
@@ -5458,8 +5457,8 @@ run a mises dans le cache de fichiers sont retirées quand il rend la main.
 rapporté.** Les octets resteraient identiques et la durée totale aussi ;
 mais la première ligne attendrait la fin de ce qui décide. Mesuré
 (`update --dry-run`, fixtures, Packagist en direct, cache chaud) : la
-première ligne sort à 15-40 ms aujourd'hui ; retenue jusqu'au lock résolu,
-elle sortirait à ~1,0 s (laravel), ~1,2 s (symfony), ~4,7 s (sylius) — sur
+première ligne, retenue jusqu'au lock résolu, attendrait toute la résolution
+(chiffres au rapport, pas ici) — sur
 chaque `update` avec installation sous `secure-http` vrai, puisque
 n'importe quel dépôt distant peut servir des dists `http://`. Pour une
 redirection pendant les téléchargements, les trois lignes d'en-tête de
@@ -5535,8 +5534,8 @@ partielle, verrouillé à un dist `http://` et pas installé, se voyait après
 la résolution ; (G3) l'élargissement `-w`/`-W` par les liens du vieux lock
 pouvait être plus étroit que Composer, qui déverrouille une dépendance
 verrouillée quand une nouvelle version chargée l'exige ; (G4) vitesse —
-mesuré par le relecteur : un dépôt local de 1 500 paquets × 20 versions,
-`update` 40 % plus lent sous `secure-http` vrai, chaque version rejugée
+mesuré par le relecteur sur un grand graphe local : `update` nettement
+plus lent sous `secure-http` vrai, chaque version rejugée
 sous chaque contrainte et les listes de versions copiées à chaque tour ;
 (G5) un retrait d'archive raté dans l'installeur laissait le `vendor/` créé
 et sortait en 100, contre 1 dans `fallback::hand_over` ; (G6) aucun cas
@@ -5552,10 +5551,8 @@ ce qu'une version chargée exige sous `-w`/`-W` (pas une exigence racine
 pour `-w`). Une version n'est jugée qu'une fois, les listes empruntées, et
 les fichiers que le contrôle lit sont gardés analysés pour le dépôt qui les
 relit ensuite (`fetch_cached`, `prefetch`) : plus de seconde analyse —
-mesuré sur le banc du relecteur (1 500 paquets × 20 versions, chacune trois
-exigences), `update` sous `secure-http` vrai au niveau de faux (temps
-utilisateur 0,931 s contre 0,932 s ; 1,045 s avant ce partage, 1,325 s sur
-f4de2f8). Le
+mesuré sur le banc du relecteur : `update` sous `secure-http` vrai au
+niveau de faux (chiffres au rapport, pas ici). Le
 retrait raté : `vendor/` d'abord rendu, puis `Error:` et sortie 1, comme
 `hand_over`. Banc : un cas `late` vivant (`late-path-dependency`, un paquet
 `path` qui amène un dist `http://` d'un dépôt local) ; un cas Flex qui
@@ -5604,13 +5601,13 @@ Packagist ne sont connus qu'au chargement, trop tard pour retenir
 « Loading… » : un projet Packagist seul à dist `http://` reste tardif.
 Les scripts (`--run-scripts`) relâchent la sortie avant de partir.
 
-**Mesuré.** Projets Packagist seuls (laravel, symfony, sylius, `update
---dry-run`, Packagist en direct, cinq passages) : première ligne à 11, 12,
-16-17 ms avant comme après ; hyperfine (install no-op, install à vendor
-vidé, `dump-autoload -o`) dans le bruit. Déclenché (retenue imposée sur
-les mêmes) : première ligne à la fin du chargement, ~0,9 s (symfony),
-~2,1 s (sylius), 2,9 à 5,0 s (laravel, réseau variable). Banc local à
-1 500 paquets : 1,103 s non retenu, 1,110 s retenu (± 0,011-0,014 s).
+**Mesuré.** Première ligne et durée totale des projets Packagist seuls
+inchangées, durée totale d'un run déclenché inchangée, première ligne d'un
+run déclenché à la fin du chargement — chiffres au rapport, pas ici (règle
+du mainteneur : aucun chiffre non approuvé dans le dépôt). *Corrigé au
+cinquième passage (entrée suivante) : la retenue commençait trop tard,
+le pool était jugé sans installation, et la garde par hôte de `install`
+retenait des projets Packagist seuls.*
 
 **Vu rouge (ff98df1) puis vert.** Traces : `hold-remote-https` (dépôt
 distant `https`, retenu), `hold-install-other-host` (retenu) ; retenue
@@ -5631,4 +5628,84 @@ retenue imposée sur les équivalents locaux. Tardifs encore : `require` et
 `remove` (leurs lignes et l'édition de composer.json précèdent la
 retenue), l'installation qui suit un `update` (le lock est écrit avant),
 le miroir préféré d'un paquet du pool.
+
+## 2026-10-30 — Cinquième revue : la retenue plus tôt, sans garde par hôte ; les fonctions non reproduites rendues (docs/plans/parity-gaps-026.md)
+
+**Constat.** (F1) La retenue commençait après l'événement `COMMAND` et la
+ligne de l'install sans lock, et après l'édition de `require`/`remove` :
+une délégation au pool réimprimait ces lignes. (F2) Le pool était jugé
+sous `--no-install`/`--dry-run`, où Composer ne télécharge rien et finit en
+0. (F3) La garde par hôte d'`install` retenait des projets Packagist seuls
+(downloads.wordpress.org, git.drupalcode.org sont servis par Packagist), et
+le déclencheur coûtait une `MergedConfig` et un passage sur le lock à
+chaque `install`. (F4) Un paquet figé non installé à dist `http://` n'était
+jugé d'avance qu'avec un dépôt local ou sous `remove`. (F5) Une panique
+pendant la retenue écrivait les lignes retenues après son message. (F7) Des
+chiffres de banc et de délai étaient entrés dans le dépôt sans
+approbation, et le CHANGELOG promettait « rien d'écrit » là où ce n'était
+pas vrai. Hors de ce delta : `update` sur un dépôt `package` (et les autres
+« not supported … yet ») sortait en 1 au lieu de rendre.
+
+**Fait.**
+
+- Retenue : `update` dès le manifeste chargé dans la résolution ;
+  `require`/`remove` dès `resolution_fallback` passé, avant toute ligne de
+  la commande et l'édition. Une délégation au pool n'écrit rien à l'écran ;
+  composer.json, édité, est rétabli à l'octet — *pas* « rien d'écrit » :
+  différer l'écriture jusqu'au pool demanderait de résoudre
+  `require`/`remove` sur un manifeste en mémoire de bout en bout (choix :
+  non fait, dit). Les lignes que `Factory` retient (`io::hold`) restent en
+  tête, hors de la sortie retenue : écrites d'abord, par la raison d'un run
+  qui s'arrête, ou abandonnées par la délégation, comme sans retenue.
+- Le pool n'est jugé que si la commande installe ; la sortie est relâchée
+  au pool dans tous les cas. Un miroir de dist préféré déclaré par le
+  packages.json d'un dépôt compte (Composer l'essaie d'abord).
+- Plus de garde par hôte : `install` retient sous le seul déclencheur. Le
+  déclencheur est un test sur le JSON en mémoire (`repositories` de
+  composer.json, du config.json global gardé pour le run), plus large que la
+  liste fusionnée ; le réglage n'est lu que si un tel dépôt est là. Un dist
+  `http://` du lock est toujours rendu avant toute sortie
+  (`insecure_dist_reason`, cas `dist-default`).
+- Paquets figés : `update` juge sur le lock que la session a lu (après la
+  sonde de plateforme et, pour un projet Flex, après la lecture de son
+  index — la même requête que Composer), `require` sur le lock lu avant son
+  édition (la lecture qu'il faisait plus tard, avancée), `remove` sur le
+  sien ; un test de chaîne par dist verrouillé d'abord.
+- Panique : un crochet chaîné, sur le seul fil qui retient, écrit la
+  retenue `-v`, puis les lignes de `Factory`, puis la sortie retenue — l'ordre
+  de `release_output` — avant le message, verrous seulement essayés. Choisi
+  plutôt que de les jeter : ce sont des lignes que le run avait écrites
+  avant la panique.
+- Rendus avant tout (`resolution_fallback`, sur la configuration fusionnée,
+  sauf `remove --no-update` qui n'ouvre aucun dépôt) : types de dépôt autres
+  que `composer`/`path`, `only`/`exclude`/`canonical`, schéma d'URL non lu,
+  dépôt sans URL ; au démarrage : `COMPOSER=` autre fichier, le mode
+  minimal-changes (option — désormais acceptée par `update` —,
+  `COMPOSER_MINIMAL_CHANGES`, `update-with-minimal-changes` de composer.json
+  ou, à défaut, du config.json global, en vérité PHP : `Config::get` laisse
+  la clé brute, la chaîne "false" est vraie) ; `update lock|nothing|mirrors`.
+  Ce que seul le chargement révèle (protocole v1, `api-url` de filtre,
+  liste de politique personnalisée) : délégation tardive au lieu de sortir
+  en 1 (retenue sous le déclencheur).
+- Docs : tout chiffre de banc ou de délai non approuvé retiré du dépôt
+  (gardé au rapport).
+
+**Vu rouge (bd879c9) puis vert.** `hold-require-handover`,
+`hold-remove-handover`, `hold-lockless-handover` (lignes avant la raison) ;
+`hold-update-no-install`, `-dry-run`, `hold-require-no-install`,
+`-dry-run`, `hold-remove-no-install`, `-dry-run` (rendus à tort) ;
+`hold-install-other-host` (retenu à tort) ; `partial-fixed-no-local`
+(tardif) ; `repo-type-package`, `repo-filter-only`, `alt-manifest`,
+`update-lock`, `minimal-changes-env`, `minimal-changes-require`,
+`minimal-changes-string`, `minimal-changes-option` (sortie 1 ou 2, ou
+natif sans le mode) ; `repo-type-package-no-update` (rendu à tort).
+Verts des deux côtés (comportement déjà juste, gardés comme garde-fous) :
+`hold-require`, `hold-remove`, `hold-update-install`, `hold-vv`,
+`hold-vvv`, les cas Flex et bamarni sous retenue.
+
+**Laissé.** Le message d'une panique n'est pas exercé par un banc. La
+retenue ne couvre pas une redirection refusée pendant l'installation qui
+suit un `update` (le lock est écrit) ni hors déclencheur. `remove` rend
+encore la main après « has been updated » quand son second chargement des
+plugins refuse (indépendant de `secure-http`, inventorié).
 
