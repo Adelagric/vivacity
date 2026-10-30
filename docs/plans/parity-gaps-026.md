@@ -435,10 +435,37 @@ Sept points confirmés, le point 5 en partie, trois nouveaux :
   dépôt `https` local (aucun cas `late` possible pour eux) ; le seul cas
   tardif exerçable, `late-transitive`, est comparé.
 
+## Troisième passage de revue (2026-10-30)
+
+- **F1, lecture trop large.** Le contrôle local lisait le fichier de chaque
+  paquet verrouillé et jugeait chaque version : `update acme/l` (acme/x
+  fixé par Composer, son fichier non lu) et `update` (acme/x 1.0.0, dist
+  `http://`, hors de `^2.0`) étaient rendus à tort. Corrigé : le départ et
+  les paquets fixés de `PoolBuilder::buildPool`, les versions qu'admettent
+  la contrainte et les stabilités. Cas `partial-locked-http`,
+  `full-outside-constraint`, rouges sur fb31ab6.
+- **F4, fermeture.** Les `require` des versions chargées sont suivis sur
+  les fichiers locaux : `late-transitive` devient `transitive-file-repo`,
+  rendu avant tout (rouge sur fb31ab6 : deux lignes, cache et store).
+  Reste tardif : une dépendance qu'un paquet d'un autre dépôt amène.
+- **F2, `includes` locaux.** Relus (régression du second passage) : cas
+  `satis-includes`, rouge sur fb31ab6.
+- **F3, cache de fichiers.** Toute archive écrite par le run (installation,
+  lecteur de Flex) est notée et retirée avant toute délégation ; un retrait
+  raté arrête le run sur cette erreur. Non exerçable par un banc ; test
+  unitaire. Le filtre « Downloading » de `flex-update.sh` reste (cache
+  partagé entre les deux côtés).
+- **F5, `allow_ssl_downgrade`.** Rendu avant tout (cas `ssl-downgrade`,
+  rouge sur fb31ab6) plutôt que porté (le retour en `https` sur une
+  empreinte `sha256` fausse serait à porter aussi).
+- **Retenue de la sortie** : non faite, décision du mainteneur (le
+  relecteur propose un déclencheur étroit : un dépôt `composer` distant
+  autre que packagist.org, sous `secure-http` vrai).
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -557,6 +584,16 @@ la décision revient au mainteneur.
     (second passage) — la première ligne d'un `update` attendrait la fin de
     la résolution (mesuré ~1 à ~4,7 s sur les fixtures). Décision du
     mainteneur.
+18e. **Faits établis par le relecteur pour la retenue** (troisième
+    passage) : Composer 2.10.3 ne réécrit ni ne relève un dist `http://` ;
+    les pilotes GitHub et Bitbucket écrivent `https` en dur, GitLab garde le
+    schéma enregistré ; sur un échantillon local de 209 685 entrées de
+    dists de Packagist, toutes en `https`.
+18f. **Contrôle local : plus large que le téléchargement** par les versions
+    que le pool charge et que le solveur ne prend pas, et par le mode
+    transitif (`-w`/`-W`) approché par les liens du lock (Composer
+    déverrouille pendant le chargement) ; une dépendance qu'un paquet d'un
+    autre dépôt amène n'est jugée qu'au lock résolu (tardif).
 18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
     `canonicalize` suivi de `/packages.json` (écart antérieur du
     transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y

@@ -138,20 +138,26 @@ byte-identical-output promise are the public API.
   of `update`/`require`/`remove` (the project's or the global
   config.json's), the URLs a local (`file://`) repository's packages.json
   names (its policy filters' too when `policy.ignore-unreachable` is off)
-  and the dists of the packages the resolution reads for sure from it
-  (the root's requirements, the locked packages, `require`'s arguments —
-  only their files, as Composer reads them; nothing is read when
-  `secure-http` cannot refuse), a dist of the lock not installed yet, a
+  and the dists of the versions the pool would load from it — read as
+  `PoolBuilder` reads them: from the root's requirements (in a partial
+  update, the locked packages outside the allow list stay fixed and their
+  files unread), the versions each constraint and the stabilities admit,
+  then their `require` links, over a full repository's packages.json and
+  includes or the per-package files of a local `metadata-url`; nothing is
+  read when `secure-http` cannot refuse — a dist of the lock not installed
+  yet, a
   Flex endpoint — goes to Composer before anything is printed, requested
   or written, the reason named (exit 3 under `--no-fallback`). What can
   only be seen once loaded is handed over late, after the lines already
   written (HANDOVER.md): the dists of the solved lock when a remote
-  repository serves `http://` archives or a new dependency from a local
-  one does, metadata a remote repository's packages.json points to over
+  repository serves `http://` archives (or a dependency another
+  repository provides brings one from a local repository), metadata a remote repository's packages.json points to over
   `http`, a remote policy filter's refusal under `ignore-unreachable`
-  off, a redirect to an insecure URL (the archives the run had put in
-  Composer's files cache are removed first, so that Composer still prints
-  their `  - Downloading` lines). A refusal Composer catches (an advisory
+  off, a redirect to an insecure URL. Before any hand-over, the archives
+  the run put in Composer's files cache (the install, Flex reading dists)
+  are removed, so that Composer still prints their `  - Downloading`
+  lines; one that cannot be removed stops the run with that error. A
+  repository with `allow_ssl_downgrade` goes to Composer. A refusal Composer catches (an advisory
   `api-url` or the list filter under `policy.ignore-unreachable`, a
   repository file it has a cached copy of) is written with Composer's
   message. With `secure-http` false

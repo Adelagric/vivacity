@@ -5446,7 +5446,10 @@ de l'auth.json du projet.
 peut pas refuser ; sinon son packages.json, puis, quand la commande
 installe, les seuls fichiers des paquets que la résolution lit à coup sûr
 (exigences racine, paquets verrouillés, arguments de `require`, filtrés
-par `available-packages`/`-patterns`) — rien que Composer ne lise. Les URL
+par `available-packages`/`-patterns`) — *corrigé au troisième passage :
+ce n'était pas un sous-ensemble de ce que Composer lit (les paquets
+verrouillés d'une mise à jour partielle, toutes les versions d'un
+fichier).* Les URL
 des filtres de politique d'un dépôt local comptent quand
 `ignore-unreachable` est faux (connu avant toute ligne). Les archives qu'un
 run a mises dans le cache de fichiers sont retirées quand il rend la main.
@@ -5469,4 +5472,52 @@ au lieu de natif : l'arbre entier lu), `late-transitive` (la marche
 trouvait le dist avant la résolution : le cas tardif n'était pas comparé),
 `meta-advisory-fatal` (une ligne, le cache et le store écrits avant la
 raison). Verts ensuite ; `meta-advisory` (natif) vert des deux côtés.
+
+## 2026-10-30 — `secure-http`, troisième passage de revue (docs/plans/parity-gaps-026.md)
+
+**Constat.** Cinq points, confirmés en exécutant contre Composer `-vvv` :
+(F1) le contrôle d'un dépôt local lisait le fichier de chaque paquet
+verrouillé et jugeait chaque version — `update acme/l` (acme/x verrouillé,
+fixé par Composer, son fichier non lu) et `update` (la 1.0.0 d'acme/x, dist
+`http://`, hors de `^2.0`) partaient à Composer, qui les mène à bien ;
+(F4) la fermeture des `require` n'était pas suivie, d'où une délégation
+tardive évitable ; (F2) les `includes` locaux n'étaient plus lus
+(régression) ; (F3) les dists que le lecteur de Flex met dans le cache de
+fichiers échappaient au retrait, et un retrait raté était avalé ; (F5)
+`allow_ssl_downgrade` n'était pas lu.
+
+**Fait.** Le contrôle local suit `PoolBuilder::buildPool` : départ des
+exigences racine (sans celles que `remove` retire, avec celles que
+`require` ajoute) ; en mise à jour partielle (liste et lock), les paquets
+verrouillés hors de la liste — élargie le long des `require` du lock pour
+`-w`/`-W`, sans les exigences racine pour `-w` — sont fixés : fichiers non
+lus, leurs propres `require` marqués à charger ; puis, nom par nom, les
+versions qu'admettent la contrainte et les stabilités (`minimum-stability`,
+drapeaux racine), leur dist jugé, leurs `require` suivis — sur le
+packages.json et les `includes` d'un dépôt complet, ou les fichiers par
+paquet d'un `metadata-url` local (`~dev` quand le dev est admis). Restent
+plus larges que le téléchargement : les versions chargées que le solveur
+ne prend pas, et le mode transitif approché par le lock (Composer déverrouille
+pendant le chargement). Les archives mises dans le cache de fichiers par
+ce run, d'où qu'elles viennent, sont notées (un canal, sans verrou) et
+retirées avant toute délégation ; une qui ne peut l'être arrête le run sur
+cette erreur — choisi plutôt qu'une délégation dont la sortie différerait
+sans le dire. `allow_ssl_downgrade` (=== vrai) : rendu avant tout, plutôt
+que porté — le réécrire suppose de suivre aussi le retour en `https` sur
+une empreinte `sha256` qui ne correspond pas (ComposerRepository.php:
+1765-1768), et l'option est rare.
+
+**Vu rouge (fb31ab6) puis vert.** `partial-locked-http`,
+`full-outside-constraint` (rendus au lieu de natifs), `transitive-file-repo`
+(tardif : deux lignes, cache et store écrits avant la raison),
+`satis-includes` (idem), `ssl-downgrade` (natif au lieu de rendu). Le
+retrait des archives (F3) n'est pas exerçable par un banc (il faut une
+redirection `https`) : un test unitaire vérifie que le lecteur commun
+(`dist_bytes_of`, celui de Flex aussi) note l'archive écrite.
+
+**Laissé.** Le filtre des lignes « Downloading » de `flex-update.sh` reste :
+le banc partage le cache de fichiers de Composer entre les deux côtés
+(pour ne pas retélécharger ~150 archives de GitHub à chaque passage), donc
+ces lignes dépendent de l'ordre des côtés ; le resserrer demanderait un
+cache par côté.
 
