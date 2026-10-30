@@ -228,6 +228,8 @@ retouch_source_ref() { # projet, paquet
 shape_source_ref()    { case "$1" in post) retouch_source_ref "$2" psr/log;; esac; }
 # `secure-http` rendu à son défaut (vrai) après la convergence : l'index en
 # http local est refusé.
+shape_not_required() { case "$1" in post)
+  jq 'del(.require["symfony/flex"])' "$2/composer.json" > "$2/c.tmp" && mv "$2/c.tmp" "$2/composer.json";; esac; }
 shape_secure_default() { case "$1" in post)
   jq 'del(.config["secure-http"])' "$2/composer.json" > "$2/c.tmp" && mv "$2/c.tmp" "$2/composer.json";; esac; }
 
@@ -258,18 +260,44 @@ prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony
   done
 }
 
-run() { # nom, attendu (native|fallback), motif attendu, arguments en plus, commande (update)
-  local name="$1" expect="$2" reason="${3:-}" extra="${4:-}" cmd="${5:-update}"
+run() { # nom, attendu (native|fallback|early), motif attendu, arguments en plus, commande (update), motif exigé chez Composer
+  local name="$1" expect="$2" reason="${3:-}" extra="${4:-}" cmd="${5:-update}" want="${6:-}"
   local ref="$WORK/ref-$name" viv="$WORK/viv-$name" c=0 v=0
   cp "$viv/composer.lock" "$WORK/$name.lock.before"; cp "$viv/symfony.lock" "$WORK/$name.symfony.before"
+  cp "$viv/composer.json" "$WORK/$name.json.before"
+  # `early` : rendu avant toute ligne ni écriture, comparé en entier — une
+  # copie de plus, où vivacity passe la main à Composer.
+  if [ "$expect" = early ]; then rm -rf "$WORK/fb-$name"; cp -R "$viv" "$WORK/fb-$name"; fi
   # Sur un cas de repli, Composer appliquerait la recette (réseau) : seule
   # la décision de vivacity est mesurée, et elle doit ne rien écrire.
-  if [ "$expect" = native ]; then
-    (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
+  if [ "$expect" = native ] || [ "$expect" = early ]; then
+    (cd "$ref" && env ${RUN_ENV:-} COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
       composer "$cmd" --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
+    if [ -n "$want" ] && ! grep -qE -- "$want" "$WORK/$name.composer.err"; then
+      echo "FAIL $name : Composer n'écrit pas « $want » (cas qui ne teste plus rien)"; status=1; return
+    fi
   fi
-  (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
+  (cd "$viv" && env ${RUN_ENV:-} COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
     "$VIVACITY" "$cmd" $extra --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
+  if [ "$expect" = early ]; then
+    local f=0 bad=""
+    (cd "$WORK/fb-$name" && env ${RUN_ENV:-} COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
+      "$VIVACITY" "$cmd" --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.fb.err") || f=$?
+    [ "$v" = 3 ] || bad="$bad --no-fallback sort en $v, pas 3;"
+    grep -qE -- "$reason" "$WORK/$name.vivacity.err" || bad="$bad pas de raison « $reason »;"
+    grep -qvE '^(vivacity: |  - |--no-fallback given: )' "$WORK/$name.vivacity.err" && bad="$bad --no-fallback écrit autre chose que la raison;"
+    cmp -s "$viv/composer.lock" "$WORK/$name.lock.before" || bad="$bad composer.lock écrit;"
+    cmp -s "$viv/symfony.lock" "$WORK/$name.symfony.before" || bad="$bad symfony.lock écrit;"
+    cmp -s "$viv/composer.json" "$WORK/$name.json.before" || bad="$bad composer.json écrit;"
+    [ "$(head -1 "$WORK/$name.fb.err" | cut -c1-10)" = "vivacity: " ] || bad="$bad une ligne avant la raison;"
+    [ "$c" = "$f" ] || bad="$bad codes $c vs $f;"
+    diff <(cat "$WORK/$name.composer.err") <(awk 'f {print} /^vivacity: delegating to /{f=1}' "$WORK/$name.fb.err") > "$WORK/$name.err.diff" || bad="$bad stderr différente;"
+    compare_vendor "$ref" "$WORK/fb-$name" "$WORK/$name.diff" >/dev/null || bad="$bad projet différent;"
+    rm -rf "$WORK/fb-$name"
+    if [ -z "$bad" ]; then echo "OK   $name : rendu à Composer avant tout ($reason), même sortie, même projet"
+    else echo "FAIL $name :$bad"; head -6 "$WORK/$name.err.diff"; status=1; fi
+    return
+  fi
   if [ "$expect" = fallback ]; then
     # Rien ne doit avoir bougé : ni le lock, ni symfony.lock.
     if ! cmp -s "$viv/composer.lock" "$WORK/$name.lock.before" || ! cmp -s "$viv/symfony.lock" "$WORK/$name.symfony.before"; then
@@ -308,16 +336,26 @@ prepare all-locked      - && run all-locked native
 # verrouillé, Flex ne lit pas son index à `PRE_POOL_CREATE`
 # (PackageFilter.php:91-93) mais à `POST_UPDATE_CMD` — l'avertissement
 # `secure-http` y passe, après « Writing lock file » et l'install.
-prepare allow-list      - && run allow-list native "" vendor/not-locked
+prepare allow-list      - && run allow-list native "" vendor/not-locked update '^Warning: Accessing 127.0.0.1 over http' 
 # Des arguments `symfony/*` : Flex lit son index dès son activation
 # (`PackageResolver::resolve` → `parseVersion`), avant toute ligne de la
 # commande ; `remove` crée un second `Composer` après « has been updated »,
 # d'où un second avertissement.
-prepare symfony-arg     - && run symfony-arg native "" symfony/console
-prepare remove-arg      - && run remove-arg native "" "symfony/uid --no-install" remove
+prepare symfony-arg     - && run symfony-arg native "" symfony/console update '^Warning: Accessing 127.0.0.1 over http'
+prepare remove-arg      - && run remove-arg native "" "symfony/uid --no-install" remove '^Warning: Accessing 127.0.0.1 over http'
+# … avant les avertissements de `BaseCommand::initialize` (variables
+# `COMPOSER_IGNORE_PLATFORM_REQ(S)`), que Flex précède : il s'active à la
+# création du `Composer`.
+prepare platform-env    - && RUN_ENV=COMPOSER_IGNORE_PLATFORM_REQ=ext-foo run platform-env native "" symfony/console update '^Warning: Accessing 127.0.0.1 over http'
+prepare remove-platform-env - && RUN_ENV=COMPOSER_IGNORE_PLATFORM_REQ=ext-foo run remove-platform-env native "" "symfony/uid --no-install" remove '^Warning: Accessing 127.0.0.1 over http'
+# Flex actif sans être exigé par la racine : `Downloader::disable` ne vide
+# que `$enabled`, `initialize` lit l'index quand même.
+prepare not-required shape_not_required - && run not-required native "" "symfony/console --no-install" update '^Warning: Accessing 127.0.0.1 over http' 
 # `secure-http` vrai : Flex réessaierait puis échouerait sur l'index —
 # rendu avant toute écriture.
-prepare secure-default shape_secure_default - && run secure-default fallback "Flex endpoint .* secure-http refuses"
+prepare secure-default shape_secure_default - && run secure-default early "Flex endpoint .* secure-http refuses"
+# … sous `remove` avec des arguments `symfony/*` : rendu avant l'édition.
+prepare secure-remove shape_secure_default - && run secure-remove early "Flex endpoint .* secure-http refuses" "symfony/uid --no-install" remove
 # `--dry-run` : Composer ne dispatche pas POST_UPDATE_CMD du tout (mesuré),
 # donc Flex n'écrit rien ET n'affiche rien — pas même la ligne des recettes.
 prepare dry-run         - && run dry-run   native "" --dry-run
