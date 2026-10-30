@@ -229,8 +229,8 @@ pub(crate) struct PoolStart<'a> {
 /// `requireComposer()` (RequireCommand.php:193) still instantiates every
 /// repository of the merged configuration: one its `RepositoryManager`
 /// refuses — a type it does not register (`pear` included: removed in 2.x),
-/// no type, no `url` where the class needs one — stops Composer before the
-/// edit. The run is Composer's then. A test on the configuration in memory.
+/// no type, no `url` where the class needs one, a `package` entry that is
+/// not a package definition — stops Composer before the edit. The run is Composer's then. A test on the configuration in memory.
 pub(crate) fn unregistered_repository_issue(
     manifest: &serde_json::Value,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
@@ -251,7 +251,28 @@ pub(crate) fn unregistered_repository_issue(
             return issue(format!("repository {named} has no type"));
         };
         match kind {
-            "package" => {}
+            // `package`: an object or a list of objects, each with a string
+            // `name` and `version` (what the loader needs). Anything else
+            // fails Composer's schema check or its loader: Composer's run
+            // — a doubt hands over, the schema is not rewritten here.
+            "package" => {
+                let well_formed = |p: &Value| {
+                    p.get("name").is_some_and(Value::is_string)
+                        && p.get("version").is_some_and(Value::is_string)
+                };
+                let ok = match def.get("package") {
+                    Some(p @ Value::Object(_)) => well_formed(p),
+                    Some(Value::Array(list)) => {
+                        !list.is_empty() && list.iter().all(|p| p.is_object() && well_formed(p))
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return issue(format!(
+                        "repository {named} of type \"package\" without a package definition vivacity can vouch for"
+                    ));
+                }
+            }
             "composer" | "vcs" | "git" | "bitbucket" | "git-bitbucket" | "github" | "gitlab"
             | "svn" | "fossil" | "perforce" | "hg" | "artifact" | "path" => {
                 if !def

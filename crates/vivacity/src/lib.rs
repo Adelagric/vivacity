@@ -879,19 +879,19 @@ impl Cli {
     /// again. The key is typed boolean in the schema: anything else fails
     /// composer.json's validation and draws a warning from the other
     /// layers', so the run is Composer's too (`"false"` included).
-    /// `--no-update` resolves nothing: the mode plays no part.
+    /// `--no-update` resolves nothing: the mode plays no part there — but
+    /// Composer validates the layers on every command, so a value that is
+    /// not a boolean hands those over too.
     fn minimal_changes(&self, manifest: Option<&serde_json::Value>) -> bool {
-        let flag = match self {
-            Cli::Require(a) if a.no_update => return false,
-            Cli::Remove(a) if a.no_update => return false,
-            Cli::Require(a) => a.minimal_changes,
-            Cli::Remove(a) => a.minimal_changes,
-            Cli::Update(a) => a.minimal_changes,
+        let (flag, no_update) = match self {
+            Cli::Require(a) => (a.minimal_changes, a.no_update),
+            Cli::Remove(a) => (a.minimal_changes, a.no_update),
+            Cli::Update(a) => (a.minimal_changes, false),
             _ => return false,
         };
         let env =
             std::env::var("COMPOSER_MINIMAL_CHANGES").is_ok_and(|v| !v.is_empty() && v != "0");
-        if flag || env {
+        if !no_update && (flag || env) {
             return true;
         }
         const KEY: &str = "update-with-minimal-changes";
@@ -945,7 +945,7 @@ impl Cli {
                 Err(()) => return true,
             }
         }
-        value
+        !no_update && value
     }
 
     /// [`run_once`]'s whole-command hand-overs before anything: the cache

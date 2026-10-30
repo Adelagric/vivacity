@@ -210,7 +210,10 @@ fn flush_for_panic() {
     }
     if let Ok(mut pending) = HELD_WRITE.try_lock() {
         if let Some((path, text)) = pending.take() {
-            let _ = std::fs::write(path, text);
+            // Written: a restore that follows has something to put back.
+            if std::fs::write(path, text).is_ok() {
+                MANIFEST_WRITTEN.store(true, Ordering::Release);
+            }
         }
     }
     if let Ok(mut deferred) = DEFERRED.try_lock() {
@@ -736,6 +739,24 @@ mod tests {
     // tests in threads.
     #[test]
     fn levels_and_symfony_parsing() {
+        // A panic flush writes the held composer.json edit, and counts it as
+        // written: a restore that follows has something to put back.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("composer.json");
+        forget_held_write();
+        hold_output();
+        write_held(&path, "{\n}\n").expect("held");
+        assert!(!path.exists() && !manifest_written());
+        flush_for_panic();
+        assert_eq!(
+            std::fs::read_to_string(&path).ok().as_deref(),
+            Some("{\n}\n")
+        );
+        assert!(
+            manifest_written(),
+            "a restore after the flush must put the file back"
+        );
+        forget_held_write();
         // Deferred lines are kept in order, released once, or dropped.
         defer();
         hold(Verbosity::Normal, "held".to_owned());

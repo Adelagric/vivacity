@@ -832,7 +832,14 @@ pub(crate) fn resolve_and_lock(
     // built — Flex's notice comes before it.)
     // `Installer::run`: an unsolvable set means exit code 2
     // (`SolverProblemsException`), any other error is an exception.
-    let (lock, report) = match session.update(&manifest_text, &filter) {
+    let updated = session.update(&manifest_text, &filter);
+    // `require`/`remove`'s edit, held back until the pool (`io::write_held`),
+    // could not be written then: Composer fails at that write, before
+    // anything of the resolution — first, whatever the resolution gave.
+    if let Some(why) = vivacity_core::io::take_held_write_error() {
+        anyhow::bail!("{why}");
+    }
+    let (lock, report) = match updated {
         Ok(r) => r,
         Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsolvable => {
             activate()?;
@@ -852,12 +859,6 @@ pub(crate) fn resolve_and_lock(
         }
         Err(e) => return Err(session_error(e)),
     };
-    // `require`/`remove`'s edit, held back until the pool (`io::write_held`),
-    // could not be written then: the error an immediate write would have
-    // given, before anything else is written.
-    if let Some(why) = vivacity_core::io::take_held_write_error() {
-        anyhow::bail!("{why}");
-    }
     trace("resolve", t0);
 
     // Under -v, a plugin the install phase would activate and whose lines
