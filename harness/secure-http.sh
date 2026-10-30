@@ -212,14 +212,18 @@ seed repo "{\"name\": \"vivacity/secure-http-repo\", \"type\": \"project\", \"re
 #   delegates:<motif>, native, expect:<motif>, anyreq (requêtes non comparées),
 #   authjson:<json> (auth.json du projet), globalauth:<json> (auth.json
 #   global), offline (`--offline` contre `COMPOSER_DISABLE_NETWORK=1`),
-#   late (délégation tardive permise), installed (vendor/ posé avant par un
+#   late (délégation tardive permise), loaded (rendu après le chargement,
+#   sortie retenue : rien d'écrit avant la raison, requêtes, cache de dépôts
+#   et store permis, pas d'archive), hold (sortie retenue imposée,
+#   `VIVACITY_HOLD_OUTPUT=force`, marqueur de trace exigé puis retiré),
+#   installed (vendor/ posé avant par un
 #   install de Composer à `secure-http: false`, cache jetable), rm:<chemin>
 #   (retiré du projet après), noappend (ni `--no-scripts` ni `--no-ansi`)
 case_() {
   local name="$1" seedname="$2"; shift 2
   local preps=() args=()
   while [ "$1" != "--" ]; do preps+=("$1"); shift; done; shift; args=("$@")
-  local d="$WORK/case/$name" delegates="" native=0 expect="" envs=() global='{}' globalauth="" warm=0 anyreq=0 offline=0 late=0 installed=0 noappend=0 p
+  local d="$WORK/case/$name" delegates="" native=0 expect="" envs=() global='{}' globalauth="" warm=0 anyreq=0 offline=0 late=0 installed=0 noappend=0 hold=0 loaded=0 p
   rm -rf "$d"; mkdir -p "$d"
   for p in "${preps[@]}"; do
     case "$p" in
@@ -234,6 +238,8 @@ case_() {
       late) late=1 ;;
       installed) installed=1 ;;
       noappend) noappend=1 ;;
+      hold) hold=1; envs+=("VIVACITY_HOLD_OUTPUT=force" "VIVACITY_TRACE=1") ;;
+      loaded) loaded=1 ;;
       globalauth:*) globalauth="${p#globalauth:}" ;;
     esac
   done
@@ -285,6 +291,13 @@ case_() {
   run ref env "${offenv[@]+"${offenv[@]}"}" composer "${args[@]}" "${tail[@]+"${tail[@]}"}"
   run viv "$VIVACITY" "${args[@]}" "${off[@]+"${off[@]}"}" "${tail[@]+"${tail[@]}"}"
   run nofb "$VIVACITY" "${args[@]}" "${off[@]+"${off[@]}"}" "${tail[@]+"${tail[@]}"}" --no-fallback
+  # `hold` : la sortie a bien été retenue (marqueur), puis les lignes de trace
+  # ne comptent pas.
+  local holdbad=""
+  if [ "$hold" = 1 ]; then
+    grep -q '^trace: output held until' "$d/viv.err" || holdbad=" sortie non retenue (pas de marqueur);"
+    for f in viv.err nofb.err; do grep -v '^trace: ' "$d/$f" > "$d/$f.t"; mv "$d/$f.t" "$d/$f"; done
+  fi
   # Une délégation : ce qui précède la ligne `delegating to` (la raison) est
   # de vivacity ; le reste, de Composer.
   # (awk : la ligne peut être la première, que `sed 1,/…/d` ne verrait pas.)
@@ -297,7 +310,7 @@ case_() {
   # chaque côté, ramené au même.
   sed "s#$d/ref/#<projet>/#g" "$d/ref.err" > "$d/ref.err.n" && mv "$d/ref.err.n" "$d/ref.err"
   sed "s#$d/viv/#<projet>/#g" "$d/viv.err.cmp" > "$d/viv.err.n" && mv "$d/viv.err.n" "$d/viv.err.cmp"
-  local bad=""
+  local bad="$holdbad"
   [ -z "$expect" ] || grep -qE -- "$expect" "$d/ref.err" || bad="$bad Composer n'écrit pas « $expect » (cas mal choisi);"
   [ "$(cat "$d/ref.code")" = "$(cat "$d/viv.code")" ] || bad="$bad codes $(cat "$d/ref.code") vs $(cat "$d/viv.code");"
   cmp -s "$d/ref.out" "$d/viv.out" || bad="$bad stdout différente;"
@@ -321,7 +334,12 @@ case_() {
     cmp -s "$d/viv.pre" "$d/nofb.pre" || bad="$bad --no-fallback : d'autres lignes avant la raison;"
     tail -n +"$(( $(wc -l < "$d/nofb.pre") + 1 ))" "$d/nofb.err" | grep -qvE '^(vivacity: |  - |--no-fallback given: )' \
       && bad="$bad --no-fallback écrit autre chose que la raison;"
-    if [ "$late" = 0 ]; then
+    if [ "$loaded" = 1 ]; then
+      # Rendu une fois le chargement fait, sortie retenue : les requêtes et
+      # le cache de dépôts sont ceux de Composer, le store est celui de
+      # vivacity ; aucune archive dans le cache de fichiers.
+      [ -z "$(find "$d/cache-nofb/files" -type f 2>/dev/null)" ] || bad="$bad --no-fallback a écrit une archive dans le cache;"
+    elif [ "$late" = 0 ]; then
       [ ! -s "$d/nofb.requests" ] || bad="$bad --no-fallback a fait des requêtes;"
       if [ "$warm" = 1 ]; then
         diff -rq "$d/cache-warm" "$d/cache-nofb" >/dev/null || bad="$bad --no-fallback a écrit dans le cache;"
@@ -350,6 +368,26 @@ case_() {
     diff "$d/ref.err" "$d/viv.err.cmp" | head -10
     [ "$native" = 1 ] && diff "$d/ref.requests" "$d/viv.requests" | head -6
   fi
+}
+
+# trace_ <nom> <held|free> <composer.json> [lock:<json>] [VAR=valeur…] -- <arguments>
+# Si vivacity retient sa sortie (marqueur `VIVACITY_TRACE`), sans rien
+# comparer : un dépôt distant `https` (aucun serveur ici ; `HTTPS_PROXY`
+# mort, rien ne part) ou Packagist seul.
+trace_() {
+  local name="$1" want="$2" json="$3"; shift 3
+  local envs=() lock="" a
+  while [ "$1" != "--" ]; do
+    case "$1" in lock:*) lock="${1#lock:}" ;; *) envs+=("$1") ;; esac; shift
+  done; shift
+  local d="$WORK/trace/$name"; rm -rf "$d"; mkdir -p "$d/p"; echo '{}' > "$d/config.json"
+  printf '%s\n' "$json" > "$d/p/composer.json"
+  [ -z "$lock" ] || printf '%s\n' "$lock" > "$d/p/composer.lock"
+  (cd "$d/p" && env "${envs[@]+"${envs[@]}"}" COMPOSER_HOME="$d" COMPOSER_CACHE_DIR="$d/cache" VIVACITY_CACHE_DIR="$d/store" VIVACITY_TRACE=1 \
+    HTTPS_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 "$VIVACITY" "$@" --no-fallback --no-scripts --no-ansi >/dev/null 2>"$d/err")
+  local got=free; grep -q '^trace: output held until' "$d/err" && got=held
+  if [ "$got" = "$want" ]; then echo "OK   $name : sortie $([ "$want" = held ] && echo retenue || echo pas retenue)"
+  else fail "$name : attendu $want, vu $got"; fi
 }
 
 only() { [ $# -eq 0 ] && return 0; local c; for c in $SELECTED; do [ "$c" = "$1" ] && return 0; done; return 1; }
@@ -482,4 +520,21 @@ want meta-advisory && case_ meta-advisory adv native 'expect:Security advisory d
 want meta-advisory-fatal && case_ meta-advisory-fatal adv 'delegates:secure-http' 'jq:.config.policy={"ignore-unreachable": false}' 'expect:does not allow connections to http://repo.test/api' -- update --no-install
 want meta-auth-json && case_ meta-auth-json filemeta native 'authjson:{"secure-http": false}' 'expect:^Warning: Accessing repo.test' -- update --no-install
 want update-file-repo-false && case_ update-file-repo-false filerepo native 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing dist.test' -- update
+# 7. La sortie retenue (le déclencheur étroit, 2026-10-30) : un dépôt
+# `composer` distant autre que packagist.org et `secure-http` vrai.
+LOCKA='{"packages": [{"name": "acme/a", "version": "1.0.0", "type": "library", "dist": {"type": "zip", "url": "URL"}}], "packages-dev": [], "aliases": [], "minimum-stability": "stable", "stability-flags": {}, "prefer-stable": false, "prefer-lowest": false, "platform": {}, "platform-dev": {}, "plugin-api-version": "2.6.0"}'
+want hold-remote-https && trace_ hold-remote-https held '{"repositories": [{"type": "composer", "url": "https://repo.test"}, {"packagist.org": false}], "require": {"acme/a": "1.0.0"}}' -- update
+want hold-remote-https-off && trace_ hold-remote-https-off free '{"repositories": [{"type": "composer", "url": "https://repo.test"}, {"packagist.org": false}], "require": {"acme/a": "1.0.0"}, "config": {"secure-http": false}}' -- update
+want hold-packagist-only && trace_ hold-packagist-only free '{"require": {"psr/log": "^3.0"}}' -- update
+want hold-install-packagist && trace_ hold-install-packagist free '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://api.github.com/repos/acme/a/zipball/abc}" -- install
+want hold-install-other-host && trace_ hold-install-other-host held '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://downloads.example.org/a.zip}" -- install
+# Retenue imposée (aucun dépôt `https` ici) : natif, octet pour octet, à
+# chaque niveau ; rendu, rien avant la raison.
+want hold-native && case_ hold-native filel native hold -- update
+want hold-native-v && case_ hold-native-v filel native hold -- update -v
+want hold-native-q && case_ hold-native-q filel native hold -- update -q
+want hold-install && case_ hold-install local native hold -- install
+want hold-install-v && case_ hold-install-v local native hold -- install -v
+want hold-install-dists && case_ hold-install-dists pkg native hold 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing dist.test' -- install
+want hold-handover && case_ hold-handover pathp 'delegates:secure-http' hold loaded nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
 exit $status
