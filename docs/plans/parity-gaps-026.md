@@ -1,0 +1,534 @@
+# Trois écarts de parité avant 0.26, et l'inventaire de ceux qui restent — plan
+
+> Niveau 2 : contrat de parité (stderr à l'octet, codes de sortie, rien
+> d'écrit avant une délégation). Méta-analyse et revue par sous-agents frais.
+> Branche `parity-gaps-026`, depuis c876c38 (candidat 0.26). Référence :
+> Composer 2.10.3 installé (`/opt/homebrew/bin/composer`), sources lues dans
+> le phar extrait hors dépôt et dans `docs/reference/`.
+
+## Contraintes posées par le mainteneur
+
+- Une décision de délégation ne lit que ce que vivacity a déjà en mémoire
+  (manifeste, lock, configuration, URL de dists et de dépôts) : aucune
+  requête et aucune lecture disque de plus sur le chemin commun. Le test
+  `secure-http` est un test de chaîne sur des URL déjà lues.
+- Corriger plutôt que déléguer quand la parité se prouve ; la délégation
+  reste pour le rare ou l'irreproductible.
+- Aucun chiffre mesuré dans les docs du dépôt (ni durée, ni compte de corpus
+  nouveau) : ils vont au rapport.
+- Corpus (`harness/corpus.sh`, deux modes) inchangé à la fin ; une
+  délégation nouvelle qui toucherait un projet du corpus est signalée avant
+  toute décision.
+
+## Ce que Composer 2.10.3 fait (lu, puis mesuré)
+
+### L'ordre de `doUpdate` jusqu'à « Updating dependencies »
+
+`Installer::doUpdate` (Installer.php:512, :534, :536) : « Loading composer
+repositories with package information », puis `createPool` →
+`PoolBuilder::buildPool` (PoolBuilder.php:208-366), puis « Updating
+dependencies ». Dans `buildPool`, tout est écrit au moment où ça arrive :
+
+1. `warnAboutNonMatchingUpdateAllowList` (:216), avant tout chargement ;
+2. le chargement des paquets : ce que les dépôts écrivent en chargeant (le
+   dépôt dégradé « could not be fully loaded », l'avertissement de
+   `Config::prohibitUrlByConfig` à la première requête vers un hôte) mêlé aux
+   avertissements « Dependency … is also a root requirement » (:539, :569) ;
+3. `PRE_POOL_CREATE` (:328) : Flex y lit son index (requête, donc
+   l'avertissement http de son hôte) puis écrit « Restricting packages… » ;
+4. `runSecurityAdvisoryFilter` (:358) puis `runFilterListFilter` (:359) :
+   leurs requêtes, puis leurs avertissements « … could not be fetched … »
+   (SecurityAdvisoryPoolFilter.php:82-85, FilterListPoolFilter.php:173-176) ;
+5. l'optimiseur, puis « Updating dependencies ».
+
+Mesuré sur 2.10.3 :
+
+- `update vendor/zzz` sur un dépôt `http://` avec `secure-http: false` :
+  la ligne de la liste d'update (1) PRÉCÈDE « Warning: Accessing 127.0.0.1
+  over http… » (2) ;
+- `update` de solver-policies avec un `security-advisories.api-url` en
+  `http://` (secure-http par défaut) : « Security advisory data could not be
+  fetched … » et sa ligne `  - Your configuration does not allow
+  connections to http://…` AVANT « Updating dependencies ». vivacity
+  (c876c38) l'écrit après, avec un autre message (le transport `file://`
+  refuse le POST) ;
+- les bancs Flex (flex-update, flex-recipes) : l'avertissement http de
+  l'index tombe juste avant « Restricting packages… ».
+
+vivacity (c876c38) : avertissements du constructeur ET des filtres après
+« Updating dependencies » ; les lignes de dépôt (dégradé) au moment du
+chargement.
+
+### `secure-http`
+
+`Config::prohibitUrlByConfig` (Config.php:692-738) : pour une URL valide (ou
+`^https?://`) de schéma `http`, `git`, `ftp` ou `svn`, `secure-http` vrai →
+`TransportException` « Your configuration does not allow connections to
+<Url::sanitize>. See https://getcomposer.org/doc/06-config.md#secure-http
+for details. » ; faux → « Warning: Accessing <hôte> over <schéma> which is
+an insecure protocol. », une fois par hôte et par instance de `Config`.
+`secure-http` (Config.php:415-425) : faux si `disable-tls` est vrai, sinon
+`$val !== 'false' && (bool) $val` ; pas de variable `COMPOSER_*` à elle ;
+couches config.json global, auth.json global, `config` du projet, auth.json
+du projet, puis `COMPOSER_AUTH` (Factory.php:209-215, :334-344 — la méta l'a
+relevé, mesuré : `COMPOSER_AUTH='{"secure-http": false}'` change le refus en
+avertissement).
+
+Appelants : `CurlDownloader::initDownload` (:181, toute requête http(s), sauf
+`^http://(repo\.)?packagist\.org/p/` avec `$`), `RemoteFilesystem::get`
+(:287), `Git::runCommand` (:109), hg/svn/fossil. `HttpDownloader::startJob`
+répond AVANT curl sous `COMPOSER_DISABLE_NETWORK` (:328-338) : ni refus ni
+avertissement hors ligne. Un dist servi par le cache de fichiers ne fait
+aucune requête : ni refus ni avertissement.
+
+Mesuré (dépôt `composer` local en `http://`, dists `http://`) :
+
+| cas | Composer 2.10.3 |
+|---|---|
+| `update`, défaut | « Loading… » puis l'exception sur `packages.json`, code 100 |
+| `update`, `false` | l'avertissement juste après « Loading… » |
+| `install` du lock, dépôt http + dists http, défaut | « Verifying… », l'avertissement du filtre de listes (cause : le refus de `packages.json`), « Package operations », deux « Downloading », exception sur le premier dist, code 100 |
+| `install`, sans dépôt http, dists http, défaut | même chose sans l'avertissement du filtre |
+| `install`, dépôt http, `false` | l'avertissement après « Verifying… » (requête du filtre de listes) |
+| `install`, sans dépôt http, dists http, `false` | l'avertissement APRÈS la première ligne « - Downloading » (la requête part dans la boucle synchrone de `FileDownloader`) |
+| `update vendor/zzz`, `false` | ligne de liste d'update, puis l'avertissement |
+| `require acme/a` (sans contrainte), `false` | l'avertissement deux fois : à la découverte de version, et après « Loading… » (seconde instance de `Composer`) |
+| `remove acme/b`, `false` | aucune requête, aucun avertissement |
+
+vivacity (c876c38) télécharge tout, n'écrit jamais l'avertissement ; les
+harnais `auth-hosts.sh`, `flex-update.sh`, `flex-recipes.sh`,
+`plugin-lines.sh` filtrent la ligne.
+
+## Le design
+
+### Points 1 et 2 : écrire au moment où Composer écrit
+
+Plutôt que porter tel quel 53d5306 (qui imprime les avertissements du
+constructeur en bloc après la construction du pool), le constructeur écrit
+chaque avertissement au moment où il le produit (`vivacity_core::say!` dans
+`pool.rs`, comme `writeError`), ce qui le met à sa place parmi les lignes que
+les dépôts écrivent pendant le chargement (dépôt dégradé aujourd'hui,
+avertissement http demain) — le port en bloc les remettrait toutes avant ou
+toutes après. `Pool::warnings` disparaît. Le constructeur ne tourne qu'à deux
+endroits (`UpdateSession::create_pool`, et `LockedPool::build` de la
+vérification d'install, sans liste d'update ni racine à garder verrouillée :
+il n'y écrit rien).
+
+Puis, dans `create_filtered_pool` : la notice de Flex (`PRE_POOL_CREATE`)
+écrite après la construction, précédée de l'avertissement http de son index
+s'il est dû ; le filtre d'avis écrit ses avertissements sitôt fini, puis le
+filtre de listes les siens ; `update` n'écrit plus que « Updating
+dependencies » après.
+
+### Point 3 : `secure-http`
+
+Un module `vivacity_core::secure_http` :
+
+- `insecure(url) -> Option<(schéma, hôte)>` : la condition de
+  `prohibitUrlByConfig` (URL valide ou `^https?://`, schéma en minuscules
+  dans http/git/ftp/svn), l'exception de `CurlDownloader` pour
+  `http://(repo.)?packagist.org/p/…$` ;
+- `secure_http_from(config du projet, config.json global)` : `disable-tls`
+  vrai → faux ; sinon `$val !== 'false' && (bool) $val`, défaut vrai ;
+- l'état d'une exécution : projet (pour lire la config à la demande, seulement
+  quand une URL non sûre se présente), hors ligne ou non, hôtes déjà avertis ;
+  `reset` à chaque `Composer` que Composer crée (début de commande ; avant
+  « Loading composer repositories » d'une résolution) ;
+- `request(url) -> Result<(), String>` : hors ligne → rien ; URL non sûre et
+  `secure-http` vrai → `Err(message de Composer)` ; faux → l'avertissement,
+  une fois par hôte, sur le canal de l'appelant.
+
+Points de contrôle :
+
+- **Délégation, avant toute écriture et toute requête, sur ce qui est en
+  mémoire** (`secure-http` vrai seulement) :
+  - `update`/`require`/`remove` (et `install` sans lock qui résout) : l'URL
+    d'un dépôt `composer` du manifeste dans `resolution_fallback` (avant que
+    `require`/`remove` n'éditent composer.json), celle d'un dépôt du
+    config.json global à la création de la session (`MergedConfig`, déjà
+    lue : erreur `Unsupported`, délégation nommée avant « Loading… »), les
+    points d'entrée de Flex quand Flex lira son index (le contrôle des
+    dépôts `package` prévu ici est sans objet : `update` refuse ce type,
+    écart inventorié) ;
+  - `install` du lock : un dist non sûr d'un paquet du lock dans le périmètre
+    (`run.lock`, en mémoire) → délégation avant la première ligne.
+- **Natif, message de Composer** (`secure-http` vrai, URL découverte en
+  route) : les quatre points de requête de `ComposerRepository` passent par
+  `request` ; le refus est une erreur de transport, que les filtres
+  d'avis/de listes rattrapent sous `ignore-unreachable` exactement comme
+  Composer (cas `api-url` ci-dessus, et le dépôt http d'un `install`) ;
+  ailleurs elle sort en 100 comme toute erreur de transport (encadré de
+  Composer contre `Error: …`, la convention acceptée de `transport-exit.sh`).
+  Le récupérateur (`Fetcher`) refuse aussi en dernier recours, redirections
+  comprises (politique de redirection de reqwest).
+- **L'avertissement** (`secure-http` faux) : dépôts — au point de requête
+  (écrit tout de suite, ou retenu avec les autres lignes du dépôt quand il
+  retient sa sortie, comme la vérification d'install) ; dists — dans la passe
+  synchrone des lignes « - Downloading », juste après la ligne du paquet ;
+  index de Flex — retenu jusqu'à `PRE_POOL_CREATE`. Sources git : `http` et
+  `git` sont déjà rendus à Composer par `git_source::plan`, rien ne change.
+
+### Ce qui reste hors du design (écrit comme écart ou non vérifié)
+
+- Une redirection d'`https` vers une URL non sûre (refus, message de
+  Composer pour la cible) et la limite de 20 redirections : portées, non
+  exercées (pas de serveur `https` local). La redirection `http` → `http`
+  vers un nouvel hôte est mesurée (`dist-redirect`).
+- Une recette de Flex servie par un autre hôte non sûr que son point
+  d'entrée : rendue (place non reproduite).
+- Un dépôt `file://` dont packages.json pointe vers des URL http(s) : le
+  transport fichier de vivacity ne sait pas les lire (écart antérieur ;
+  sous `secure-http` vrai, le refus de Composer est reproduit).
+
+## Cas de harnais (chacun vu rouge sur c876c38, sauf les témoins nommés)
+
+- `verbosity.sh` (comparaison entière sous normal, `-q`, `-v` ;
+  `@registry-jq`, `@warns`, `VERBOSITY_ONLY`) : `laravel update
+  vendor/not-locked`, `laravel update laravel/tinker -w` (exigence racine
+  gardée, par les `replace` de laravel/framework), `solver-policies update`
+  avec l'`api-url` d'avis en http (points 2 et 3). Rouges au niveau normal
+  et sous `-v` ; `-q` passait (rien n'est écrit).
+- `secure-http.sh` (nouveau, mandataire `http_proxy` local) : 32 cas, 27
+  rouges ; témoins verts avant comme après (cache chaud, `--dry-run`, hors
+  ligne ×2, `remove` à cache chaud).
+- `flex-update.sh` : `allow-list` (index lu à `POST_UPDATE_CMD`),
+  `symfony-arg` et `remove-arg` (index lu à l'activation de Flex,
+  `PackageResolver::resolve` sur les arguments — trouvé par `steps.sh`, dont
+  le cas `symfony remove symfony/uid` portait l'avertissement en trop à
+  `POST_UPDATE_CMD` : Composer l'avait écrit en tête, une fois par
+  `Composer`), `secure-default` (rendu) ; rouges, comme tous ses cas une
+  fois le filtre retiré.
+- Filtres retirés : `auth-hosts.sh` (rouge sur c876c38 sans eux),
+  `flex-update.sh`, `flex-recipes.sh`, `plugin-lines.sh`.
+
+## Critère « vert »
+
+Gates (build, clippy, fmt, test) ; les cas ci-dessus rouges sur c876c38,
+verts après ; `steps.sh`, `update.sh`, `verbosity.sh`, `auth-hosts.sh`,
+`plugin-lines.sh`, `allow-plugins.sh`, `flex-update.sh`, `flex-recipes.sh`,
+`transport-exit.sh`, `secure-http.sh` verts ; corpus deux modes inchangé ;
+hyperfine avant/après (rapport seulement).
+
+## Méta-analyse (sous-agent frais, sur le code) et ce qui a changé
+
+Seize points ; ceux qui ont changé le design :
+
+- **Où et quand l'avertissement s'écrit.** vivacity n'envoie pas ses
+  requêtes aux moments de Composer (l'index de Flex avant « Loading… », les
+  recettes avant l'écriture du lock, la vérification d'`install` sur un
+  fil) : la décision « dû » est prise à la requête, l'écriture aux points de
+  Composer ; le `Fetcher` ne fait que refuser, jamais avertir.
+- **Flex lit son index paresseusement** (`PackageFilter.php:91-93` :
+  `$knownVersions ??= getVersions()` seulement pour un paquet hors
+  `symfony/symfony` et pas à sa version verrouillée) : `remove_legacy_packages`
+  dit s'il l'aurait lu, l'avertissement de `PRE_POOL_CREATE` n'est écrit
+  qu'alors ; sinon c'est `POST_UPDATE_CMD` (`fetchRecipes` →
+  `initialize`), mesuré par `plugin-lines.sh` (`ni-flex`) et le nouveau cas
+  `allow-list` de `flex-update.sh`.
+- **`secure-http` vient aussi d'auth.json et de `COMPOSER_AUTH`**
+  (`Factory.php:209-215`, `:334-344`), mesuré : rendu à Composer.
+- **Le plafond de `HttpDownloader`** (12 tâches, `COMPOSER_MAX_PARALLEL_HTTP`) :
+  mesuré, le 13e téléchargement d'un nouvel hôte est averti après la 14e
+  ligne ; porté.
+- **`disable-tls`** fait plus que couper `secure-http` (pas de TLS, une
+  ligne à `createHttpDownloader`) : rendu à Composer quand une URL non sûre
+  se présente ; en général, écart inventorié ci-dessous.
+- **Le contrôle `install` avant toute ligne** : après `read_manifests`,
+  avant l'événement `COMMAND` de bamarni et `pre-install-cmd`.
+- **Les dépôts `package`/`vcs` d'`update`** sortent en 1 (« not supported
+  by vivacity update yet ») au lieu d'être rendus : hors de ce chantier,
+  inventorié.
+- Le banc : les cas d'ordre vont dans `verbosity.sh` (comparaison entière,
+  trois niveaux) plutôt qu'un drapeau de plus dans `steps.sh`.
+
+## Revue indépendante (sous-agent frais) et ce qui a changé
+
+Dix-huit points ; corrigés :
+
+- `COMPOSER_DISABLE_NETWORK` ne compte plus comme hors ligne pour
+  `secure-http` : les transports de vivacity ne le lisent pas (écart
+  existant, inventorié), le refus doit donc tenir.
+- `COMPOSER_AUTH` l'emporte sur le projet (fusionné en dernier) : lu avant
+  lui, rendu à Composer s'il pose la clé ; cas `dist-auth-env-wins`.
+- Une redirection refusée donne le message de Composer pour la cible
+  (`Error::Transport`, sortie 100), une redirection vers un nouvel hôte non
+  sûr (`secure-http` faux) son avertissement après les lignes
+  « Downloading » (cas `dist-redirect`) ou à la fin de la requête de
+  métadonnées ; limite de 20 redirections (`CurlDownloader::$maxRedirects`).
+- Le contrôle des dists ne compte pas un paquet déjà installé à sa version
+  et sa référence, ni l'URL d'un miroir non préféré ; il ne lit installed.json
+  qu'en présence d'une URL non sûre.
+- Le plafond ne compte que les téléchargements `http(s)://` (un dist local
+  passe par `RemoteFilesystem`, sans tâche curl).
+- Flex sous `--dry-run` sans `extra.symfony.require` ne lit pas son index :
+  pas de délégation.
+- Des cas : `--offline`, auth.json du projet, `COMPOSER_AUTH` contre le
+  projet, redirection, dépôt et dists sur le même hôte, Flex refusé.
+
+Laissés, écrits : l'`svn` (jamais demandé par vivacity), le `realpath` de
+composer.json pour trouver auth.json, l'avertissement `verify_peer` de la
+même fonction (inventorié), une délégation tardive après des lignes déjà
+écrites quand un réglage illisible (auth.json…) n'apparaît qu'au
+chargement (la famille connue de HANDOVER).
+
+## Résultats
+
+Les trois points sont fermés. Bancs verts sur le binaire final :
+`secure-http.sh` (32), `auth-hosts.sh`, `transport-exit.sh`,
+`flex-update.sh` (30), `flex-recipes.sh`, `flex-install.sh`,
+`download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
+`verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
+(118) ; `cargo test`, clippy, fmt. Les durées (hyperfine avant/après) et le
+corpus vont au rapport, pas ici.
+
+## Inventaire des écarts connus restants
+
+Écarts de sortie ou de comportement connus, ni corrigés ni rendus à
+Composer, relevés dans HANDOVER, DECISIONS, README, CHANGELOG et les plans
+(puis contrôlés dans le code là où c'était bon marché). Pour chacun : le
+déclencheur et ce qui diffère ; **avant écriture** — se détecte-t-il sur ce
+qui est déjà en mémoire avant toute écriture (une délégation bon marché) ;
+**coût** (S/M/L) ; **corpus** — une délégation toucherait-elle un projet du
+corpus (`harness/corpus.sh` ne joue que `install`) ; **sans coût** — un
+correctif possible sans coût d'exécution sur le chemin commun. Non corrigés :
+la décision revient au mainteneur.
+
+### Réseau et authentification
+
+1. **GitLab, Bitbucket, `custom-headers`, `client-certificate`, `forgejo-token`** :
+   ces clés d'auth ne sont pas lues (requête sans identifiants) ; un
+   `http-basic` que Composer traite à part (`oauth2`, `private-token`,
+   `gitlab-ci-token`, `x-token-auth`) part en Basic là où Composer envoie
+   Bearer ou `PRIVATE-TOKEN` ; `github-domains`/`gitlab-domains` ignorés.
+   HANDOVER disait « rendus en Basic » : le code ne lit pas ces clés.
+   Avant écriture : oui (auth.json, `COMPOSER_AUTH`). Coût : S pour rendre,
+   M pour porter. Corpus : non. Sans coût : oui (lecture déjà faite).
+2. **Clés d'auth dans `config`** (composer.json ou config.json global) :
+   ignorées. Avant écriture : oui. S. Corpus : non. Sans coût : oui.
+3. **« avoid overwriting already defined auth settings »** absent (deux
+   types d'auth sur une origine ; même gagnant). Avant écriture : oui. S.
+   Corpus : non. Sans coût : oui.
+4. **Casse des hôtes et des clés** : vivacity met en minuscules, Composer
+   compare tels qu'écrits. Avant écriture : oui. S. Corpus : non. Sans
+   coût : oui.
+5. **Redirection vers une origine qui a ses propres identifiants** :
+   Composer les ajoute, reqwest retire l'en-tête. Avant écriture : non
+   (réponse du serveur). M. Corpus : non. Sans coût : oui (politique de
+   redirection).
+6. **Magasin de CA** : webpki embarqué ; `SSL_CERT_FILE`, `cafile`,
+   `capath`, `COMPOSER_CAFILE` ignorés. Avant écriture : oui (env, config).
+   S pour rendre, M pour porter. Corpus : non. Sans coût : oui pour la
+   délégation (variables d'environnement), la config demande la lecture
+   déjà faite du config.json global.
+7. **`disable-tls` vrai** : Composer écrit « You are running Composer with
+   SSL/TLS protection disabled. » et coupe TLS ; vivacity ne lit la clé
+   qu'en présence d'une URL non sûre (rendu alors). Avant écriture : oui.
+   S. Corpus : non. Sans coût : à lire en même temps que `cache-dir` (le
+   config.json global est déjà lu au démarrage).
+8. **`options.ssl.verify_peer` / `verify_peer_name` à faux** sur un dépôt :
+   « Warning: Accessing <hôte> with verify_peer disabled. »
+   (`Config.php:723-737`), même en https ; ni écrit ni rendu. Avant
+   écriture : oui (manifeste). S. Corpus : non. Sans coût : oui.
+9. **`COMPOSER_AUTH` mal formé ou auth.json invalide** : rendu seulement
+   quand la résolution du répertoire de cache lit la config globale ; un
+   auth.json de projet invalide est ignoré (Composer s'arrête). Avant
+   écriture : oui. S. Corpus : non. Sans coût : oui.
+10. **`COMPOSER_DISABLE_NETWORK` posé par l'utilisateur** : seul `--offline`
+    coupe le réseau de vivacity (les sources git exceptées). Avant
+    écriture : oui. S (rendre, ou le lire comme `--offline`). Corpus : non.
+    Sans coût : oui.
+11. **Hors ligne, dist absent du cache** : « missing cache for … in offline
+    mode » au lieu de « Network disabled, request canceled: <url> ».
+    Avant écriture : en partie. S. Corpus : non. Sans coût : oui.
+12. **Texte des erreurs réseau** (curl contre reqwest, musl compris) et
+    **encadré** des exceptions (`Error: …` contre la boîte de Symfony
+    Console, normalisé par `transport-exit.sh` et d'autres) ; une
+    installation qui échoue au téléchargement n'imprime pas les lignes
+    « Downloading » (imprimées après la transaction). Avant écriture :
+    non. M. Corpus : non. Sans coût : en partie.
+13. **Dépôt injoignable sous `ignore-unreachable: false`** : sortie 1 notée
+    contre 100 (HANDOVER:208) — peut-être périmé, non revérifié ici.
+14. **Lignes « Downloading »** : archive en cache au sha1 périmé (Composer
+    l'annonce), `cache-files-ttl: 0` et `cache-read-only` inconnus, cache
+    non inscriptible (« Cannot create cache directory »), clé de cache sur
+    l'URL brute. Avant écriture : la config oui, le sha1 non. S. Corpus :
+    non (aucun ne pose ces clés). Sans coût : oui pour la config.
+15. **Dist local lu une fois** (Composer : trois tentatives) et message
+    d'un dist local absent. Avant écriture : non. S. Corpus : non.
+16. **Miroirs de dist** (`dist.mirrors` du lock) : vivacity télécharge
+    l'URL principale, Composer un miroir préféré d'abord. Avant écriture :
+    oui (lock). S pour rendre. Corpus : non (aucun lock n'en a). Sans
+    coût : oui.
+17. **Notifications d'installation** : Composer poste les paquets installés
+    à leur `notification-url` (`InstallationManager::notifyInstalls`,
+    erreurs avalées ; `config.notify-on-install`, vrai par défaut,
+    Installer.php:333-341) ; vivacity n'envoie rien. Comportement réseau, pas de
+    sortie (sauf l'avertissement `secure-http` d'une URL http, jamais vu).
+    Avant écriture : oui, mais tous les locks du corpus en ont : une
+    délégation les rendrait tous. Coût : M (une requête après
+    l'installation). Sans coût : non (une requête de plus).
+18. **Une redirection d'`https` vers une URL non sûre refusée, la limite de
+    20 redirections** : portées mais non vérifiées (pas de serveur `https`
+    local). Avant écriture : non.
+19. **`require` sans contrainte** : Composer relit `p2/<nom>.json` et
+    `~dev.json` à la découverte de version, vivacity non (requêtes seulement,
+    sortie identique, `secure-http.sh` `repo-require`).
+
+### Résolution, `update`/`require`/`remove`
+
+20. **Dépôts `vcs`, `git`, `github`, `package`, `artifact` sur une
+    résolution** : « repository type … is not supported by vivacity update
+    yet », sortie 1, au lieu d'être rendus (`session.rs`
+    `open_repository_with`, `SessionError::new`). Avant écriture : oui
+    (`repositories[].type`). S (renvoyer `Unsupported`). Corpus : non
+    (`install` seulement ; 48 projets du corpus ont un dépôt `vcs`). Sans
+    coût : oui.
+21. **Changements minimaux** : `--minimal-changes` refusé ; `update` ignore
+    en silence `COMPOSER_MINIMAL_CHANGES` et `config.update-with-minimal-changes`
+    (`require`/`remove` les refusent) — le lock peut différer. Avant
+    écriture : oui. S pour rendre. Corpus : non. Sans coût : oui.
+22. **`bump-after-update`** (option ou config) jamais joué. Avant
+    écriture : oui. S pour rendre, M pour porter. Corpus : non (`install`
+    seulement ; symfony-skeleton pose la clé). Sans coût : oui.
+23. **`update lock|nothing|mirrors`** refusé (sortie 1). Avant écriture :
+    oui. S. Corpus : non. Sans coût : oui.
+24. **Options de Composer refusées en erreur d'usage (code 2)** au lieu
+    d'être rendues : globales `-d`, `--ansi`, `--no-cache`, `--profile` ;
+    `install --audit`, `--audit-format`, `--download-only`, `--dev`,
+    `--strict-psr-autoloader`, `--no-suggest` ; `update --lock`,
+    `--patch-only`, `--root-reqs`, `--interactive`, `--bump-after-update`,
+    `--minimal-changes`, `--prefer-*`, `--dev` ; `dump-autoload --dry-run`,
+    `--dev`, `--strict-psr`, `--strict-ambiguous` ; `config` hors
+    `--global cache-dir`. Avant écriture : oui (argv). S. Corpus : non.
+    Sans coût : oui.
+25. **Listes de politique à sources et `filter.api-url`** : refusées en
+    erreur, pas rendues. Avant écriture : en partie (après packages.json).
+    S. Corpus : non. Sans coût : oui.
+26. **L'audit** ne tourne jamais (`update`/`require`/`remove` sans sortie
+    d'audit). Avant écriture : oui. M. Corpus : non. Sans coût : non (les
+    avis sont déjà lus pour les politiques, le rendu est du travail en plus).
+27. **« Did you mean » / `getProviders`** absents de `require` d'un nom
+    inconnu. Avant écriture : en partie. M. Corpus : non.
+28. **Textes d'explication acceptés** : `Link::getPrettyString` d'un lien
+    `self.version` d'alias, description coupée au milieu d'un caractère,
+    `Url::sanitize` absent de `getRepoName`, échec de l'extraction non-dev
+    formaté avec le jeu de dépôts de l'update. Avant écriture : non. S
+    chacun. Corpus : non.
+29. **`-v` « Dependency resolution completed »** d'`update` chronomètre
+    tout le solve, règles comprises (valeur seulement). S. Sans coût : oui.
+30. **Délégations tardives** : en-tête, « Verifying… », « Package
+    operations », « Loading composer repositories » (et, depuis ce
+    chantier, les avertissements du constructeur de pool) réimprimés par
+    Composer quand la délégation suit des lignes déjà écrites (portée
+    d'`install`, Flex et plugins décidés sur le lock résolu, réglage
+    `secure-http` illisible trouvé au chargement) ; « Verifying… » de trop
+    et suggestions manquantes pour une install rendue après un update.
+    Avant écriture : oui, mais après des lignes. M (différer la sortie ou
+    décider plus tôt). Corpus : oui pour la portée d'`install` (les 11
+    projets rendus du corpus). Sans coût : non si l'on diffère la sortie
+    (latence d'affichage).
+31. **Mode interactif** jamais porté (questions de `require`/`remove`,
+    `allow-plugins`, Docker de Flex, c3) : vivacity se comporte comme `-n`.
+    Avant écriture : oui (TTY sans `-n`). S pour rendre. Corpus : non.
+    Sans coût : oui.
+32. **`remove --unused`** liste chaque paquet une fois (Composer répète les
+    alias) ; **`require`** ne rétablit pas le mtime du lock après
+    `updateHash` ; **`JsonManipulator`** : limite de retour arrière de PCRE,
+    `1e999`, demi-substituts UTF-16, imbrication > 512. S chacun.
+
+### Installation, plugins, système de fichiers
+
+33. **Ligne de résumé `vivacity: N installed …`** et **`vivacity:
+    autoloader generated …`**, **`Note: plugin … installed as a plain
+    library`**, **`Note: composer/installers … emulated natively`** sur
+    stderr au niveau normal, filtrées par presque tous les harnais. Toute
+    exécution native. S (les retirer ou les passer sous `-v`). Corpus : —
+    (pas de délégation possible). Sans coût : oui.
+34. **Préambule d'une délégation** (raisons, « delegating to … ») avant la
+    sortie de Composer. Toute délégation. S. Sans coût : oui.
+35. **« Skipped installation of bin … file not found in package »** jamais
+    écrit (et `vendor/bin` créé) ; la variante « name conflicts » écrite
+    après toutes les opérations. Avant écriture : oui. S–M. Corpus : à
+    mesurer (dépend des paquets). Sans coût : oui.
+36. **Lancé en root sans `COMPOSER_ALLOW_SUPERUSER`** (hors Docker) :
+    Composer avertit et coupe les plugins, vivacity les émule. Avant
+    écriture : oui (uid, env). S. Corpus : non (le banc ne tourne pas en
+    root). Sans coût : oui.
+37. **Plugin autorisé à l'API de plugin incompatible** : Composer le saute
+    avec un avertissement. Avant écriture : oui. S. Sans coût : oui.
+38. **Plugins émulés installés globalement** : ordre d'activation calculé,
+    émulation non jouée ; **bamarni `forward-command: true` sur `update`**
+    non transmis ; **dealerdirect quand phpcs ne tourne pas** (Composer
+    écrit « Failed to set … », vivacity la configuration — accepté).
+    Avant écriture : oui sauf dealerdirect. S (L pour dealerdirect).
+39. **Restes de plugins** : dealerdirect 1.1.x sans install lit un
+    installed.php non purgé ; la purge suit l'`install-path` enregistré ;
+    la ligne « not writable » de package-versions ; `COMPOSER_DEBUG_EVENTS`
+    et l'auto-install de php-http/discovery non portés ; lignes de
+    dg-cleaner dans l'ordre de `readdir` ; un `vendor/bin` vide retiré ;
+    drupol à contrainte `packages-dev` invalide sous `--no-dev` ; `PATH` du
+    patcher. S chacun, avant écriture en partie.
+40. **Archives hostiles, mtimes des zips, repli `unzip` en deux temps**
+    (cinq lignes de Composer non imprimées) : acceptés et écrits (README,
+    DECISIONS). Avant écriture : non. L/M/S.
+41. **Store et identité** : un zip `artifact` remplacé à même nom et
+    version encore servi par le store ; `target_dir` avec `..` ;
+    `target-dir: "0"` ; `vendor-dir` par un répertoire absent. S chacun.
+42. **Dépôts `path`** : pas de « Symlink failed, fallback to mirroring » ;
+    accolades sous musl ; ordre des accolades ; `Url::sanitize` du nom ;
+    fichier simple à la place d'un répertoire ; `is_readable` ; texte
+    d'erreur JSON de serde ; FIFO ; entrées non UTF-8. S chacun, avant
+    écriture pour la plupart. Corpus : non mesuré.
+43. **`-v`, `--run-scripts`** : ordre des lignes du patcher et d'infection
+    après une installation ; `composer run-script` rejoue des écouteurs de
+    plugins, `pre-install-cmd` avant la décision de portée (deux fois si
+    rendu ensuite) ; `-0` gardé en `-0` dans installed.json. S–M.
+44. **Scripts** jamais joués par défaut (`install` = `--no-scripts`) :
+    choix de contrat, écrit.
+45. **Barre de progression** : aucune dans un terminal ; tranché comme
+    irreproductible.
+
+### Version racine et manifeste
+
+46. **Avertissement de version racine** : doublon sur une délégation
+    tardive, une ligne de plus par `composer run-script`, trois lignes chez
+    Composer contre une pour un manifeste refusé après lui, composer.json
+    global non lu, ce que Composer écrit avant (root/sudo, Xdebug,
+    `disable-tls`, « dubious ownership »). S–M.
+47. **Refus de manifeste formulés autrement** (schéma : nom racine en
+    majuscules, contrainte non chaîne ; encadré absent) et **manifestes
+    acceptés là où Composer refuse** (`install`/`dump-autoload` : stabilité
+    inconnue, version invalide, dépôt sans `type`, alias mal formé,
+    contrainte illisible ; le schéma `LAX` avant les éditions ; vu ici :
+    `"secure-http": "false"` en chaîne, refusé par le schéma de Composer,
+    installé par vivacity). Avant écriture : oui. L (validation de schéma).
+    Corpus : non. Sans coût : non (une validation de schéma par exécution).
+48. **`require Psr/Log:^3`** (une ligne de plus, note inversée) ;
+    `{"require":{"0":"^1"}}` sort en 1 (Composer 255). S.
+49. **`COMPOSER=<fichier>`** refusé (sortie 1) au lieu d'être suivi ou
+    rendu. Avant écriture : oui. S. Sans coût : oui.
+
+### Autoload
+
+50. **`target-dir` racine avec `psr-0` racine** : la closure
+    `targetDirLoader` jamais générée. Avant écriture : oui. S–M. Corpus :
+    non (aucun manifeste du corpus n'a `target-dir`). Sans coût : oui.
+51. **Le cache de classmap suppose vendor/ immuable** : contrat assumé.
+52. **Chemin de projet avec `'`** (chemins absolus dans
+    autoload_static.php), nom de paquet en majuscules comme clé
+    d'installed.php, paquet aliasé du dépôt local qui remplace en
+    `self.version`. S chacun.
+
+### Windows
+
+53. **Fins de ligne** `\n` au lieu de `\r\n` sur stdout ; un argument que
+    Rust ne sait pas échapper pour `composer.bat` (sortie 1, rien lancé).
+    S.
+
+### Docs peut-être périmées (à revérifier, pas des écarts établis)
+
+HANDOVER:213 (`acme/NOPE` 1 contre 2 : la validation des noms de liens est
+portée), HANDOVER:208 (`--with` non porté : livré en 0.18 ; « le message
+d'install d'un lock bloqué ne liste que les versions retirées »), HANDOVER:215
+(`remove --dry-run` refusé, `vendor-dir`/`bin-dir` non lus, transport de
+`remove` en 1), un `vendor-dir` posé seulement dans le config.json global.

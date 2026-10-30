@@ -30,7 +30,8 @@
 # ligne `vivacity: delegating` ni « outside what vivacity » sur sa stderr
 # brute) — sauf `@delegates:<motif>`, où il doit déléguer avec cette raison.
 #
-# Usage : harness/verbosity.sh [fixture...]   (`online` : la seconde partie)
+# Usage : harness/verbosity.sh [fixture...]   (`online` : la seconde partie ;
+# `VERBOSITY_ONLY=<motif>` limite la première aux cas qui le contiennent)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,7 +43,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/compare.sh"
 VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/verbosity"
-FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-problems solver-conflict path-repos online)
+FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-problems solver-conflict solver-policies path-repos online)
 # "fixture|arguments" : chaque cas est joué sous chacun des NIVEAUX. Les mots
 # finaux en `@…` préparent la copie (sous-ensemble de ceux de steps.sh) :
 #   @nolock  @nojson  @require:a/b=^1  @jq:expr  @env:NAME=VALUE
@@ -69,6 +70,10 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony solver-p
 #   @files:a[,b]  ces fichiers du projet comparés à l'octet après la commande
 #             (absents des deux côtés : égaux ; d'un seul : différents) —
 #             ce que la commande écrit sans le dire
+#   @registry-jq:expr  l'expression jq appliquée au packages.json de
+#             l'instantané, pour ce cas seulement (rétabli après)
+#   @warns:motif  la sortie d'erreur de Composer au niveau normal contient le
+#             motif (grep -E) : un cas qui ne montre plus ce qu'il teste échoue
 CASES=(
   # install depuis le lock, sans rien écrire : durée de résolution, `Installs:`.
   "laravel|install --dry-run"
@@ -148,6 +153,19 @@ CASES=(
   "laravel|update laravel/pint --dry-run --no-install"
   "laravel|remove laravel/tinker --dry-run --no-install"
   "laravel|require symfony/uid --dry-run --no-install"
+  # `PoolBuilder::buildPool` écrit ses avertissements pendant qu'il construit
+  # le pool, avant « Updating dependencies » (Installer.php:534-536) : la
+  # liste d'update qui ne vise rien de verrouillé (PoolBuilder.php:216), une
+  # exigence racine gardée verrouillée (:539, :569 par les `replace` de
+  # laravel/framework).
+  "laravel|update vendor/not-locked --dry-run --no-install @warns:^Package..vendor/not-locked..listed"
+  "laravel|update laravel/tinker -w --dry-run --no-install @warns:^Dependency.laravel/framework.is.also"
+  # Les filtres de politique écrivent les leurs dans `buildPool` aussi
+  # (PoolBuilder.php:358-359), après `PRE_POOL_CREATE` : une `api-url`
+  # d'avis en http, que `secure-http` (vrai par défaut) refuse — la
+  # `TransportException` de `Config::prohibitUrlByConfig`, rattrapée sous
+  # `policy.ignore-unreachable` (SecurityAdvisoryPoolFilter.php:81-85).
+  "solver-policies|update --no-install @registry-jq:.[\"security-advisories\"]={\"metadata\":false,\"api-url\":\"http://127.0.0.1:9/api\"} @warns:^....Your.configuration.does.not.allow.connections.to.http://127.0.0.1:9/api"
   # Ensemble insoluble : tête QUIET, problèmes au niveau normal, explication
   # détaillée sous -v (`acme/many`).
   "solver-problems|update --no-install @nolock @require:acme/missing-dep=^1.0"
@@ -237,6 +255,9 @@ for fx in "${FIXTURES[@]}"; do
   n=0
   for spec in "${CASES[@]}"; do
     [ "${spec%%|*}" = "$fx" ] || continue
+    # `VERBOSITY_ONLY=<motif>` : les cas dont la spécification contient le
+    # motif (grep -E), pour rejouer un sous-ensemble.
+    if [ -n "${VERBOSITY_ONLY:-}" ] && ! printf '%s\n' "$spec" | grep -qE -- "$VERBOSITY_ONLY"; then continue; fi
     read -r -a sargs <<< "${spec#*|}"
     preps=()
     while [ ${#sargs[@]} -gt 0 ]; do
@@ -246,7 +267,7 @@ for fx in "${FIXTURES[@]}"; do
         *) break ;;
       esac
     done
-    levels=("${LEVELS[@]}"); plugins=(--no-plugins); unsets=(); rootwarn=""; files=(); delegates=""
+    levels=("${LEVELS[@]}"); plugins=(--no-plugins); unsets=(); rootwarn=""; files=(); delegates=""; warns=""
     for prep in "${preps[@]+"${preps[@]}"}"; do
       case "$prep" in
         @delegates:*) delegates="${prep#@delegates:}" ;;
@@ -255,6 +276,7 @@ for fx in "${FIXTURES[@]}"; do
         @unset:*) unsets+=("${prep#@unset:}") ;;
         @rootwarn:*) rootwarn="${prep#@rootwarn:}" ;;
         @files:*) IFS=, read -r -a files <<< "${prep#@files:}" ;;
+        @warns:*) warns="${prep#@warns:}" ;;
       esac
     done
     for level in "${levels[@]}"; do
@@ -292,7 +314,7 @@ for fx in "${FIXTURES[@]}"; do
         done
         for prep in "${preps[@]+"${preps[@]}"}"; do
           case "$prep" in
-            @env:*|@warm|@warm:update|@vendor|@levels:*|@plugins|@unset:*|@rootwarn:*|@files:*|@delegates:*) ;;
+            @env:*|@warm|@warm:update|@vendor|@levels:*|@plugins|@unset:*|@rootwarn:*|@files:*|@delegates:*|@registry-jq:*|@warns:*) ;;
             @nolock) rm -f "$d/composer.lock" ;;
             @nojson) rm -f "$d/composer.json" "$d/composer.lock" ;;
             @require:*) kv="${prep#@require:}"; jq --arg p "${kv%%=*}" --arg c "${kv#*=}" '.require[$p] = $c' "$d/composer.json" > "$d/c.tmp" && mv "$d/c.tmp" "$d/composer.json" ;;
@@ -301,6 +323,12 @@ for fx in "${FIXTURES[@]}"; do
             *) echo "prep inconnu : $prep"; exit 1 ;;
           esac
         done
+      done
+      registry_edited=0
+      for prep in "${preps[@]+"${preps[@]}"}"; do
+        case "$prep" in
+          @registry-jq:*) jq "${prep#@registry-jq:}" "$reg/packages.json" > "$reg/p.tmp" && mv "$reg/p.tmp" "$reg/packages.json"; registry_edited=1 ;;
+        esac
       done
       flags=(); [ -n "$level" ] && flags=("$level")
       # Options propres à chaque commande : `install` n'audite que sur
@@ -321,8 +349,12 @@ for fx in "${FIXTURES[@]}"; do
       for e in "${saved[@]+"${saved[@]}"}"; do
         case "$e" in *=*) export "$e" ;; *) unset "$e" ;; esac
       done; saved=()
+      [ "$registry_edited" = 0 ] || write_snapshot_packages_json "$reg"
       label="$fx ${sargs[*]} ${level:-(normal)}"; [ ${#preps[@]} -gt 0 ] && label="$label (${preps[*]})"
       ok=1
+      if [ -n "$warns" ] && [ -z "$level" ] && ! grep -qE -- "$warns" "$WORK/$fx-$n.composer.err"; then
+        echo "FAIL $label : Composer n'écrit pas « $warns » (cas mal choisi)"; ok=0
+      fi
       if [ -n "$rootwarn" ]; then
         want="$rootwarn"; [ "$level" = -q ] && want=0
         got=$(grep -c "^Composer could not detect the root package " "$WORK/$fx-$n.composer.err" || true)

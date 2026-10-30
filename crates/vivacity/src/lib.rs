@@ -647,6 +647,12 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
             );
         }
     }
+    // `secure-http`: a new `Config`, nothing warned yet, the setting read
+    // only if an insecure URL shows up.
+    vivacity_core::secure_http::begin(
+        project_dir(cli.working_dir()).ok().as_deref(),
+        cli.offline(),
+    );
     match dispatch(cli) {
         Ok(code) => {
             // A command that wrote nothing else still writes the line it held
@@ -739,7 +745,7 @@ fn exit_code_of(e: &anyhow::Error) -> i32 {
     let transport = e.chain().any(|c| {
         matches!(
             c.downcast_ref::<vivacity_core::Error>(),
-            Some(vivacity_core::Error::Http { .. })
+            Some(vivacity_core::Error::Http { .. } | vivacity_core::Error::Transport(_))
         ) || c.downcast_ref::<TransportFailure>().is_some()
     });
     if transport {
@@ -760,6 +766,17 @@ impl Cli {
             Cli::Remove(a) => a.working_dir.as_deref(),
             Cli::Require(a) => a.working_dir.as_deref(),
             Cli::Config(_) => None,
+        }
+    }
+
+    /// `--offline` (no network: `secure-http` neither refuses nor warns).
+    fn offline(&self) -> bool {
+        match self {
+            Cli::Install(a) => a.offline,
+            Cli::Update(a) => a.offline,
+            Cli::Remove(a) => a.offline,
+            Cli::Require(a) => a.offline,
+            Cli::DumpAutoload(_) | Cli::Config(_) => false,
         }
     }
 

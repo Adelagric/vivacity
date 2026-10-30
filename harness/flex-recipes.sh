@@ -249,10 +249,10 @@ run() {
   for f in composer.json composer.lock symfony.lock; do
     if ! cmp -s "$ref/$f" "$viv/$f"; then echo "FAIL $name : $f diffère"; diff "$ref/$f" "$viv/$f" | head -6; status=1; return; fi
   done
-  # `Warning: Accessing 127.0.0.1 over http…` : artefact du banc (index et
-  # recettes servis en http local, `secure-http: false`). `  - Downloading
-  # …` : cache froid.
-  if ! diff <(normalize_err "$WORK/$name.composer.err" | grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ') \
+  # `Warning: Accessing 127.0.0.1 over http…` (index et recettes servis en
+  # http local, `secure-http: false`) est comparé (docs/plans/
+  # parity-gaps-026.md). `  - Downloading …` : cache froid.
+  if ! diff <(normalize_err "$WORK/$name.composer.err" | grep -vE '^  - Downloading ') \
             <(normalize_err "$WORK/$name.vivacity.err" | grep -v '^vivacity: \|^Note: plugin ') >"$WORK/$name.err.diff"; then
     echo "FAIL $name : stderr différente"; head -10 "$WORK/$name.err.diff"; status=1; return
   fi

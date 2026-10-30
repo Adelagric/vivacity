@@ -112,6 +112,89 @@ fn cache_key(url: &str) -> String {
     }
 }
 
+/// `secure-http` on the endpoints `Downloader::initialize` requests, in
+/// order: the insecure ones' `(scheme, host)` to warn about (`secure-http`
+/// false), or why the run is Composer's (`secure-http` true: Flex's
+/// `Downloader::get` retries the refused request, then throws or degrades —
+/// not emulated). A legacy or malformed endpoint list is left to the
+/// callers that already hand it over.
+pub fn endpoint_hosts(manifest: &Value) -> Result<Vec<(String, String)>, String> {
+    use vivacity_core::secure_http::{classify, Verdict};
+    let Ok(urls) = endpoints(manifest) else {
+        return Ok(Vec::new());
+    };
+    let mut hosts = Vec::new();
+    for url in urls {
+        match classify(&url) {
+            Verdict::Allowed => {}
+            Verdict::Warn { scheme, host } => hosts.push((scheme, host)),
+            Verdict::Refuse => {
+                return Err(format!(
+                "the Flex endpoint {} is read over an insecure protocol, which secure-http refuses",
+                vivacity_resolver::metacache::sanitize_url(&url)
+            ))
+            }
+            Verdict::HandOver(reason) => {
+                return Err(format!(
+                    "the Flex endpoint {} is read over an insecure protocol, with {reason}",
+                    vivacity_resolver::metacache::sanitize_url(&url)
+                ))
+            }
+        }
+    }
+    Ok(hosts)
+}
+
+/// `Flex::activate` on `require`, `update` and `remove`
+/// (`$aliasResolveCommands`): `PackageResolver::resolve` on the command's
+/// package arguments reads the index — `getAliases` for a name without `/`
+/// that is not a platform package, a pattern or a skipped word,
+/// `getVersions` for a `symfony/*` name (`parseVersion`) — which requests
+/// every endpoint (`Downloader::initialize`) while the `Composer` is being
+/// created, before the command writes anything. `secure-http` false: the
+/// warnings for the insecure endpoint hosts, written now. Nothing when
+/// Flex is not active or its downloader is disabled (symfony/flex not
+/// required by the root).
+pub(crate) fn activation_warnings(
+    project: &Path,
+    manifest: &Value,
+    plugins_enabled: bool,
+    packages: &[String],
+) {
+    let reads_index = packages.iter().any(|argument| {
+        let name = argument.split([':', '=']).next().unwrap_or("");
+        let skipped = ["mirrors", "nothing", "", "lock"].contains(&name);
+        let pattern = name.char_indices().any(|(i, c)| {
+            c == '*'
+                && (name[..i].chars().last().is_some_and(word)
+                    || name[i + 1..].chars().next().is_some_and(word))
+        });
+        let alias = !name.contains('/')
+            && !vivacity_resolver::platform::is_platform_package(name)
+            && !pattern
+            && !skipped;
+        alias || name.starts_with("symfony/")
+    });
+    if !reads_index
+        || !crate::flex_install::flex_downloader_enabled(manifest)
+        || !vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+            .iter()
+            .any(|p| p == "symfony/flex")
+    {
+        return;
+    }
+    for (scheme, host) in endpoint_hosts(manifest).unwrap_or_default() {
+        if let Some(line) = vivacity_core::secure_http::warn_once(&scheme, &host) {
+            vivacity_core::say!("{line}");
+        }
+    }
+}
+
+/// `[a-z0-9_/-]`, case-insensitively: a `*` next to one makes a pattern.
+fn word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-')
+}
+
 fn cache_dir() -> PathBuf {
     vivacity_core::fetch::composer_cache_dir()
         .join("repo")

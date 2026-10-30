@@ -125,6 +125,42 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **`secure-http` is honoured.** Composer refuses to fetch an `http://`
+  (or `git://`, `ftp://`) URL unless `config.secure-http` is false, and
+  then warns once per host: « Warning: Accessing <host> over http which is
+  an insecure protocol. ». vivacity downloaded such URLs, with the
+  credentials configured for their origin, and never wrote the warning.
+  Now, with `secure-http` true (the default), a run that would fetch an
+  insecure URL known before any request — a `composer` repository of
+  `update`/`require`/`remove`, a dist of the lock or of the solved lock, a
+  Flex endpoint — goes to Composer before anything is printed, requested
+  or written, the reason named (exit 3 under `--no-fallback`); one found
+  while loading (an advisory `api-url`, the `install` list filter reading
+  an http repository) is refused with Composer's own message, caught where
+  Composer catches it. With `secure-http` false the warning comes where
+  Composer writes it: as a repository's request starts, after the first
+  `  - Downloading` line of a host (after the last one past
+  `COMPOSER_MAX_PARALLEL_HTTP` downloads), as a redirect reaches a new
+  host, and for Flex's index as Flex activates on `symfony/*` or alias
+  arguments (`update`, `remove`: once per `Composer`), at `PRE_POOL_CREATE`
+  or at `POST_UPDATE_CMD`.
+  A setting read from `auth.json`, `COMPOSER_AUTH`, or `disable-tls` set,
+  goes to Composer. `harness/secure-http.sh` (local proxy, no network)
+  compares it all with Composer; `auth-hosts.sh`, `flex-update.sh`,
+  `flex-recipes.sh` and `plugin-lines.sh` no longer filter the line.
+- **Warnings written while the pool is built come before « Updating
+  dependencies »**, in Composer's order (`PoolBuilder::buildPool`): the
+  update list that matches nothing locked, a root requirement kept locked,
+  what the repositories write as they load, Flex's notice, then the
+  advisory and list filters' « … could not be fetched … » warnings. All of
+  them came after that line, with or without PHP. `harness/verbosity.sh`
+  compares the three cases under normal, `-q` and `-v`.
+- **A redirect is followed up to 20 times**, Composer's
+  `CurlDownloader::$maxRedirects`, not reqwest's 10 (read from Composer's
+  source; no harness exercises the limit). A redirect from `https` to an
+  insecure URL under `secure-http` true now stops with Composer's message
+  (exit 100); it is not exercised either, a local `https` server being out
+  of the harnesses' reach.
 - **A `github-oauth` token goes where Composer sends it, and only there.**
   The github.com token is sent as `token …` to `api.github.com` URLs only
   (it went to github.com and every `*.github.com`, codeload included); a

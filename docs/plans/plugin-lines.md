@@ -354,7 +354,8 @@ habituel). 46 cas :
   `vendor-dir` global posé dans `COMPOSER_HOME/config.json` seulement.
 - La ligne « Dependency … is also a root requirement » de `remove`
   imprimée après « Updating dependencies » chez vivacity, avant chez
-  Composer (vue par la revue, autre famille).
+  Composer (vue par la revue, autre famille). Réglé le 2026-10-29
+  (docs/plans/parity-gaps-026.md).
 - Les plugins globaux émulés (dealerdirect installé dans `COMPOSER_HOME`) :
   les émulations ne lisent que le dépôt local — écart existant, la liste
   d'activation les place correctement mais rien ne les joue.

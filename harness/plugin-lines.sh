@@ -97,9 +97,9 @@ step() { # ref, viv, nom, args composer..., "--", args vivacity...
   # `Note: plugin … installed as a plain library` : la note de vivacity sur
   # un plugin bénin (drupal/core-project-message), tolérée comme dans
   # flex-install.sh.
-  # `Warning: Accessing 127.0.0.1 over http…` : artefact du banc (l'index de
-  # Flex servi en http local, `ni-flex`), filtré comme dans flex-update.sh.
-  if ! diff <(grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ' "$WORK/$name.composer.all") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.all") >"$WORK/$name.order.diff"; then
+  # `Warning: Accessing 127.0.0.1 over http…` (l'index de Flex servi en
+  # http local, `ni-flex`) est comparé : Flex le lit à `POST_UPDATE_CMD`.
+  if ! diff <(grep -vE '^  - Downloading ' "$WORK/$name.composer.all") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.all") >"$WORK/$name.order.diff"; then
     echo "FAIL $name : sortie fusionnée différente"; head -12 "$WORK/$name.order.diff"; status=1; return
   fi
   if compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -329,10 +329,9 @@ fi
 # et chargé (les règles `allow-plugins` lues à la création du `Composer` de
 # la commande, avant que `remove` retire son entrée — ici la seule, donc la
 # clé entière), écrit à `POST_UPDATE_CMD`, puis « Removal failed », code 2.
-# phpstan/phpstan n'est pas requis par la racine : sa ligne « Dependency …
-# is also a root requirement » sort chez vivacity après « Updating
-# dependencies », avant chez Composer (écart d'une autre famille, noté
-# dans docs/plans/plugin-lines.md).
+# Une ligne « Dependency … is also a root requirement », quand elle sort,
+# vient avant « Updating dependencies » des deux côtés depuis le 2026-10-29
+# (docs/plans/parity-gaps-026.md ; harness/verbosity.sh la compare).
 mkdir -p "$WORK/pkg/needs-installer"
 printf '{"name": "vivacity/needs-installer", "version": "1.0.0", "require": {"phpstan/extension-installer": "1.4.3"}}\n' > "$WORK/pkg/needs-installer/composer.json"
 lock remove-required "{\"name\": \"vivacity/plugin-lines-remove-required\",

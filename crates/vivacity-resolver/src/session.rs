@@ -87,14 +87,13 @@ impl SessionError {
 
 impl From<PoolError> for SessionError {
     fn from(e: PoolError) -> SessionError {
-        let transport = e.is_transport();
         SessionError {
-            message: e.0,
-            kind: if transport {
-                SessionErrorKind::Transport
-            } else {
-                SessionErrorKind::Other
+            kind: match e.1 {
+                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
+                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
+                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
             },
+            message: e.0,
             stdout: None,
             parts: Vec::new(),
             annotation: None,
@@ -126,10 +125,10 @@ session_error_from!(
 impl From<crate::pool_filters::FilterError> for SessionError {
     fn from(e: crate::pool_filters::FilterError) -> SessionError {
         SessionError {
-            kind: if e.1 == crate::repository::RepoErrorKind::Transport {
-                SessionErrorKind::Transport
-            } else {
-                SessionErrorKind::Other
+            kind: match e.1 {
+                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
+                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
+                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
             },
             message: e.0,
             stdout: None,
@@ -489,6 +488,10 @@ pub struct FlexSession {
     pub symfony_require: String,
     pub symfony: Constraint,
     pub versions: crate::flex_filter::FlexVersions,
+    /// The insecure hosts of the endpoints Flex's `Downloader::initialize`
+    /// requests in order, `(scheme, host)`: `secure-http` false warns about
+    /// them when `removeLegacyPackages` reads the index.
+    pub index_hosts: Vec<(String, String)>,
 }
 
 pub struct UpdateSession {
@@ -1067,17 +1070,11 @@ impl UpdateSession {
             }
         };
         let mut policy = self.policy();
+        // `Installer::doUpdate`: `createPool` writes what it writes as it
+        // goes ([`Self::create_filtered_pool`]), then `Updating
+        // dependencies` (Installer.php:534-536).
         let pool = self.create_filtered_pool()?;
-        // `Installer::doUpdate`: the pool is built (Flex's notice comes out
-        // of it), then `Updating dependencies`, then the policy filters'
-        // warnings as they happened.
-        if let Some(notice) = &pool.flex_notice {
-            vivacity_core::say!("{notice}");
-        }
         vivacity_core::say!("Updating dependencies");
-        for w in &pool.warnings {
-            vivacity_core::say!("{w}");
-        }
         lap("pool", &t);
         let pool = if std::env::var("COMPOSER_POOL_OPTIMIZER").as_deref() == Ok("0") {
             pool
@@ -1275,13 +1272,26 @@ impl UpdateSession {
     }
 
     /// `buildPool` up to the policy filters (advisories, lists), without the
-    /// optimizer; their warnings go into `pool.warnings`.
+    /// optimizer, writing what `PoolBuilder::buildPool` writes in its order
+    /// (PoolBuilder.php:208-366): the builder's warnings and the
+    /// repositories' lines as the packages load (written by them), then at
+    /// `PRE_POOL_CREATE` Flex's index request and notice, then each policy
+    /// filter's warnings once it has run.
     pub fn create_filtered_pool(&mut self) -> Result<Pool, SessionError> {
         let mut pool = self.create_pool()?;
         let before = pool.len();
-        // The policy filters rebuild the pool: what PRE_POOL_CREATE noted
-        // rides along.
-        let flex_notice = pool.flex_notice.take();
+        if pool.flex_index_read {
+            if let Some(flex) = &self.flex {
+                for (scheme, host) in &flex.index_hosts {
+                    if let Some(line) = vivacity_core::secure_http::warn_once(scheme, host) {
+                        vivacity_core::say!("{line}");
+                    }
+                }
+            }
+        }
+        if let Some(notice) = pool.flex_notice.take() {
+            vivacity_core::say!("{notice}");
+        }
         let mut warnings = Vec::new();
         pool = crate::pool_filters::security_advisory_filter(
             pool,
@@ -1292,6 +1302,9 @@ impl UpdateSession {
             &mut warnings,
         )
         .map_err(SessionError::from)?;
+        for w in warnings.drain(..) {
+            vivacity_core::say!("{w}");
+        }
         pool = crate::pool_filters::filter_list_filter(
             pool,
             &self.arena,
@@ -1302,8 +1315,9 @@ impl UpdateSession {
             &mut warnings,
         )
         .map_err(SessionError::from)?;
-        pool.warnings.extend(warnings);
-        pool.flex_notice = flex_notice;
+        for w in warnings {
+            vivacity_core::say!("{w}");
+        }
         if std::env::var_os("VIVACITY_TRACE").is_some() {
             eprintln!(
                 "trace: policy filters      {before} → {} package versions ({} removed by lists)",
@@ -2034,6 +2048,27 @@ fn open_repository_with(
         )));
     };
     let mut repo = ComposerRepository::open(url, transport).map_err(SessionError::from)?;
+    // `secure-http` (Config::prohibitUrlByConfig): a resolution reads the
+    // repository's packages.json first, which Composer refuses over an
+    // insecure protocol — the run is Composer's, decided here, before any
+    // request or line. The lock verification of `install` (`for_policies`)
+    // goes on as Composer does, the refusal caught by the list filter.
+    if !for_policies {
+        use vivacity_core::secure_http::{classify, Verdict};
+        let why = match classify(repo.packages_json_url()) {
+            Verdict::Refuse => Some("which secure-http refuses".to_owned()),
+            Verdict::HandOver(reason) => Some(format!("with {reason}")),
+            Verdict::Allowed | Verdict::Warn { .. } => None,
+        };
+        if let Some(why) = why {
+            return Err(SessionError::from(
+                crate::repository::RepoError::unsupported(format!(
+                    "repository {} is read over an insecure protocol, {why}",
+                    crate::metacache::sanitize_url(&repo.url)
+                )),
+            ));
+        }
+    }
     if let Some(options) = def.get("options") {
         repo.options = options.clone();
     }

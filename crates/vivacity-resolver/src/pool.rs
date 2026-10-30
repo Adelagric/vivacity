@@ -351,10 +351,13 @@ pub struct Pool {
     id_of: HashMap<usize, usize>,
     package_by_name: HashMap<String, Vec<usize>>,
     pub unacceptable_fixed_or_locked: Vec<usize>,
-    pub warnings: Vec<String>,
     /// Flex's `Restricting packages listed in "symfony/symfony" to …`
-    /// notice, printed once by the caller before `Updating dependencies`.
+    /// notice, printed once by the caller at `PRE_POOL_CREATE`.
     pub flex_notice: Option<String>,
+    /// Whether Flex's `removeLegacyPackages` asked its downloader for the
+    /// index (`$knownVersions ??= $this->getVersions()`), the request
+    /// Composer makes at `PRE_POOL_CREATE`.
+    pub flex_index_read: bool,
     /// `filterListRemovedVersions`: what a filter list removed (the rule
     /// generator and the solver consult it).
     pub filter_list_removed: FilterListRemoved,
@@ -381,7 +384,7 @@ impl Pool {
             id_of: HashMap::new(),
             package_by_name: HashMap::new(),
             unacceptable_fixed_or_locked: unacceptable,
-            warnings: Vec::new(),
+            flex_index_read: false,
             filter_list_removed: BTreeMap::new(),
             security_removed: BTreeMap::new(),
             abandoned_removed: BTreeMap::new(),
@@ -483,7 +486,6 @@ impl Pool {
     /// and warnings preserved.
     pub fn with_packages(&self, kept: Vec<usize>, arena: &[Package]) -> Pool {
         let mut pool = Pool::new(kept, self.unacceptable_fixed_or_locked.clone(), arena);
-        pool.warnings = self.warnings.clone();
         pool.filter_list_removed = self.filter_list_removed.clone();
         pool.security_removed = self.security_removed.clone();
         pool.abandoned_removed = self.abandoned_removed.clone();
@@ -643,7 +645,6 @@ struct PoolBuilder<'a> {
     path_repo_unlocked: BTreeSet<String>,
     max_extended_reqs: BTreeSet<String>,
     update_allow_warned: BTreeSet<String>,
-    warnings: Vec<String>,
 }
 
 impl<'a> PoolBuilder<'a> {
@@ -665,7 +666,6 @@ impl<'a> PoolBuilder<'a> {
             path_repo_unlocked: BTreeSet::new(),
             max_extended_reqs: BTreeSet::new(),
             update_allow_warned: BTreeSet::new(),
-            warnings: Vec::new(),
         }
     }
 
@@ -816,6 +816,7 @@ impl<'a> PoolBuilder<'a> {
         // `PRE_POOL_CREATE`: the listeners see the loaded packages and the
         // request's fixed or locked packages, and may replace the list.
         let mut flex_notice = None;
+        let mut flex_index_read = false;
         if let Some(f) = pre_pool {
             let mut locked: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for idx in request.fixed_or_locked_packages() {
@@ -826,7 +827,7 @@ impl<'a> PoolBuilder<'a> {
                     entry.push(arena[base].version.clone());
                 }
             }
-            let (kept, restricting) = crate::flex_filter::remove_legacy_packages(
+            let (kept, restricting, index_read) = crate::flex_filter::remove_legacy_packages(
                 &packages,
                 arena,
                 &f.root_constraints,
@@ -844,6 +845,7 @@ impl<'a> PoolBuilder<'a> {
                 );
             }
             packages = kept;
+            flex_index_read = index_read;
             if restricting {
                 flex_notice = Some(format!(
                     "Restricting packages listed in \"symfony/symfony\" to \"{}\"",
@@ -852,8 +854,8 @@ impl<'a> PoolBuilder<'a> {
             }
         }
         let mut pool = Pool::new(packages, std::mem::take(&mut self.unacceptable), arena);
-        pool.warnings = std::mem::take(&mut self.warnings);
         pool.flex_notice = flex_notice;
+        pool.flex_index_read = flex_index_read;
         Ok(pool)
     }
 
@@ -1093,9 +1095,9 @@ impl<'a> PoolBuilder<'a> {
     fn warn_root_requires(&mut self, root_requires: &[String]) {
         for root_require in root_requires {
             if self.update_allow_warned.insert(root_require.clone()) {
-                self.warnings.push(format!(
+                vivacity_core::say!(
                     "Dependency {root_require} is also a root requirement. Package has not been listed as an update argument, so keeping locked at old version. Use --with-all-dependencies (-W) to include root dependencies."
-                ));
+                );
             }
         }
     }
@@ -1183,17 +1185,15 @@ impl<'a> PoolBuilder<'a> {
                 }
             }
             if matched_platform {
-                self.warnings.push(format!(
+                vivacity_core::say!(
                     "Pattern \"{pattern}\" listed for update matches platform packages, but these cannot be updated by Composer."
-                ));
+                );
             } else if pattern.contains('*') {
-                self.warnings.push(format!(
+                vivacity_core::say!(
                     "Pattern \"{pattern}\" listed for update does not match any locked packages."
-                ));
+                );
             } else {
-                self.warnings.push(format!(
-                    "Package \"{pattern}\" listed for update is not locked."
-                ));
+                vivacity_core::say!("Package \"{pattern}\" listed for update is not locked.");
             }
         }
         Ok(())

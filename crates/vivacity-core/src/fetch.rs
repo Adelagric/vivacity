@@ -520,6 +520,15 @@ fn cache_dir_hand_over_with(h: &dyn Host, reads_cache: bool) -> Option<String> {
     None
 }
 
+/// `config.<key>` of the global layer as `Config::get` sees it: config.json,
+/// `Err` where auth.json or COMPOSER_AUTH set the key, a file is not valid
+/// JSON, or the home cannot be resolved ([`global_config_layer`]).
+pub fn global_config_value_checked(key: &str) -> std::result::Result<Option<Value>, String> {
+    let host = RealHost;
+    let home = config_home(&host)?;
+    host.global_config(&home, key)
+}
+
 /// `Config::get('home')`: the directory of Composer's global config.json,
 /// auth.json and composer.json (`Factory::getHomeDir`, expanded and
 /// trimmed). `None` where Composer stops.
@@ -676,12 +685,112 @@ fn attempts_message(retries: u32, last: &str) -> String {
 struct Attempt {
     message: String,
     retryable: bool,
+    /// A redirect `secure-http` stopped: never retried.
+    insecure_redirect: Option<InsecureRedirect>,
+}
+
+/// A redirect `secure-http` stops (the request's error source).
+/// `CurlDownloader::handleRedirect` restarts the job on the new URL, and
+/// `initDownload` checks it: refused, the `TransportException` names the
+/// target; read from where vivacity does not, the run is Composer's.
+#[derive(Debug, Clone)]
+enum InsecureRedirect {
+    /// Composer's message for the target.
+    Refused(String),
+    /// Why the run goes to Composer.
+    HandOver(String),
+}
+
+impl std::fmt::Display for InsecureRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InsecureRedirect::Refused(m) | InsecureRedirect::HandOver(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for InsecureRedirect {}
+
+impl InsecureRedirect {
+    /// The command's error for it: Composer's transport failure, or the
+    /// hand-over.
+    fn into_error(self) -> Error {
+        match self {
+            InsecureRedirect::Refused(m) => Error::Transport(m),
+            InsecureRedirect::HandOver(m) => Error::Unsupported(m),
+        }
+    }
+}
+
+/// The refused redirect behind a reqwest error, if that is what it is.
+fn insecure_redirect(e: &reqwest::Error) -> Option<InsecureRedirect> {
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        if let Some(r) = s.downcast_ref::<InsecureRedirect>() {
+            return Some(r.clone());
+        }
+        source = s.source();
+    }
+    None
+}
+
+/// What the redirect policy does with a target `secure-http` objects to.
+fn redirect_verdict(target: &reqwest::Url) -> Option<InsecureRedirect> {
+    use crate::secure_http::{classify, refusal, Verdict};
+    let url = target.as_str();
+    match classify(url) {
+        Verdict::Allowed => None,
+        Verdict::Warn { scheme, host } => {
+            crate::secure_http::note_redirect(&scheme, &host);
+            None
+        }
+        // A target with credentials would need `Url::sanitize` in the
+        // message: Composer's, then.
+        Verdict::Refuse if target.username().is_empty() && target.password().is_none() => {
+            Some(InsecureRedirect::Refused(refusal(url)))
+        }
+        Verdict::Refuse => Some(InsecureRedirect::HandOver(
+            "a redirect to an insecure URL with credentials, which secure-http refuses".to_owned(),
+        )),
+        Verdict::HandOver(reason) => Some(InsecureRedirect::HandOver(format!(
+            "a redirect to an insecure URL, with {reason}"
+        ))),
+    }
+}
+
+/// `secure-http` once more where the request leaves: the commands decide
+/// before anything is written ([`crate::secure_http`]); a request they did
+/// not foresee is handed to Composer rather than sent.
+fn refuse_insecure(url: &str) -> Result<()> {
+    use crate::secure_http::{classify, Verdict};
+    let why = match classify(url) {
+        Verdict::Refuse => "which secure-http refuses".to_owned(),
+        Verdict::HandOver(reason) => format!("with {reason}"),
+        Verdict::Allowed | Verdict::Warn { .. } => return Ok(()),
+    };
+    Err(Error::Unsupported(format!(
+        "{} would be fetched over an insecure protocol, {why}",
+        url.split(['?', '#']).next().unwrap_or(url)
+    )))
 }
 
 impl Fetcher {
     pub fn new(cache_root: PathBuf, auth: Auth) -> Result<Fetcher> {
+        // `CurlDownloader::handleRedirect` starts a new request, which
+        // `prohibitUrlByConfig` checks ([`redirect_verdict`]); at most
+        // `CurlDownloader::$maxRedirects` (20) are followed.
+        let redirects = reqwest::redirect::Policy::custom(|attempt| {
+            if let Some(stop) = redirect_verdict(attempt.url()) {
+                attempt.error(stop)
+            } else if attempt.previous().len() > 20 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        });
         let client = reqwest::Client::builder()
             .user_agent(format!("vivacity/{}", env!("CARGO_PKG_VERSION")))
+            .redirect(redirects)
             .build()
             .map_err(|e| Error::Http {
                 url: "client".to_owned(),
@@ -755,6 +864,7 @@ impl Fetcher {
             return Ok((bytes, Provenance::Network));
         }
 
+        refuse_insecure(url)?;
         let mut retries = 0u32;
         let last_err = loop {
             match self.try_download(url).await {
@@ -772,6 +882,10 @@ impl Fetcher {
                     self.cache_dist(&cache_path, &bytes);
                     return Ok((bytes, Provenance::Network));
                 }
+                Err(Attempt {
+                    insecure_redirect: Some(stop),
+                    ..
+                }) => return Err(stop.into_error()),
                 Err(a) => {
                     if !a.retryable || retries >= MAX_RETRIES {
                         break a.message;
@@ -801,6 +915,7 @@ impl Fetcher {
     /// API: `packages[]=...`), 10 s timeout like Composer, a single attempt;
     /// 404 -> `NotFound`.
     pub async fn post_form(&self, url: &str, body: &str) -> Result<MetadataResponse> {
+        refuse_insecure(url)?;
         let mut req = self
             .client
             .post(url)
@@ -813,9 +928,12 @@ impl Fetcher {
         if let Some(authz) = self.auth.authorization_for_url(url) {
             req = req.header(reqwest::header::AUTHORIZATION, authz);
         }
-        let resp = req.send().await.map_err(|e| Error::Http {
-            url: url.to_owned(),
-            message: e.to_string(),
+        let resp = req.send().await.map_err(|e| match insecure_redirect(&e) {
+            Some(stop) => stop.into_error(),
+            None => Error::Http {
+                url: url.to_owned(),
+                message: e.to_string(),
+            },
         })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(MetadataResponse::NotFound);
@@ -842,6 +960,7 @@ impl Fetcher {
         url: &str,
         if_modified_since: Option<&str>,
     ) -> Result<MetadataResponse> {
+        refuse_insecure(url)?;
         let mut retries = 0u32;
         let last_err = loop {
             let mut req = self.client.get(url);
@@ -874,6 +993,7 @@ impl Fetcher {
                             }
                             Err(e) => Attempt {
                                 retryable: transport_is_retryable(&e),
+                                insecure_redirect: None,
                                 message: e.to_string(),
                             },
                         },
@@ -881,15 +1001,20 @@ impl Fetcher {
                             retryable: e
                                 .status()
                                 .is_some_and(|s| status_is_retryable(s.as_u16(), url)),
+                            insecure_redirect: None,
                             message: e.to_string(),
                         },
                     }
                 }
                 Err(e) => Attempt {
                     retryable: transport_is_retryable(&e),
+                    insecure_redirect: insecure_redirect(&e),
                     message: e.to_string(),
                 },
             };
+            if let Some(stop) = attempt.insecure_redirect {
+                return Err(stop.into_error());
+            }
             if !attempt.retryable || retries >= MAX_RETRIES {
                 break attempt.message;
             }
@@ -942,6 +1067,7 @@ impl Fetcher {
 
     async fn try_download(&self, url: &str) -> std::result::Result<Vec<u8>, Attempt> {
         let fail = |e: reqwest::Error, url: &str| Attempt {
+            insecure_redirect: insecure_redirect(&e),
             message: e.to_string(),
             retryable: match e.status() {
                 Some(s) => status_is_retryable(s.as_u16(), url),

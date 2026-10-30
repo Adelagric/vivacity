@@ -51,6 +51,21 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
     let run = proceed!(merge_plugin(run)?);
+    // `secure-http` on the lock's dists, before the command prints or runs
+    // anything (an install after an update was decided on its solved lock).
+    // A dry run downloads nothing.
+    if !args.after_update() && !args.dry_run {
+        if let Some(reason) =
+            insecure_dist_reason(&run.project, &run.manifest, &run.lock, run.with_dev)
+        {
+            let scope = vivacity_core::scope::ScopeReport {
+                issues: vec![vivacity_core::scope::ScopeIssue::Layout(reason)],
+                skipped_plugins: vec![],
+                layout: None,
+            };
+            return fallback_or_fail(args, &scope);
+        }
+    }
     // `InstallCommand::execute` dispatches `PluginEvents::COMMAND` before
     // `Installer::run` (InstallCommand.php:111); `update`, `require` and
     // `remove` dispatch theirs before their resolution.
@@ -1071,6 +1086,19 @@ fn join_verification(run: &Run<'_>, verification: Verification) -> anyhow::Resul
         .map_err(|_| anyhow::anyhow!("the lock verification thread panicked"))?
     {
         Ok(v) => v,
+        // A request the list filter would make that Composer treats in a
+        // way vivacity does not (`secure-http` read from auth.json): the
+        // run is Composer's, nothing written yet — the headline and
+        // « Verifying… » are printed already, and Composer prints them
+        // again (the late hand-over of HANDOVER.md).
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            let scope = vivacity_core::scope::ScopeReport {
+                issues: vec![vivacity_core::scope::ScopeIssue::Layout(e.message)],
+                skipped_plugins: vec![],
+                layout: None,
+            };
+            return Ok(Flow::Break(fallback_or_fail(run.args, &scope)?));
+        }
         Err(e) => {
             // Written by Composer before it threw (a degraded repository).
             for line in &e.preface {
@@ -1353,6 +1381,11 @@ fn execute_operations(
     };
     trace("install transaction", run.t0);
     for line in &downloading {
+        vivacity_core::say!("{line}");
+    }
+    // A redirect to an insecure host (`secure-http` false): Composer warns as
+    // its wait loop restarts the job, after the lines above.
+    for line in vivacity_core::secure_http::take_redirect_warnings() {
         vivacity_core::say!("{line}");
     }
     // codeception/c3's `uninstall` when this transaction removes the plugin:
@@ -2119,6 +2152,133 @@ pub(crate) fn emulate_package_versions(
     Ok(())
 }
 
+/// `secure-http` true (or read from where vivacity does not) on a dist
+/// Composer would download: Composer refuses the request (`CurlDownloader`
+/// → `Config::prohibitUrlByConfig`), so the run is Composer's — decided on
+/// the lock in memory, a string test per URL, before anything is printed or
+/// written. Only an insecure URL costs more: then installed.json is read, and
+/// a package it already holds at the locked version and reference (no
+/// download in Composer either) does not count. The URL is the first one
+/// `FileDownloader` tries (`Package::getDistUrls`: a preferred mirror first),
+/// and the one vivacity downloads (vivacity does not read mirrors). A dist
+/// Composer's files cache would serve still counts: Composer then succeeds on
+/// its own.
+pub(crate) fn insecure_dist_reason(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock: &vivacity_core::lock::Lock,
+    with_dev: bool,
+) -> Option<String> {
+    use serde_json::Value;
+    use vivacity_core::secure_http::{classify, Verdict};
+    let mut installed: Option<Vec<Value>> = None;
+    for p in lock.wanted_packages(with_dev) {
+        if p.is_metapackage() || p.dist_kind() == vivacity_core::lock::DistKind::Missing {
+            continue;
+        }
+        let dist = p.raw.get("dist");
+        // The common path: every URL `https`, a string test each.
+        let any = dist
+            .and_then(|d| d.get("url"))
+            .and_then(Value::as_str)
+            .into_iter()
+            .chain(
+                dist.and_then(|d| d.get("mirrors"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m.get("url").and_then(Value::as_str)),
+            )
+            .any(|u| vivacity_core::secure_http::insecure(u).is_some());
+        if !any {
+            continue;
+        }
+        let first_mirror = dist
+            .and_then(|d| d.get("mirrors"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|m| m.get("preferred").is_some_and(crate::manifest::php_truthy))
+            .and_then(|m| m.get("url").and_then(Value::as_str))
+            .map(str::to_owned);
+        let mut why = None;
+        for url in first_mirror.into_iter().chain(p.dist_url_expanded()) {
+            why = match classify(&url) {
+                Verdict::Refuse => Some("which secure-http refuses".to_owned()),
+                Verdict::HandOver(reason) => Some(format!("with {reason}")),
+                Verdict::Allowed | Verdict::Warn { .. } => continue,
+            };
+            break;
+        }
+        let Some(why) = why else { continue };
+        let reference = |v: &Value, key: &str| {
+            v.get(key)
+                .and_then(|d| d.get("reference"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let held = installed
+            .get_or_insert_with(|| vivacity_core::layout::installed_packages_of(project, manifest))
+            .iter()
+            .any(|i| {
+                i.get("name").and_then(Value::as_str) == Some(p.name())
+                    && i.get("version_normalized") == p.raw.get("version_normalized")
+                    && reference(i, "dist") == reference(&Value::Object(p.raw.clone()), "dist")
+            });
+        if held {
+            continue;
+        }
+        return Some(format!(
+            "the dist of {} is downloaded over an insecure protocol, {why}",
+            p.name()
+        ));
+    }
+    None
+}
+
+/// Whether any dist URL of a lock (as JSON) has an insecure scheme: the
+/// string scan that keeps [`insecure_dist_reason`] off the common path.
+pub(crate) fn any_insecure_dist(lock: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    ["packages", "packages-dev"]
+        .iter()
+        .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+        .flatten()
+        .filter_map(|p| p.get("dist"))
+        .any(|d| {
+            let main = d.get("url").and_then(Value::as_str);
+            let mirrors = d
+                .get("mirrors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m.get("url").and_then(Value::as_str));
+            main.into_iter()
+                .chain(mirrors)
+                .any(|u| vivacity_core::secure_http::insecure(u).is_some())
+        })
+}
+
+/// `HttpDownloader::$maxJobs`: 12, or `COMPOSER_MAX_PARALLEL_HTTP` when
+/// `is_numeric`, `(int)` and clamped to 1..=50 (HttpDownloader.php:52,
+/// :91-93).
+fn max_parallel_http() -> usize {
+    let Ok(raw) = std::env::var("COMPOSER_MAX_PARALLEL_HTTP") else {
+        return 12;
+    };
+    let trimmed = raw.trim_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let numeric = !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+        && trimmed.parse::<f64>().is_ok_and(f64::is_finite);
+    if !numeric {
+        return 12;
+    }
+    let n = trimmed.parse::<f64>().unwrap_or(12.0).trunc();
+    n.clamp(1.0, 50.0) as usize
+}
+
 /// `  - <operation><appendix>` for every operation of a real install.
 /// `FileDownloader::download`'s line, for the packages this install will fetch.
 ///
@@ -2134,6 +2294,13 @@ pub(crate) fn emulate_package_versions(
 /// serve the archive. Checked by presence alone — a cached archive whose sha1 no
 /// longer matches makes Composer print where we do not, which is the one corner
 /// left (our own fetch throws that entry away and re-downloads either way).
+///
+/// `secure-http` false: the request a line announces starts right after it
+/// (`addCopy` → `startJob` → `CurlDownloader::initDownload`), which writes
+/// « Warning: Accessing <host> over http… » once per host — for the first
+/// `maxJobs` downloads only. Past them a job waits in the queue and starts in
+/// `wait()`, after the last line, in queue order (measured: the 13th
+/// download's new host is warned after the 14th line).
 pub(crate) fn download_lines(
     lock: &vivacity_core::lock::Lock,
     arena: &[vivacity_resolver::package::Package],
@@ -2147,6 +2314,9 @@ pub(crate) fn download_lines(
         .collect();
     let cache_root = vivacity_core::fetch::composer_cache_dir();
     let mut lines = Vec::new();
+    let max_jobs = max_parallel_http();
+    let mut started = 0usize;
+    let mut queued: Vec<(String, String)> = Vec::new();
     for op in operations {
         let target = match *op {
             Operation::Install(p) | Operation::Update(_, p) => p,
@@ -2211,6 +2381,24 @@ pub(crate) fn download_lines(
                 DisplayRef::SourceRefIfDev
             )
         ));
+        if let vivacity_core::secure_http::Verdict::Warn { scheme, host } =
+            vivacity_core::secure_http::classify(&url)
+        {
+            if started < max_jobs {
+                lines.extend(vivacity_core::secure_http::warn_once(&scheme, &host));
+            } else {
+                queued.push((scheme, host));
+            }
+        }
+        // Only an `http(s)://` download takes a curl job; anything else goes
+        // through `RemoteFilesystem`, synchronously (`canUseCurl`).
+        let scheme = url.split("://").next().unwrap_or("");
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+            started += 1;
+        }
+    }
+    for (scheme, host) in queued {
+        lines.extend(vivacity_core::secure_http::warn_once(&scheme, &host));
     }
     lines
 }

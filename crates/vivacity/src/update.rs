@@ -41,10 +41,12 @@ pub(crate) fn http_transport(
             if offline {
                 return network_disabled(url, ims);
             }
-            runtime
+            let r = runtime
                 .block_on(fetcher.metadata_fetch(url, ims))
                 .map(to_fetched)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            say_redirect_warnings();
+            r
         })
     };
     // Parallel batch (Composer: curl multi, 12 downloads at a time).
@@ -76,7 +78,9 @@ pub(crate) fn http_transport(
                         }
                     })
                     .collect();
-                futures_join_all(tasks).await
+                let r = futures_join_all(tasks).await;
+                say_redirect_warnings();
+                r
             })
         })
     };
@@ -88,13 +92,24 @@ pub(crate) fn http_transport(
             if offline {
                 return network_disabled(url, None);
             }
-            runtime
+            let r = runtime
                 .block_on(fetcher.post_form(url, body))
                 .map(to_fetched)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            say_redirect_warnings();
+            r
         })
     };
     Ok((http, Some(http_many), Some(http_post)))
+}
+
+/// The `secure-http` warnings of the redirects a metadata request followed
+/// to an insecure host, written as the request completes (Composer: as
+/// `CurlDownloader` restarts the job).
+fn say_redirect_warnings() {
+    for line in vivacity_core::secure_http::take_redirect_warnings() {
+        vivacity_core::say!("{line}");
+    }
 }
 
 /// `--offline` answers metadata requests as Composer's `HttpDownloader`
@@ -663,6 +678,21 @@ pub(crate) fn resolve_and_lock(
             .iter()
             .any(|p| p == "symfony/flex");
         if flex_active {
+            // `secure-http` on Flex's endpoints, read at `PRE_POOL_CREATE`
+            // (with `extra.symfony.require`) or `POST_UPDATE_CMD` (not
+            // dispatched under --dry-run): refused, the run is Composer's now.
+            let reads_index =
+                vivacity_resolver::flex_filter::symfony_require(&m).is_some() || !args.dry_run;
+            let index_hosts = match flex::endpoint_hosts(&m) {
+                Ok(hosts) => hosts,
+                Err(_) if !reads_index => Vec::new(),
+                Err(reason) => {
+                    return Ok(Resolved {
+                        hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(reason)),
+                        ..Resolved::stopped(0)
+                    })
+                }
+            };
             if let Some(symfony_require) = vivacity_resolver::flex_filter::symfony_require(&m) {
                 let parsed = vivacity_resolver::constraint::parse_constraints(&symfony_require)
                     .map_err(|e| {
@@ -673,6 +703,7 @@ pub(crate) fn resolve_and_lock(
                     symfony_require,
                     symfony: parsed.constraint,
                     versions,
+                    index_hosts,
                 });
             }
         }
@@ -699,6 +730,9 @@ pub(crate) fn resolve_and_lock(
     // `remove` have dispatched theirs already.
     if !args.command_dispatched {
         if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            // Flex read its index while the `Composer` was created, if the
+            // package arguments made it (`require`/`remove` do it themselves).
+            flex::activation_warnings(&project, &m, !args.no_plugins, &args.packages);
             bamarni_command_event(&project, &m, !args.no_plugins);
         }
     }
@@ -718,6 +752,17 @@ pub(crate) fn resolve_and_lock(
             activate()?;
             print_session_error(&e);
             return Ok(Resolved::stopped(2));
+        }
+        // A request found while loading that Composer would treat in a way
+        // vivacity does not (`secure-http` read from auth.json): Composer's,
+        // before anything is written — after « Loading composer
+        // repositories » and what loading printed, which Composer prints
+        // again (the late hand-over of HANDOVER.md).
+        Err(e) if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported => {
+            return Ok(Resolved {
+                hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(e.message)),
+                ..Resolved::stopped(0)
+            });
         }
         Err(e) => return Err(session_error(e)),
     };
@@ -838,6 +883,23 @@ pub(crate) fn resolve_and_lock(
                     ..Resolved::stopped(0)
                 });
             }
+        }
+    }
+    // `secure-http` on the dists the install phase would download, known
+    // only now (a repository may serve `http://` archives): Composer would
+    // write this lock, then stop at the first of them — its run, before
+    // the lock is written.
+    if !args.dry_run && !args.no_install && crate::install::any_insecure_dist(&lock) {
+        let parsed = vivacity_core::lock::Lock::from_value(&lock);
+        let null = serde_json::Value::Null;
+        let m = loaded_manifest.as_ref().unwrap_or(&null);
+        if let Some(reason) =
+            crate::install::insecure_dist_reason(&project, m, &parsed, installer_dev_mode)
+        {
+            return Ok(Resolved {
+                hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(reason)),
+                ..Resolved::stopped(0)
+            });
         }
     }
     let lock_path = project.join("composer.lock");

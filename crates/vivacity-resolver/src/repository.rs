@@ -555,6 +555,45 @@ impl ComposerRepository {
             .unwrap_or_default()
     }
 
+    /// `getPackagesJsonUrl`: the first file a resolution requests.
+    pub fn packages_json_url(&self) -> &str {
+        &self.packages_json_url
+    }
+
+    /// A line this repository writes while loading: now, or kept with the
+    /// others when the caller holds its output.
+    fn write_line(&self, line: String) {
+        match &self.held {
+            Some(held) => held.borrow_mut().push(line),
+            None => vivacity_core::say!("{line}"),
+        }
+    }
+
+    /// `Config::prohibitUrlByConfig`, which `CurlDownloader` runs as it
+    /// starts each request: the warning written once per host
+    /// (`secure-http` false), the refusal as the `TransportException` it is
+    /// (`secure-http` true), a setting vivacity does not read as a
+    /// hand-over. Nothing for a secure URL.
+    fn guard(&self, url: &str) -> Result<(), RepoError> {
+        use vivacity_core::secure_http::{refusal, request, Verdict};
+        match request(url) {
+            Ok(None) => Ok(()),
+            Ok(Some(line)) => {
+                self.write_line(line);
+                Ok(())
+            }
+            Err(Verdict::Refuse) => Err(RepoError::transport(refusal(
+                &crate::metacache::sanitize_url(url),
+            ))),
+            Err(Verdict::HandOver(reason)) => Err(RepoError::unsupported(format!(
+                "{} over {}, with {reason}",
+                crate::metacache::sanitize_url(url),
+                url.split("://").next().unwrap_or("http")
+            ))),
+            Err(_) => Ok(()),
+        }
+    }
+
     /// `FilterRepository::__construct`: `only` or `exclude` (not both).
     pub fn set_name_filter(
         &mut self,
@@ -981,10 +1020,7 @@ impl ComposerRepository {
                             crate::metacache::sanitize_url(&self.url),
                             e.0
                         );
-                        match &self.held {
-                            Some(held) => held.borrow_mut().push(line),
-                            None => vivacity_core::say!("{line}"),
-                        }
+                        self.write_line(line);
                     }
                 };
                 if !asynchronous {
@@ -1016,7 +1052,11 @@ impl ComposerRepository {
     ) -> Result<Option<Value>, RepoError> {
         let cached = self.cached(cache_key);
         let ims = cached.as_ref().and_then(|(_, lm)| lm.clone());
-        let result = self.transport.fetch(url, ims.as_deref());
+        let result = match self.guard(url) {
+            Ok(()) => self.transport.fetch(url, ims.as_deref()),
+            Err(e) if e.1 == RepoErrorKind::Unsupported => return Err(e),
+            Err(e) => Err(e),
+        };
         self.settle(url, cache_key, cached, result, asynchronous)
     }
 
@@ -1057,6 +1097,7 @@ impl ComposerRepository {
             return Ok(None);
         };
         let url = template.replace("%package%", package_name);
+        self.guard(&url)?;
         let body = match self.transport.fetch(&url, None)? {
             Fetched::Body { bytes, .. } => bytes,
             Fetched::NotFound | Fetched::NotModified => return Ok(Some(Vec::new())),
@@ -1234,6 +1275,7 @@ impl ComposerRepository {
                     .iter()
                     .map(|(n, _)| format!("packages%5B%5D={}", urlencode(n)))
                     .collect();
+                self.guard(api_url)?;
                 let fetched = self.transport.post_form(api_url, &body.join("&"))?;
                 let bytes = match fetched {
                     Fetched::Body { bytes, .. } => bytes,
@@ -1480,7 +1522,35 @@ impl ComposerRepository {
             .zip(&cached)
             .map(|((_, _, url), c)| (url.clone(), c.as_ref().and_then(|(_, lm)| lm.clone())))
             .collect();
-        let results = self.transport.fetch_many(&requests);
+        // Each request is checked as it would start, in order; the refused
+        // ones never leave.
+        let mut results: Vec<Option<Result<Fetched, RepoError>>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut sent: Vec<usize> = Vec::new();
+        for (i, (url, _)) in requests.iter().enumerate() {
+            match self.guard(url) {
+                Ok(()) => sent.push(i),
+                Err(e) if e.1 == RepoErrorKind::Unsupported => return Err(e),
+                Err(e) => results[i] = Some(Err(e)),
+            }
+        }
+        if sent.len() == requests.len() {
+            results = self
+                .transport
+                .fetch_many(&requests)
+                .into_iter()
+                .map(Some)
+                .collect();
+        } else if !sent.is_empty() {
+            let subset: Vec<Request> = sent.iter().map(|&i| requests[i].clone()).collect();
+            for (i, r) in sent.iter().zip(self.transport.fetch_many(&subset)) {
+                results[*i] = Some(r);
+            }
+        }
+        let results: Vec<Result<Fetched, RepoError>> = results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(RepoError::transport("not fetched"))))
+            .collect();
         self.fresh_metadata.set(true);
         let mut settled = Vec::with_capacity(todo.len());
         for (((key, package_name, url), c), result) in todo.into_iter().zip(cached).zip(results) {

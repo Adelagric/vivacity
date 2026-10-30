@@ -144,9 +144,13 @@ pub fn symfony_require(manifest: &Value) -> Option<String> {
 /// alias contributes the aliased version too); `versions` the index as
 /// fetched — pruned here (`getVersions`), so a package whose every split
 /// version matches the requirement, or none does, is not filtered.
-/// Returns the kept indices in order, and whether the `Restricting
+/// Returns the kept indices in order, whether the `Restricting
 /// packages…` notice is due (once, when a package other than
-/// `symfony/symfony` loses a version to the constraint).
+/// `symfony/symfony` loses a version to the constraint), and whether Flex
+/// read its index: `$knownVersions ??= $this->getVersions()` runs for the
+/// first package that is not `symfony/symfony` and not at a locked version
+/// (PackageFilter.php:91-93) — the index request, which `secure-http`
+/// warns about.
 pub fn remove_legacy_packages(
     packages: &[usize],
     arena: &[Package],
@@ -154,12 +158,13 @@ pub fn remove_legacy_packages(
     locked: &BTreeMap<String, Vec<String>>,
     symfony: &Constraint,
     versions: &FlexVersions,
-) -> (Vec<usize>, bool) {
+) -> (Vec<usize>, bool, bool) {
     let versions = versions.pruned(symfony);
     let mut kept: Vec<usize> = Vec::new();
     let mut symfony_packages: Vec<usize> = Vec::new();
     let mut one_symfony = false;
     let mut restricting = false;
+    let mut index_read = false;
     for &idx in packages {
         let p = &arena[idx];
         let name = p.name.as_str();
@@ -170,6 +175,7 @@ pub fn remove_legacy_packages(
         let locked_hit = locked
             .get(name)
             .is_some_and(|l| candidate_versions.iter().any(|v| l.contains(v)));
+        index_read = index_read || (name != "symfony/symfony" && !locked_hit);
         let root_disjoint = root_constraints
             .get(name)
             .is_some_and(|c| !intervals::have_intersections(symfony, c));
@@ -210,7 +216,7 @@ pub fn remove_legacy_packages(
     if !symfony_packages.is_empty() && !one_symfony {
         kept.extend(symfony_packages);
     }
-    (kept, restricting)
+    (kept, restricting, index_read)
 }
 
 /// PHP's `6.4 > $versions[0]`: the normalized version string cast to
@@ -315,7 +321,7 @@ mod tests {
         };
         let mut locked = BTreeMap::new();
         locked.insert("symfony/locked".to_string(), vec!["6.4.0.0".to_string()]);
-        let (kept, notice) = remove_legacy_packages(
+        let (kept, notice, index_read) = remove_legacy_packages(
             &packages,
             &arena,
             &BTreeMap::new(),
@@ -329,6 +335,40 @@ mod tests {
         // because no symfony/symfony matched.
         assert_eq!(kept, vec![1, 2, 3, 5, 6, 4]);
         assert!(notice);
+        assert!(index_read);
+    }
+
+    #[test]
+    fn the_index_is_read_only_for_a_package_off_its_locked_version() {
+        let arena = vec![
+            pkg("symfony/symfony", "v7.1.0"),
+            pkg("symfony/console", "v7.1.0"),
+        ];
+        let versions = FlexVersions {
+            splits: vec![("symfony/console".into(), vec!["7.1".into()])],
+            next: "7.2".into(),
+        };
+        let mut locked = BTreeMap::new();
+        locked.insert("symfony/console".to_string(), vec!["7.1.0.0".to_string()]);
+        // `symfony/symfony` never asks; a locked version short-circuits.
+        let (_, _, index_read) = remove_legacy_packages(
+            &[0, 1],
+            &arena,
+            &BTreeMap::new(),
+            &locked,
+            &cons("7.1.*"),
+            &versions,
+        );
+        assert!(!index_read);
+        let (_, _, index_read) = remove_legacy_packages(
+            &[0, 1],
+            &arena,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &cons("7.1.*"),
+            &versions,
+        );
+        assert!(index_read);
     }
 
     #[test]
@@ -340,7 +380,7 @@ mod tests {
         };
         let mut root = BTreeMap::new();
         root.insert("symfony/console".to_string(), cons("^6.4"));
-        let (kept, notice) = remove_legacy_packages(
+        let (kept, notice, _) = remove_legacy_packages(
             &[0],
             &arena,
             &root,

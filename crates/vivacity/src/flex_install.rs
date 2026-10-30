@@ -32,6 +32,19 @@ pub(crate) fn print_flex_post_update(
 ) -> anyhow::Result<()> {
     let sync = flex_synchronize_enabled(manifest);
     let enabled = flex_downloader_enabled(manifest);
+    // `fetchRecipes` → `Downloader::getRecipes` → `initialize`: the
+    // endpoints' requests, in order, unless `PRE_POOL_CREATE` made them
+    // already — `secure-http` false warns about each insecure host once
+    // (the recipes' own requests go to those hosts, `fetch_recipe`).
+    if enabled {
+        if let Ok(hosts) = crate::flex::endpoint_hosts(manifest) {
+            for (scheme, host) in hosts {
+                if let Some(line) = vivacity_core::secure_http::warn_once(&scheme, &host) {
+                    vivacity_core::say!("{line}");
+                }
+            }
+        }
+    }
     // `fetchRecipes` writes this one before `install`'s blank line.
     if !enabled {
         vivacity_core::say!(
@@ -625,6 +638,32 @@ fn fetch_recipe(
         return Err(format!(
             "{name}'s recipe comes from the GitHub API ({url}), which Flex reads with its own Accept header (not emulated)"
         ));
+    }
+    // `secure-http`: a recipe served from its endpoint's insecure host was
+    // warned about with the index; another insecure host would be warned
+    // about among the recipes' requests — not reproduced.
+    {
+        use vivacity_core::secure_http::{classify, insecure, Verdict};
+        match classify(&url) {
+            Verdict::Allowed => {}
+            Verdict::Warn { host, .. } => {
+                if insecure(endpoint_url).and_then(|(_, h)| h).as_deref() != Some(host.as_str()) {
+                    return Err(format!(
+                        "the recipe of {name} is read from {host} over an insecure protocol, a host its endpoint does not share"
+                    ));
+                }
+            }
+            Verdict::Refuse => {
+                return Err(format!(
+                "the recipe of {name} is read over an insecure protocol, which secure-http refuses"
+            ))
+            }
+            Verdict::HandOver(reason) => {
+                return Err(format!(
+                    "the recipe of {name} is read over an insecure protocol, with {reason}"
+                ))
+            }
+        }
     }
     let body = flex::fetch_recipe(project, &url, offline)
         .map_err(|e| format!("cannot download the recipe of {name} ({e:#})"))?;

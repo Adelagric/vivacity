@@ -92,10 +92,55 @@ pub(crate) fn resolution_fallback(
             }
         }
     }
+    // `secure-http` on the project's `composer` repositories: a resolution
+    // reads their packages.json first, which Composer refuses over an
+    // insecure protocol. Decided on the manifest in memory, before `require`
+    // or `remove` edit it; the global config's repositories are checked
+    // when the session opens them (`open_repository_with`).
+    issues.extend(insecure_repository_issue(manifest));
     if issues.is_empty() {
         return Ok(None);
     }
     delegate_resolution(&issues, no_fallback).map(Some)
+}
+
+/// The first `composer` repository of the manifest that `secure-http`
+/// refuses (or that Composer would judge on a setting vivacity does not
+/// read), as a hand-over reason. The URL as `ComposerRepository` makes it:
+/// one without a scheme is a local path when it exists, `http://` otherwise.
+fn insecure_repository_issue(
+    manifest: &serde_json::Value,
+) -> Option<vivacity_core::scope::ScopeIssue> {
+    use serde_json::Value;
+    use vivacity_core::secure_http::{classify, Verdict};
+    let repos: Vec<&Value> = match manifest.get("repositories") {
+        Some(Value::Array(a)) => a.iter().collect(),
+        Some(Value::Object(o)) => o.values().collect(),
+        _ => return None,
+    };
+    for repo in repos {
+        if repo.get("type").and_then(Value::as_str) != Some("composer") {
+            continue;
+        }
+        let Some(url) = repo.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let url = if url.contains("://") || std::path::Path::new(url).exists() {
+            url.to_owned()
+        } else {
+            format!("http://{url}")
+        };
+        let why = match classify(&url) {
+            Verdict::Refuse => "which secure-http refuses".to_owned(),
+            Verdict::HandOver(reason) => format!("with {reason}"),
+            Verdict::Allowed | Verdict::Warn { .. } => continue,
+        };
+        return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+            "repository {} is read over an insecure protocol, {why}",
+            vivacity_resolver::metacache::sanitize_url(url.trim_end_matches('/'))
+        )));
+    }
+    None
 }
 
 /// Prints the reasons, then re-runs the command under Composer (or stops

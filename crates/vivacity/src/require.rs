@@ -693,6 +693,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         None => "",
     };
     let names: Vec<String> = requirements.iter().map(|(n, _)| n.clone()).collect();
+    // The second `Composer` (`resetComposer` + `requireComposer`): a new
+    // `Config`, whose `secure-http` warnings start afresh.
+    vivacity_core::secure_http::new_composer();
     vivacity_core::say!("Running composer update {}{flags}", names.join(" "));
     // The `Composer` re-created by `doUpdate` (RequireCommand.php:409-410)
     // loads every installed plugin's classes again: renamed, as the -v

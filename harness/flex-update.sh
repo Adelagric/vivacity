@@ -226,6 +226,10 @@ retouch_source_ref() { # projet, paquet
     || { echo "retouch_source_ref: $2 n'\''a pas de bloc source dans $f" >&2; return 1; }
 }
 shape_source_ref()    { case "$1" in post) retouch_source_ref "$2" psr/log;; esac; }
+# `secure-http` rendu à son défaut (vrai) après la convergence : l'index en
+# http local est refusé.
+shape_secure_default() { case "$1" in post)
+  jq 'del(.config["secure-http"])' "$2/composer.json" > "$2/c.tmp" && mv "$2/c.tmp" "$2/composer.json";; esac; }
 
 # Les deux côtés partent du même état convergé : un `composer update` de
 # préparation (l'instantané est figé, donc le lock qui en sort est stable),
@@ -254,18 +258,18 @@ prepare() { # nom, forme du projet (`-` : aucune), paquets à omettre de symfony
   done
 }
 
-run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
-  local name="$1" expect="$2" reason="${3:-}" extra="${4:-}"
+run() { # nom, attendu (native|fallback), motif attendu, arguments en plus, commande (update)
+  local name="$1" expect="$2" reason="${3:-}" extra="${4:-}" cmd="${5:-update}"
   local ref="$WORK/ref-$name" viv="$WORK/viv-$name" c=0 v=0
   cp "$viv/composer.lock" "$WORK/$name.lock.before"; cp "$viv/symfony.lock" "$WORK/$name.symfony.before"
   # Sur un cas de repli, Composer appliquerait la recette (réseau) : seule
   # la décision de vivacity est mesurée, et elle doit ne rien écrire.
   if [ "$expect" = native ]; then
     (cd "$ref" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
-      composer update --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
+      composer "$cmd" --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
   fi
   (cd "$viv" && COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$CACHE_DIR" COMPOSER_ROOT_VERSION="$root_version" \
-    "$VIVACITY" update $extra --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
+    "$VIVACITY" "$cmd" $extra --no-fallback --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || v=$?
   if [ "$expect" = fallback ]; then
     # Rien ne doit avoir bougé : ni le lock, ni symfony.lock.
     if ! cmp -s "$viv/composer.lock" "$WORK/$name.lock.before" || ! cmp -s "$viv/symfony.lock" "$WORK/$name.symfony.before"; then
@@ -282,13 +286,14 @@ run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
   for f in composer.lock symfony.lock; do
     if ! cmp -s "$ref/$f" "$viv/$f"; then echo "FAIL $name : $f diffère"; diff "$ref/$f" "$viv/$f" | head -6; status=1; return; fi
   done
-  # `Warning: Accessing 127.0.0.1 over http…` : artefact du banc (l'index
-  # est servi en http local avec `secure-http: false`), pas du produit —
-  # les endpoints réels sont en https. `  - Downloading …` : cache froid.
+  # `Warning: Accessing 127.0.0.1 over http…` (l'index servi en http local,
+  # `secure-http: false`) est comparé : vivacity l'écrit où Composer
+  # l'écrit (docs/plans/parity-gaps-026.md). `  - Downloading …` : cache
+  # froid.
   # La session de « Symfony operations: … (<32 hex>) » est aléatoire
   # (`Downloader::$sess`) : normalisée des deux côtés.
   local sess='s/^(Symfony operations: [0-9]+ recipes?) \([0-9a-f]{32}\)$/\1 (<session>)/'
-  if ! diff <(grep -vE '^  - Downloading |^Warning: Accessing 127\.0\.0\.1 over http ' "$WORK/$name.composer.err" | sed -E "$sess") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.err" | sed -E "$sess") >"$WORK/$name.err.diff"; then
+  if ! diff <(grep -vE '^  - Downloading ' "$WORK/$name.composer.err" | sed -E "$sess") <(grep -v '^vivacity: \|^Note: plugin ' "$WORK/$name.vivacity.err" | sed -E "$sess") >"$WORK/$name.err.diff"; then
     echo "FAIL $name : stderr différente"; head -8 "$WORK/$name.err.diff"; status=1; return
   fi
   if compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null; then
@@ -299,6 +304,20 @@ run() { # nom, attendu (native|fallback), motif attendu, arguments en plus
 }
 
 prepare all-locked      - && run all-locked native
+# Une liste d'update qui ne vise rien : tout ce que le pool charge est
+# verrouillé, Flex ne lit pas son index à `PRE_POOL_CREATE`
+# (PackageFilter.php:91-93) mais à `POST_UPDATE_CMD` — l'avertissement
+# `secure-http` y passe, après « Writing lock file » et l'install.
+prepare allow-list      - && run allow-list native "" vendor/not-locked
+# Des arguments `symfony/*` : Flex lit son index dès son activation
+# (`PackageResolver::resolve` → `parseVersion`), avant toute ligne de la
+# commande ; `remove` crée un second `Composer` après « has been updated »,
+# d'où un second avertissement.
+prepare symfony-arg     - && run symfony-arg native "" symfony/console
+prepare remove-arg      - && run remove-arg native "" "symfony/uid --no-install" remove
+# `secure-http` vrai : Flex réessaierait puis échouerait sur l'index —
+# rendu avant toute écriture.
+prepare secure-default shape_secure_default - && run secure-default fallback "Flex endpoint .* secure-http refuses"
 # `--dry-run` : Composer ne dispatche pas POST_UPDATE_CMD du tout (mesuré),
 # donc Flex n'écrit rien ET n'affiche rien — pas même la ligne des recettes.
 prepare dry-run         - && run dry-run   native "" --dry-run

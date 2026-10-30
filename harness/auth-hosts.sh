@@ -17,10 +17,9 @@
 # sert un zip pour le reste. Aucune requête ne quitte la machine.
 #
 # Comparés, par cas : le journal du mandataire (trié : les téléchargements
-# sont parallèles), le code de sortie, stdout, stderr (moins « Warning:
-# Accessing <hôte> over http… », que Composer écrit et vivacity non — un
-# écart connu de `secure-http`, hors de ce banc — et les lignes `vivacity:`),
-# le projet. Puis, outil par outil, le cas sans jeton contre les cas avec :
+# sont parallèles), le code de sortie, stdout, stderr (« Warning: Accessing
+# <hôte> over http… » compris, harness/secure-http.sh ; moins les lignes
+# `vivacity:`), le projet. Puis, outil par outil, le cas sans jeton contre les cas avec :
 # le jeton ne change rien à la sortie. Le cas `env` affirme aussi le
 # journal attendu ligne à ligne.
 #
@@ -143,7 +142,7 @@ run_case() {
       "$VIVACITY" install --no-scripts --no-fallback > "$d.out" 2> "$d.err"); echo $? > "$d.code"
   fi
   sort "$LOG" > "$d.requests"
-  grep -vE '^Warning: Accessing [^ ]+ over http which is an insecure protocol\.$|^vivacity: ' "$d.err" > "$d.err.cmp"
+  grep -vE '^vivacity: ' "$d.err" > "$d.err.cmp"
   # Le projet seul : auth.json est une entrée du cas, pas un produit.
   rm -f "$d/auth.json"
 }

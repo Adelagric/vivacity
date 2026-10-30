@@ -5249,3 +5249,102 @@ schéma inconnu. `ci-bench.sh` et `gate.py` prennent le hyperfine d'apt
 inchangée) tenait à une raison de correction, pas à ces temps : il ne
 bouge pas ; la condition « un gain Linux mesuré » reste à remplir en
 relançant le workflow.
+
+## 2026-10-29 — Les avertissements du pool à leur place, `secure-http` porté (docs/plans/parity-gaps-026.md)
+
+**Constat.** Trois écarts connus, ni corrigés ni rendus, avant 0.26 :
+(1) les avertissements que `PoolBuilder::buildPool` écrit pendant la
+construction du pool — la liste d'update qui ne vise rien de verrouillé
+(PoolBuilder.php:216), une exigence racine gardée verrouillée (:539, :569)
+— sortaient après « Updating dependencies », avec ou sans PHP ; (2) ceux
+des filtres de politique (« … could not be fetched … »), jamais mesurés,
+aussi ; (3) `secure-http` n'était pas porté : vivacity téléchargeait une URL
+`http://` que Composer refuse, avec les identifiants de son origine, et
+n'écrivait jamais « Warning: Accessing <hôte> over http… », que quatre
+harnais filtraient.
+
+**Lu puis mesuré sur 2.10.3.** Tout ce que `buildPool` écrit sort avant
+« Updating dependencies » (Installer.php:534-536), au moment où ça arrive :
+liste d'update, puis ce que les dépôts écrivent en chargeant (dépôt
+dégradé, avertissement http de la première requête vers un hôte) mêlé aux
+exigences racine gardées, puis `PRE_POOL_CREATE` (Flex : la requête de son
+index, puis « Restricting… »), puis chaque filtre (avis, listes) et ses
+avertissements. Mesuré : `update vendor/zzz` sur un dépôt http →
+la ligne de liste, puis l'avertissement ; une `api-url` d'avis en http
+→ « Security advisory data could not be fetched … » et le refus de
+`secure-http` avant « Updating dependencies ». `secure-http` : refus
+(`TransportException`) ou avertissement une fois par hôte et par
+`Config` (donc deux fois pour `require`, une par `Composer`), rien hors
+ligne (`HttpDownloader` répond avant curl), rien pour un dist servi par le
+cache ; la ligne d'un dist sort juste après sa ligne « Downloading », et
+après la dernière pour un téléchargement au-delà des 12 tâches de
+`HttpDownloader` (`COMPOSER_MAX_PARALLEL_HTTP`) ; Flex lit son index à
+`PRE_POOL_CREATE` seulement pour un paquet hors `symfony/symfony` et pas à
+sa version verrouillée (PackageFilter.php:91-93), sinon à `POST_UPDATE_CMD`.
+
+**Fait.**
+
+- Le constructeur de pool écrit ses avertissements au moment où il les
+  produit (`say!`), plutôt que le port en bloc de 53d5306 : celui-ci les
+  aurait tous mis avant (ou tous après) les lignes que les dépôts écrivent
+  en chargeant. `Pool::warnings` disparaît ; `create_filtered_pool` écrit
+  l'avertissement http de l'index de Flex s'il l'a lu, la notice de Flex,
+  puis les avertissements de chaque filtre sitôt passé ; `update` n'écrit
+  plus que « Updating dependencies » après.
+- `vivacity_core::secure_http` : la condition de `prohibitUrlByConfig`, le
+  réglage lu comme `Config::get` (`disable-tls`, `$val !== 'false'`), les
+  hôtes avertis par `Config`. Rien n'est lu tant qu'aucune URL n'est non
+  sûre : le chemin commun est un test de chaîne, sans verrou.
+- `secure-http` vrai : délégation avant toute ligne, requête ou écriture
+  pour ce qui est connu d'avance (dépôt `composer` d'une résolution — ceux
+  du manifeste avant que `require`/`remove` ne l'éditent, ceux du
+  config.json global à l'ouverture de la session —, dists du lock — pas ceux déjà installés —, dists du lock résolu avant son
+  écriture, points d'entrée de Flex) ; refus avec le message de Composer à
+  la requête d'un dépôt (rattrapé par les filtres sous
+  `ignore-unreachable`, comme chez Composer) ; le `Fetcher` refuse en
+  dernier recours et la politique de redirection refuse une cible non sûre
+  (message de Composer, sortie 100). Réglage lu dans auth.json,
+  `COMPOSER_AUTH` (fusionné en dernier : il l'emporte sur le projet), ou
+  `disable-tls` posé : rendu à Composer.
+- `secure-http` faux : l'avertissement à la requête d'un dépôt (retenu
+  avec les lignes du dépôt quand il retient sa sortie), dans la passe des
+  lignes « Downloading » avec le plafond de `HttpDownloader`, à la fin
+  d'une requête de métadonnées ou après les lignes « Downloading » pour
+  une redirection vers un nouvel hôte, et pour Flex à son activation quand
+  les arguments de `update`/`remove` lui font lire l'index
+  (`PackageResolver::resolve` : un alias, un nom `symfony/*` — mesuré : une
+  fois par `Composer`, donc deux pour `remove`), à `PRE_POOL_CREATE` ou au
+  début de sa sortie de `POST_UPDATE_CMD`. Une recette de Flex servie
+  par un autre hôte non sûr que son point d'entrée est rendue (place non
+  reproduite).
+- Redirections : au plus 20, `CurlDownloader::$maxRedirects` (lu, non
+  exercé).
+
+**Vu rouge puis vert.** `harness/verbosity.sh` : trois cas (liste
+d'update, exigence racine gardée, `api-url` d'avis en http) × trois
+niveaux, rouges sur c876c38 au niveau normal et sous `-v`.
+`harness/secure-http.sh` (nouveau, mandataire local, 32 cas) : 27 rouges
+sur c876c38, les 5 autres sont des témoins qui passaient déjà (cache
+chaud, `--dry-run`, hors ligne, `remove` à cache chaud). `auth-hosts.sh`
+sans son filtre : rouge sur c876c38 (trois cas). `flex-update.sh` : quatre
+cas de plus (Flex qui ne lit son index qu'à `POST_UPDATE_CMD` ; à son
+activation sur `update symfony/console` et `remove symfony/uid` — vu par
+`steps.sh`, dont la queue comparée portait une ligne de trop ;
+`secure-http` vrai, rendu). Les filtres de la ligne retirés de
+`auth-hosts.sh`, `flex-update.sh`, `flex-recipes.sh`, `plugin-lines.sh`.
+
+**Écarté.** Déléguer tout `secure-http: false` (l'avertissement se
+prouvait partout où les bancs l'exercent ; les bancs Flex, qui servent
+l'index en http local, seraient tous partis à Composer) ; un drapeau de
+comparaison entière dans `steps.sh` (`verbosity.sh` compare déjà tout, sous
+trois niveaux).
+
+**Laissé, écrit.** Non vérifiés faute de serveur `https` local : la
+redirection d'`https` vers une URL non sûre et la limite de 20. Une
+délégation tardive (réglage illisible trouvé au chargement ; dépôt http du
+seul config.json global sous `remove`, après « has been updated ») réimprime
+les lignes déjà écrites, comme les autres délégations tardives de HANDOVER.
+La délégation sur un dépôt refusé est large : un `remove` que Composer
+mène à bien sans requête de résolution (les filtres rattrapent le refus,
+mesuré) part aussi à Composer — même sortie, à la vitesse de Composer.
+L'inventaire des écarts connus restants est dans le plan.

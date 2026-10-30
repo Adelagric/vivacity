@@ -61,6 +61,11 @@ pub enum Error {
     #[error("{0}")]
     Unsupported(String),
 
+    /// A `TransportException` whose message is Composer's word for word
+    /// (`secure-http` refusing a redirect target): exit 100.
+    #[error("{0}")]
+    Transport(String),
+
     /// A refusal Composer states in its own words (`PathDownloader`):
     /// printed as is, exit 1.
     #[error("{0}")]

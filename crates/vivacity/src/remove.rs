@@ -120,6 +120,8 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     )? {
         return Ok(code);
     }
+    // The first `Composer`'s Flex read its index on these arguments.
+    crate::flex::activation_warnings(&project, &manifest, !args.no_plugins, &args.packages);
     let backup = manifest_text.clone();
     let json = JsonConfigSource::new(&file);
     let (link_type, alt_type) = if args.dev {
@@ -316,6 +318,10 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     } else if transitive == vivacity_resolver::pool::UpdateMode::OnlyListed {
         flags.push_str(" --with-dependencies");
     }
+    // The second `Composer` (`resetComposer` + `requireComposer`): a new
+    // `Config`, whose `secure-http` warnings start afresh.
+    vivacity_core::secure_http::new_composer();
+    crate::flex::activation_warnings(&project, &manifest, !args.no_plugins, &args.packages);
     vivacity_core::say!("Running composer update {}{flags}", packages.join(" "));
     // `setUpdateAllowList` only if a lock exists.
     let mut options = if locked_data.is_some() {
