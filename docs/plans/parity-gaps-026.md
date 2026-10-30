@@ -701,8 +701,8 @@ fichier au démarrage coûterait une lecture à chaque commande.
   relayé une fois le pid connu ; enfant attendu sans être récolté tant que
   le relais est posé), puis `exit_code_of` fait mourir vivacity du même
   signal (`128 + n` pour la bibliothèque et les signaux à core). Relais
-  toujours (un signal de groupe arrive deux fois à l'enfant, sans effet
-  observable).
+  plutôt qu'ignorer ; un signal de groupe arrive deux fois à l'enfant (la
+  ligne `-vvv` du `ProcessExecutor` deux fois : neuvième revue).
 - Revue indépendante de ce lot : signal pris juste avant le retrait (traité
   quand même), trou entre lancement et relais (fermé), `raise(3)` au lieu
   de `kill(getpid())`, `posix` aussi pendant les opérations, pid réutilisé
@@ -722,6 +722,18 @@ fichier au démarrage coûterait une lecture à chaque commande.
   du run quand elle a eu lieu, sinon supposés (inventaire 32b).
 - Bancs : `COMPOSER_TEST_SUITE` dans secure-http.sh (`hold-vv` instable :
   ramasse-miettes tiré au sort à `-vv`).
+
+## Neuvième revue (23ff273..fa62aa0) : fait
+
+- Relais : une ignorance héritée laissée en place jusqu'au lancement de
+  l'enfant (il en hérite), relais ensuite ; le mode de `require` passe outre
+  comme seld. `SA_SIGINFO` : signal de terminal non relayé sous Linux
+  (`SI_KERNEL`) ; indiscernable sous macOS et pour un `kill` de groupe
+  (inventaire 32b). Signal pendant le lancement sans perte (le dernier
+  gardé) ; `kill` et retrait sous un verrou, récolte après. `--run-scripts`
+  relayé. Sonde : deux drapeaux, rien de construit.
+- Cas : `nohup-handed`, `ignored-int-handed` (rouges sur fa62aa0),
+  `nohup-require` (témoin).
 
 ## Résultats
 
@@ -952,7 +964,10 @@ la décision revient au mainteneur.
     n'a pas de gestionnaire : vivacity n'en tient compte qu'une fois la
     sonde faite, sans en lancer une pour cela) ; la sonde dit « extension
     chargée », seld teste `function_exists` (`disable_functions`) ; sans
-    `pcntl` sous `nohup`, Composer survit à SIGHUP, vivacity non.
+    `pcntl` sous `nohup`, Composer survit à SIGHUP, vivacity non ; un
+    signal de groupe arrive deux fois au Composer enfant d'une délégation
+    sous macOS (un signal de terminal n'y porte pas de marque propre) et
+    pour un `kill` de groupe (ligne `-vvv` du `ProcessExecutor` deux fois).
 32c. **URL de dépôt `composer` que le constructeur refuse** — fermé le
     2026-10-30 (rendu au démarrage, avec les `filter`, `only`/`exclude`/
     `canonical` et définitions mal formés). Ports et hôtes entre crochets lus

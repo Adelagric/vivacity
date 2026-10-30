@@ -5952,10 +5952,12 @@ posé, pour ne jamais viser un pid réutilisé) ; il les traite comme Composer
 seul puis vivacity meurt du même signal (`128 + n` pour la bibliothèque, et
 pour un signal qui produit un core : le core de vivacity n'est pas celui de
 Composer). Choix :
-relayer toujours plutôt qu'ignorer — un signal de terminal envoyé au groupe
-atteint l'enfant deux fois, mais ses gestionnaires (et l'action par défaut)
-le terminent au premier : rien d'observable ; ignorer laisserait l'enfant
-sourd à un signal adressé au seul vivacity. Rien n'est posé hors
+relayer plutôt qu'ignorer — ignorer laisserait l'enfant sourd à un signal
+adressé au seul vivacity. Un signal envoyé au groupe atteint l'enfant deux
+fois : ses gestionnaires (et l'action par défaut) le terminent au premier,
+mais la ligne `-vvv` « Received SIG…, aborting when child process is done »
+du `ProcessExecutor` de Composer s'écrit alors deux fois (corrigé en partie
+le même jour, entrée suivante). Rien n'est posé hors
 délégation. Recettes de Flex derrière la porte ; porte attendue cinq
 secondes au plus ; tube unique jamais fermé, non bloquant, `pipe2` sous
 Linux ; `errno` sauvé ; `raise(3)` pour mourir ; un signal pris juste avant
@@ -5978,3 +5980,45 @@ où seld teste `function_exists` (des fonctions retirées par
 `disable_functions` passent pour présentes) ; sans `pcntl` sous `nohup`,
 Composer ignore SIGHUP (disposition héritée) quand vivacity, qui a posé son
 gestionnaire, meurt ; Windows.
+
+## 2026-10-30 — Neuvième revue : une ignorance héritée respectée, signal de terminal non relayé sous Linux, relais sans course (docs/plans/parity-gaps-026.md)
+
+**Constat.** Le relais posait son gestionnaire avant de lancer l'enfant :
+un signal que l'appelant ignorait (`nohup`, `trap '' HUP`, SIGINT d'une
+tâche de fond sans contrôle des tâches) redevenait, à `exec`, l'action par
+défaut chez l'enfant — toute délégation mourait d'un signal que le même
+Composer lancé directement ignore. Un signal de terminal arrivait deux fois
+à l'enfant (la ligne `-vvv` du `ProcessExecutor` deux fois). Un signal
+venu pendant le lancement pouvait se perdre entre le fil et le fil
+principal ; un `kill` restait possible juste après la récolte. `--run-scripts`
+attendait son `composer run-script` sans relais (sortie 1 sur un signal).
+La sonde construisait l'ensemble de toutes les extensions pour deux noms.
+
+**Fait.**
+- Relais : un signal ignoré par l'appelant n'est pas touché avant le
+  lancement (l'enfant hérite de l'ignorance), puis le gestionnaire de relais
+  le prend pour passer à l'enfant un signal adressé au seul vivacity. Le
+  mode de `require` passe outre une ignorance, comme `pcntl_signal` dans
+  seld (vérifié dans SignalHandler.php).
+- `SA_SIGINFO` : sous Linux, un signal de terminal (`SI_KERNEL`) n'est pas
+  relayé — l'enfant l'a déjà. Sous macOS un tel signal porte le pid du
+  meneur de session et aucun code propre (relevé : `si_pid` du processus
+  `script` qui tient le terminal, `si_code` 0, comme pour un `kill`) : il
+  ne se distingue pas d'un `kill` et reste relayé. Un `kill` adressé au
+  groupe par un autre processus, sur les deux systèmes, aussi. Résidu :
+  dans ces deux cas, la ligne `-vvv` du `ProcessExecutor` deux fois.
+- Signal pendant le lancement : le fil relit le pid après avoir noté le
+  signal et le relaie lui-même s'il est arrivé ; plusieurs signaux dans ce
+  laps (des microsecondes) se réduisent au dernier.
+- Pid réutilisé : « encore en relais ? alors `kill` » et « retrait des
+  gestionnaires » sous un même verrou, la récolte après : aucun `kill` ne
+  suit la récolte.
+- `--run-scripts` : même relais et même fin que pour une délégation.
+- Sonde : `pcntl` et `posix` seulement, sans rien construire.
+
+**Vu rouge (fa62aa0) puis vert.** `nohup-handed`, `ignored-int-handed`
+(require-signals.sh, un faux `composer` qui dort, SIGHUP ou SIGINT ignorés
+par l'appelant et envoyés au groupe). Témoin vert des deux côtés :
+`nohup-require` (le mode de `require` passe outre, comme Composer). Le
+signal de terminal non relayé (Linux) n'est pas exercé ici (macOS, sans
+terminal dans le banc).

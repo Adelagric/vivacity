@@ -137,7 +137,10 @@ byte-identical-output promise are the public API.
   vivacity waits for the Composer it started, SIGINT, SIGTERM and SIGHUP
   sent to vivacity alone (`timeout`, `docker stop`) reach that Composer,
   which reverts and ends as it would run directly; vivacity then ends by
-  the same signal instead of exiting 1.
+  the same signal instead of exiting 1. A signal the caller ignores
+  (`nohup`) stays ignored by that Composer, and on Linux a terminal signal,
+  which the whole process group already gets, is not passed on again. The
+  same for the `composer run-script` of `--run-scripts`.
 - **Repository definitions Composer refuses or warns about go to Composer
   at startup**: a `composer` URL without a host or with an invalid port, a
   user `filter` that is not booleans by list name, a malformed
