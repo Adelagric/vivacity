@@ -82,6 +82,22 @@ printf '{"packages": {"acme/t": []}}\n' > "$WORK/srv/p2/acme/t~dev.json"
 # acme/x : 2.0.0 (dist local) et 1.0.0 (dist en `http://`), hors de `^2.0`.
 printf '{"packages": {"acme/x": [{"name": "acme/x", "version": "2.0.0", "version_normalized": "2.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}, {"name": "acme/x", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "http://old.test/x-1.zip"}}]}}\n' "$WORK/srv/dist/x.zip" > "$WORK/srv/p2/acme/x.json"
 printf '{"packages": {"acme/x": []}}\n' > "$WORK/srv/p2/acme/x~dev.json"
+# Des versions de dev à dist `http://` : acme/d dev-main ; acme/e dev-master
+# avec l'alias de branche 1.0.x-dev.
+printf '{"packages": {"acme/d": []}}\n' > "$WORK/srv/p2/acme/d.json"
+printf '{"packages": {"acme/d": [{"name": "acme/d", "version": "dev-main", "version_normalized": "dev-main", "type": "library", "dist": {"type": "zip", "url": "http://dist.test/dist/a.zip", "reference": "abc"}}]}}\n' > "$WORK/srv/p2/acme/d~dev.json"
+printf '{"packages": {"acme/e": []}}\n' > "$WORK/srv/p2/acme/e.json"
+printf '{"packages": {"acme/e": [{"name": "acme/e", "version": "dev-master", "version_normalized": "9999999-dev", "type": "library", "extra": {"branch-alias": {"dev-master": "1.0.x-dev"}}, "dist": {"type": "zip", "url": "http://dist.test/dist/a.zip", "reference": "abc"}}]}}\n' > "$WORK/srv/p2/acme/e~dev.json"
+# acme/n et acme/q : le lock les fige à 1.0.0 (seuls servis au moment des
+# graines) ; n 2.0.0 exige ensuite q, dont la 1.1.0 a un dist `http://`.
+printf '{"packages": {"acme/n": [{"name": "acme/n", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/n.json"
+printf '{"packages": {"acme/q": [{"name": "acme/q", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/q.json"
+printf '{"packages": {"acme/k": [{"name": "acme/k", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "require": {"acme/q": "^1.0"}, "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/k.json"
+for n in d e n q k; do printf '{"packages": {"acme/%s": []}}\n' "$n" > "$WORK/srv/p2/acme/$n~dev.json.tmp"; [ -e "$WORK/srv/p2/acme/$n~dev.json" ] || mv "$WORK/srv/p2/acme/$n~dev.json.tmp" "$WORK/srv/p2/acme/$n~dev.json"; rm -f "$WORK/srv/p2/acme/$n~dev.json.tmp"; done
+# Un dépôt `path` dont le paquet exige acme/a (dist `http://`, servi par un
+# dépôt local) : la fermeture n'y passe pas, jugé une fois le lock résolu.
+mkdir -p "$WORK/pathp"
+printf '{"name": "acme/p", "version": "1.0.0", "require": {"acme/a": "1.0.0"}}\n' > "$WORK/pathp/composer.json"
 # Un dépôt `file://` à la Satis : packages.json n'a que des `includes`.
 mkdir -p "$WORK/srvsatis/include"
 printf '{"packages": {"acme/a": {"1.0.0": {"name": "acme/a", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "http://dist.test/dist/a.zip"}}}}}\n' > "$WORK/srvsatis/include/all.json"
@@ -172,6 +188,15 @@ seed filel "{\"name\": \"vivacity/secure-http-filel\", \"type\": \"project\", \"
 seed filet "{\"name\": \"vivacity/secure-http-filet\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/t\": \"1.0.0\"}}"
 seed filex "{\"name\": \"vivacity/secure-http-filex\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\", \"acme/x\": \"^2.0\"}}"
 seed satis "{\"name\": \"vivacity/secure-http-satis\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvsatis\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\"}}"
+seed filed "{\"name\": \"vivacity/secure-http-filed\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/d\": \"dev-main\"}}"
+seed filee "{\"name\": \"vivacity/secure-http-filee\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/e\": \"^1.0@dev\"}}"
+seed filealias "{\"name\": \"vivacity/secure-http-filealias\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/d\": \"dev-main as 1.0.0\"}}"
+seed filexo "{\"name\": \"vivacity/secure-http-filexo\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\", \"acme/x\": \"1.0.0\"}}"
+seed filenq "{\"name\": \"vivacity/secure-http-filenq\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/n\": \"^1.0 || ^2.0\", \"acme/k\": \"1.0.0\"}}"
+seed pathp "{\"name\": \"vivacity/secure-http-pathp\", \"type\": \"project\", \"repositories\": [{\"type\": \"path\", \"url\": \"$WORK/pathp\"}, {\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/p\": \"1.0.0\"}}"
+# Après les graines : n 2.0.0 (exige q) et q 1.1.0 (dist `http://`).
+printf '{"packages": {"acme/n": [{"name": "acme/n", "version": "2.0.0", "version_normalized": "2.0.0.0", "type": "library", "require": {"acme/q": "^1.0"}, "dist": {"type": "zip", "url": "%s"}}, {"name": "acme/n", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/n.json"
+printf '{"packages": {"acme/q": [{"name": "acme/q", "version": "1.1.0", "version_normalized": "1.1.0.0", "type": "library", "dist": {"type": "zip", "url": "http://old.test/q-1.1.zip"}}, {"name": "acme/q", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/q.json"
 seed adv "{\"name\": \"vivacity/secure-http-adv\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvadv\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 # Un dist sans requête (chemin local) : rien de non sûr.
 seed local "{\"name\": \"vivacity/secure-http-local\", \"type\": \"project\", \"repositories\": [{\"type\": \"package\", \"package\": {\"name\": \"acme/l\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"$WORK/srv/dist/a.zip\"}}}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
@@ -426,6 +451,20 @@ want transitive-file-repo && case_ transitive-file-repo filet 'delegates:secure-
 # mais sa 1.0.0 (dist `http://`) est hors de `^2.0`.
 want partial-locked-http && case_ partial-locked-http filex native installed 'expect:Nothing to install, update or remove' -- update acme/l
 want full-outside-constraint && case_ full-outside-constraint filex native installed 'expect:Nothing to install, update or remove' -- update
+# Les drapeaux de stabilité implicites (`dev-main`, l'alias racine) et
+# l'alias de branche (`^1.0@dev` sur dev-master → 1.0.x-dev) : les fichiers
+# `~dev` sont lus, l'alias compte — rendu avant tout.
+want dev-implicit-flag && case_ dev-implicit-flag filed 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+want dev-branch-alias && case_ dev-branch-alias filee 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+want dev-root-alias && case_ dev-root-alias filealias 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# Un paquet que la mise à jour partielle fige, verrouillé à un dist
+# `http://` et pas installé : téléchargé depuis le lock — rendu avant tout.
+want partial-fixed-missing && case_ partial-fixed-missing filexo 'delegates:secure-http' 'expect:does not allow connections to http://old.test/x-1.zip' -- update acme/l
+# `-W` : la nouvelle version d'acme/n exige acme/q, verrouillé ; Composer le
+# déverrouille et prend sa 1.1.0 (dist `http://`) — rendu avant tout.
+want transitive-unlock && case_ transitive-unlock filenq 'delegates:secure-http' 'expect:does not allow connections to http://old.test/q-1.1.zip' -- update acme/n -W
+# Délégation tardive comparée : acme/a amené par un paquet `path`.
+want late-path-dependency && case_ late-path-dependency pathp 'delegates:secure-http' late nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
 # Un dépôt local à `includes` (`loadIncludes`) : ses dists sont lus aussi.
 want satis-includes && case_ satis-includes satis 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
 # `allow_ssl_downgrade` : Composer relirait le dépôt en `http` — rendu.

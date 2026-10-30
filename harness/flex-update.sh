@@ -213,6 +213,18 @@ shape_real_lock_gap() { case "$1" in post)
                             file_put_contents($f, json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
                           ' "$2" "$ROOT/fixtures/projects/$FX/symfony.lock";; esac; }
 shape_forget_twig()   { case "$1" in post) forget_package "$2" symfony/twig-bundle;; esac; }
+# psr/log retiré, et son dist pris dans un zip local (copié du cache
+# partagé) : aucun réseau, et le cache de fichiers de chaque côté peut
+# partir vide.
+shape_forget_log_local() { case "$1" in post)
+  forget_package "$2" psr/log
+  local url sha zip
+  url=$(jq -r '.packages[] | select(.name == "psr/log") | .dist.url' "$2/composer.lock")
+  sha=$(php -r 'echo sha1($argv[1]);' "$url")
+  zip="$CACHE_DIR/files/psr/log/$sha.zip"
+  [ -f "$zip" ] || { echo "dist de psr/log absent du cache partagé ($zip)"; return 1; }
+  mkdir -p "$WORK/dists"; cp "$zip" "$WORK/dists/psr-log.zip"
+  jq --indent 4 --arg z "$WORK/dists/psr-log.zip" '.packages |= map(if .name == "psr/log" then .dist.url = $z | .dist.shasum = "" else . end)' "$2/composer.lock" > "$2/c.tmp" && mv "$2/c.tmp" "$2/composer.lock";; esac; }
 shape_forget_flex()   { case "$1" in post) forget_package "$2" symfony/flex;; esac; }
 shape_downgrade_log() { case "$1" in post) downgrade_package "$2" psr/log;; esac; }
 # Seule la référence de SOURCE bouge : `Transaction::calculateOperations` la
@@ -268,6 +280,30 @@ run() { # nom, attendu (native|fallback|early), motif attendu, arguments en plus
   # `early` : rendu avant toute ligne ni écriture, comparé en entier — une
   # copie de plus, où vivacity passe la main à Composer.
   if [ "$expect" = early ]; then rm -rf "$WORK/fb-$name"; cp -R "$viv" "$WORK/fb-$name"; fi
+  # `handover` : vivacity rend la main tard (après la résolution) et appelle
+  # vraiment Composer — cache de fichiers vide de chaque côté, lignes
+  # « Downloading » comprises : ce qu'il écrit avant sa raison doit être le
+  # début de la sortie de Composer, et la suite cette sortie entière.
+  if [ "$expect" = handover ]; then
+    local f=0 bad="" sess='s/^(Symfony operations: [0-9]+ recipes?) \([0-9a-f]{32}\)$/\1 (<session>)/'
+    rm -rf "$WORK/cache-ref-$name" "$WORK/cache-viv-$name"; mkdir -p "$WORK/cache-ref-$name" "$WORK/cache-viv-$name"
+    (cd "$ref" && env ${RUN_ENV:-} COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$WORK/cache-ref-$name" COMPOSER_ROOT_VERSION="$root_version" \
+      composer "$cmd" --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.composer.err") || c=$?
+    (cd "$viv" && env ${RUN_ENV:-} COMPOSER_HOME="$home" COMPOSER_CACHE_DIR="$WORK/cache-viv-$name" COMPOSER_ROOT_VERSION="$root_version" \
+      "$VIVACITY" "$cmd" --no-scripts $extra --no-interaction --no-audit --no-ansi --no-blocking >/dev/null 2>"$WORK/$name.vivacity.err") || f=$?
+    [ -z "$want" ] || grep -qE -- "$want" "$WORK/$name.composer.err" || bad="$bad Composer n'écrit pas « $want »;"
+    grep -qE -- "$reason" "$WORK/$name.vivacity.err" || bad="$bad pas de raison « $reason »;"
+    sed -n '/^vivacity: /q;p' "$WORK/$name.vivacity.err" > "$WORK/$name.pre"
+    head -n "$(wc -l < "$WORK/$name.pre")" "$WORK/$name.composer.err" | cmp -s - "$WORK/$name.pre" \
+      || bad="$bad les lignes d'avant la raison ne sont pas le début de celles de Composer;"
+    [ "$c" = "$f" ] || bad="$bad codes $c vs $f;"
+    diff <(sed -E "$sess" "$WORK/$name.composer.err") <(awk 'f {print} /^vivacity: delegating to /{f=1}' "$WORK/$name.vivacity.err" | sed -E "$sess") > "$WORK/$name.err.diff" || bad="$bad stderr différente;"
+    compare_vendor "$ref" "$viv" "$WORK/$name.diff" >/dev/null || bad="$bad projet différent;"
+    rm -rf "$WORK/cache-ref-$name" "$WORK/cache-viv-$name"
+    if [ -z "$bad" ]; then echo "OK   $name : rendu à Composer après la résolution ($reason), même sortie — « Downloading » compris —, même projet"
+    else echo "FAIL $name :$bad"; head -6 "$WORK/$name.err.diff"; status=1; fi
+    return
+  fi
   # Sur un cas de repli, Composer appliquerait la recette (réseau) : seule
   # la décision de vivacity est mesurée, et elle doit ne rien écrire.
   if [ "$expect" = native ] || [ "$expect" = early ]; then
@@ -376,6 +412,11 @@ prepare relays-package shape_forget_log - && run relays-package native
 # du dist, vendor/ ne l'a pas encore.
 prepare dist-no-bundle shape_forget_log  psr/log              && run dist-no-bundle native
 prepare dist-bundle    shape_forget_twig symfony/twig-bundle  && run dist-bundle    native
+# Flex lit le dist de psr/log (classe de bundle : l'install le pose), qui
+# entre dans le cache de fichiers, puis rend la main sur la recette de
+# symfony/console : l'archive est reprise avant, sans quoi Composer, la
+# trouvant en cache, n'écrirait pas « Downloading psr/log ».
+prepare dist-then-recipe shape_forget_log_local psr/log symfony/console && run dist-then-recipe handover "cannot download the recipe of symfony/console" "" update '^  - Downloading psr/log' 
 # Une opération d'update arme le rappel `symfony/thanks`.
 prepare thanks         shape_downgrade_log - && run thanks    native
 prepare thanks-src-ref shape_source_ref    - && run thanks-src-ref native
