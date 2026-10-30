@@ -500,21 +500,19 @@ pub async fn install(
             Err(e @ Error::Unsupported(_)) => {
                 tasks.abort_all();
                 while tasks.join_next().await.is_some() {}
-                // An archive that cannot be taken back would change
-                // Composer's output: the run stops on that error instead
-                // of handing over.
-                if let Err(why) = crate::fetch::take_back_cached_dists() {
-                    return Err(Error::Http {
-                        url: "files cache".to_owned(),
-                        message: why,
-                    });
-                }
                 if let Some(top) = &created_from {
                     for dir in vendor.ancestors() {
                         if std::fs::remove_dir(dir).is_err() || dir == top.as_path() {
                             break;
                         }
                     }
+                }
+                // An archive that cannot be taken back would change
+                // Composer's output: the run stops on that error instead of
+                // handing over — as `fallback::hand_over` does, `Error:`
+                // and exit 1 (`Error::Refused` is printed as it is).
+                if let Err(why) = crate::fetch::take_back_cached_dists() {
+                    return Err(Error::Refused(format!("Error: {why}")));
                 }
                 return Err(e);
             }

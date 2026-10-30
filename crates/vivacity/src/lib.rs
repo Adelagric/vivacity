@@ -564,6 +564,7 @@ where
 fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // The configuration files are read once per run (`fetch::global_json`).
     vivacity_core::fetch::forget_global_files();
+    vivacity_resolver::repository::forget_preparsed();
     // Kept for the resolution fallback, which re-runs the whole command
     // under Composer with the same arguments.
     if let Ok(mut a) = ARGV.lock() {

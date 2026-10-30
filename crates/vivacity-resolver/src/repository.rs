@@ -581,9 +581,20 @@ pub struct LocalScope {
     pub skipped: BTreeSet<String>,
     /// `minimum-stability`.
     pub minimum_stability: String,
-    /// Names with a stability flag in the root's requirements (`@dev`…):
-    /// every stability counts for them.
+    /// Names with a stability flag in the root's requirements, explicit
+    /// (`@dev`) or implicit (`dev-main`, `1.0.x-dev`,
+    /// `RootPackageLoader::extractStabilityFlags`): every stability counts
+    /// for them.
     pub flagged: BTreeSet<String>,
+    /// The root's aliases (`dev-main as 1.0.0`): name, the aliased
+    /// normalized version, the alias's.
+    pub root_aliases: Vec<(String, String, String)>,
+    /// A transitive partial update (`-w`: `Some(true)`, root requirements
+    /// kept fixed; `-W`: `Some(false)`): a fixed package a loaded version
+    /// requires is unlocked and loaded (`PoolBuilder::loadPackage`).
+    pub unlock: Option<bool>,
+    /// The root's requirement names (for `-w`).
+    pub root_names: BTreeSet<String>,
     /// The command installs: the dists count.
     pub with_dists: bool,
     /// `policy.ignore-unreachable` off for the resolution: the policy
@@ -597,11 +608,55 @@ struct LocalRepo {
     template: Option<String>,
     listed: Option<Vec<String>>,
     patterns: Vec<Regex>,
-    /// The versions held by packages.json (and, for a full repository, its
-    /// local includes), by name.
-    inline: BTreeMap<String, Vec<Value>>,
+    /// packages.json (and, for a full repository, its local includes): the
+    /// files, and by lowercased name the keys of their `packages`.
+    inline: Vec<std::sync::Arc<Value>>,
+    inline_index: BTreeMap<String, Vec<(usize, String)>>,
     /// Package files read, by name (each once).
-    files: BTreeMap<String, Vec<Value>>,
+    files: BTreeMap<String, Vec<std::sync::Arc<Value>>>,
+    /// The versions of a name, expanded once when a file is minified.
+    expanded: BTreeMap<String, Vec<Value>>,
+}
+
+/// The local files [`local_insecure_url`] read and parsed, by URL: the
+/// repository that reads one next takes it (`fetch_cached`, `prefetch`)
+/// instead of reading and parsing it again — the check costs the run no
+/// second parse. Forgotten at the start of each run.
+#[allow(clippy::type_complexity)]
+static PREPARSED: std::sync::Mutex<BTreeMap<String, (Vec<u8>, std::sync::Arc<Value>)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+static HAS_PREPARSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn keep_preparsed(url: String, bytes: Vec<u8>, value: std::sync::Arc<Value>) {
+    PREPARSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(url, (bytes, value));
+    HAS_PREPARSED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// The bytes and the parsed value of a local file the check read, once.
+/// A test of a flag for anything else: no lock on the common path.
+fn take_preparsed(url: &str) -> Option<(Vec<u8>, Value)> {
+    if !url.starts_with("file://") || !HAS_PREPARSED.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    let (bytes, value) = PREPARSED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(url)?;
+    let value = std::sync::Arc::try_unwrap(value).unwrap_or_else(|a| (*a).clone());
+    Some((bytes, value))
+}
+
+/// A new run: what a previous one parsed is not its own.
+pub fn forget_preparsed() {
+    if HAS_PREPARSED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        PREPARSED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
 }
 
 /// For the local (`file://`) `composer` repositories of a resolution, the
@@ -644,28 +699,34 @@ pub fn local_insecure_url(
             Verdict::Allowed | Verdict::Warn { .. } => None,
         }
     };
-    let read = |p: &str| -> Option<Value> { serde_json::from_slice(&std::fs::read(p).ok()?).ok() };
-    // A package entry's versions: a list or a map, expanded when minified.
-    fn versions_of(v: &Value, minified: bool) -> Vec<Value> {
-        let list: Vec<Value> = match v {
-            Value::Array(a) => a.clone(),
-            Value::Object(o) => o.values().cloned().collect(),
-            _ => Vec::new(),
-        };
-        if minified {
-            expand_minified_owned(list)
-        } else {
-            list
-        }
-    }
-    fn add_packages(into: &mut BTreeMap<String, Vec<Value>>, data: &Value) {
-        let minified = data.get("minified").and_then(Value::as_str) == Some("composer/2.0");
+    // Each file read once, kept for the repository that reads it next.
+    let read = |p: &str| -> Option<std::sync::Arc<Value>> {
+        let bytes = std::fs::read(p).ok()?;
+        let value = std::sync::Arc::new(serde_json::from_slice::<Value>(&bytes).ok()?);
+        keep_preparsed(format!("file://{p}"), bytes, value.clone());
+        Some(value)
+    };
+    fn index_packages(
+        into: &mut BTreeMap<String, Vec<(usize, String)>>,
+        source: usize,
+        data: &Value,
+    ) {
         if let Some(packages) = data.get("packages").and_then(Value::as_object) {
-            for (name, v) in packages {
+            for name in packages.keys() {
                 into.entry(name.to_lowercase())
                     .or_default()
-                    .extend(versions_of(v, minified));
+                    .push((source, name.clone()));
             }
+        }
+    }
+    fn minified(data: &Value) -> bool {
+        data.get("minified").and_then(Value::as_str) == Some("composer/2.0")
+    }
+    fn refs(v: &Value) -> Vec<&Value> {
+        match v {
+            Value::Array(a) => a.iter().collect(),
+            Value::Object(o) => o.values().collect(),
+            _ => Vec::new(),
         }
     }
     let mut repos: Vec<LocalRepo> = Vec::new();
@@ -747,10 +808,11 @@ pub fn local_insecure_url(
             .any(|k| !php_empty(root.get(*k)));
         // A full repository (`loadIncludes`): packages.json and its
         // includes, recursively, all read by Composer.
-        let mut inline: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        add_packages(&mut inline, &root);
+        let mut inline: Vec<std::sync::Arc<Value>> = vec![root.clone()];
+        let mut inline_index: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+        index_packages(&mut inline_index, 0, &root);
         if !lazy {
-            let mut pending: Vec<Value> = vec![root.clone()];
+            let mut pending: Vec<std::sync::Arc<Value>> = vec![root.clone()];
             let mut seen: BTreeSet<String> = BTreeSet::new();
             while let Some(data) = pending.pop() {
                 for (include, _) in data
@@ -769,7 +831,8 @@ pub fn local_insecure_url(
                         Some(local) if scope.with_dists => {
                             if seen.insert(local.to_owned()) {
                                 let included = read(local)?;
-                                add_packages(&mut inline, &included);
+                                index_packages(&mut inline_index, inline.len(), &included);
+                                inline.push(included.clone());
                                 pending.push(included);
                             }
                         }
@@ -809,18 +872,25 @@ pub fn local_insecure_url(
                 .map(package_name_regexp)
                 .collect(),
             inline,
+            inline_index,
             files: BTreeMap::new(),
+            expanded: BTreeMap::new(),
         });
     }
     if !scope.with_dists || repos.is_empty() {
         return None;
     }
     let min_rank = stability_rank(&scope.minimum_stability);
+    let mut skipped = scope.skipped.clone();
     let mut queue: Vec<(String, String)> = scope.requires.clone();
     let mut done: BTreeSet<(String, String)> = BTreeSet::new();
+    // The versions already judged (and their links followed), by
+    // repository and name: a version is judged once, whatever constraints
+    // reach it after.
+    let mut judged: BTreeMap<(usize, String), Vec<bool>> = BTreeMap::new();
     while let Some((name, constraint)) = queue.pop() {
         let name = name.to_lowercase();
-        if scope.skipped.contains(&name)
+        if skipped.contains(&name)
             || is_platform_package(&name)
             || !done.insert((name.clone(), constraint.clone()))
         {
@@ -831,8 +901,7 @@ pub fn local_insecure_url(
             .map(|p| p.constraint)
             .unwrap_or(Constraint::MatchAll);
         let every_stability = scope.flagged.contains(&name);
-        for repo in &mut repos {
-            let mut versions: Vec<Value> = repo.inline.get(&name).cloned().unwrap_or_default();
+        for (ri, repo) in repos.iter_mut().enumerate() {
             if let Some(template) = &repo.template {
                 let declared = repo.listed.is_some() || !repo.patterns.is_empty();
                 let in_list = repo.listed.as_ref().is_some_and(|l| l.contains(&name));
@@ -840,44 +909,100 @@ pub fn local_insecure_url(
                     .patterns
                     .iter()
                     .any(|re| re.is_match(name.as_bytes()).unwrap_or(false));
-                if !declared || in_list || in_patterns {
-                    let file = repo.files.entry(name.clone()).or_insert_with(|| {
-                        // `~dev` too when dev versions are acceptable for it.
-                        let mut out = Vec::new();
-                        let mut files = vec![template.replace("%package%", &name)];
-                        if every_stability || min_rank >= stability_rank("dev") {
-                            files.push(template.replace("%package%", &format!("{name}~dev")));
-                        }
-                        for f in files {
-                            if let Some(data) = read(&f) {
-                                let minified = data.get("minified").and_then(Value::as_str)
-                                    == Some("composer/2.0");
-                                if let Some(v) =
-                                    data.get("packages").and_then(|p| p.get(name.as_str()))
-                                {
-                                    out.extend(versions_of(v, minified));
-                                }
-                            }
-                        }
-                        out
-                    });
-                    versions.extend(file.iter().cloned());
+                if (!declared || in_list || in_patterns) && !repo.files.contains_key(&name) {
+                    // `~dev` too when dev versions are acceptable for it.
+                    let mut files = vec![template.replace("%package%", &name)];
+                    if every_stability || min_rank >= stability_rank("dev") {
+                        files.push(template.replace("%package%", &format!("{name}~dev")));
+                    }
+                    let read_files: Vec<std::sync::Arc<Value>> =
+                        files.iter().filter_map(|f| read(f)).collect();
+                    repo.files.insert(name.clone(), read_files);
                 }
             }
-            for version in &versions {
+            // A minified file's versions inherit from the previous one:
+            // expanded (copied) once; the others are read in place.
+            if !repo.expanded.contains_key(&name) {
+                let mut owned: Vec<Value> = Vec::new();
+                let mut any = false;
+                for (src, key) in repo.inline_index.get(&name).into_iter().flatten() {
+                    let data = &repo.inline[*src];
+                    if minified(data) {
+                        any = true;
+                        if let Some(v) = data.get("packages").and_then(|p| p.get(key.as_str())) {
+                            owned.extend(expand_minified_owned(
+                                refs(v).into_iter().cloned().collect(),
+                            ));
+                        }
+                    }
+                }
+                for data in repo.files.get(&name).into_iter().flatten() {
+                    if minified(data) {
+                        any = true;
+                        if let Some(v) = data.get("packages").and_then(|p| p.get(name.as_str())) {
+                            owned.extend(expand_minified_owned(
+                                refs(v).into_iter().cloned().collect(),
+                            ));
+                        }
+                    }
+                }
+                if any {
+                    repo.expanded.insert(name.clone(), owned);
+                }
+            }
+            let mut versions: Vec<&Value> = Vec::new();
+            for (src, key) in repo.inline_index.get(&name).into_iter().flatten() {
+                let data = &repo.inline[*src];
+                if !minified(data) {
+                    if let Some(v) = data.get("packages").and_then(|p| p.get(key.as_str())) {
+                        versions.extend(refs(v));
+                    }
+                }
+            }
+            for data in repo.files.get(&name).into_iter().flatten() {
+                if !minified(data) {
+                    if let Some(v) = data.get("packages").and_then(|p| p.get(name.as_str())) {
+                        versions.extend(refs(v));
+                    }
+                }
+            }
+            versions.extend(repo.expanded.get(&name).into_iter().flatten());
+            if versions.is_empty() {
+                continue;
+            }
+            let seen = judged
+                .entry((ri, name.clone()))
+                .or_insert_with(|| vec![false; versions.len()]);
+            for (vi, version) in versions.iter().enumerate() {
+                if seen[vi] {
+                    continue;
+                }
                 let pretty = version.get("version").and_then(Value::as_str).unwrap_or("");
+                if !every_stability && stability_rank(parse_stability(pretty)) > min_rank {
+                    continue;
+                }
                 let normalized = version
                     .get("version_normalized")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                     .or_else(|| normalize(pretty, None).ok())
                     .unwrap_or_default();
-                if !every_stability && stability_rank(parse_stability(pretty)) > min_rank {
+                // The version, its branch alias, a root alias of it: the
+                // pool holds an AliasPackage for each, which a constraint
+                // may match instead.
+                let mut candidates = vec![normalized.clone()];
+                if let Some(alias) = version.as_object().and_then(branch_alias) {
+                    candidates.push(alias);
+                }
+                for (alias_name, from, to) in &scope.root_aliases {
+                    if *alias_name == name && *from == normalized {
+                        candidates.push(to.clone());
+                    }
+                }
+                if !candidates.iter().any(|v| parsed.matches_version(v)) {
                     continue;
                 }
-                if !parsed.matches_version(&normalized) {
-                    continue;
-                }
+                seen[vi] = true;
                 if let Some(dist) = version.get("dist") {
                     let urls = dist.get("url").and_then(Value::as_str).into_iter().chain(
                         dist.get("mirrors")
@@ -898,9 +1023,16 @@ pub fn local_insecure_url(
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(c) = c.as_str() {
-                        queue.push((dep.to_lowercase(), c.to_owned()));
+                    let Some(c) = c.as_str() else { continue };
+                    let dep = dep.to_lowercase();
+                    // A transitive partial update unlocks what a loaded
+                    // version requires (`-w`: not a root requirement).
+                    if let Some(keep_root) = scope.unlock {
+                        if !(keep_root && scope.root_names.contains(&dep)) {
+                            skipped.remove(&dep);
+                        }
                     }
+                    queue.push((dep, c.to_owned()));
                 }
             }
         }
@@ -1443,6 +1575,14 @@ impl ComposerRepository {
         cache_key: &str,
         asynchronous: bool,
     ) -> Result<Option<Value>, RepoError> {
+        // A local file the `secure-http` check parsed already: as
+        // `settle` takes a body without `Last-Modified`.
+        if let Some((bytes, data)) = take_preparsed(url) {
+            if let Some(cache) = &self.cache {
+                cache.write(cache_key, &bytes);
+            }
+            return Ok(Some(data));
+        }
         let cached = self.cached(cache_key);
         let ims = cached.as_ref().and_then(|(_, lm)| lm.clone());
         let result = match self.guard(url) {
@@ -1901,6 +2041,25 @@ impl ComposerRepository {
                 }
                 let url = template.replace("%package%", &key);
                 todo.push((key, package_name.clone(), url));
+            }
+        }
+        // The files the `secure-http` check parsed already: settled now.
+        let mut ready = Vec::new();
+        todo.retain(|(key, package_name, url)| match take_preparsed(url) {
+            Some((bytes, data)) => {
+                if let Some(cache) = &self.cache {
+                    cache.write(&crate::metacache::MetadataCache::provider_key(key), &bytes);
+                }
+                ready.push((key.clone(), Self::parse_provider(package_name, Some(data))));
+                false
+            }
+            None => true,
+        });
+        if !ready.is_empty() {
+            self.fresh_metadata.set(true);
+            let mut memo = self.fetched.borrow_mut();
+            for (key, value) in ready {
+                memo.insert(key, value);
             }
         }
         if todo.len() < 2 {

@@ -23,7 +23,7 @@ pub(crate) fn resolution_fallback(
     with_install: bool,
     post_update_cmd: bool,
     with_dev: bool,
-    start: &PoolStart,
+    start: &PoolStart<'_>,
 ) -> anyhow::Result<Option<i32>> {
     let mut issues = vivacity_core::scope::resolution_issues(
         project,
@@ -102,6 +102,7 @@ pub(crate) fn resolution_fallback(
         manifest,
         with_install,
         with_dev,
+        !no_plugins,
         start,
     ));
     if issues.is_empty() {
@@ -116,11 +117,13 @@ pub(crate) fn resolution_fallback(
 /// makes the allow list), `remove` (the packages it drops). Empty: a full
 /// update.
 #[derive(Default)]
-pub(crate) struct PoolStart {
+pub(crate) struct PoolStart<'a> {
     pub allow: Vec<String>,
     pub mode: Option<vivacity_resolver::pool::UpdateMode>,
     pub added: Vec<(String, String)>,
     pub removed: Vec<String>,
+    /// The lock, when the command has it in memory already (`remove`).
+    pub lock: Option<&'a serde_json::Value>,
 }
 
 /// The first `composer` repository of the merged configuration (the global
@@ -136,7 +139,8 @@ fn insecure_repository_issue(
     manifest: &serde_json::Value,
     with_install: bool,
     with_dev: bool,
-    start: &PoolStart,
+    plugins_enabled: bool,
+    start: &PoolStart<'_>,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
     use serde_json::Value;
     use vivacity_core::secure_http::{classify, insecure, Verdict};
@@ -185,6 +189,54 @@ fn insecure_repository_issue(
             local.push(url.to_owned());
         }
     }
+    // A partial update fixes the locked packages outside its allow list:
+    // one not installed as locked is downloaded from its locked dist,
+    // which the lock holds — judged now (the lock in memory, or read for a
+    // local repository's check anyway).
+    let partial = !start.allow.is_empty() || !start.added.is_empty();
+    let read_lock;
+    let lock = match start.lock {
+        Some(l) => Some(l),
+        None if partial && with_install && !local.is_empty() => {
+            read_lock = vivacity_core::jsonfile::read(&project.join("composer.lock"));
+            read_lock.as_deref()
+        }
+        None => None,
+    };
+    let fixed = lock
+        .filter(|_| partial)
+        .map(|l| fixed_packages(manifest, with_dev, start, l));
+    if let (true, Some(lock), Some(fixed)) = (with_install, lock, &fixed) {
+        let sections = if with_dev {
+            &["packages", "packages-dev"][..]
+        } else {
+            &["packages"][..]
+        };
+        let entries: Vec<Value> = sections
+            .iter()
+            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+            .flatten()
+            .filter(|p| {
+                p.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| fixed.names.contains(&n.to_lowercase()))
+            })
+            .cloned()
+            .collect();
+        if crate::install::any_insecure_dist(&serde_json::json!({ "packages": entries })) {
+            let subset = serde_json::json!({"packages": entries, "packages-dev": []});
+            let parsed = vivacity_core::lock::Lock::from_value(&subset);
+            if let Some(reason) = crate::install::insecure_dist_reason(
+                project,
+                manifest,
+                &parsed,
+                true,
+                plugins_enabled,
+            ) {
+                return Some(vivacity_core::scope::ScopeIssue::Layout(reason));
+            }
+        }
+    }
     if local.is_empty() {
         return None;
     }
@@ -195,11 +247,11 @@ fn insecure_repository_issue(
             !(p.ignore_unreachable.update && p.ignore_unreachable.install)
         });
     let scope = pool_scope(
-        project,
         manifest,
         with_install,
         with_dev,
         start,
+        fixed,
         filters_fatal,
     );
     let (found, verdict) = vivacity_resolver::repository::local_insecure_url(&local, &scope)?;
@@ -211,24 +263,15 @@ fn insecure_repository_issue(
     })
 }
 
-/// `PoolBuilder::buildPool`'s start (PoolBuilder.php:215-290): the root's
-/// requirements (`require`, `require-dev` in dev mode, `require`'s
-/// additions, not `remove`'s drops); in a partial update (an allow list and
-/// a lock), the locked packages outside the allow list — widened along the
-/// lock's `require` links for the transitive modes, root requirements left
-/// out for `-w` — are fixed: their files are not read, and their own
-/// requirements are marked for loading unless fixed too. The lock is read
-/// only then, and only for a local repository.
-fn pool_scope(
-    project: &std::path::Path,
+/// The root's requirements as `PoolBuilder` starts from them (`require`,
+/// `require-dev` in dev mode, `require`'s additions, not `remove`'s drops),
+/// name and constraint.
+fn root_requirements(
     manifest: &serde_json::Value,
-    with_install: bool,
     with_dev: bool,
-    start: &PoolStart,
-    filters_fatal: bool,
-) -> vivacity_resolver::repository::LocalScope {
+    start: &PoolStart<'_>,
+) -> Vec<(String, String)> {
     use serde_json::Value;
-    use vivacity_resolver::pool::UpdateMode;
     let removed: Vec<String> = start.removed.iter().map(|n| n.to_lowercase()).collect();
     let sections: &[&str] = if with_dev {
         &["require", "require-dev"]
@@ -247,10 +290,149 @@ fn pool_scope(
         root.retain(|(n, _)| *n != name);
         root.push((name, constraint.clone()));
     }
+    root
+}
+
+/// The locked packages a partial update fixes (PoolBuilder.php:215-245):
+/// those outside the allow list — widened along the lock's `require`
+/// links for the transitive modes, root requirements left out for `-w`
+/// (Composer widens further as it loads new versions: the local check
+/// unlocks those too) — and the names they replace; and the requirements
+/// the fixed packages mark for loading.
+struct Fixed {
+    names: std::collections::BTreeSet<String>,
+    requires: Vec<(String, String)>,
+}
+
+fn fixed_packages(
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    start: &PoolStart<'_>,
+    lock: &serde_json::Value,
+) -> Fixed {
+    use serde_json::Value;
+    use vivacity_resolver::pool::UpdateMode;
+    let root = root_requirements(manifest, with_dev, start);
+    let mut allow: Vec<String> = start.allow.iter().map(|n| n.to_lowercase()).collect();
+    allow.extend(start.added.iter().map(|(n, _)| n.to_lowercase()));
+    let locked: Vec<&Value> = ["packages", "packages-dev"]
+        .iter()
+        .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let name_of = |p: &Value| {
+        p.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    let patterns: Vec<_> = allow
+        .iter()
+        .map(|a| vivacity_resolver::pool::package_name_regexp(a))
+        .collect();
+    let mut allowed: std::collections::BTreeSet<String> = locked
+        .iter()
+        .map(|p| name_of(p))
+        .filter(|n| {
+            patterns
+                .iter()
+                .any(|re| re.is_match(n.as_bytes()).unwrap_or(false))
+        })
+        .collect();
+    if let Some(mode) = start.mode.filter(|m| *m != UpdateMode::OnlyListed) {
+        let root_names: Vec<&String> = root.iter().map(|(n, _)| n).collect();
+        let mut pending: Vec<String> = allowed.iter().cloned().collect();
+        while let Some(name) = pending.pop() {
+            let Some(p) = locked.iter().find(|p| name_of(p) == name) else {
+                continue;
+            };
+            for dep in p
+                .get("require")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(d, _)| d.to_lowercase())
+            {
+                if mode == UpdateMode::ListedWithTransitiveDepsNoRootRequire
+                    && root_names.contains(&&dep)
+                {
+                    continue;
+                }
+                if allowed.insert(dep.clone()) {
+                    pending.push(dep);
+                }
+            }
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let mut requires = Vec::new();
+    for p in &locked {
+        let name = name_of(p);
+        if allowed.contains(&name) {
+            continue;
+        }
+        names.insert(name);
+        for (target, _) in p
+            .get("replace")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            names.insert(target.to_lowercase());
+        }
+        for (dep, c) in p
+            .get("require")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(c) = c.as_str() {
+                requires.push((dep.to_lowercase(), c.to_owned()));
+            }
+        }
+    }
+    Fixed { names, requires }
+}
+
+/// `PoolBuilder::buildPool`'s start (PoolBuilder.php:215-290) for the local
+/// check: the root's requirements and the fixed packages' requirements,
+/// minus what is fixed; the stabilities and aliases the root sets.
+fn pool_scope(
+    manifest: &serde_json::Value,
+    with_install: bool,
+    with_dev: bool,
+    start: &PoolStart<'_>,
+    fixed: Option<Fixed>,
+    filters_fatal: bool,
+) -> vivacity_resolver::repository::LocalScope {
+    use serde_json::Value;
+    use vivacity_resolver::pool::UpdateMode;
+    let root = root_requirements(manifest, with_dev, start);
+    // `extractStabilityFlags`: an explicit `@stability`, or a constraint
+    // that names an unstable version (`dev-main`, `1.0.x-dev`, the left
+    // side of an alias).
     let flagged = root
         .iter()
-        .filter(|(_, c)| c.contains('@'))
+        .filter(|(_, c)| {
+            c.contains('@')
+                || c.split("||").flat_map(|a| a.split('|')).any(|alt| {
+                    let left = alt.split(" as ").next().unwrap_or(alt).trim();
+                    vivacity_resolver::version::parse_stability(left) != "stable"
+                })
+        })
         .map(|(n, _)| n.clone())
+        .collect();
+    // `extractAliases`: `<version> as <alias>`.
+    let root_aliases = root
+        .iter()
+        .filter_map(|(n, c)| {
+            let (from, to) = c.split_once(" as ")?;
+            let norm = |v: &str| {
+                vivacity_resolver::version::normalize(v.trim().trim_start_matches(['=', ' ']), None)
+                    .ok()
+            };
+            Some((n.clone(), norm(from)?, norm(to)?))
+        })
         .collect();
     let minimum_stability = match manifest
         .get("minimum-stability")
@@ -262,103 +444,26 @@ fn pool_scope(
         Some(s @ ("dev" | "alpha" | "beta")) => s.to_owned(),
         _ => "stable".to_owned(),
     };
-    let mut skipped = std::collections::BTreeSet::new();
-    let mut requires = root.clone();
-    let mut allow: Vec<String> = start.allow.iter().map(|n| n.to_lowercase()).collect();
-    allow.extend(start.added.iter().map(|(n, _)| n.to_lowercase()));
-    let lock = (!allow.is_empty())
-        .then(|| vivacity_core::jsonfile::read(&project.join("composer.lock")))
-        .flatten();
-    if let Some(lock) = lock {
-        let locked: Vec<&Value> = ["packages", "packages-dev"]
-            .iter()
-            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
-            .flatten()
-            .collect();
-        let name_of = |p: &Value| {
-            p.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase()
-        };
-        let patterns: Vec<_> = allow
-            .iter()
-            .map(|a| vivacity_resolver::pool::package_name_regexp(a))
-            .collect();
-        let mut allowed: std::collections::BTreeSet<String> = locked
-            .iter()
-            .map(|p| name_of(p))
-            .filter(|n| {
-                patterns
-                    .iter()
-                    .any(|re| re.is_match(n.as_bytes()).unwrap_or(false))
-            })
-            .collect();
-        // The transitive modes: the dependencies of what is allowed, as the
-        // lock links them (`-w` leaves the root's requirements locked).
-        if let Some(mode) = start.mode.filter(|m| *m != UpdateMode::OnlyListed) {
-            let root_names: Vec<&String> = root.iter().map(|(n, _)| n).collect();
-            let mut pending: Vec<String> = allowed.iter().cloned().collect();
-            while let Some(name) = pending.pop() {
-                let Some(p) = locked.iter().find(|p| name_of(p) == name) else {
-                    continue;
-                };
-                for dep in p
-                    .get("require")
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flatten()
-                    .map(|(d, _)| d.to_lowercase())
-                {
-                    if mode == UpdateMode::ListedWithTransitiveDepsNoRootRequire
-                        && root_names.contains(&&dep)
-                    {
-                        continue;
-                    }
-                    if allowed.insert(dep.clone()) {
-                        pending.push(dep);
-                    }
-                }
-            }
-        }
-        for p in &locked {
-            let name = name_of(p);
-            if allowed.contains(&name) {
-                continue;
-            }
-            skipped.insert(name);
-            for (target, _) in p
-                .get("replace")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-            {
-                skipped.insert(target.to_lowercase());
-            }
-        }
-        // A fixed package's requirements are marked for loading.
-        for p in &locked {
-            if allowed.contains(&name_of(p)) {
-                continue;
-            }
-            for (dep, c) in p
-                .get("require")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-            {
-                if let Some(c) = c.as_str() {
-                    requires.push((dep.to_lowercase(), c.to_owned()));
-                }
-            }
-        }
-    }
+    let root_names = root.iter().map(|(n, _)| n.clone()).collect();
+    let (skipped, mut requires) = match fixed {
+        Some(f) => (f.names, f.requires),
+        None => (std::collections::BTreeSet::new(), Vec::new()),
+    };
+    requires.extend(root);
     requires.retain(|(n, _)| !skipped.contains(n));
+    let unlock = match start.mode {
+        Some(UpdateMode::ListedWithTransitiveDeps) => Some(false),
+        Some(UpdateMode::ListedWithTransitiveDepsNoRootRequire) => Some(true),
+        _ => None,
+    };
     vivacity_resolver::repository::LocalScope {
         requires,
         skipped,
         minimum_stability,
         flagged,
+        root_aliases,
+        unlock,
+        root_names,
         with_dists: with_install,
         filters_fatal,
     }

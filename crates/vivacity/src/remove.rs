@@ -132,6 +132,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
                 },
             ),
             removed: packages.clone(),
+            lock: locked_data.as_ref(),
             ..PoolStart::default()
         },
     )? {
