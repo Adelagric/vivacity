@@ -631,5 +631,15 @@ want minimal-changes-remove-no-update && case_ minimal-changes-remove-no-update 
 # … mais `requireComposer()` instancie les dépôts : une définition que le
 # `RepositoryManager` refuse arrête Composer : rendu.
 want repo-path-no-url-require-no-update && case_ repo-path-no-url-require-no-update filel 'delegates:has no url' 'jq:.repositories += [{"type": "path"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+# … et Composer valide les couches à chaque commande : une valeur non
+# booléenne (erreur dans composer.json, avertissement ailleurs) est rendue,
+# `--no-update` compris.
+want minimal-changes-require-no-update-string && case_ minimal-changes-require-no-update-string filel 'delegates:minimal-changes' 'jq:.config["update-with-minimal-changes"]="no"|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+want minimal-changes-require-no-update-null && case_ minimal-changes-require-no-update-null filel 'delegates:minimal-changes' 'jq:.config["update-with-minimal-changes"]=null|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+want minimal-changes-remove-no-update-zero && case_ minimal-changes-remove-no-update-zero filel 'delegates:minimal-changes' 'jq:.config["update-with-minimal-changes"]=0' -- remove acme/l --no-update
+want minimal-changes-require-no-update-global && case_ minimal-changes-require-no-update-global filel 'delegates:minimal-changes' 'global:{"config": {"update-with-minimal-changes": "no"}}' 'jq:del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+# Un dépôt `package` sans définition de paquet : Composer refuse (schéma).
+want repo-package-no-key-require-no-update && case_ repo-package-no-key-require-no-update filel 'delegates:package definition' 'jq:.repositories += [{"type": "package"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+want repo-package-string-require-no-update && case_ repo-package-string-require-no-update filel 'delegates:package definition' 'jq:.repositories += [{"type": "package", "package": "x"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
 want repo-type-package-require-no-update && case_ repo-type-package-require-no-update pkg native 'jq:del(.require["acme/b"])' -- require acme/b:1.0.0 --no-update
 exit $status
