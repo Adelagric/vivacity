@@ -315,7 +315,12 @@ pub(crate) fn php_truthy(v: &serde_json::Value) -> bool {
 /// falsy values disable it.
 pub(crate) fn config_lock_enabled(manifest_text: &str) -> bool {
     let manifest: serde_json::Value = serde_json::from_str(manifest_text).unwrap_or_default();
-    match require::config_value(&manifest, "lock") {
+    config_lock_enabled_in(&manifest)
+}
+
+/// [`config_lock_enabled`] on a parsed manifest.
+pub(crate) fn config_lock_enabled_in(manifest: &serde_json::Value) -> bool {
+    match require::config_value(manifest, "lock") {
         None => true,
         Some(serde_json::Value::String(s)) => s != "false" && !(s.is_empty() || s == "0"),
         Some(serde_json::Value::Bool(b)) => b,

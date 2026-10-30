@@ -345,7 +345,7 @@ pub fn filter_list_filter(
                 if let Some(l) = lists.iter().find(|l| policy.custom_lists.contains(l)) {
                     return Err(FilterError(
                         format!("custom policy list \"{l}\" is not supported by vivacity yet"),
-                        crate::repository::RepoErrorKind::Data,
+                        crate::repository::RepoErrorKind::Unsupported,
                     ));
                 }
             }

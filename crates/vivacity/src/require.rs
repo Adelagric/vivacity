@@ -347,9 +347,8 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         crate::hold_ignored_lock_warning(&project_dir(args.working_dir.as_deref())?);
     crate::platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
-    if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
-        anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
-    }
+    // `--minimal-changes`, `COMPOSER_MINIMAL_CHANGES` and the configuration
+    // key were handed to Composer at startup (`Cli::minimal_changes`).
     if let Ok(f) = std::env::var("COMPOSER") {
         let f = f.trim();
         if !f.is_empty() && f != "composer.json" && f != "./composer.json" {
@@ -369,6 +368,9 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     let lock = project.join("composer.lock");
     let file_label = "./composer.json".to_owned();
     let newly_created = !json.exists();
+    // The lock, parsed once (`Locker::isLocked` below reads it): before the
+    // edit, so that a partial update's fixed packages are judged on it then.
+    let mut early_lock: Option<Result<Value, serde_json::Error>> = None;
     // Plugins that change what `require` resolves or writes: decided on
     // the manifest as it is, before this command edits it.
     if !newly_created {
@@ -414,6 +416,11 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             )? {
                 return Ok(code);
             }
+            if crate::config_lock_enabled_in(&manifest) {
+                early_lock = std::fs::read_to_string(&lock)
+                    .ok()
+                    .map(|t| serde_json::from_str::<Value>(&t));
+            }
             if let Some(code) = crate::resolution_fallback(
                 &project,
                 &manifest,
@@ -424,6 +431,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 !args.dry_run,
                 !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
                 &crate::PoolStart {
+                    lock: early_lock.as_ref().and_then(|r| r.as_ref().ok()),
                     added: parse_name_version_pairs(&args.packages)
                         .into_iter()
                         .map(|(n, v)| (n, v.unwrap_or_else(|| "*".to_owned())))
@@ -446,7 +454,17 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
             )? {
                 return Ok(code);
             }
+            // `secure-http` under its trigger: everything from here — the
+            // version discovery, « has been updated », « Running composer
+            // update », the resolution's loading — is held until the pool,
+            // so that a hand-over then prints nothing (composer.json, edited
+            // by then, is put back).
+            if !args.no_update && crate::fallback::hold_trigger(&manifest) {
+                crate::fallback::start_holding("the pool is built");
+            }
         }
+    } else if !args.no_update && crate::fallback::hold_trigger(&serde_json::json!({})) {
+        crate::fallback::start_holding("the pool is built");
     }
     if newly_created {
         std::fs::write(&json, "{\n}\n")
@@ -469,9 +487,6 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     };
     let manifest: Value = serde_json::from_str(&files.composer_backup)
         .with_context(|| format!("{file_label} does not contain valid JSON"))?;
-    if truthy(config_value(&manifest, "update-with-minimal-changes")) {
-        anyhow::bail!("config.update-with-minimal-changes is not supported yet");
-    }
 
     if args.fixed {
         let package_type = match manifest.get("type") {
@@ -741,8 +756,15 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     // and error. With `config.lock: false` the `Locker` reads `/dev/null`:
     // never locked, whatever the file holds.
     let lock_enabled = crate::config_lock_enabled(&files.composer_backup);
-    let locked = match std::fs::read_to_string(&lock).ok().filter(|_| lock_enabled) {
-        Some(t) => match serde_json::from_str::<Value>(&t) {
+    let parsed = match early_lock.take() {
+        Some(parsed) => Some(parsed),
+        None => std::fs::read_to_string(&lock)
+            .ok()
+            .filter(|_| lock_enabled)
+            .map(|t| serde_json::from_str::<Value>(&t)),
+    };
+    let locked = match parsed {
+        Some(p) => match p {
             Ok(v) => v.get("packages").is_some_and(|p| !p.is_null()),
             Err(e) => {
                 files.revert()?;
@@ -790,6 +812,7 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        minimal_changes: false,
         // Read by the install phase's fallback line (`after_update_line`).
         compat: crate::GlobalCompatArgs {
             no_interaction: args.no_interaction,

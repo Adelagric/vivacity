@@ -194,12 +194,19 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
     }
     // Partial update: `update a/b [-w|-W]` (UpdateCommand).
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
-    for p in &args.packages {
-        if ["lock", "nothing", "mirrors"].contains(&p.as_str()) {
-            anyhow::bail!(
-                "`vivacity update {p}` (lock file metadata refresh) is not supported yet"
-            );
-        }
+    // `update lock|nothing|mirrors`: the lock's metadata refreshed, not
+    // reproduced — Composer's, before anything.
+    if let Some(p) = args
+        .packages
+        .iter()
+        .find(|p| ["lock", "nothing", "mirrors"].contains(&p.as_str()))
+    {
+        return delegate_resolution(
+            &[vivacity_core::scope::ScopeIssue::Layout(format!(
+                "`update {p}` (refreshes the lock's metadata, not reproduced)"
+            ))],
+            args.no_fallback,
+        );
     }
     let transitive = if args.with_all_dependencies || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES") {
         vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDeps
@@ -582,6 +589,18 @@ pub(crate) fn resolve_and_lock(
     let loaded_manifest = serde_json::from_str::<serde_json::Value>(&manifest_text)
         .ok()
         .map(|m| listeners_manifest(&m, args.allow_plugins_at_load.as_ref()));
+    // `secure-http` under its trigger (a remote repository other than
+    // packagist.org): everything the command writes from here — the
+    // `COMMAND` event's lines, the install-without-lock line, « Loading… »
+    // and what loading writes — is held until the pool, so that a hand-over
+    // decided then prints nothing (`require` and `remove` started holding
+    // before their edit already).
+    let hold = loaded_manifest
+        .as_ref()
+        .is_some_and(crate::fallback::hold_trigger);
+    if hold {
+        crate::fallback::start_holding("the pool is built");
+    }
     // Without an install, php-http/discovery's `POST_UPDATE_CMD` listener
     // reads the old installed state (`no_install::discovery_issue`):
     // decided on the manifest this command resolves (`require`'s edit
@@ -697,6 +716,37 @@ pub(crate) fn resolve_and_lock(
         }
     };
     trace("prepare", t0);
+    // A partial update's fixed packages are installed from their locked
+    // dists: one `secure-http` does not let through, not installed as
+    // locked, is Composer's run, now — on the lock the session read (a
+    // string test per locked dist, nothing more without an insecure URL).
+    // `require` and `remove` judged theirs before their edit.
+    if !args.command_dispatched && !args.no_install && !args.dry_run {
+        if let (Some(lock), Some(m), false) = (
+            session.lock_data.as_ref(),
+            loaded_manifest.as_ref(),
+            options.allow_list.is_empty(),
+        ) {
+            let start = crate::PoolStart {
+                allow: options.allow_list.clone(),
+                mode: options.transitive,
+                ..crate::PoolStart::default()
+            };
+            if let Some(reason) = crate::fallback::fixed_insecure_reason(
+                &project,
+                m,
+                installer_dev_mode,
+                !args.no_plugins,
+                &start,
+                lock,
+            ) {
+                return Ok(Resolved {
+                    hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(reason)),
+                    ..Resolved::stopped(0)
+                });
+            }
+        }
+    }
     // symfony/flex active (installed, allowed, `extra.symfony.require` or
     // `SYMFONY_REQUIRE` set): its `PRE_POOL_CREATE` filter runs on the
     // pool, from the index fetched like Flex's Downloader does. The
@@ -768,15 +818,12 @@ pub(crate) fn resolve_and_lock(
     if let Some(line) = &args.lockless_install {
         vivacity_core::say!("{line}");
     }
-    // `secure-http` under its trigger (a remote repository other than
-    // packagist.org): « Loading… » and what loading writes are held until
-    // the pool's dists are judged, so that a hand-over then prints nothing.
-    if loaded_manifest
-        .as_ref()
-        .is_some_and(crate::fallback::hold_trigger)
-    {
-        crate::fallback::start_holding("the pool's dists are judged");
-        session.scan_pool_dists = true;
+    // Under the trigger, the pool's dists are judged once it is built —
+    // when the command installs (`--no-install` and `--dry-run` download
+    // nothing) — and the held output goes out there.
+    if hold {
+        session.release_at_pool = true;
+        session.scan_pool_dists = !args.no_install && !args.dry_run;
     }
     vivacity_core::say!("Loading composer repositories with package information");
     // (`Updating dependencies` is printed by the session once the pool is

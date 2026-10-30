@@ -279,6 +279,10 @@ struct RemoveArgs {
 struct UpdateArgs {
     #[command(flatten)]
     compat: GlobalCompatArgs,
+    /// Accepted for compatibility: the run goes to Composer
+    /// (`update-with-minimal-changes` is not reproduced).
+    #[arg(short = 'm', long)]
+    minimal_changes: bool,
     /// Accepted for compatibility: vivacity prints no progress bar.
     #[arg(long)]
     no_progress: bool,
@@ -614,9 +618,15 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
             }
         }
     }
-    // Composer's cache directory as `Config::get('cache-dir')` resolves it:
-    // what vivacity does not reproduce is Composer's, whole, before anything
-    // is read or written (docs/plans/action-cache.md).
+    // An alternate manifest (`COMPOSER=`): the command is Composer's, whole,
+    // before anything is read or written.
+    if let Some(reason) = cli.unsupported_hand_over() {
+        return delegate_for_verbosity(tail, &reason, "drop it");
+    }
+    // Composer's cache directory as `Config::get('cache-dir')` resolves it,
+    // `disable-tls`, the minimal-changes mode: what vivacity does not
+    // reproduce is Composer's, whole, before anything is read or written
+    // (docs/plans/action-cache.md).
     let (cache_reason, tls_reason) = cli.startup_hand_over();
     if let Some(reason) = tls_reason {
         let remedy = if reason == "disable-tls is set" {
@@ -845,13 +855,54 @@ impl Cli {
     /// there (`Config::realpath`, after `Application::doRun`'s `chdir`)
     /// where vivacity, which never changes directory, would not.
     /// `dump-autoload` reads no cache; `config` answers on its own.
-    /// What sends the whole command to Composer before anything is read or
-    /// written: the cache directory settings vivacity does not reproduce
-    /// (first), and `disable-tls` or a COMPOSER_AUTH Composer reports
-    /// (second, [`vivacity_core::secure_http::disable_tls_reason`]) — on the
-    /// files this reads anyway: the global ones, composer.json for the
-    /// commands that read the cache (`dump-autoload` checks its own once it
-    /// has read it).
+    /// [`run_once`]'s whole-command hand-over: `COMPOSER=<other file>`
+    /// (every command reads composer.json).
+    fn unsupported_hand_over(&self) -> Option<String> {
+        if let Some(f) = std::env::var("COMPOSER").ok().map(|f| f.trim().to_owned()) {
+            if !f.is_empty() && f != "composer.json" && f != "./composer.json" {
+                return Some(format!("COMPOSER={f} (an alternate manifest)"));
+            }
+        }
+        None
+    }
+
+    /// `update-with-minimal-changes` for `update`, `require` and `remove`
+    /// (`$input->getOption('minimal-changes') ||
+    /// $config->get('update-with-minimal-changes')`): the option,
+    /// `COMPOSER_MINIMAL_CHANGES` (`(bool) getenv`), or the key as `Config`
+    /// merges it — composer.json's when set, the global config.json's
+    /// otherwise — in PHP truthiness (`"false"` is true: `Config::get`
+    /// leaves this key raw).
+    fn minimal_changes(&self, manifest: Option<&serde_json::Value>) -> bool {
+        let flag = match self {
+            Cli::Require(a) => a.minimal_changes,
+            Cli::Remove(a) => a.minimal_changes,
+            Cli::Update(a) => a.minimal_changes,
+            _ => return false,
+        };
+        let env =
+            std::env::var("COMPOSER_MINIMAL_CHANGES").is_ok_and(|v| !v.is_empty() && v != "0");
+        if flag || env {
+            return true;
+        }
+        let key = |c: Option<&serde_json::Value>| -> Option<serde_json::Value> {
+            c.and_then(|c| c.get("config"))
+                .and_then(|c| c.get("update-with-minimal-changes"))
+                .cloned()
+        };
+        let value = key(manifest).or_else(|| {
+            vivacity_core::fetch::composer_home()
+                .and_then(|home| vivacity_core::fetch::with_global_json(&home, "config.json", key))
+        });
+        value.as_ref().is_some_and(crate::manifest::php_truthy)
+    }
+
+    /// [`run_once`]'s whole-command hand-overs before anything: the cache
+    /// directory settings vivacity does not reproduce (first), then
+    /// `disable-tls`, a COMPOSER_AUTH Composer reports, or the
+    /// minimal-changes mode (second) — on the files this reads anyway: the
+    /// global ones, composer.json for the commands that read the cache
+    /// (`dump-autoload` checks its own once it has read it).
     fn startup_hand_over(&self) -> (Option<String>, Option<String>) {
         let reads_cache = match self {
             // `Application::doRun` creates the project's `Composer` to list
@@ -884,7 +935,11 @@ impl Cli {
             .flatten();
         let tls = vivacity_core::secure_http::disable_tls_reason(
             manifest.as_ref().and_then(|m| m.get("config")),
-        );
+        )
+        .or_else(|| {
+            self.minimal_changes(manifest.as_ref())
+                .then(|| "update-with-minimal-changes".to_owned())
+        });
         if let Some(why) = vivacity_core::fetch::cache_dir_hand_over(reads_cache) {
             return (Some(why), tls);
         }

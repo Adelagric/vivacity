@@ -17,9 +17,8 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         hold_ignored_lock_warning(&project_dir(args.working_dir.as_deref())?);
     platform_requirement_env(args.ignore_platform_reqs, &args.ignore_platform_req, true);
     let env_flag = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0");
-    if args.minimal_changes || env_flag("COMPOSER_MINIMAL_CHANGES") {
-        anyhow::bail!("`--minimal-changes` (update-with-minimal-changes) is not supported yet");
-    }
+    // `--minimal-changes`, `COMPOSER_MINIMAL_CHANGES` and the configuration
+    // key were handed to Composer at startup (`Cli::minimal_changes`).
     // `--dry-run`: the links are collected instead of removed from the
     // file, and the root package is patched in memory (`$toRemove`).
     let dry_run = args.dry_run;
@@ -76,13 +75,6 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     }
     let first_refused = first_load.as_ref().is_some_and(|l| l.refusal.is_some());
     refuse_merge_plugin_resolution(&project, &manifest, !args.no_plugins)?;
-    if serde_json::from_str::<serde_json::Value>(&manifest_text)
-        .ok()
-        .and_then(|m| m.get("config")?.get("update-with-minimal-changes").cloned())
-        .is_some_and(|v| v == serde_json::Value::Bool(true))
-    {
-        anyhow::bail!("config.update-with-minimal-changes is not supported yet");
-    }
     let mut packages: Vec<String> = args.packages.iter().map(|p| p.to_lowercase()).collect();
 
     // `Locker::isLocked`: `config.lock` on (the `Locker` reads `/dev/null`
@@ -133,6 +125,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
             ),
             removed: packages.clone(),
             lock: locked_data.as_ref(),
+            no_resolution: args.no_update,
             ..PoolStart::default()
         },
     )? {
@@ -155,6 +148,14 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
                 args.no_fallback,
             );
         }
+    }
+    // `secure-http` under its trigger: everything from here — the lines
+    // about the packages, « has been updated », « Running composer update »,
+    // the resolution's loading — is held until the pool, so that a
+    // hand-over then prints nothing (composer.json, edited by then, is put
+    // back).
+    if !args.no_update && crate::fallback::hold_trigger(&manifest) {
+        crate::fallback::start_holding("the pool is built");
     }
     let backup = manifest_text.clone();
     let json = JsonConfigSource::new(&file);
@@ -376,6 +377,7 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         });
     }
     let update_args = UpdateArgs {
+        minimal_changes: false,
         // Read by the install phase's fallback line (`after_update_line`).
         compat: GlobalCompatArgs {
             no_interaction: args.no_interaction,

@@ -113,72 +113,53 @@ pub(crate) fn resolution_fallback(
 
 /// Whether the command holds its output while a `secure-http` hand-over
 /// may still come late (the maintainer's narrow trigger, 2026-10-30): a
-/// remote `composer` repository other than packagist.org in the merged
-/// configuration, and `secure-http` true — such a repository may serve
-/// metadata or dists over `http`, which only its files tell. Packagist
-/// alone: never (its dists are `https`, on hosts that do not redirect to
-/// `http`). The setting is read only once such a repository is there.
+/// remote `composer` repository other than packagist.org configured, and
+/// `secure-http` true — such a repository may serve metadata or dists over
+/// `http`, which only its files tell. Packagist alone: never. A test on the
+/// JSON in memory — composer.json's `repositories` and the global
+/// config.json's (kept for the run) — broader than the merged list (a
+/// repository disabled by name still counts: one hold too many at worst);
+/// the setting is read only once such a repository is there.
 /// `VIVACITY_HOLD_OUTPUT=force` holds whatever the configuration (the
 /// harnesses: no local `https` server stands in for a remote repository).
 pub(crate) fn hold_trigger(manifest: &serde_json::Value) -> bool {
     if std::env::var("VIVACITY_HOLD_OUTPUT").as_deref() == Ok("force") {
         return true;
     }
-    let home = vivacity_core::fetch::composer_home();
-    let Ok(config) = vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref())
-    else {
-        return false;
-    };
-    let remote = config.repositories.iter().any(|repo| {
-        let def = &repo.definition;
-        if def.get("type").and_then(serde_json::Value::as_str) != Some("composer") {
-            return false;
-        }
-        let Some(url) = def.get("url").and_then(serde_json::Value::as_str) else {
-            return false;
+    fn remote(repos: Option<&serde_json::Value>) -> bool {
+        use serde_json::Value;
+        let entries: Box<dyn Iterator<Item = &Value>> = match repos {
+            Some(Value::Array(a)) => Box::new(a.iter()),
+            Some(Value::Object(o)) => Box::new(o.values()),
+            _ => return false,
         };
-        let url = vivacity_resolver::repository::repo_urls(url).url;
-        let Some(rest) = url
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"))
-        else {
-            return false;
-        };
-        let host = rest.split(['/', ':']).next().unwrap_or("");
-        host != "repo.packagist.org" && host != "packagist.org"
-    });
-    remote && secure_http_refuses()
-}
-
-/// The install phase's trigger: [`hold_trigger`], or a dist of the lock on
-/// a host other than those whose archives are served over `https` without
-/// a redirect to `http` (api.github.com, codeload.github.com,
-/// bitbucket.org, gitlab.com) with `secure-http` true — known before the
-/// headline, so it counts here, while for a resolution the Packagist dists
-/// are only known once loaded.
-pub(crate) fn install_hold_trigger(
-    manifest: &serde_json::Value,
-    lock: &vivacity_core::lock::Lock,
-    with_dev: bool,
-) -> bool {
-    if hold_trigger(manifest) {
-        return true;
-    }
-    const SAFE: [&str; 4] = [
-        "api.github.com",
-        "codeload.github.com",
-        "bitbucket.org",
-        "gitlab.com",
-    ];
-    let other_host = lock.wanted_packages(with_dev).any(|p| {
-        p.dist_url_expanded().is_some_and(|url| {
-            let rest = url
-                .strip_prefix("https://")
-                .or_else(|| url.strip_prefix("http://"));
-            rest.is_some_and(|r| !SAFE.contains(&r.split(['/', ':']).next().unwrap_or("")))
+        entries.into_iter().any(|r| {
+            if r.get("type").and_then(Value::as_str) != Some("composer") {
+                return false;
+            }
+            let Some(url) = r.get("url").and_then(Value::as_str) else {
+                return false;
+            };
+            let lower = url.to_ascii_lowercase();
+            let Some(rest) = ["https?://", "https://", "http://"]
+                .iter()
+                .find_map(|p| lower.strip_prefix(p))
+            else {
+                // A path, or a host without a scheme (`http://`, which
+                // secure-http refuses up front anyway).
+                return !lower.contains("://") && !std::path::Path::new(url).exists();
+            };
+            let host = rest.split(['/', ':']).next().unwrap_or("");
+            host != "repo.packagist.org" && host != "packagist.org"
         })
-    });
-    other_host && secure_http_refuses()
+    }
+    let configured = remote(manifest.get("repositories"))
+        || vivacity_core::fetch::composer_home().is_some_and(|home| {
+            vivacity_core::fetch::with_global_json(&home, "config.json", |c| {
+                remote(c.and_then(|c| c.get("repositories")))
+            })
+        });
+    configured && secure_http_refuses()
 }
 
 fn secure_http_refuses() -> bool {
@@ -191,6 +172,9 @@ fn secure_http_refuses() -> bool {
 
 /// Starts holding the output, with a trace marker the harnesses look for.
 pub(crate) fn start_holding(until: &str) {
+    if vivacity_core::io::holding_output() {
+        return;
+    }
     vivacity_core::io::hold_output();
     if std::env::var_os("VIVACITY_TRACE").is_some() {
         eprintln!("trace: output held until {until} (secure-http)");
@@ -210,6 +194,9 @@ pub(crate) struct PoolStart<'a> {
     pub removed: Vec<String>,
     /// The lock, when the command has it in memory already (`remove`).
     pub lock: Option<&'a serde_json::Value>,
+    /// The command resolves nothing (`remove --no-update`): no repository
+    /// is opened, nothing about them counts.
+    pub no_resolution: bool,
 }
 
 /// The first `composer` repository of the merged configuration (the global
@@ -230,6 +217,9 @@ fn insecure_repository_issue(
 ) -> Option<vivacity_core::scope::ScopeIssue> {
     use serde_json::Value;
     use vivacity_core::secure_http::{classify, insecure, Verdict};
+    if start.no_resolution {
+        return None;
+    }
     let home = vivacity_core::fetch::composer_home();
     // An unreadable global config.json is the session's to report.
     let config = vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref()).ok()?;
@@ -239,10 +229,53 @@ fn insecure_repository_issue(
         Verdict::Allowed | Verdict::Warn { .. } => None,
     };
     let mut local: Vec<String> = Vec::new();
+    // What a resolution cannot open (`open_repository`), decided on the
+    // merged configuration before anything is printed or edited: the run is
+    // Composer's (the session would hand it over too, later).
     for repo in &config.repositories {
         let def = &repo.definition;
-        if def.get("type").and_then(Value::as_str) != Some("composer") {
+        let kind = def.get("type").and_then(Value::as_str);
+        let named = match &repo.key {
+            vivacity_resolver::session::RepoKey::Named(n) => n.clone(),
+            vivacity_resolver::session::RepoKey::Indexed(i) => i.to_string(),
+        };
+        if !matches!(kind, Some("composer" | "path") | None) {
+            return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                "repository {named} of type \"{}\" (not supported by vivacity at resolution)",
+                kind.unwrap_or("")
+            )));
+        }
+        if kind.is_some()
+            && ["only", "exclude", "canonical"]
+                .iter()
+                .any(|k| def.get(*k).is_some())
+        {
+            return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                "repository {named} sets only/exclude/canonical (not supported by vivacity at resolution)"
+            )));
+        }
+        if kind != Some("composer") {
             continue;
+        }
+        match def.get("url").and_then(Value::as_str) {
+            None => {
+                return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                    "repository {named} has no url"
+                )))
+            }
+            // The common path first: an `https` URL needs nothing more.
+            Some(url) if url.starts_with("https://") => {}
+            Some(url) => {
+                let canonical = vivacity_resolver::repository::repo_urls(url).url;
+                if !["file://", "http://", "https://"]
+                    .iter()
+                    .any(|p| canonical.starts_with(p))
+                {
+                    return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                        "repository {named} has a url scheme vivacity does not read ({url})"
+                    )));
+                }
+            }
         }
         // `allow_ssl_downgrade` (=== true): without a `metadata-url`,
         // Composer reads the rest of the repository over `http` once its
@@ -289,40 +322,16 @@ fn insecure_repository_issue(
         }
         None => None,
     };
+    if let (true, true, Some(lock)) = (with_install, partial, lock) {
+        if let Some(reason) =
+            fixed_insecure_reason(project, manifest, with_dev, plugins_enabled, start, lock)
+        {
+            return Some(vivacity_core::scope::ScopeIssue::Layout(reason));
+        }
+    }
     let fixed = lock
         .filter(|_| partial)
         .map(|l| fixed_packages(manifest, with_dev, start, l));
-    if let (true, Some(lock), Some(fixed)) = (with_install, lock, &fixed) {
-        let sections = if with_dev {
-            &["packages", "packages-dev"][..]
-        } else {
-            &["packages"][..]
-        };
-        let entries: Vec<Value> = sections
-            .iter()
-            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
-            .flatten()
-            .filter(|p| {
-                p.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|n| fixed.names.contains(&n.to_lowercase()))
-            })
-            .cloned()
-            .collect();
-        if crate::install::any_insecure_dist(&serde_json::json!({ "packages": entries })) {
-            let subset = serde_json::json!({"packages": entries, "packages-dev": []});
-            let parsed = vivacity_core::lock::Lock::from_value(&subset);
-            if let Some(reason) = crate::install::insecure_dist_reason(
-                project,
-                manifest,
-                &parsed,
-                true,
-                plugins_enabled,
-            ) {
-                return Some(vivacity_core::scope::ScopeIssue::Layout(reason));
-            }
-        }
-    }
     if local.is_empty() {
         return None;
     }
@@ -377,6 +386,45 @@ fn root_requirements(
         root.push((name, constraint.clone()));
     }
     root
+}
+
+/// A partial update's fixed packages (in `lock`) not installed as locked
+/// whose dist `secure-http` does not let through: the reason to hand over,
+/// before anything — they are downloaded from the lock. A string test per
+/// locked dist first (`any_insecure_dist`): nothing more is done without an
+/// insecure URL.
+pub(crate) fn fixed_insecure_reason(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    with_dev: bool,
+    plugins_enabled: bool,
+    start: &PoolStart<'_>,
+    lock: &serde_json::Value,
+) -> Option<String> {
+    use serde_json::Value;
+    if !crate::install::any_insecure_dist(lock) {
+        return None;
+    }
+    let fixed = fixed_packages(manifest, with_dev, start, lock);
+    let sections = if with_dev {
+        &["packages", "packages-dev"][..]
+    } else {
+        &["packages"][..]
+    };
+    let entries: Vec<Value> = sections
+        .iter()
+        .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+        .flatten()
+        .filter(|p| {
+            p.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| fixed.names.contains(&n.to_lowercase()))
+        })
+        .cloned()
+        .collect();
+    let subset = serde_json::json!({"packages": entries, "packages-dev": []});
+    let parsed = vivacity_core::lock::Lock::from_value(&subset);
+    crate::install::insecure_dist_reason(project, manifest, &parsed, true, plugins_enabled)
 }
 
 /// The locked packages a partial update fixes (PoolBuilder.php:215-245):

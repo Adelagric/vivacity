@@ -1616,6 +1616,19 @@ impl ComposerRepository {
         Ok(value)
     }
 
+    /// The dist mirror `Package::getUrls` puts first for this repository's
+    /// packages, if packages.json declared one (the last preferred), and
+    /// packages.json is read — `None` otherwise.
+    pub fn preferred_dist_mirror(&self) -> Option<String> {
+        let root = self.root.get()?;
+        root.dist_mirrors
+            .iter()
+            .filter(|m| !php_empty(m.get("preferred")))
+            .filter_map(|m| m.get("url").and_then(Value::as_str))
+            .next_back()
+            .map(str::to_owned)
+    }
+
     /// `getRepoName`.
     pub fn repo_name(&self) -> String {
         format!("composer repo ({})", self.url)
@@ -1908,7 +1921,7 @@ impl ComposerRepository {
         let fresh = self.fresh_metadata.get();
         if let Some(f) = &root.filter {
             if f.api_url.is_some() && !fresh {
-                return Err(RepoError::data(format!(
+                return Err(RepoError::unsupported(format!(
                     "{}: a filter api-url is not supported by vivacity yet",
                     self.repo_name()
                 )));
@@ -2324,7 +2337,7 @@ impl ComposerRepository {
     ) -> Result<(Vec<String>, Vec<usize>), RepoError> {
         let root = self.root_data()?;
         if root.v1_protocol {
-            return Err(RepoError::data(format!(
+            return Err(RepoError::unsupported(format!(
                 "{}: Composer v1 repository protocol (providers) is not supported by vivacity",
                 self.url
             )));

@@ -73,6 +73,13 @@ pub enum SessionErrorKind {
 }
 
 impl SessionError {
+    /// What vivacity does not reproduce: the command is Composer's.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        let mut e = Self::new(message);
+        e.kind = SessionErrorKind::Unsupported;
+        e
+    }
+
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -516,11 +523,16 @@ pub struct FlexSession {
 }
 
 pub struct UpdateSession {
-    /// The command holds its output (`secure-http` under its trigger): once
-    /// the pool is built, its dists are judged — one `secure-http` does not
-    /// let through hands the run over, nothing printed — and the output is
-    /// released.
+    /// The command holds its output (`secure-http` under its trigger): it
+    /// goes out once the pool is built (`release_at_pool`), after its dists
+    /// are judged when the command installs (`scan_pool_dists`) — one
+    /// `secure-http` does not let through hands the run over, nothing
+    /// printed.
+    pub release_at_pool: bool,
     pub scan_pool_dists: bool,
+    /// The lock as read (when the update reads one): the command judges a
+    /// partial update's fixed packages on it before anything.
+    pub lock_data: Option<Value>,
     /// `None`: no Flex filter at `PRE_POOL_CREATE`.
     pub flex: Option<FlexSession>,
     pub arena: Vec<Package>,
@@ -825,7 +837,9 @@ impl UpdateSession {
         }
 
         Ok(UpdateSession {
+            release_at_pool: false,
             scan_pool_dists: false,
+            lock_data: lock,
             flex: None,
             arena,
             root,
@@ -1345,32 +1359,54 @@ impl UpdateSession {
         for w in warnings {
             vivacity_core::say!("{w}");
         }
-        // The output held since « Loading composer repositories »: every
-        // dist the pool could hand the install is known now. One
-        // `secure-http` does not let through (broader than the download:
-        // versions the solver will not pick count) is Composer's run, with
-        // nothing printed; otherwise the output goes out as it was.
+        // The output the command held (`secure-http`'s trigger): every dist
+        // the pool could hand the install is known now. One `secure-http`
+        // does not let through (broader than the download: versions the
+        // solver will not pick count, and an installed locked package too)
+        // is Composer's run, with nothing printed; otherwise the output
+        // goes out as it was. A preferred dist mirror a repository's
+        // packages.json declares counts (Composer tries it first); one
+        // declared by a single package's metadata is not kept by the pool,
+        // and is judged on the solved lock (late).
         if self.scan_pool_dists {
             use vivacity_core::secure_http::{classify, insecure, Verdict};
+            let refused = |url: &str| -> Option<String> {
+                insecure(url)?;
+                match classify(url) {
+                    Verdict::Refuse => Some("which secure-http refuses".to_owned()),
+                    Verdict::HandOver(reason) => Some(format!("with {reason}")),
+                    Verdict::Allowed | Verdict::Warn { .. } => None,
+                }
+            };
+            for repo in &self.set.repositories {
+                if let Repository::Composer(r) = repo {
+                    if let Some(mirror) = r.preferred_dist_mirror() {
+                        if let Some(why) = refused(&mirror) {
+                            let mut e = SessionError::new(format!(
+                                "the dist mirror {mirror} of {} is downloaded over an insecure protocol, {why}",
+                                r.repo_name()
+                            ));
+                            e.kind = SessionErrorKind::Unsupported;
+                            return Err(e);
+                        }
+                    }
+                }
+            }
             for &i in &pool.packages {
                 let Some(dist) = self.arena[i].dist.as_ref() else {
                     continue;
                 };
-                if insecure(&dist.url).is_none() {
-                    continue;
+                if let Some(why) = refused(&dist.url) {
+                    let mut e = SessionError::new(format!(
+                        "the dist of {} is downloaded over an insecure protocol, {why}",
+                        self.arena[i].name
+                    ));
+                    e.kind = SessionErrorKind::Unsupported;
+                    return Err(e);
                 }
-                let why = match classify(&dist.url) {
-                    Verdict::Refuse => "which secure-http refuses".to_owned(),
-                    Verdict::HandOver(reason) => format!("with {reason}"),
-                    Verdict::Allowed | Verdict::Warn { .. } => continue,
-                };
-                let mut e = SessionError::new(format!(
-                    "the dist of {} is downloaded over an insecure protocol, {why}",
-                    self.arena[i].name
-                ));
-                e.kind = SessionErrorKind::Unsupported;
-                return Err(e);
             }
+        }
+        if self.release_at_pool {
             vivacity_core::io::release_output();
         }
         if std::env::var_os("VIVACITY_TRACE").is_some() {
@@ -2035,7 +2071,7 @@ fn open_repository(
             || repo.definition.get("exclude").is_some()
             || repo.definition.get("canonical").is_some()
         {
-            return Err(SessionError::new(format!(
+            return Err(SessionError::unsupported(format!(
                 "repository filters (only/exclude/canonical) are not supported by vivacity update yet ({})",
                 key_string(&repo.key)
             )));
@@ -2064,7 +2100,7 @@ fn open_repository_with(
         ))
     })?;
     if kind != "composer" {
-        return Err(SessionError::new(format!(
+        return Err(SessionError::unsupported(format!(
             "repository type \"{kind}\" is not supported by vivacity update yet ({})",
             key_string(&repo.key)
         )));
@@ -2074,13 +2110,13 @@ fn open_repository_with(
             || def.get("exclude").is_some()
             || def.get("canonical").is_some())
     {
-        return Err(SessionError::new(format!(
+        return Err(SessionError::unsupported(format!(
             "repository filters (only/exclude/canonical) are not supported by vivacity update yet ({})",
             key_string(&repo.key)
         )));
     }
     let url = def.get("url").and_then(Value::as_str).ok_or_else(|| {
-        SessionError::new(format!("repository {} has no url", key_string(&repo.key)))
+        SessionError::unsupported(format!("repository {} has no url", key_string(&repo.key)))
     })?;
     let transport: Box<dyn crate::repository::Transport> = if url.starts_with("file://") {
         // Its metadata may name remote URLs, which the network transport
@@ -2109,7 +2145,7 @@ fn open_repository_with(
             }
         }
     } else {
-        return Err(SessionError::new(format!(
+        return Err(SessionError::unsupported(format!(
             "unsupported repository url scheme ({url})"
         )));
     };

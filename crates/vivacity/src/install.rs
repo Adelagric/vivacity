@@ -78,11 +78,12 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     // `Installer::run`.
     let run = proceed!(pre_install_cmd(run)?);
-    // `Installer::doInstall`. Under `secure-http`'s trigger (or a dist on a
-    // host that may redirect), the headline and what follows are held
-    // until the downloads end: a refused redirect hands over with nothing
-    // printed (the archives it cached taken back, F3).
-    if crate::fallback::install_hold_trigger(&run.manifest, &run.lock, run.with_dev) {
+    // `Installer::doInstall`. Under `secure-http`'s trigger, the headline
+    // and what follows are held until the downloads end: a refused
+    // redirect then hands over with nothing printed (the archives it
+    // cached taken back). An `http://` dist of the lock was handed over
+    // before anything (`insecure_dist_reason`, above).
+    if crate::fallback::hold_trigger(&run.manifest) {
         crate::fallback::start_holding("the downloads end");
     }
     proceed!(headline(&run)?);
@@ -380,6 +381,7 @@ fn install_without_lock(args: &InstallArgs, lock_enabled: bool) -> anyhow::Resul
         return Ok(code);
     }
     let update_args = UpdateArgs {
+        minimal_changes: false,
         compat: GlobalCompatArgs {
             no_interaction: args.compat.no_interaction,
             no_ansi: args.compat.no_ansi,

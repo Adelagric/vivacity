@@ -244,6 +244,22 @@ pub fn global_json(path_dir: &Path, name: &str) -> std::result::Result<Option<Va
     v
 }
 
+/// [`global_json`] without the copy: `f` sees the run's parsed file (`None`
+/// when absent or not valid JSON).
+pub fn with_global_json<R>(path_dir: &Path, name: &str, f: impl FnOnce(Option<&Value>) -> R) -> R {
+    let path = path_dir.join(name);
+    {
+        let memo = GLOBAL_FILES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, v)) = memo.iter().find(|(p, _)| *p == path) {
+            return f(v.as_ref().ok().and_then(Option::as_ref));
+        }
+    }
+    let v = global_json(path_dir, name);
+    f(v.as_ref().ok().and_then(Option::as_ref))
+}
+
 /// The files [`global_json`] read, by path.
 type JsonMemo = Vec<(PathBuf, std::result::Result<Option<Value>, String>)>;
 static GLOBAL_FILES: std::sync::Mutex<JsonMemo> = std::sync::Mutex::new(Vec::new());
