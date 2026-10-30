@@ -245,9 +245,10 @@ config and auth.json, composer.json, the project's auth.json,
 `http://` URL goes to Composer — before anything is written when the URL
 can be seen without a request; when a remote repository other than
 packagist.org is configured, vivacity holds its output from the start of
-the resolution (before `require`/`remove` edit composer.json) to the
-pool, and an `install`'s until the downloads end, so that a hand-over
-decided then prints nothing first; a few paths still hand over after
+the resolution (before `require`/`remove` edit composer.json, an edit
+kept in memory until then) to the pool, and an `install`'s until the
+downloads end, so that a hand-over decided then prints and writes nothing
+to the project first; a few paths still hand over after
 lines already printed (see `docs/plans/parity-gaps-026.md`) — or stops with Composer's own refusal where Composer catches it; with it
 off, Composer's `Warning: Accessing <host> over http…` lines come where
 Composer writes them. `disable-tls` sends the command to Composer at

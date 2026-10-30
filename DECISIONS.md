@@ -5709,3 +5709,74 @@ suit un `update` (le lock est écrit) ni hors déclencheur. `remove` rend
 encore la main après « has been updated » quand son second chargement des
 plugins refuse (indépendant de `secure-http`, inventorié).
 
+
+## 2026-10-30 — Sixième revue : composer.json en mémoire jusqu'au pool ; minimal-changes sur toutes les couches ; `--no-update` natif (docs/plans/parity-gaps-026.md)
+
+**Constat.** (W) Sous la retenue, `require`/`remove` écrivaient composer.json
+avant le pool, puis le remettaient à l'octet pour une délégation : le
+contrat du mainteneur est plus strict (rien d'écrit avant la délégation),
+et la raison `--no-fallback` (« nothing was written ») était fausse.
+(H1) `update-with-minimal-changes` posé dans auth.json (global ou du
+projet) ou `COMPOSER_AUTH` restait natif ; Composer le lit (`Factory`
+fusionne ces couches sous `config`). (H2) `require <paquet>:<version>
+--no-update` était rendu sur un dépôt `vcs`/`package`/`artifact` ou à
+filtres (régression de la cinquième revue) ; `require`/`remove
+--no-update` étaient rendus au démarrage pour minimal-changes, qu'ils ne
+lisent pas. (H4) Le déclencheur résolvait `composer_home()` à chaque
+commande et deux ou trois fois par run ; `require --no-update` lisait le
+lock. (H5) « à chaque niveau » de verbosité et « nothing was written »
+disaient plus que vrai.
+
+**Fait.**
+
+- `io::write_held` : sous la retenue, l'édition de composer.json (et le
+  fichier que `require` crée) est gardée en mémoire ; `io::read_held` la
+  rend à tous les lecteurs entre l'édition et le pool (`prepare_update` de
+  la découverte et de la résolution, `resolve_and_lock`, le second
+  chargement des plugins de `require`, le manifeste relu de `remove`,
+  `JsonConfigSource` y compris sa réécriture de repli). Écrite au
+  relâchement de la sortie (pool jugé, ou fin du run sans délégation :
+  Composer laisse alors le fichier édité, `--fixed` refusé sur un fichier
+  créé par exemple) ; oubliée par une délégation. Hors retenue : écrite à
+  l'instant, comme avant. Un fichier non inscriptible est écrit tout de
+  suite (l'erreur d'aujourd'hui) ; une écriture différée qui échoue arrête
+  la résolution avant le lock.
+- Retour en arrière : `revert` oublie l'édition en attente puis écrit
+  l'original comme Composer (ou retire le fichier créé et le lock) ;
+  `undo_edit` (délégation) n'écrit rien si rien n'a été écrit — édition en
+  attente, `--dry-run`, aucun argument de `remove` qui nomme un lien. La
+  délégation de la découverte d'un fichier créé passe par `undo_edit` (elle
+  supprimait un lock existant et écrivait une ligne avant de rendre).
+- Raison `--no-fallback` : « nothing was written to the project », ou ce qui
+  l'a été (composer.json édité puis remis, ou créé puis retiré). Le cache de
+  dépôts et la sonde du store, hors du projet, ne sont pas couverts par la
+  phrase.
+- Minimal-changes : les six couches de `Factory`, la dernière gagne ; toute
+  valeur non booléenne rend (composer.json échoue à la validation, les
+  autres couches avertissent). auth.json du projet par la copie gardée pour
+  le run, que `fetch::Auth::load` relit désormais aussi : pas de lecture de
+  plus. Ignoré pour `require`/`remove --no-update`.
+- `require --no-update` dont chaque argument porte une contrainte : ni
+  contrôle de dépôts, ni session de découverte ; seulement le test, en
+  mémoire, de ce que `requireComposer()` refuserait en instanciant les
+  dépôts (type non enregistré, pas de type, pas d'`url`) — rendu alors.
+- `composer_home()` et le déclencheur gardés pour le run (une évaluation
+  par commande, install qui suit compris) ; ni lock ni sauvegarde du lock
+  lus par `require --no-update`.
+
+**Vu rouge (02ef0a7) puis vert.** `hold-require-handover`,
+`hold-remove-handover`, `hold-remove-nomatch-handover` (composer.json
+réécrit), `hold-require-created-handover` (fichier créé puis retiré) ;
+`minimal-changes-auth-env`, `-auth-json`, `-auth-global`, `-auth-string`
+(natifs), `minimal-changes-auth-json-wins` (rendu à tort) ;
+`minimal-changes-require-no-update`, `minimal-changes-remove-no-update`,
+`repo-type-package-require-no-update` (rendus à tort) ;
+`repo-path-no-url-require-no-update` (sortie 1 au lieu de rendre). Le
+banc vérifie désormais, pour toute délégation sans ligne avant la raison,
+que ni composer.json ni le répertoire du projet `--no-fallback` n'ont été
+écrits (dates). Témoins verts des deux côtés : `hold-require-created-fixed`,
+`hold-require-unsolvable`.
+
+**Laissé.** H3 et S sortis de cette revue par le mainteneur, inventoriés
+(32a, 32b). Le cache de dépôts et la sonde du store restent écrits par une
+délégation décidée au chargement.

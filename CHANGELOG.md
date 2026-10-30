@@ -125,6 +125,16 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **`update-with-minimal-changes` read where Composer reads it.** Set in
+  the global or the project's auth.json or in `COMPOSER_AUTH` (Composer
+  merges them under `config`), the minimal-changes mode now sends
+  `update`, `require` and `remove` to Composer at startup, the last layer
+  winning; a value that is not a boolean in any layer does too. `require`
+  and `remove --no-update`, which resolve nothing, stay native.
+- **`require <package>:<constraint> --no-update` stays native** whatever
+  repositories are configured: with every constraint given nothing is
+  resolved and no repository is opened; only a definition Composer itself
+  refuses (no type, an unregistered type, no `url`) hands it over.
 - **Output held while a `secure-http` hand-over may still come.** With
   `secure-http` true and a remote `composer` repository other than
   packagist.org configured (in composer.json or the global config.json) —
@@ -135,10 +145,14 @@ byte-identical-output promise are the public API.
   `require` and `remove` from before they edit composer.json, until the
   pool is built. When the command installs, every dist the pool holds is
   judged then: a refused one hands the run to Composer with nothing
-  printed (composer.json, edited by `require`/`remove`, is put back to its
-  exact bytes; the repository requests and their cache are Composer's
-  own); otherwise, and always under `--no-install` or `--dry-run`, the
-  held lines go out unchanged, in order, at every verbosity. `install`
+  printed and nothing written to the project (`require`/`remove` keep
+  their edit of composer.json — or the file `require` creates — in memory
+  until the pool, and write it then, or when the run ends without a
+  hand-over; the repository requests and their cache are Composer's own);
+  otherwise, and always under `--no-install` or `--dry-run`, the held
+  lines go out unchanged, in order, at `-q`, normal and `-v` (`-vv` and
+  `-vvv` go to Composer at startup). `--no-fallback` says what the run
+  wrote to the project before stopping. `install`
   holds its headline and what follows until the downloads end, under the
   same trigger. Packagist-only projects are untouched. The pool's
   judgement is broader than the download (an installed or unchosen

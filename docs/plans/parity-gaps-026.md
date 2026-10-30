@@ -537,10 +537,72 @@ dépôts, la liste de politique personnalisée laissée tardive (seul un dépôt
 qui la déclare la rend fatale), chemin `https` avant `repo_urls`, ordre du
 vidage sur panique.
 
+## Sixième revue (bd879c9..02ef0a7) : plan
+
+Portée réduite par le mainteneur à W, H1, H2, H4 et H5 ; H3 et S passent à
+l'inventaire (32a, 32b), pour un lot séparé après la fusion.
+
+- **W.** Sous la retenue, `require`/`remove` n'écrivent pas composer.json :
+  le texte édité devient une écriture en attente (`io`), que lisent à sa
+  place tous les lecteurs entre l'édition et le pool (`prepare_update` de
+  la découverte et de la session, `resolve_and_lock`, la seconde lecture
+  des plugins de `require`, `updated` de `remove`) ; `remove` édite par un
+  `JsonConfigSource` qui passe par la même attente. L'écriture a lieu au
+  relâchement de la sortie (pool jugé), ou à toute sortie qui n'est pas
+  une délégation (Composer laisse le fichier édité sur ces sorties) ; une
+  délégation l'abandonne. Un composer.json créé par `require` aussi. Un
+  retour en arrière annule l'attente : il affiche sa ligne, supprime le
+  lock d'un fichier créé, et n'écrit l'original que si l'édition a été
+  écrite. La découverte rendue d'un fichier créé appelle `undo_edit` (pas
+  `revert`, qui supprimait un lock existant et affichait une ligne avant la
+  délégation). Un fichier non inscriptible est écrit tout de suite
+  (l'erreur d'aujourd'hui, pas le « is not writable » de Composer, inchangé
+  par cette revue) ; une écriture différée qui échoue arrête la résolution.
+  Sans retenue : écrit où il l'est aujourd'hui. La raison `--no-fallback`
+  dit ce qui a été écrit dans le projet.
+- **H1.** `update-with-minimal-changes` lu sur les couches de `Factory`
+  (config.json et auth.json globaux, `COMPOSER_AUTH`, composer.json,
+  auth.json du projet, `COMPOSER_AUTH`) : la dernière couche gagne. Toute
+  valeur non booléenne rend (méta et revue : composer.json échoue à la
+  validation, les autres couches avertissent). Les fichiers par la copie
+  gardée pour le run, que `fetch::Auth::load` relit aussi (pas de lecture
+  de plus).
+- **H2.** `require --no-update` dont chaque argument porte une contrainte :
+  aucun contrôle de dépôts, pas de session de découverte (rien ne résout),
+  seulement ce que `requireComposer()` refuse en instanciant les dépôts.
+  Minimal-changes ignoré au démarrage pour `require`/`remove --no-update`.
+- **H4.** `composer_home()` et le déclencheur gardés pour le run (une
+  évaluation par commande) ; pas d'analyse du lock pour `require
+  --no-update`.
+- **H5.** Formulations : raison `--no-fallback`, « à chaque niveau » réduit
+  à `-q`, normal, `-v` (`-vv`/`-vvv` partent à Composer au démarrage).
+
+### Méta et revue indépendante de la sixième revue
+
+La méta (sous-agent frais, sur le code) a corrigé le plan : l'édition en
+attente est écrite à toute sortie qui n'est pas une délégation (Composer
+laisse le fichier édité ou créé sur `--fixed`, une contrainte invalide, un
+refus du second chargement de plugins) ; deux lecteurs du disque oubliés
+(second chargement de `require`, manifeste relu de `remove`) ; `revert` doit
+toujours supprimer le lock d'un fichier créé ; la délégation de la
+découverte d'un fichier créé appelait `revert` (lock supprimé, ligne
+écrite) ; `require --no-update` sans contrainte découvre encore une
+version (les contrôles de dépôts restent) ; `Auth::load` ne passait pas
+par la copie gardée ; une valeur non booléenne dans une couche d'auth est
+signalée par Composer. La revue indépendante a trouvé : `undo_edit`
+réécrivait composer.json quand rien n'avait été édité (`--dry-run`,
+`remove` sans lien nommé) — corrigé par un témoin d'écriture ; la session
+de découverte sautée perdait les refus de `requireComposer()` — test en
+mémoire ajouté ; les valeurs non booléennes de composer.json et du
+config.json global — rendues ; l'erreur d'une écriture différée avalée —
+elle arrête la résolution ; l'état de l'édition en attente non remis à
+zéro entre deux runs embarqués — remis ; un motif de délégation trop large
+dans les cas W — resserré sur la raison du pool.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue, 103 après la cinquième revue, 116 après la sixième), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -751,6 +813,23 @@ la décision revient au mainteneur.
     alias) ; **`require`** ne rétablit pas le mtime du lock après
     `updateHash` ; **`JsonManipulator`** : limite de retour arrière de PCRE,
     `1e999`, demi-substituts UTF-16, imbrication > 512. S chacun.
+32a. **Données en mémoire rendues tard** : le protocole v1 d'un dépôt
+    composer, le `filter.api-url` d'un packages.json local et les listes de
+    politique personnalisées se décident à l'ouverture du dépôt ou au
+    chargement, après l'en-tête, alors que le packages.json local ou la
+    configuration est déjà en mémoire. Aujourd'hui : rendus à Composer au
+    moment de l'erreur (délégation tardive, lignes retenues sous le
+    déclencheur). Avant écriture : oui. S. Corpus : non. Sans coût : oui
+    sur un chemin Packagist seul (rien à lire de plus).
+32b. **Signal pendant `require`** : Composer rétablit composer.json (et
+    supprime le lock d'un fichier créé) sur SIGINT/SIGTERM/SIGHUP
+    (`RequireCommand.php:160-162`, du sauvegarde au `finally`, même pendant
+    l'installation) ; vivacity n'a pas de gestionnaire : le fichier reste
+    édité, les lignes retenues sont perdues. Déclencheur : un signal entre
+    l'écriture de composer.json et la fin du run. Coût : S, mais un
+    gestionnaire demande une dépendance (`signal-hook` ou `libc`) et pose
+    un gestionnaire pour tout le processus (à peser pour un embarquement
+    en bibliothèque). Corpus : non.
 
 ### Installation, plugins, système de fichiers
 
