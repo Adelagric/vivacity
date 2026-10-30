@@ -75,6 +75,13 @@ printf '{"packages": {"acme/l": [{"name": "acme/l", "version": "1.0.0", "version
 mkdir -p "$WORK/srvfile"
 printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["acme/*"]}\n' "$WORK/srv" > "$WORK/srvfile/packages.json"
 
+# acme/t : dist local, mais il exige acme/a (dist en `http://`) — connu
+# seulement une fois la résolution faite.
+printf '{"packages": {"acme/t": [{"name": "acme/t", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "require": {"acme/a": "1.0.0"}, "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/t.json"
+printf '{"packages": {"acme/t": []}}\n' > "$WORK/srv/p2/acme/t~dev.json"
+# Un dépôt `file://` dont l'`api-url` d'avis est en `http://`.
+mkdir -p "$WORK/srvadv"
+printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["acme/*"], "security-advisories": {"metadata": false, "api-url": "http://repo.test/api"}}\n' "$WORK/srv" > "$WORK/srvadv/packages.json"
 # Un dépôt `file://` dont les métadonnées sont en `http://` : refusées au
 # chargement, que Composer ne rattrape pas sans copie en cache.
 mkdir -p "$WORK/srvmeta"
@@ -154,6 +161,9 @@ seed filerepo "{\"name\": \"vivacity/secure-http-filerepo\", \"type\": \"project
 seed redir "{\"name\": \"vivacity/secure-http-redir\", \"type\": \"project\", \"repositories\": [$(pkgrepo a:dist.test r:redir.test) {\"packagist.org\": false}], \"require\": {$(reqs a r)}}"
 seed samehost "{\"name\": \"vivacity/secure-http-samehost\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"http://repo.test\"}, {\"packagist.org\": false}], \"require\": {\"acme/s\": \"1.0.0\"}}"
 seed filemeta "{\"name\": \"vivacity/secure-http-filemeta\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvmeta\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\"}}"
+seed filel "{\"name\": \"vivacity/secure-http-filel\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
+seed filet "{\"name\": \"vivacity/secure-http-filet\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvfile\"}, {\"packagist.org\": false}], \"require\": {\"acme/t\": \"1.0.0\"}}"
+seed adv "{\"name\": \"vivacity/secure-http-adv\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvadv\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 # Un dist sans requête (chemin local) : rien de non sûr.
 seed local "{\"name\": \"vivacity/secure-http-local\", \"type\": \"project\", \"repositories\": [{\"type\": \"package\", \"package\": {\"name\": \"acme/l\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"$WORK/srv/dist/a.zip\"}}}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 # Deux miroirs préférés : `Package::getUrls` met chacun en tête
@@ -395,6 +405,13 @@ want install-repo-default-local && case_ install-repo-default-local repolocal na
 # Composer écrirait le lock, puis s'arrêterait au premier. Lisibles sans
 # requête : rendu avant tout, comme pour `require`.
 want update-file-repo && case_ update-file-repo filerepo 'delegates:secure-http' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
+# … mais seulement ceux des paquets que la résolution lit : le dépôt sert
+# aussi acme/a, b, c (dists `http://`), que Composer ne lit pas ici.
+want update-file-repo-unrelated && case_ update-file-repo-unrelated filel native -- update
+# Un dist `http://` qu'une dépendance nouvelle amène (acme/t → acme/a) : vu
+# une fois la résolution faite, délégation tardive — les lignes écrites
+# doivent être le début de celles de Composer.
+want late-transitive && case_ late-transitive filet 'delegates:secure-http' late nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
 want require-file-repo && case_ require-file-repo filerepo 'delegates:secure-http' 'jq:del(.require["acme/a"])' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/a:1.0.0
 # 5. Des métadonnées `http://` derrière un dépôt `file://` : refusées au
 # chargement (l'avertissement du dépôt dégradé, puis l'exception, que
@@ -402,6 +419,10 @@ want require-file-repo && case_ require-file-repo filerepo 'delegates:secure-htt
 # `secure-http` faux (dans auth.json) : l'avertissement au chargement.
 want meta-default && case_ meta-default filemeta 'delegates:secure-http' 'expect:does not allow connections to http://repo.test/p2/acme/a.json' -- update --no-install
 want meta-remove-default && case_ meta-remove-default filemeta 'delegates:secure-http' 'jq:.require["acme/b"]="1.0.0"' 'expect:does not allow connections to http://repo.test/p2/acme/b.json' -- remove acme/a --no-install
+# L'`api-url` d'avis en `http://` : rattrapée sous `ignore-unreachable` (le
+# défaut), natif ; sans, Composer s'arrête — décidé avant tout.
+want meta-advisory && case_ meta-advisory adv native 'expect:Security advisory data could not be fetched' -- update --no-install
+want meta-advisory-fatal && case_ meta-advisory-fatal adv 'delegates:secure-http' 'jq:.config.policy={"ignore-unreachable": false}' 'expect:does not allow connections to http://repo.test/api' -- update --no-install
 want meta-auth-json && case_ meta-auth-json filemeta native 'authjson:{"secure-http": false}' 'expect:^Warning: Accessing repo.test' -- update --no-install
 want update-file-repo-false && case_ update-file-repo-false filerepo native 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing dist.test' -- update
 exit $status
