@@ -27,18 +27,23 @@ SELECTED="$*"
 want() { [ -z "$SELECTED" ] || [[ " $SELECTED " == *" $1 "* ]]; }
 P2='{"packages": {"acme/l": [{"name": "acme/l", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library"}]}}'
 
-# run <répertoire> <signal> <env…> -- <commande…>
+# run <répertoire> <signal> <signal ignoré ou -> <0|1 : au groupe> <env…> -- <commande…>
 run() {
-  local d="$1" sig="$2"; shift 2
+  local d="$1" sig="$2" ign="$3" group="$4"; shift 4
   local envs=()
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
   rm -f "$d/srv/p2/acme/l.json"; mkfifo "$d/srv/p2/acme/l.json"
-  (cd "$d/p" && exec env "${envs[@]+"${envs[@]}"}" COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" \
+  # Au groupe : un groupe de processus à lui (contrôle des tâches), comme le
+  # terminal ou `kill -- -pgid` l'atteint, l'enfant compris.
+  [ "$group" = 0 ] || set -m
+  (if [ "$ign" != - ]; then trap '' "$ign"; fi
+   cd "$d/p" && exec env "${envs[@]+"${envs[@]}"}" COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" \
     VIVACITY_CACHE_DIR="$d/store" COMPOSER_NO_INTERACTION=1 "$@" --no-ansi --no-scripts > "$d/out" 2> "$d/err") &
   local pid=$! i
+  [ "$group" = 0 ] || set +m
   for i in $(seq 1 100); do grep -q 'Loading composer repositories' "$d/err" 2>/dev/null && break; sleep 0.1; done
   sleep 0.3
-  kill -"$sig" "$pid"
+  if [ "$group" = 1 ]; then kill -"$sig" -- -"$pid"; else kill -"$sig" "$pid"; fi
   ( printf '%s' "$P2" > "$d/srv/p2/acme/l.json" ) & local w=$!
   wait "$pid" 2>/dev/null; echo $? > "$d/code"
   sleep 0.2; kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
@@ -49,7 +54,7 @@ run() {
 # case_ <nom> <signal> [created] [lock] [env…] -- <arguments de require>
 case_() {
   local name="$1" sig="$2"; shift 2
-  local created=0 lock=0 held=0 handed=0 envs=() side
+  local created=0 lock=0 held=0 handed=0 group=0 ign=- envs=() side
   while [ "$1" != "--" ]; do
     case "$1" in
       created) created=1 ;; lock) lock=1 ;;
@@ -57,6 +62,10 @@ case_() {
       # Rendu au démarrage (le mode minimal-changes, des deux côtés) : le
       # signal va à vivacity seul, le Composer enfant est bloqué sur la FIFO.
       handed) handed=1; envs+=("COMPOSER_MINIMAL_CHANGES=1") ;;
+      # Signal ignoré par l'appelant (`nohup`, `trap '' HUP`) ; signal
+      # envoyé au groupe.
+      group) group=1 ;;
+      ignore:*) ign="${1#ignore:}" ;;
       *) envs+=("$1") ;;
     esac; shift
   done; shift
@@ -73,8 +82,8 @@ case_() {
       printf '{"repositories": %s, "require": {}}\n' "$repos" > "$d/p/composer.json"
     fi
     [ "$lock" = 0 ] || printf '{\n    "content-hash": "x",\n    "packages": [],\n    "packages-dev": []\n}\n' > "$d/p/composer.lock"
-    if [ "$side" = ref ]; then run "$d" "$sig" "${envs[@]+"${envs[@]}"}" -- composer "$@"
-    else run "$d" "$sig" "${envs[@]+"${envs[@]}"}" -- "$VIVACITY" "$@"; fi
+    if [ "$side" = ref ]; then run "$d" "$sig" "$ign" "$group" "${envs[@]+"${envs[@]}"}" -- composer "$@"
+    else run "$d" "$sig" "$ign" "$group" "${envs[@]+"${envs[@]}"}" -- "$VIVACITY" "$@"; fi
   done
   local r="$WORK/$name/ref" v="$WORK/$name/viv" bad=""
   if [ "$handed" = 1 ]; then
@@ -88,7 +97,9 @@ case_() {
   local f
   for f in composer.json composer.lock; do
     if [ -e "$r/p/$f" ] || [ -e "$v/p/$f" ]; then
-      sed "s#$r/#<d>/#g" "$r/p/$f" 2>/dev/null > "$r/$f.n"; sed "s#$v/#<d>/#g" "$v/p/$f" 2>/dev/null > "$v/$f.n"
+      # (`content-hash` : celui d'un composer.json qui nomme le chemin du côté.)
+      sed -e "s#$r/#<d>/#g" -e '/"content-hash"/d' "$r/p/$f" 2>/dev/null > "$r/$f.n"
+      sed -e "s#$v/#<d>/#g" -e '/"content-hash"/d' "$v/p/$f" 2>/dev/null > "$v/$f.n"
       { [ -e "$r/p/$f" ] && [ -e "$v/p/$f" ] && cmp -s "$r/$f.n" "$v/$f.n"; } || bad="$bad $f différent;"
     fi
   done
@@ -115,4 +126,36 @@ want verbose && case_ verbose INT -- require acme/l:1.0.0 --no-install -v
 # finit sa commande, composer.json reste édité).
 want handed-term && case_ handed-term TERM handed -- require acme/l:1.0.0 --no-install
 want handed-int && case_ handed-int INT handed -- require acme/l:1.0.0 --no-install
+# SIGHUP ignoré par l'appelant (`nohup`) et envoyé au groupe. `require`
+# natif : son gestionnaire passe outre, comme celui de seld (`pcntl_signal`),
+# et rétablit.
+want nohup-require && case_ nohup-require HUP group ignore:HUP -- require acme/l:1.0.0 --no-install
+# Rendu à Composer, le même SIGHUP ignoré : le Composer enfant doit hériter
+# de l'ignorance (un gestionnaire posé avant le lancement redevient l'action
+# par défaut à `exec`). Un faux `composer` qui dort puis écrit « done » :
+# lancé directement, il survit (sortie 0) ; derrière vivacity aussi.
+stub_case() { # <nom> <signal> <signal ignoré> <commande vivacity…>
+  local name="$1" sig="$2" ign="$3"; shift 3
+  local d="$WORK/$name" side bad=""
+  mkdir -p "$d/bin" "$d/p" "$d/home"
+  printf '#!/bin/sh\nsleep 2\necho done >&2\n' > "$d/bin/composer"; chmod +x "$d/bin/composer"
+  echo '{}' > "$d/home/config.json"; echo '{"require": {}}' > "$d/p/composer.json"
+  for side in ref viv; do
+    set -m
+    (trap '' "$ign"; cd "$d/p" && if [ "$side" = ref ]; then exec "$d/bin/composer"
+     else exec env PATH="$d/bin:$PATH" COMPOSER_HOME="$d/home" COMPOSER_MINIMAL_CHANGES=1 "$VIVACITY" "$@"; fi) > "$d/$side.out" 2> "$d/$side.err" &
+    local pid=$!
+    set +m
+    sleep 1
+    kill -"$sig" -- -"$pid"
+    wait "$pid" 2>/dev/null; echo $? > "$d/$side.code"
+  done
+  [ "$(cat "$d/ref.code")" = "$(cat "$d/viv.code")" ] || bad="$bad codes $(cat "$d/ref.code") vs $(cat "$d/viv.code");"
+  grep -q '^done$' "$d/viv.err" || bad="$bad l'enfant n'a pas fini;"
+  [ "$(cat "$d/ref.code")" = 0 ] || bad="$bad le faux composer ne survit pas (cas mal construit);"
+  if [ -z "$bad" ]; then echo "OK   $name : même code ($(cat "$d/ref.code")), l'enfant hérite de l'ignorance"
+  else echo "FAIL $name :$bad"; status=1; fi
+}
+want nohup-handed && stub_case nohup-handed HUP HUP update --no-install
+want ignored-int-handed && stub_case ignored-int-handed INT INT update --no-install
 exit $status
