@@ -136,17 +136,25 @@ byte-identical-output promise are the public API.
   Composer). With `secure-http` true (the default), a run that would fetch
   an insecure URL it can see before any request — a `composer` repository
   of `update`/`require`/`remove` (the project's or the global
-  config.json's), the URLs and dists named by the metadata of a local
-  (`file://`) repository, a dist of the lock not installed yet, a Flex
-  endpoint — goes to Composer before anything is printed, requested or
-  written, the reason named (exit 3 under `--no-fallback`). What can only
-  be seen after a request is handed over late, after the lines already
+  config.json's), the URLs a local (`file://`) repository's packages.json
+  names (its policy filters' too when `policy.ignore-unreachable` is off)
+  and the dists of the packages the resolution reads for sure from it
+  (the root's requirements, the locked packages, `require`'s arguments —
+  only their files, as Composer reads them; nothing is read when
+  `secure-http` cannot refuse), a dist of the lock not installed yet, a
+  Flex endpoint — goes to Composer before anything is printed, requested
+  or written, the reason named (exit 3 under `--no-fallback`). What can
+  only be seen once loaded is handed over late, after the lines already
   written (HANDOVER.md): the dists of the solved lock when a remote
-  repository serves `http://` archives, metadata a remote repository's
-  packages.json points to over `http`, a redirect to an insecure URL. A
-  refusal Composer catches (an advisory `api-url` or the list filter
-  under `policy.ignore-unreachable`, a repository file it has a cached
-  copy of) is written with Composer's message. With `secure-http` false
+  repository serves `http://` archives or a new dependency from a local
+  one does, metadata a remote repository's packages.json points to over
+  `http`, a remote policy filter's refusal under `ignore-unreachable`
+  off, a redirect to an insecure URL (the archives the run had put in
+  Composer's files cache are removed first, so that Composer still prints
+  their `  - Downloading` lines). A refusal Composer catches (an advisory
+  `api-url` or the list filter under `policy.ignore-unreachable`, a
+  repository file it has a cached copy of) is written with Composer's
+  message. With `secure-http` false
   the warning comes where Composer writes it: as a repository's request
   starts, after the first `  - Downloading` line of a host (the host of
   the URL Composer tries first, a preferred mirror's; after the last line

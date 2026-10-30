@@ -328,8 +328,9 @@ chemin tout-`https` sans lecture disque ni verrou de plus.
    une copie ; les filtres ont déjà rattrapé sous `ignore-unreachable`) →
    `Unsupported`, délégation tardive documentée.
 5. **Redirection refusée sur un dist** : rendue (`Unsupported`) au lieu de
-   `Error:` ; tardive par nature (connue à la réponse ; d'autres dists ont pu
-   entrer dans le cache de fichiers, ceux que Composer téléchargerait).
+   `Error:` ; tardive par nature (connue à la réponse). Les dists que le run
+   a mis dans le cache de fichiers sont retirés (second tour : Composer les
+   y aurait trouvés et n'aurait pas écrit leur « Downloading »).
    Non vérifiable localement : vivacity ne fait confiance qu'aux racines
    webpki embarquées (pas de CA locale de test). Écrit non vérifié.
 6. **L'exemption des paquets déjà installés** : `installed_as_locked`
@@ -401,10 +402,43 @@ vert ; gates ; `secure-http.sh`, `flex-update.sh`, `auth-hosts.sh`,
 hyperfine ebd53b1 contre le final (rapport seulement). Pas de corpus (le
 coordinateur le passe).
 
+## Second passage de revue (2026-10-30)
+
+Sept points confirmés, le point 5 en partie, trois nouveaux :
+
+- **N1, vitesse.** `local_insecure_url` parcourait et analysait tout
+  l'arbre du `metadata-url` d'un dépôt local à chaque `update`/`require`/
+  `remove` qui installe, même sous `secure-http` faux. Corrigé : rien lu si
+  le réglage ne peut pas refuser ; sinon packages.json, puis les seuls
+  fichiers des paquets que la résolution lit à coup sûr (exigences racine,
+  verrouillés, arguments de `require`). Un dist `http://` qu'amène une
+  dépendance nouvelle se voit une fois le lock résolu : délégation
+  tardive, comparée par le cas `late-transitive`. Garde : le cas
+  `update-file-repo-unrelated` (un dépôt qui sert d'autres paquets en
+  `http`, que Composer ne lit pas : natif exigé), rouge sur a1b6684.
+  Mesuré : dépôt de 4 000 paquets × 30 versions, `update` 283 ms → 6 ms.
+- **N2, cache de fichiers.** Les archives qu'un run a mises dans le cache
+  de Composer avant une délégation sont retirées (Composer, les trouvant,
+  n'écrirait pas leur « Downloading »). Non exercé (redirection `https`).
+- **D1.** README aligné (l'auth.json du projet).
+- **Délégations tardives.** (2) l'`api-url` d'avis et les URL de listes
+  d'un dépôt local sous `ignore-unreachable` faux : décidées avant tout
+  (`meta-advisory-fatal`, rouge sur a1b6684). (1) dépôt distant (dists du
+  lock résolu, métadonnées refusées) et (3) redirection pendant les
+  téléchargements : **retenir la sortie n'est pas fait, le compromis est
+  rapporté** — les octets et la durée totale seraient les mêmes, mais la
+  première ligne attendrait la fin de ce qui décide : mesuré, de 15-40 ms
+  à ~1,0 s (laravel), ~1,2 s (symfony), ~4,7 s (sylius) sur chaque
+  `update` avec installation sous `secure-http` vrai ; pour (3), l'en-tête
+  de l'installation attendrait la fin des téléchargements. À trancher par
+  le mainteneur. Ces chemins restent tardifs et non comparés faute de
+  dépôt `https` local (aucun cas `late` possible pour eux) ; le seul cas
+  tardif exerçable, `late-transitive`, est comparé.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -519,6 +553,10 @@ la décision revient au mainteneur.
     `realpath`** (Factory.php:335) : un composer.json lien symbolique fait
     lire un autre auth.json (identifiants et réglage). Avant écriture :
     oui. S. Corpus : non. Sans coût : non (un `realpath` par run).
+18d. **Retenue de la sortie avant une délégation tardive** : non faite
+    (second passage) — la première ligne d'un `update` attendrait la fin de
+    la résolution (mesuré ~1 à ~4,7 s sur les fixtures). Décision du
+    mainteneur.
 18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
     `canonicalize` suivi de `/packages.json` (écart antérieur du
     transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y

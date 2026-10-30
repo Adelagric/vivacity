@@ -5430,3 +5430,43 @@ jugées d'avance : sous le défaut Composer rattrape le refus, et
 redirection refusée) et limite de 20 redirections : non vérifiées, faute de serveur
 `https` local auquel vivacity fasse confiance.
 
+## 2026-10-30 — `secure-http`, second passage de revue (docs/plans/parity-gaps-026.md)
+
+**Constat.** Le second passage confirme sept points et en trouve trois :
+(N1) le contrôle d'un dépôt local lisait tout l'arbre de son
+`metadata-url`, et l'analysait avant tout test, même sous `secure-http`
+faux — mesuré : un dépôt `file://` de 4 000 paquets × 30 versions (78 Mo,
+tout en `https`), `update` : 283 ms sur a1b6684, 6 ms une fois corrigé ; (N2) les
+archives qu'une installation rendue après une redirection refusée avait
+mises dans le cache de fichiers changeaient la sortie de Composer (pas de
+« Downloading » pour un dist en cache) ; (D1) le README taisait l'exception
+de l'auth.json du projet.
+
+**Fait.** Le contrôle d'un dépôt local ne lit rien si `secure-http` ne
+peut pas refuser ; sinon son packages.json, puis, quand la commande
+installe, les seuls fichiers des paquets que la résolution lit à coup sûr
+(exigences racine, paquets verrouillés, arguments de `require`, filtrés
+par `available-packages`/`-patterns`) — rien que Composer ne lise. Les URL
+des filtres de politique d'un dépôt local comptent quand
+`ignore-unreachable` est faux (connu avant toute ligne). Les archives qu'un
+run a mises dans le cache de fichiers sont retirées quand il rend la main.
+
+**Retenir la sortie pour supprimer les délégations tardives : pas fait,
+rapporté.** Les octets resteraient identiques et la durée totale aussi ;
+mais la première ligne attendrait la fin de ce qui décide. Mesuré
+(`update --dry-run`, fixtures, Packagist en direct, cache chaud) : la
+première ligne sort à 15-40 ms aujourd'hui ; retenue jusqu'au lock résolu,
+elle sortirait à ~1,0 s (laravel), ~1,2 s (symfony), ~4,7 s (sylius) — sur
+chaque `update` avec installation sous `secure-http` vrai, puisque
+n'importe quel dépôt distant peut servir des dists `http://`. Pour une
+redirection pendant les téléchargements, les trois lignes d'en-tête de
+l'installation attendraient la fin des téléchargements (la durée du réseau
+à froid). Restreindre la retenue aux projets à dépôt local ne vaut que pour
+eux, avec le même effet. Décision du mainteneur.
+
+**Vu rouge puis vert.** Sur a1b6684 : `update-file-repo-unrelated` (rendu
+au lieu de natif : l'arbre entier lu), `late-transitive` (la marche
+trouvait le dist avant la résolution : le cas tardif n'était pas comparé),
+`meta-advisory-fatal` (une ligne, le cache et le store écrits avant la
+raison). Verts ensuite ; `meta-advisory` (natif) vert des deux côtés.
+

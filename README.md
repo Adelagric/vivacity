@@ -247,8 +247,10 @@ can be seen without a request, after the lines already printed otherwise
 (a remote repository serving `http://` dists or metadata, a redirect) —
 or stops with Composer's own refusal where Composer catches it; with it
 off, Composer's `Warning: Accessing <host> over http…` lines come where
-Composer writes them. `disable-tls` sends the command to Composer
-(`harness/secure-http.sh`).
+Composer writes them. `disable-tls` sends the command to Composer at
+startup, except when it is set only in the project's auth.json and no
+insecure URL comes up (that file is not read on every run; see
+`docs/plans/parity-gaps-026.md`) (`harness/secure-http.sh`).
 
 A locked package with no dist at all and a `git` source (a `package` or
 `vcs` repository without archives) is installed as Composer installs it:
