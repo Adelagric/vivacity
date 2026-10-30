@@ -239,11 +239,16 @@ Linux and macOS; on Windows a lock with a `path` package goes through the
 Composer fallback). Not yet: `vcs` repositories, `--minimal-changes`, the
 audit (`--no-audit` is the compared behaviour).
 
-`config.secure-http` is Composer's: with it on (the default), a run that
-would fetch an `http://` URL goes to Composer before anything is written,
+`config.secure-http` is Composer's, read from the same layers (global
+config and auth.json, composer.json, the project's auth.json,
+`COMPOSER_AUTH`): with it on (the default), a run that would fetch an
+`http://` URL goes to Composer — before anything is written when the URL
+can be seen without a request, after the lines already printed otherwise
+(a remote repository serving `http://` dists or metadata, a redirect) —
 or stops with Composer's own refusal where Composer catches it; with it
 off, Composer's `Warning: Accessing <host> over http…` lines come where
-Composer writes them (`harness/secure-http.sh`).
+Composer writes them. `disable-tls` sends the command to Composer
+(`harness/secure-http.sh`).
 
 A locked package with no dist at all and a `git` source (a `package` or
 `vcs` repository without archives) is installed as Composer installs it:

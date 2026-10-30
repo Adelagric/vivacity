@@ -130,24 +130,40 @@ byte-identical-output promise are the public API.
   then warns once per host: « Warning: Accessing <host> over http which is
   an insecure protocol. ». vivacity downloaded such URLs, with the
   credentials configured for their origin, and never wrote the warning.
-  Now, with `secure-http` true (the default), a run that would fetch an
-  insecure URL known before any request — a `composer` repository of
-  `update`/`require`/`remove`, a dist of the lock or of the solved lock, a
-  Flex endpoint — goes to Composer before anything is printed, requested
-  or written, the reason named (exit 3 under `--no-fallback`); one found
-  while loading (an advisory `api-url`, the `install` list filter reading
-  an http repository) is refused with Composer's own message, caught where
-  Composer catches it. With `secure-http` false the warning comes where
-  Composer writes it: as a repository's request starts, after the first
-  `  - Downloading` line of a host (after the last one past
-  `COMPOSER_MAX_PARALLEL_HTTP` downloads), as a redirect reaches a new
+  The setting is read as `Factory` merges it: the global config.json and
+  auth.json, composer.json, the project's auth.json, `COMPOSER_AUTH` last
+  (JSON booleans; any other value, which Composer reports, goes to
+  Composer). With `secure-http` true (the default), a run that would fetch
+  an insecure URL it can see before any request — a `composer` repository
+  of `update`/`require`/`remove` (the project's or the global
+  config.json's), the URLs and dists named by the metadata of a local
+  (`file://`) repository, a dist of the lock not installed yet, a Flex
+  endpoint — goes to Composer before anything is printed, requested or
+  written, the reason named (exit 3 under `--no-fallback`). What can only
+  be seen after a request is handed over late, after the lines already
+  written (HANDOVER.md): the dists of the solved lock when a remote
+  repository serves `http://` archives, metadata a remote repository's
+  packages.json points to over `http`, a redirect to an insecure URL. A
+  refusal Composer catches (an advisory `api-url` or the list filter
+  under `policy.ignore-unreachable`, a repository file it has a cached
+  copy of) is written with Composer's message. With `secure-http` false
+  the warning comes where Composer writes it: as a repository's request
+  starts, after the first `  - Downloading` line of a host (the host of
+  the URL Composer tries first, a preferred mirror's; after the last line
+  past `COMPOSER_MAX_PARALLEL_HTTP` downloads), as a redirect reaches a new
   host, and for Flex's index as Flex activates on `symfony/*` or alias
-  arguments (`update`, `remove`: once per `Composer`), at `PRE_POOL_CREATE`
-  or at `POST_UPDATE_CMD`.
-  A setting read from `auth.json`, `COMPOSER_AUTH`, or `disable-tls` set,
-  goes to Composer. `harness/secure-http.sh` (local proxy, no network)
-  compares it all with Composer; `auth-hosts.sh`, `flex-update.sh`,
-  `flex-recipes.sh` and `plugin-lines.sh` no longer filter the line.
+  arguments (`update`, `remove`: once per `Composer`, before the
+  `COMPOSER_IGNORE_PLATFORM_REQ(S)` warnings), at `PRE_POOL_CREATE` or at
+  `POST_UPDATE_CMD`. `disable-tls` true — « You are running Composer with
+  SSL/TLS protection disabled. », and no TLS — sends every command to
+  Composer at startup, as does a `COMPOSER_AUTH` that is not a JSON object
+  (set only in the project's auth.json, `disable-tls` is seen only once an
+  insecure URL shows up). A file:// repository whose metadata is served
+  over `http(s)` is now read. `harness/secure-http.sh` (local proxy, no
+  network) compares it all with Composer, a hand-over included (nothing
+  written, requested or cached before it); `auth-hosts.sh`,
+  `flex-update.sh`, `flex-recipes.sh` and `plugin-lines.sh` no longer
+  filter the line.
 - **Warnings written while the pool is built come before « Updating
   dependencies »**, in Composer's order (`PoolBuilder::buildPool`): the
   update list that matches nothing locked, a root requirement kept locked,
@@ -158,9 +174,11 @@ byte-identical-output promise are the public API.
 - **A redirect is followed up to 20 times**, Composer's
   `CurlDownloader::$maxRedirects`, not reqwest's 10 (read from Composer's
   source; no harness exercises the limit). A redirect from `https` to an
-  insecure URL under `secure-http` true now stops with Composer's message
-  (exit 100); it is not exercised either, a local `https` server being out
-  of the harnesses' reach.
+  insecure URL under `secure-http` true now goes to Composer (late, after
+  the lines already written; a `vendor/` the run created is removed), or,
+  on a metadata request Composer recovers from, stops with Composer's
+  message; neither is exercised, a local `https` server vivacity trusts
+  being out of the harnesses' reach (rustls with its bundled roots).
 - **A `github-oauth` token goes where Composer sends it, and only there.**
   The github.com token is sent as `token …` to `api.github.com` URLs only
   (it went to github.com and every `*.github.com`, codeload included); a

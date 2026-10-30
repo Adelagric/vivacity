@@ -188,7 +188,8 @@ Points de contrôle :
   gardée, par les `replace` de laravel/framework), `solver-policies update`
   avec l'`api-url` d'avis en http (points 2 et 3). Rouges au niveau normal
   et sous `-v` ; `-q` passait (rien n'est écrit).
-- `secure-http.sh` (nouveau, mandataire `http_proxy` local) : 32 cas, 27
+- `secure-http.sh` (nouveau, mandataire `http_proxy` local) : 32 cas (53
+  après la revue du 2026-10-30, section suivante), 27
   rouges ; témoins verts avant comme après (cache chaud, `--dry-run`, hors
   ligne ×2, `remove` à cache chaud).
 - `flex-update.sh` : `allow-list` (index lu à `POST_UPDATE_CMD`),
@@ -271,11 +272,140 @@ même fonction (inventorié), une délégation tardive après des lignes déjà
 écrites quand un réglage illisible (auth.json…) n'apparaît qu'au
 chargement (la famille connue de HANDOVER).
 
+## Revue de ebd53b1 : neuf défauts, et ce qui en est fait
+
+Revue indépendante (coordinateur) de ebd53b1, six défauts reproduits contre
+Composer 2.10.3. Corrigés dans des commits au-dessus de ebd53b1. Ordre :
+le banc d'abord (point 9 : tel qu'écrit, il cachait les points 1 à 3), puis
+chaque point vu rouge par un cas comparé à Composer, puis corrigé.
+
+Règles inchangées : rendu avant toute ligne, requête ou écriture (cache
+compris) quand c'est décidable ; porté exactement quand c'est prouvé ;
+chemin tout-`https` sans lecture disque ni verrou de plus.
+
+1. **`remove` et un dépôt `http://` du config.json global** : décidé dans
+   `resolution_fallback`, avant l'édition, sur la liste fusionnée
+   (`MergedConfig::load` : config.json global puis composer.json, avec les
+   désactivations par nom). Le config.json global est déjà lu au démarrage
+   (répertoire de cache) : il est gardé en mémoire pour le run
+   (`fetch::global_files`, oublié au début de chaque run), et
+   `MergedConfig::load`, le contrôle du répertoire de cache et le réglage
+   `secure-http` le relisent de là — moins de lectures qu'avant.
+2. **Dists `http://` du lock résolu** : choisi de **documenter la
+   délégation tardive** pour un dépôt distant, pas de la rendre précoce.
+   Ses dists ne sont connus que par ses métadonnées, donc après leurs
+   requêtes et l'écriture de leur cache — aucune stratégie d'affichage ne
+   rend vraie l'affirmation « avant toute requête ». Retenir toute la
+   sortie de « Loading… » à la fin de la résolution sur chaque `update`
+   pour cacher ce cas rare retarderait toutes les lignes du chemin commun.
+   Pour un dépôt **local** (le cas du banc, `update-file-repo`), les dists
+   se lisent sans requête (méta, point 1) : rendu avant tout, dans
+   `resolution_fallback`, quand la commande installe. CHANGELOG, HANDOVER
+   et DECISIONS corrigés ; le cas distant va dans la liste des délégations
+   tardives de HANDOVER (non vérifiable ici : il faut un dépôt `https`).
+3. **`secure-http` lu dans auth.json ou `COMPOSER_AUTH`** : **porté** au
+   lieu d'être rendu. `Factory` fusionne sous `config` : config.json global,
+   auth.json global, `COMPOSER_AUTH`, composer.json, auth.json du projet,
+   `COMPOSER_AUTH` encore (Factory.php:209-215, :325-344) — la dernière
+   couche qui pose la clé gagne, `Config::merge` remplace un scalaire,
+   `null` compris. Plus de délégation sur cette raison, donc plus de
+   délégation tardive au chargement. Reste rendu : un fichier ou
+   `COMPOSER_AUTH` illisible (Composer s'arrête), `disable-tls` (point 7).
+4. **Un refus trouvé au chargement que Composer ne rattrape pas**
+   (`asyncFetchFile` : l'avertissement du dépôt dégradé, puis le cache s'il
+   y en a un, sinon l'exception — l'encadré) : (a) dépôt `composer` local
+   (`file://`, chemin) : son packages.json est lu dans
+   `resolution_fallback` (une lecture locale, hors chemin tout-`https`) :
+   toute URL qu'il nomme et qu'un run demanderait pour charger des paquets
+   (`metadata-url`, URL v1, `providers-api`, `includes`, miroirs) refusée
+   rend la commande avant tout — pas les URL des filtres de politique
+   (avis, listes), dont Composer rattrape le refus sous
+   `ignore-unreachable` (le défaut ; vu par `verbosity.sh`, cas
+   `solver-policies`, quand la revue les avait ajoutées) ; (b) sinon (l'URL n'est connue
+   qu'après une requête) : un refus qui remonte jusqu'à la session est un
+   refus que Composer ne rattrape pas (`settle` a déjà servi le cache là
+   où Composer le sert : asynchrone avec `Last-Modified`, synchrone avec
+   une copie ; les filtres ont déjà rattrapé sous `ignore-unreachable`) →
+   `Unsupported`, délégation tardive documentée.
+5. **Redirection refusée sur un dist** : rendue (`Unsupported`) au lieu de
+   `Error:` ; tardive par nature (connue à la réponse ; d'autres dists ont pu
+   entrer dans le cache de fichiers, ceux que Composer téléchargerait).
+   Non vérifiable localement : vivacity ne fait confiance qu'aux racines
+   webpki embarquées (pas de CA locale de test). Écrit non vérifié.
+6. **L'exemption des paquets déjà installés** : `installed_as_locked`
+   (`package_identity` : version, deux références, `abandoned`) sur
+   installed.json purgé comme `local_repository_transaction` le purge
+   (`purge_missing`, puis le chemin de l'installeur du run).
+7. **`disable-tls` vrai sans URL non sûre** : rendu au démarrage, pour
+   toutes les commandes (`config` comprise : mesuré, la ligne sort dès
+   qu'un composer.json existe — `Application::getPluginCommands` crée le
+   `Composer`), sur les couches déjà en mémoire (`COMPOSER_AUTH`,
+   config.json et auth.json globaux gardés, composer.json lu par le
+   contrôle du répertoire de cache ; `dump-autoload` à la lecture de son
+   manifeste, avant le refus d'une racine invalide : le téléchargeur est
+   créé avant le paquet racine, Factory.php:370, :394). Un `COMPOSER_AUTH`
+   qui n'est pas un objet JSON est rendu au même endroit. Écart laissé,
+   écrit : `disable-tls` posé dans le seul auth.json du projet sans URL non
+   sûre (le lire au démarrage ouvrirait un fichier de plus à chaque run).
+8. **Flex** : l'avertissement d'activation est retenu après les lignes de
+   `Factory` et des plugins (`io::hold_after_factory`, qui ajoute désormais
+   à la suite des lignes de plugins déjà retenues), donc avant celles de
+   `COMPOSER_IGNORE_PLATFORM_REQ(S)` et `--no-suggest` ; plus de condition
+   sur le téléchargeur désactivé (`Downloader::disable` ne vide que
+   `$enabled`, `initialize` part quand même).
+9. **Le banc** : `secure-http.sh` exige, pour un cas rendu, une stderr vide
+   avant la raison (sauf `late`), et sous `--no-fallback` ni requête, ni
+   écriture, ni cache (fichiers, store) ; `flex-update.sh` exige la ligne
+   « Accessing » côté Composer (`allow-list`, `symfony-arg`, `remove-arg`)
+   et compare toute la sortie de `secure-default`.
+
+Petits points : `prefetch` sans allocation de plus quand tout est `https`
+(test de chaîne d'abord) ; le miroir préféré essayé en premier est le
+dernier (`array_unshift`, Package.php:700-702) ; l'hôte d'une redirection
+pris par reqwest en minuscules au lieu du `Location` tel qu'écrit
+(CurlDownloader.php:553-555) : la politique de redirection de reqwest ne
+voit pas l'en-tête — écart inventorié, pas porté.
+
+### Méta (sous-agent frais, sur le code) et revue indépendante : ce qui a changé
+
+Méta, onze points ; retenus : les dists d'un dépôt local se lisent sans
+requête (point 2 précoce pour lui) ; booléens JSON seulement (le schéma de
+Composer signale ou refuse les autres) ; `COMPOSER_AUTH` « 0 » n'est pas
+vide en 2.10.3 (mesuré : l'avertissement de schéma, plusieurs fois) ; un
+point d'entrée de Flex refusé était perdu par l'avertissement d'activation
+et `remove` le rendait après son édition ; `config` aussi écrit la ligne
+de TLS ; Flex décidé avant `prepare_update` ; un second compteur dans
+`io` (pas `FACTORY_HELD`, que `factory_held` rejoue) ; la redirection
+refusée laissait un `vendor/` créé ; une seule fonction de purge ; plus
+d'URL dans le contrôle local, la reprise asynchrone sur `Last-Modified` ;
+le mémo par chemin et oublié au début du run ; le miroir de
+`download_lines`. Laissé : l'auth.json du projet au démarrage (règle de
+coût), le `realpath` de composer.json (inventorié).
+
+Revue indépendante, huit points ; corrigés : la découverte de version de
+`require` aplatissait la délégation en `Error:` ; `dump-autoload` jugeait
+`disable-tls` après la racine ; le contrôle local ignorait les URL des
+inclusions v1 (celles des filtres aussi, retirées ensuite : `verbosity.sh`
+les a vues rendre un cas que Composer mène à bien), parcourait l'arbre sans installer, suivait
+les liens ; le remède nommé pour toute raison de démarrage ; le mémo
+oublié trop tard ; un config.json global illisible pris pour absent ; un
+`vendor-dir` imbriqué laissait ses parents ; l'ordre exact de `getUrls`
+(`in_array`). Laissé, écrit : l'auth.json du projet (même raison), le
+chemin Windows du transport fichier (inventorié).
+
+Critère « vert » de ce tour : chaque cas nouveau vu rouge sur ebd53b1 puis
+vert ; gates ; `secure-http.sh`, `flex-update.sh`, `auth-hosts.sh`,
+`transport-exit.sh`, `steps.sh`, `update.sh`, `verbosity.sh`,
+`flex-recipes.sh`, `flex-install.sh`, `download-lines.sh`,
+`fallback-args.sh`, `allow-plugins.sh`, `plugin-lines.sh` verts ;
+hyperfine ebd53b1 contre le final (rapport seulement). Pas de corpus (le
+coordinateur le passe).
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32), `auth-hosts.sh`, `transport-exit.sh`,
-`flex-update.sh` (30), `flex-recipes.sh`, `flex-install.sh`,
+`secure-http.sh` (32, puis 53 après la revue), `auth-hosts.sh`,
+`transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
 (118) ; `cargo test`, clippy, fmt. Les durées (hyperfine avant/après) et le
@@ -320,19 +450,27 @@ la décision revient au mainteneur.
    S pour rendre, M pour porter. Corpus : non. Sans coût : oui pour la
    délégation (variables d'environnement), la config demande la lecture
    déjà faite du config.json global.
-7. **`disable-tls` vrai** : Composer écrit « You are running Composer with
-   SSL/TLS protection disabled. » et coupe TLS ; vivacity ne lit la clé
-   qu'en présence d'une URL non sûre (rendu alors). Avant écriture : oui.
-   S. Corpus : non. Sans coût : à lire en même temps que `cache-dir` (le
-   config.json global est déjà lu au démarrage).
+7. **`disable-tls` vrai posé dans le seul auth.json du projet** (les autres
+   couches sont rendues au démarrage depuis la revue du 2026-10-30) :
+   Composer écrit « You are running Composer with SSL/TLS protection
+   disabled. » et coupe TLS ; vivacity ne lit ce fichier qu'en présence
+   d'une URL non sûre (rendu alors). Avant écriture : oui. S. Corpus : non.
+   Sans coût : non — un fichier de plus ouvert à chaque run (l'auth.json du
+   projet n'est lu qu'avec le transport, et pas du tout par un `install`
+   sans opération ni par `dump-autoload`).
 8. **`options.ssl.verify_peer` / `verify_peer_name` à faux** sur un dépôt :
    « Warning: Accessing <hôte> with verify_peer disabled. »
    (`Config.php:723-737`), même en https ; ni écrit ni rendu. Avant
    écriture : oui (manifeste). S. Corpus : non. Sans coût : oui.
-9. **`COMPOSER_AUTH` mal formé ou auth.json invalide** : rendu seulement
-   quand la résolution du répertoire de cache lit la config globale ; un
-   auth.json de projet invalide est ignoré (Composer s'arrête). Avant
-   écriture : oui. S. Corpus : non. Sans coût : oui.
+9. **auth.json de projet invalide** : ignoré (Composer s'arrête), sauf
+   quand une URL non sûre fait lire le réglage (rendu alors). Un
+   `COMPOSER_AUTH` qui n'est pas un objet JSON est rendu au démarrage
+   depuis le 2026-10-30. Avant écriture : oui. S. Corpus : non. Sans coût :
+   non (même raison que le point 7). **Schéma** : une valeur de mauvais
+   type dans le config.json global ou un auth.json (Composer l'écrit :
+   « does not match the expected JSON schema »), ou dans composer.json
+   (Composer s'arrête), n'est vue que pour `secure-http`/`disable-tls`
+   (rendu) ; les autres clés, non.
 10. **`COMPOSER_DISABLE_NETWORK` posé par l'utilisateur** : seul `--offline`
     coupe le réseau de vivacity (les sources git exceptées). Avant
     écriture : oui. S (rendre, ou le lire comme `--offline`). Corpus : non.
@@ -356,9 +494,12 @@ la décision revient au mainteneur.
 15. **Dist local lu une fois** (Composer : trois tentatives) et message
     d'un dist local absent. Avant écriture : non. S. Corpus : non.
 16. **Miroirs de dist** (`dist.mirrors` du lock) : vivacity télécharge
-    l'URL principale, Composer un miroir préféré d'abord. Avant écriture :
-    oui (lock). S pour rendre. Corpus : non (aucun lock n'en a). Sans
-    coût : oui.
+    l'URL principale, Composer celle que `getUrls` met en tête (le dernier
+    miroir préféré) — l'avertissement et la délégation de `secure-http`
+    suivent l'URL de Composer depuis le 2026-10-30, pas le téléchargement ;
+    les miroirs comparés tels qu'écrits (sans `ComposerMirror::processUrl`).
+    Avant écriture : oui (lock). S pour rendre. Corpus : non (aucun lock
+    n'en a). Sans coût : oui.
 17. **Notifications d'installation** : Composer poste les paquets installés
     à leur `notification-url` (`InstallationManager::notifyInstalls`,
     erreurs avalées ; `config.notify-on-install`, vrai par défaut,
@@ -367,9 +508,21 @@ la décision revient au mainteneur.
     Avant écriture : oui, mais tous les locks du corpus en ont : une
     délégation les rendrait tous. Coût : M (une requête après
     l'installation). Sans coût : non (une requête de plus).
-18. **Une redirection d'`https` vers une URL non sûre refusée, la limite de
-    20 redirections** : portées mais non vérifiées (pas de serveur `https`
-    local). Avant écriture : non.
+18. **Une redirection d'`https` vers une URL non sûre refusée** (rendue,
+    tard), **la limite de 20 redirections** : portées mais non vérifiées
+    (pas de serveur `https` local auquel vivacity fasse confiance). Avant
+    écriture : non. **L'hôte averti d'une redirection** (`secure-http`
+    faux) est celui de reqwest, en minuscules, pas le `Location` tel
+    qu'écrit (CurlDownloader.php:553-555). Avant écriture : non. M (suivre
+    les redirections à la main). Corpus : non.
+18b. **auth.json du projet cherché à côté de composer.json, pas de son
+    `realpath`** (Factory.php:335) : un composer.json lien symbolique fait
+    lire un autre auth.json (identifiants et réglage). Avant écriture :
+    oui. S. Corpus : non. Sans coût : non (un `realpath` par run).
+18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
+    `canonicalize` suivi de `/packages.json` (écart antérieur du
+    transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y
+    lit rien. Avant écriture : oui. S. Corpus : non.
 19. **`require` sans contrainte** : Composer relit `p2/<nom>.json` et
     `~dev.json` à la découverte de version, vivacity non (requêtes seulement,
     sortie identique, `secure-http.sh` `repo-require`).

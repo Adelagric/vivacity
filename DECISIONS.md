@@ -5295,17 +5295,16 @@ sa version verrouillée (PackageFilter.php:91-93), sinon à `POST_UPDATE_CMD`.
   réglage lu comme `Config::get` (`disable-tls`, `$val !== 'false'`), les
   hôtes avertis par `Config`. Rien n'est lu tant qu'aucune URL n'est non
   sûre : le chemin commun est un test de chaîne, sans verrou.
-- `secure-http` vrai : délégation avant toute ligne, requête ou écriture
-  pour ce qui est connu d'avance (dépôt `composer` d'une résolution — ceux
-  du manifeste avant que `require`/`remove` ne l'éditent, ceux du
-  config.json global à l'ouverture de la session —, dists du lock — pas ceux déjà installés —, dists du lock résolu avant son
-  écriture, points d'entrée de Flex) ; refus avec le message de Composer à
-  la requête d'un dépôt (rattrapé par les filtres sous
-  `ignore-unreachable`, comme chez Composer) ; le `Fetcher` refuse en
-  dernier recours et la politique de redirection refuse une cible non sûre
-  (message de Composer, sortie 100). Réglage lu dans auth.json,
-  `COMPOSER_AUTH` (fusionné en dernier : il l'emporte sur le projet), ou
-  `disable-tls` posé : rendu à Composer.
+- `secure-http` vrai : délégation pour ce qui est connu d'avance (dépôt
+  `composer` d'une résolution, dists du lock, dists du lock résolu avant
+  son écriture, points d'entrée de Flex) ; refus avec le message de
+  Composer à la requête d'un dépôt ; le `Fetcher` refuse en dernier
+  recours. *Corrigé le 2026-10-30 (entrée suivante)* : plusieurs de ces
+  délégations n'étaient pas « avant toute ligne » (dépôt du config.json
+  global sous `remove`, dists du lock résolu), l'exemption des paquets
+  installés ne s'appliquait jamais, un refus que Composer ne rattrape pas
+  était écrit `Error:`, et le réglage lu dans auth.json ou `COMPOSER_AUTH`
+  est désormais porté.
 - `secure-http` faux : l'avertissement à la requête d'un dépôt (retenu
   avec les lignes du dépôt quand il retient sa sortie), dans la passe des
   lignes « Downloading » avec le plafond de `HttpDownloader`, à la fin
@@ -5340,11 +5339,94 @@ comparaison entière dans `steps.sh` (`verbosity.sh` compare déjà tout, sous
 trois niveaux).
 
 **Laissé, écrit.** Non vérifiés faute de serveur `https` local : la
-redirection d'`https` vers une URL non sûre et la limite de 20. Une
-délégation tardive (réglage illisible trouvé au chargement ; dépôt http du
-seul config.json global sous `remove`, après « has been updated ») réimprime
-les lignes déjà écrites, comme les autres délégations tardives de HANDOVER.
+redirection d'`https` vers une URL non sûre et la limite de 20. Les
+délégations tardives : voir l'entrée du 2026-10-30.
 La délégation sur un dépôt refusé est large : un `remove` que Composer
 mène à bien sans requête de résolution (les filtres rattrapent le refus,
 mesuré) part aussi à Composer — même sortie, à la vitesse de Composer.
 L'inventaire des écarts connus restants est dans le plan.
+
+## 2026-10-30 — `secure-http` : neuf défauts de revue de ebd53b1 (docs/plans/parity-gaps-026.md)
+
+**Constat.** Une revue indépendante de ebd53b1 a trouvé neuf défauts, six
+reproduits contre Composer 2.10.3 ; le banc en cachait trois (une
+délégation n'y était comparée qu'après sa ligne `delegating to`, et sous
+`--no-fallback` rien n'interdisait une ligne avant la raison). Le banc
+d'abord, puis chaque point vu rouge sur ebd53b1.
+
+**Fait.**
+
+- Banc : `secure-http.sh` exige une stderr vide avant la raison (sauf cas
+  `late`, où ces lignes doivent être le début exact de celles de
+  Composer), et sous `--no-fallback` la raison seule, ni requête, ni
+  écriture du projet, du cache de fichiers ou de dépôts, ni du store — ce
+  qui a montré aussi la sonde de plateforme écrite dans le store avant une
+  délégation à l'ouverture de la session ; `flex-update.sh` exige
+  l'avertissement côté Composer et compare en entier le défaut rendu. 21
+  cas de plus (53), 4 de plus pour Flex (34).
+- Le réglage lu sur toutes les couches de `Factory` (config.json et
+  auth.json globaux, composer.json, auth.json du projet, `COMPOSER_AUTH`
+  en dernier), booléens JSON seulement : porté, plus délégué (une valeur
+  d'un autre type, que Composer signale — schéma —, est rendue). Un
+  `COMPOSER_AUTH` qui n'est pas un objet JSON n'est pas « vide » en 2.10.3
+  (`false === $env || '' === $env`) : Composer le signale, rendu au
+  démarrage. `disable-tls` vrai : rendu au démarrage pour toute commande,
+  `config` comprise (mesuré : la ligne sort dès qu'un composer.json
+  existe).
+- Les dépôts d'une résolution sont jugés dans `resolution_fallback`, avant
+  l'édition de `require`/`remove`, sur la liste fusionnée
+  (`MergedConfig::load` : désactivation par nom comprise) ; un dépôt local
+  (`file://`) y est lu : les URL de son packages.json, et ses dists quand
+  la commande installe. Le config.json et l'auth.json globaux sont gardés
+  pour le run (`fetch::global_json`) : le répertoire de cache, la liste
+  fusionnée et le réglage les lisent une fois au lieu de plusieurs.
+- Un dépôt `file://` dont les métadonnées sont en `http(s)` est lu
+  (`MixedTransport`) au lieu d'échouer.
+- Un refus qui remonte jusqu'à la session est un refus que Composer ne
+  rattrape pas (son encadré) : délégation au lieu de `Error:`, y compris
+  depuis la découverte de version de `require`. Une redirection refusée
+  sur un dist : délégation, le `vendor/` créé par le run retiré.
+- Déjà installé : l'identité de `Transaction` (`installed_as_locked`) sur
+  installed.json purgé comme la transaction locale le purge
+  (`present_packages`, une seule fonction pour les deux). Le miroir essayé
+  d'abord est le dernier préféré (`getUrls`), pour la délégation comme
+  pour l'hôte averti.
+- Flex : l'avertissement d'activation est retenu après les lignes de
+  `Factory` et des plugins (`io::hold_after_factory`, qui ajoute à la
+  suite), donc avant celles des variables de plateforme ; décidé avant
+  `prepare_update` ; un point d'entrée refusé rendu avant l'édition de
+  `remove` ; plus de condition sur le téléchargeur désactivé.
+
+**Choisi : documenter la délégation tardive des dists du lock résolu**
+servis par un dépôt distant, plutôt que la rendre précoce : ces dists ne
+sont connus que par les métadonnées, donc après leurs requêtes et
+l'écriture de leur cache — aucune stratégie d'affichage ne la rend « avant
+toute requête ». Pour un dépôt local, connus sans requête : rendu avant
+tout (ci-dessus). Retenir toute la sortie de chaque `update` jusqu'à la
+fin de la résolution pour cacher le cas distant aurait retardé les lignes
+du chemin commun.
+
+**Vu rouge puis vert.** Sur ebd53b1, rouges : `repo-global-remove`,
+`update-file-repo`, `require-file-repo` (lignes avant la raison, cache et
+store écrits), `meta-default`, `meta-remove-default` (`Error:` natif),
+`dist-auth-env`, `dist-auth-json`, `dist-auth-global`,
+`dist-auth-json-wins`, `meta-auth-json` (délégués au lieu de natifs),
+`dist-auth-env-wins`, `dist-auth-string`, `dist-held`, `dist-mirrors`,
+`tls-install`, `tls-global`, `tls-env`, `tls-update`, `tls-remove`,
+`tls-dump`, `repo-global-default` (store écrit) ; Flex : `platform-env`,
+`remove-platform-env`, `not-required`, `secure-remove`. Tous verts.
+
+**Laissé, écrit.** `disable-tls` posé dans le seul auth.json du projet,
+sans URL non sûre : natif, la ligne de TLS manque (le lire au démarrage
+ouvrirait un fichier de plus à chaque run du chemin commun ; la règle de
+coût l'interdit). L'hôte d'une redirection est celui de reqwest (en
+minuscules), pas le `Location` tel qu'écrit (CurlDownloader.php:553-555) :
+la politique de redirection de reqwest ne voit pas l'en-tête. Le miroir
+comparé tel qu'écrit, sans `ComposerMirror::processUrl`. Délégations
+tardives (dists distants, métadonnées distantes en `http`, refus d'un
+filtre de politique sous `ignore-unreachable` faux — leurs URL ne sont pas
+jugées d'avance : sous le défaut Composer rattrape le refus, et
+`verbosity.sh` a vu un cas natif rendu quand la revue les avait ajoutées —,
+redirection refusée) et limite de 20 redirections : non vérifiées, faute de serveur
+`https` local auquel vivacity fasse confiance.
+
