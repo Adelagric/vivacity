@@ -243,7 +243,8 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
                 }
             }
             if let Some(serde_json::Value::Object(section)) = edited.get_mut(link_type) {
-                section.retain(|k, _| !names.iter().any(|n| n.eq_ignore_ascii_case(k)));
+                // `unset` of the key as named: exact.
+                section.retain(|k, _| !names.iter().any(|n| n == k));
                 if section.is_empty() {
                     if let Some(root) = edited.as_object_mut() {
                         root.shift_remove(link_type);

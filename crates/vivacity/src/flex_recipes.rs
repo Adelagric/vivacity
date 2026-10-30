@@ -522,6 +522,10 @@ impl Vfs {
             // In place, like `file_put_contents`: an existing file keeps its
             // inode and its mode.
             if t.before.as_ref() != Some(&t.after) || t.before.is_none() {
+                // composer.json and the lock: through `require`'s gate (a
+                // signal's revert waits for the write, none follows it).
+                let _gate = (t.rel == "composer.json" || t.rel == "composer.lock")
+                    .then(vivacity_core::signals::write_gate);
                 std::fs::write(&disk, &t.after)
                     .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", disk.display()))?;
             }

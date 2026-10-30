@@ -583,20 +583,38 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
     let _signals = {
         let files = files.clone();
         let no_update = args.no_update;
-        vivacity_core::signals::on_termination(move || {
-            vivacity_core::io::cancel_held_write();
-            vivacity_core::io::release_output();
-            vivacity_core::io::release_deferred();
-            let mut files = files;
-            // Composer reads the lock backup whatever the options
-            // (RequireCommand.php:158); `--no-update` never touches it.
-            if no_update && !files.newly_created {
-                files.lock_backup = std::fs::read_to_string(&files.lock)
-                    .ok()
-                    .filter(|t| !t.is_empty());
-            }
-            let _ = files.revert();
-        })
+        vivacity_core::signals::on_termination(
+            move || {
+                // Without `pcntl`, Composer installs no handler: the
+                // default action ends it, nothing reverted (known from this
+                // run's platform probe; before it, `pcntl` is assumed).
+                let pcntl =
+                    vivacity_resolver::platform::probed_extension("ext-pcntl") != Some(false);
+                if pcntl {
+                    vivacity_core::io::cancel_held_write();
+                }
+                vivacity_core::io::release_output();
+                vivacity_core::io::release_deferred();
+                if !pcntl {
+                    return;
+                }
+                let mut files = files;
+                // Composer reads the lock backup whatever the options
+                // (RequireCommand.php:158); `--no-update` never touches it.
+                if no_update && !files.newly_created {
+                    files.lock_backup = std::fs::read_to_string(&files.lock)
+                        .ok()
+                        .filter(|t| !t.is_empty());
+                }
+                let _ = files.revert();
+            },
+            // `exitWithLastSignal` re-raises with `posix`, else exits
+            // `128 + n`; without `pcntl` the default action ends it.
+            || {
+                vivacity_resolver::platform::probed_extension("ext-pcntl") == Some(false)
+                    || vivacity_resolver::platform::probed_extension("ext-posix") != Some(false)
+            },
+        )
     };
     let manifest: Value = serde_json::from_str(&files.composer_backup)
         .with_context(|| format!("{file_label} does not contain valid JSON"))?;

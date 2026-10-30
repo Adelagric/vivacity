@@ -367,9 +367,9 @@ pub(crate) fn repository_construction_issue(
 /// `ComposerRepository::__construct`'s URL: without `scheme://`, a path
 /// that exists becomes `file://`, anything else `http://`; then `rtrim`
 /// of `/` and `parse_url`, which must give a scheme. `true` where
-/// `parse_url` fails as far as cheaply mirrored — a scheme other than
-/// `file` without a host, a port that is not one to five digits up to
-/// 65535 — or on a doubt (an empty URL).
+/// `parse_url` fails as mirrored here — a scheme other than `file` without
+/// a host, a port `parse_url` refuses ([`php_port`]) — checked against PHP
+/// 8.4's `parse_url` on the forms of the unit test below.
 fn composer_url_refused(project: Option<&std::path::Path>, url: &str) -> bool {
     let bytes = url.as_bytes();
     let word = bytes
@@ -409,15 +409,11 @@ fn composer_url_refused(project: Option<&std::path::Path>, url: &str) -> bool {
     if host_port.is_empty() {
         return true;
     }
-    let port = if let Some(bracketed) = host_port.strip_prefix('[') {
-        match bracketed.split_once(']') {
-            Some((_, "")) => "",
-            Some((_, tail)) => match tail.strip_prefix(':') {
-                Some(port) => port,
-                None => return true,
-            },
-            None => return true,
-        }
+    // `php_url_parse_ex`: no port in a host that is all in brackets;
+    // otherwise the last `:` starts the port (so `[::1` and `[::1]x` read
+    // as host `[:`, port 1, as PHP reads them).
+    let port = if host_port.starts_with('[') && host_port.ends_with(']') {
+        ""
     } else {
         match host_port.rsplit_once(':') {
             Some(("", _)) => return true,
@@ -425,10 +421,28 @@ fn composer_url_refused(project: Option<&std::path::Path>, url: &str) -> bool {
             None => "",
         }
     };
-    !(port.is_empty()
-        || (port.len() <= 5
-            && port.bytes().all(|b| b.is_ascii_digit())
-            && port.parse::<u32>().is_ok_and(|p| p <= 65535)))
+    !(port.is_empty() || php_port(port))
+}
+
+/// A port `parse_url` accepts: at most five characters, read by `strtol`
+/// (leading blanks, a sign, at least one digit, what follows ignored), in
+/// 0..=65535.
+fn php_port(port: &str) -> bool {
+    if port.len() > 5 {
+        return false;
+    }
+    let s = port.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (negative, s) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return false;
+    }
+    let value: i64 = digits.parse().unwrap_or(i64::MAX);
+    !negative && value <= 65535 || (negative && value == 0)
 }
 
 /// `parseUserFilterConfig`: `false`, `null`, `true`, or list names (PHP
@@ -1072,8 +1086,10 @@ fn has_option(tokens: &[std::ffi::OsString], flag: &str) -> bool {
 
 /// Runs Composer with `args`, as a child process in vivacity's own
 /// directory — never `exec`, which would replace the process of a program
-/// that embeds `vivacity::run` (ePHPm) — and returns its exit code (1 when a
-/// signal ended it). The directory does not change so that a relative
+/// that embeds `vivacity::run` (ePHPm) — and returns its exit code. While
+/// it runs, SIGINT/SIGTERM/SIGHUP sent to vivacity are passed on to it; a
+/// signal that ended it ends the binary by the same signal (`128 + n` for
+/// the library) — as Composer run directly ends. The directory does not change so that a relative
 /// `--working-dir` on the line means for Composer what it meant for
 /// vivacity: Composer applies it itself (`Application::doRun`, `chdir`).
 /// The child gets the run's verbosity ([`with_verbosity`]), and
@@ -1116,7 +1132,11 @@ pub(crate) fn hand_over(
     if offline {
         cmd.env("COMPOSER_DISABLE_NETWORK", "1");
     }
-    Ok(cmd.status()?.code().unwrap_or(1))
+    // Signals sent to vivacity alone reach the Composer that runs the
+    // command; a signal that ended it ends vivacity the same way
+    // (`signals::exit_code_of`).
+    let status = vivacity_core::signals::spawn_forwarding(&mut cmd)?;
+    Ok(vivacity_core::signals::exit_code_of(status))
 }
 
 /// The arguments a command hands to Composer: the command line after the
@@ -1393,11 +1413,31 @@ mod tests {
     #[test]
     fn composer_urls_the_constructor_refuses() {
         let refused = |u: &str| composer_url_refused(None, u);
+        // `php -r 'var_dump(parse_url(...))'` gives `false` for these.
         assert!(refused("https:///x"));
         assert!(refused("https://repo.test:99999"));
+        assert!(refused("https://repo.test:65536"));
         assert!(refused("https://repo.test:000443"));
+        assert!(refused("https://repo.test:123456"));
+        assert!(refused("https://repo.test:-1"));
+        assert!(refused("https://repo.test:+"));
         assert!(refused("https://user@/x"));
         assert!(refused("http://:80/x"));
+        assert!(refused("http://[::1]:x"));
+        // … and an array for these.
+        assert!(!refused("https://repo.test:80a"));
+        assert!(!refused("https://repo.test:+80"));
+        assert!(!refused("https://repo.test: 80"));
+        assert!(!refused("https://repo.test:  8"));
+        assert!(!refused("https://repo.test:8a/x"));
+        assert!(!refused("https://repo.test:0"));
+        assert!(!refused("https://repo.test:"));
+        assert!(!refused("http://[::1"));
+        assert!(!refused("http://[::1]x"));
+        assert!(!refused("http://[::1]:80"));
+        assert!(!refused("http://[::1]"));
+        assert!(!refused("http://[::1]:x:80"));
+        assert!(refused("http://[::1]:80:x"));
         assert!(!refused("https://repo.test:8443/"));
         assert!(!refused("https://repo.test"));
         assert!(!refused("https://[::1]:8080/x"));

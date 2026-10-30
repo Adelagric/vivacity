@@ -366,10 +366,32 @@ fn probe_cache_file() -> std::path::PathBuf {
 /// `VIVACITY_NO_PLATFORM_CACHE=1` bypasses it outright.
 pub fn probe() -> Result<Vec<Value>, PlatformError> {
     let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
-    if std::env::var_os("VIVACITY_NO_PLATFORM_CACHE").is_some() {
-        return run_probe(&php).map(|r| r.entries);
+    let probed = if std::env::var_os("VIVACITY_NO_PLATFORM_CACHE").is_some() {
+        run_probe(&php).map(|r| r.entries)
+    } else {
+        probe_at(&php, &probe_cache_file())
+    };
+    if let Ok(entries) = &probed {
+        *LAST_LOADED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(loaded_extensions(entries));
     }
-    probe_at(&php, &probe_cache_file())
+    probed
+}
+
+/// The extensions of the last [`probe`] of this process.
+static LAST_LOADED: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the PHP Composer runs on has `ext` (`ext-pcntl`) loaded, as the
+/// last probe of this process saw it; `None` before any probe (nothing is
+/// run for it).
+pub fn probed_extension(ext: &str) -> Option<bool> {
+    LAST_LOADED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|loaded| loaded.contains(ext))
 }
 
 /// `probe` with the php and the cache file as arguments: the seam the tests
