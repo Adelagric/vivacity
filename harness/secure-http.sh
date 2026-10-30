@@ -112,6 +112,20 @@ printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "avail
 # chargement, que Composer ne rattrape pas sans copie en cache.
 mkdir -p "$WORK/srvmeta"
 printf '{"packages": [], "metadata-url": "http://repo.test/p2/%%package%%.json", "available-package-patterns": ["acme/*"]}\n' > "$WORK/srvmeta/packages.json"
+# Un dépôt `file://` au protocole v1 (`providers-url`, sans `metadata-url`) :
+# Composer le lit, la résolution de vivacity non (rendu).
+mkdir -p "$WORK/srvv1/p/acme"
+printf '{"packages": {"acme/l": {"1.0.0": {"name": "acme/l", "version": "1.0.0", "version_normalized": "1.0.0.0", "uid": 1, "type": "library", "dist": {"type": "zip", "url": "%s"}}}}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srvv1/l.json"
+V1HASH=$(shasum -a 256 "$WORK/srvv1/l.json" | cut -d' ' -f1)
+mv "$WORK/srvv1/l.json" "$WORK/srvv1/p/acme/l\$$V1HASH.json"
+printf '{"packages": [], "providers-url": "file://%s/srvv1/p/%%package%%$%%hash%%.json", "providers": {"acme/l": {"sha256": "%s"}}}\n' "$WORK" "$V1HASH" > "$WORK/srvv1/packages.json"
+# Des dépôts `file://` qui annoncent des listes de filtre : une liste
+# `mylist` (personnalisée côté configuration), et `malware` servie par une
+# `api-url` (la portée `install` ne lit pas les métadonnées).
+mkdir -p "$WORK/srvlists" "$WORK/srvapi"
+printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["acme/*"], "filter": {"metadata": true, "lists": {"mylist": {"enabled": true}}}}\n' "$WORK/srv" > "$WORK/srvlists/packages.json"
+printf '{"packages": [], "metadata-url": "file://%s/p2/%%package%%.json", "available-package-patterns": ["acme/*"], "filter": {"metadata": true, "lists": {"malware": {"enabled": true}}, "api-url": "file://%s/srvapi/filter.json"}}\n' "$WORK/srv" "$WORK" > "$WORK/srvapi/packages.json"
+printf '{"filter": {}}\n' > "$WORK/srvapi/filter.json"
 
 cat > "$WORK/proxy.py" <<'PY'
 import http.server, os, re, sys
@@ -204,6 +218,9 @@ seed pathp "{\"name\": \"vivacity/secure-http-pathp\", \"type\": \"project\", \"
 # Après les graines : n 2.0.0 (exige q) et q 1.1.0 (dist `http://`).
 printf '{"packages": {"acme/n": [{"name": "acme/n", "version": "2.0.0", "version_normalized": "2.0.0.0", "type": "library", "require": {"acme/q": "^1.0"}, "dist": {"type": "zip", "url": "%s"}}, {"name": "acme/n", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/n.json"
 printf '{"packages": {"acme/q": [{"name": "acme/q", "version": "1.1.0", "version_normalized": "1.1.0.0", "type": "library", "dist": {"type": "zip", "url": "http://old.test/q-1.1.zip"}}, {"name": "acme/q", "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "library", "dist": {"type": "zip", "url": "%s"}}]}}\n' "$WORK/srv/dist/a.zip" > "$WORK/srv/p2/acme/q.json"
+seed filev1 "{\"name\": \"vivacity/secure-http-filev1\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvv1\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
+seed filelists "{\"name\": \"vivacity/secure-http-filelists\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvlists\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
+seed fileapi "{\"name\": \"vivacity/secure-http-fileapi\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvapi\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 seed adv "{\"name\": \"vivacity/secure-http-adv\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"file://$WORK/srvadv\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
 # Un dist sans requête (chemin local) : rien de non sûr.
 seed local "{\"name\": \"vivacity/secure-http-local\", \"type\": \"project\", \"repositories\": [{\"type\": \"package\", \"package\": {\"name\": \"acme/l\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"$WORK/srv/dist/a.zip\"}}}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
@@ -642,4 +659,20 @@ want minimal-changes-require-no-update-global && case_ minimal-changes-require-n
 want repo-package-no-key-require-no-update && case_ repo-package-no-key-require-no-update filel 'delegates:package definition' 'jq:.repositories += [{"type": "package"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
 want repo-package-string-require-no-update && case_ repo-package-string-require-no-update filel 'delegates:package definition' 'jq:.repositories += [{"type": "package", "package": "x"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
 want repo-type-package-require-no-update && case_ repo-type-package-require-no-update pkg native 'jq:del(.require["acme/b"])' -- require acme/b:1.0.0 --no-update
+# 32c/32d : ce que la création du `Composer` refuse ou signale dans une
+# définition de dépôt, rendu au démarrage.
+want repo-url-no-host && case_ repo-url-no-host filel 'delegates:url Composer refuses' 'jq:.repositories += [{"type": "composer", "url": "https:///x"}]' 'expect:Invalid url given for Composer repository' -- install
+want repo-url-no-host-update && case_ repo-url-no-host-update filel 'delegates:url Composer refuses' 'jq:.repositories += [{"type": "composer", "url": "https:///x"}]' 'expect:Invalid url given for Composer repository' -- update --no-install
+want repo-url-bad-port && case_ repo-url-bad-port filel 'delegates:url Composer refuses' 'jq:.repositories += [{"type": "composer", "url": "https://repo.test:99999"}]' 'expect:Invalid url given for Composer repository' -- install
+want repo-url-no-host-dump && case_ repo-url-no-host-dump filel 'delegates:url Composer refuses' 'jq:.repositories += [{"type": "composer", "url": "https:///x"}]' 'expect:Invalid url given for Composer repository' -- dump-autoload
+want repo-filter-int-key && case_ repo-filter-int-key filel 'delegates:filter Composer refuses' 'jq:.repositories[0].filter={"0": false}' 'expect:keys must be non-empty list-name strings' -- install
+want repo-only-string && case_ repo-only-string filel 'delegates:only/exclude/canonical' 'jq:.repositories[0].only="acme/*"' 'expect:an array is required' -- install
+want repo-packagist-key && case_ repo-packagist-key filel 'delegates:packagist key' 'jq:.repositories[0].packagist=false' 'expect:has a packagist key' -- install
+want repo-packagist-key-global && case_ repo-packagist-key-global filel 'delegates:packagist key' 'global:{"repositories": [{"type": "composer", "url": "file://'"$WORK"'/srvfile", "packagist": false}]}' 'expect:has a packagist key' -- install
+# 32a : ce que le packages.json d'un dépôt local déclare et que la session
+# refuserait au chargement, rendu avant tout.
+want local-v1 && case_ local-v1 filev1 'delegates:v1 repository protocol' -- update --no-install
+want local-custom-list && case_ local-custom-list filelists 'delegates:custom policy list' 'jq:.config.policy={"mylist": {"block": true}}' -- update --no-install
+want local-custom-list-install && case_ local-custom-list-install filelists 'delegates:custom policy list' 'jq:.config.policy={"mylist": {"block": true}}' -- install
+want local-api-url-install && case_ local-api-url-install fileapi 'delegates:filter api-url' -- install
 exit $status
