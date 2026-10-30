@@ -372,26 +372,42 @@ pub fn probe() -> Result<Vec<Value>, PlatformError> {
         probe_at(&php, &probe_cache_file())
     };
     if let Ok(entries) = &probed {
-        *LAST_LOADED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(loaded_extensions(entries));
+        // Two names looked for, nothing built: read on signal paths only.
+        let loaded = |ext: &str| {
+            entries.iter().any(|v| {
+                v.get("kind").and_then(Value::as_str) == Some("ext")
+                    && v.get("skipped").and_then(Value::as_bool) != Some(true)
+                    && v.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| n.eq_ignore_ascii_case(ext))
+            })
+        };
+        let flag = |b: bool| if b { 2 } else { 1 };
+        PCNTL.store(flag(loaded("pcntl")), std::sync::atomic::Ordering::Release);
+        POSIX.store(flag(loaded("posix")), std::sync::atomic::Ordering::Release);
     }
     probed
 }
 
-/// The extensions of the last [`probe`] of this process.
-static LAST_LOADED: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
-    std::sync::Mutex::new(None);
+/// `pcntl` and `posix` in the last [`probe`] of this process: 0 unknown, 1
+/// absent, 2 loaded.
+static PCNTL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static POSIX: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Whether the PHP Composer runs on has `ext` (`ext-pcntl`) loaded, as the
-/// last probe of this process saw it; `None` before any probe (nothing is
-/// run for it).
+/// Whether the PHP Composer runs on has `ext` (`ext-pcntl`, `ext-posix`)
+/// loaded, as the last probe of this process saw it; `None` before any
+/// probe (nothing is run for it) or for another extension.
 pub fn probed_extension(ext: &str) -> Option<bool> {
-    LAST_LOADED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .map(|loaded| loaded.contains(ext))
+    let flag = match ext {
+        "ext-pcntl" => &PCNTL,
+        "ext-posix" => &POSIX,
+        _ => return None,
+    };
+    match flag.load(std::sync::atomic::Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
 }
 
 /// `probe` with the php and the cache file as arguments: the seam the tests

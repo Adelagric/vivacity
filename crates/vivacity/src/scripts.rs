@@ -100,9 +100,10 @@ impl Runner {
             vivacity_core::io::Verbosity::Normal => {}
         }
         cmd.arg(event);
-        let status = cmd
-            .status()
+        // Signals sent to vivacity alone reach that Composer, and one that
+        // ended it ends vivacity the same way, as for a hand-over.
+        let status = vivacity_core::signals::spawn_forwarding(&mut cmd)
             .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", self.composer.display()))?;
-        Ok(status.code().unwrap_or(1))
+        Ok(vivacity_core::signals::exit_code_of(status))
     }
 }

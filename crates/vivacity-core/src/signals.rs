@@ -10,7 +10,8 @@
 //! - **A hand-over** (the command re-run by a child Composer): while vivacity
 //!   starts and waits for it, the three signals are passed on to the child,
 //!   which handles them as Composer does; then vivacity ends as the child
-//!   did — by the same signal when one ended it. [`spawn_forwarding`].
+//!   did — by the same signal when one ended it. [`spawn_forwarding`]; the
+//!   same for the `composer run-script` of `--run-scripts`.
 //!
 //! One pipe and one thread for the process, created the first time either
 //! is needed and kept until exit (never closed: a handler that loaded the
@@ -201,10 +202,17 @@ pub fn release() {
 /// while it was being started is passed on once its pid is known). A signal
 /// the terminal sent to the whole process group reaches the child twice:
 /// Composer's handlers and the default action end it on the first, so the
-/// second changes nothing it prints or writes. The child is waited for
-/// without being reaped until the handlers are removed (no signal goes to a
-/// reused pid). Plain spawn and wait for the library or without
-/// `sigaction`.
+/// second changes nothing it prints or writes — except Composer's `-vvv`
+/// line « Received SIG…, aborting when child process is done », written
+/// twice around one of its own child processes. On Linux a terminal signal
+/// (`SI_KERNEL`) is not forwarded; on macOS, and for a `kill` aimed at the
+/// whole group from another process, it cannot be told apart and is. A
+/// signal the caller ignores (`nohup`, `trap '' HUP`) stays ignored by both
+/// until the child has started (it inherits the ignore), then one sent to
+/// vivacity alone is passed on. The child is waited for without being
+/// reaped, and the handlers are removed under a lock the forwarding `kill`
+/// also takes, before the reaping: no signal reaches a reused pid. Plain
+/// spawn and wait for the library or without `sigaction`.
 pub fn spawn_forwarding(
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::ExitStatus> {
@@ -218,7 +226,7 @@ pub fn spawn_forwarding(
         Ok(child) => child,
         Err(e) => {
             if forwarding {
-                imp::uninstall();
+                imp::stop_forwarding();
             }
             return Err(e);
         }
@@ -226,10 +234,13 @@ pub fn spawn_forwarding(
     if forwarding {
         if let Ok(pid) = i32::try_from(child.id()) {
             CHILD.store(pid, Ordering::Release);
+            // The signals the caller ignores: the child has inherited the
+            // ignore; one sent to vivacity alone is passed on from now.
+            imp::install_ignored();
             imp::forward_pending(pid);
             imp::wait_unreaped(pid);
         }
-        imp::uninstall();
+        imp::stop_forwarding();
     }
     child.wait()
 }
@@ -259,6 +270,12 @@ mod imp {
         ABORTING, CHILD, GATE_WAIT, HANDLING_THREAD, LAST_SIGNAL, MODE, MODE_FORWARD, MODE_NONE,
         MODE_REVERT, PENDING, RAISES, REVERT, SUSPENDED, SUSPENDED_AT_SIGNAL, WRITES,
     };
+    /// Held across "still forwarding? then `kill`" in the thread, and
+    /// across the removal of the forwarding handlers in the main thread,
+    /// before the child is reaped: no `kill` follows the reaping.
+    static FORWARDING: Mutex<()> = Mutex::new(());
+    /// The signals the caller ignored when forwarding began (bit `n`).
+    static IGNORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::sync::Mutex;
 
@@ -285,7 +302,27 @@ mod imp {
         unsafe { libc::__errno_location() }
     }
 
-    extern "C" fn on_signal(signal: libc::c_int) {
+    /// A signal the terminal sent: the whole foreground process group, the
+    /// child Composer included, has it already. Linux marks it `SI_KERNEL`;
+    /// macOS gives such a signal the session leader's pid and no code of its
+    /// own, so there it cannot be told from a `kill` (forwarded: a second
+    /// delivery).
+    #[cfg(target_os = "linux")]
+    fn from_terminal(info: *mut libc::siginfo_t) -> bool {
+        // SAFETY: the `siginfo_t` the kernel passed to this handler.
+        !info.is_null() && unsafe { (*info).si_code } == libc::SI_KERNEL
+    }
+
+    #[cfg(target_os = "macos")]
+    fn from_terminal(_info: *mut libc::siginfo_t) -> bool {
+        false
+    }
+
+    extern "C" fn on_signal(
+        signal: libc::c_int,
+        info: *mut libc::siginfo_t,
+        _context: *mut libc::c_void,
+    ) {
         // `write` may set `errno`: the interrupted code finds it unchanged.
         // SAFETY: the thread's own `errno`; `getpid` and `write` are
         // async-signal-safe, the byte is on this stack, the descriptor is
@@ -295,7 +332,7 @@ mod imp {
             if libc::getpid() == PID.load(Ordering::Relaxed) {
                 let mode = MODE.load(Ordering::Acquire);
                 let fd = WRITE_FD.load(Ordering::Acquire);
-                if mode != MODE_NONE && fd >= 0 {
+                if mode != MODE_NONE && fd >= 0 && !(mode == MODE_FORWARD && from_terminal(info)) {
                     // Before anything else of the run goes on, as Composer's
                     // handler comes first.
                     if mode == MODE_REVERT && !ABORTING.swap(true, Ordering::AcqRel) {
@@ -375,12 +412,24 @@ mod imp {
                 if ABORTING.load(Ordering::Acquire) {
                     abort(LAST_SIGNAL.load(Ordering::Acquire));
                 }
+                let _forwarding = FORWARDING
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if MODE.load(Ordering::Acquire) == MODE_FORWARD {
                     match CHILD.load(Ordering::Acquire) {
-                        // Not started yet: passed on once it is.
-                        0 => PENDING.store(signal, Ordering::Release),
+                        // Not started yet: passed on once it is — by the
+                        // main thread, or here if its pid came meanwhile.
+                        // (Several signals in that window: the last one.)
+                        0 => {
+                            PENDING.store(signal, Ordering::Release);
+                            let pid = CHILD.load(Ordering::Acquire);
+                            if pid != 0 {
+                                forward_pending(pid);
+                            }
+                        }
                         // SAFETY: the child this process started and has
-                        // not reaped (`wait_unreaped`).
+                        // not reaped (`wait_unreaped`, then the removal
+                        // under `FORWARDING` before the reaping).
                         pid => unsafe {
                             libc::kill(pid, signal);
                         },
@@ -510,34 +559,85 @@ mod imp {
         status.signal()
     }
 
+    /// The handler installed over `signal`, the previous disposition kept.
+    fn install_one(signal: libc::c_int, previous: &mut Vec<(libc::c_int, libc::sigaction)>) {
+        // SAFETY: a zeroed `sigaction` filled with the handler above; the
+        // previous one kept for the restore.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_signal
+                as extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void)
+                as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signal, &action, &mut old) == 0 {
+                previous.push((signal, old));
+            }
+        }
+    }
+
+    /// `require`'s mode replaces every disposition, an ignored one too, as
+    /// seld's `pcntl_signal` does. The forwarding mode leaves an ignored
+    /// signal alone until the child is started ([`install_ignored`]): a
+    /// caught disposition is reset to the default at `exec`, an ignored one
+    /// is inherited — Composer run under `nohup` ignores SIGHUP.
     pub(super) fn install(mode: u8) -> bool {
-        if !ensure_pipe() {
+        if !ensure_pipe() || MODE.load(Ordering::Acquire) != MODE_NONE {
             return false;
         }
         let mut previous = PREVIOUS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !previous.is_empty() {
-            return false;
-        }
         // SAFETY: `getpid` has no preconditions.
         PID.store(unsafe { libc::getpid() }, Ordering::Release);
         MODE.store(mode, Ordering::Release);
+        let mut ignored = 0u64;
         for signal in SIGNALS {
-            // SAFETY: a zeroed `sigaction` filled with the handler above;
-            // the previous one kept for the restore.
-            unsafe {
-                let mut action: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
-                libc::sigemptyset(&mut action.sa_mask);
-                action.sa_flags = libc::SA_RESTART;
-                let mut old: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, &action, &mut old) == 0 {
-                    previous.push((signal, old));
+            if mode == MODE_FORWARD {
+                // SAFETY: reads the current disposition only.
+                let current = unsafe {
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    libc::sigaction(signal, std::ptr::null(), &mut old);
+                    old.sa_sigaction
+                };
+                if current == libc::SIG_IGN {
+                    ignored |= 1 << signal;
+                    continue;
                 }
             }
+            install_one(signal, &mut previous);
         }
+        IGNORED.store(ignored, Ordering::Release);
         true
+    }
+
+    /// The forwarding handlers over the signals the caller ignores, once
+    /// the child has inherited the ignore.
+    pub(super) fn install_ignored() {
+        let ignored = IGNORED.swap(0, Ordering::AcqRel);
+        if ignored == 0 {
+            return;
+        }
+        let mut previous = PREVIOUS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for signal in SIGNALS {
+            if ignored & (1 << signal) != 0 {
+                install_one(signal, &mut previous);
+            }
+        }
+    }
+
+    /// The forwarding handlers removed under [`FORWARDING`]: once it is
+    /// released, the thread forwards nothing more, and the child can be
+    /// reaped.
+    pub(super) fn stop_forwarding() {
+        let _forwarding = FORWARDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        IGNORED.store(0, Ordering::Release);
+        uninstall();
     }
 
     pub(super) fn uninstall() {
@@ -570,5 +670,7 @@ mod imp {
         true
     }
     pub(super) fn forward_pending(_pid: i32) {}
+    pub(super) fn install_ignored() {}
+    pub(super) fn stop_forwarding() {}
     pub(super) fn wait_unreaped(_pid: i32) {}
 }
