@@ -125,6 +125,21 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **Output held while a `secure-http` hand-over may still come.** With
+  `secure-http` true and a remote `composer` repository other than
+  packagist.org configured — such a repository may serve metadata or
+  dists over `http`, which only its files tell — `update`, `require` and
+  `remove` hold « Loading composer repositories… » and what loading
+  writes until the pool is built, then judge every dist the pool holds: a
+  refused one hands the run to Composer with nothing printed, otherwise the
+  held lines go out unchanged, in order, at every verbosity. `install`
+  holds its headline and what follows until the downloads end, under the
+  same trigger or when a dist of the lock sits on a host other than
+  api.github.com, codeload.github.com, bitbucket.org or gitlab.com (a
+  refused redirect then hands over with nothing printed). Packagist-only
+  projects see no change (measured: same first line, same total time); a
+  triggered run's first line waits for the loading (0.9 to 5 s on the
+  fixtures with a remote repository forced), its total time does not move.
 - **`secure-http` is honoured.** Composer refuses to fetch an `http://`
   (or `git://`, `ftp://`) URL unless `config.secure-http` is false, and
   then warns once per host: « Warning: Accessing <host> over http which is

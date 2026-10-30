@@ -5575,3 +5575,60 @@ qu'on ne peut retirer).
 `dist-then-recipe` : rouge sur fb31ab6 (avant la reprise centrale, qui est
 dans 83a60b8), vert sur f4de2f8 et après.
 
+## 2026-10-30 — Retenir la sortie quand une délégation `secure-http` peut encore venir (docs/plans/parity-gaps-026.md)
+
+**Décision du mainteneur** (option 2, déclencheur étroit), après le
+rapport du second passage : retenir la sortie seulement quand
+`secure-http` est vrai et que la configuration fusionnée contient un
+dépôt `composer` distant autre que packagist.org — lui seul peut servir
+des métadonnées ou des dists en `http` que seuls ses fichiers révèlent.
+Pourquoi étroit : les faits du relecteur (Composer ne réécrit pas un dist
+`http://` ; GitHub et Bitbucket en `https` en dur ; 209 685 dists de
+Packagist, tous en `https`) font d'un projet Packagist seul un cas où rien
+ne peut arriver tard, et la retenue y retarderait la première ligne pour
+rien.
+
+**Fait.** Une retenue de sortie distincte de celle de `-v`
+(`io::hold_output` : stdout et stderr dans l'ordre ; relâchée telle quelle,
+dans la retenue `-v` si elle est active ; abandonnée à toute délégation,
+`--no-fallback` compris — la retenue `-v`, elle, s'écrit quand le run
+s'arrête). `update`/`require`/`remove` : de « Loading… » au pool construit ;
+le pool construit, ses dists sont jugés (pas seulement ceux que le solveur
+prendra : plus large, une délégation de trop au pire), puis la sortie part —
+la retenue ne couvre que le chargement, pas la résolution (l'étape moins
+chère du relecteur). `install` : de l'en-tête à la fin des téléchargements,
+sous le même déclencheur ou quand un dist du lock est hors des hôtes sûrs
+(api.github.com, codeload.github.com, bitbucket.org, gitlab.com) — connu
+avant l'en-tête, donc compté ici ; pour une résolution, les dists de
+Packagist ne sont connus qu'au chargement, trop tard pour retenir
+« Loading… » : un projet Packagist seul à dist `http://` reste tardif.
+Les scripts (`--run-scripts`) relâchent la sortie avant de partir.
+
+**Mesuré.** Projets Packagist seuls (laravel, symfony, sylius, `update
+--dry-run`, Packagist en direct, cinq passages) : première ligne à 11, 12,
+16-17 ms avant comme après ; hyperfine (install no-op, install à vendor
+vidé, `dump-autoload -o`) dans le bruit. Déclenché (retenue imposée sur
+les mêmes) : première ligne à la fin du chargement, ~0,9 s (symfony),
+~2,1 s (sylius), 2,9 à 5,0 s (laravel, réseau variable). Banc local à
+1 500 paquets : 1,103 s non retenu, 1,110 s retenu (± 0,011-0,014 s).
+
+**Vu rouge (ff98df1) puis vert.** Traces : `hold-remote-https` (dépôt
+distant `https`, retenu), `hold-install-other-host` (retenu) ; retenue
+imposée : `hold-native`, `-v`, `-q`, `hold-install`, `-v`,
+`hold-install-dists` (pas de marqueur avant), `hold-handover` (deux lignes
+avant la raison avant, rien après). `hold-packagist-only`,
+`hold-install-packagist` : vus rouges sur un déclencheur faussé exprès
+(exclusion de packagist.org, liste d'hôtes vidée), verts sinon ;
+`hold-remote-https-off` (`secure-http` faux) est un témoin, vert avant
+comme après. `verbosity.sh`, `steps.sh`, `flex-update.sh` passés
+aussi avec la retenue imposée partout.
+
+**Laissé.** Les chemins tardifs distants eux-mêmes (un dépôt `https` qui
+sert des dists ou des métadonnées `http`, une redirection) ne sont pas
+exerçables : pas de serveur `https` local auquel vivacity fasse confiance.
+Vérifié à la place : le déclencheur sur un dépôt `https` injoignable, et la
+retenue imposée sur les équivalents locaux. Tardifs encore : `require` et
+`remove` (leurs lignes et l'édition de composer.json précèdent la
+retenue), l'installation qui suit un `update` (le lock est écrit avant),
+le miroir préféré d'un paquet du pool.
+

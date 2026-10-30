@@ -476,10 +476,23 @@ Cas rouges sur f4de2f8 puis verts : `dev-implicit-flag`, `dev-branch-alias`,
 `dev-root-alias`, `partial-fixed-missing`, `transitive-unlock` ;
 `dist-then-recipe` rouge sur fb31ab6.
 
+## Sortie retenue (2026-10-30, décision du mainteneur)
+
+Déclencheur : `secure-http` vrai et un dépôt `composer` distant autre que
+packagist.org (`fallback::hold_trigger`) ; pour `install`, aussi un dist
+du lock hors des hôtes sûrs (`install_hold_trigger`). Retenue distincte de
+`-v` (`io::hold_output`), abandonnée à toute délégation. `update` : de
+« Loading… » au pool construit, ses dists jugés (`scan_pool_dists`) ;
+`install` : de l'en-tête à la fin des téléchargements. Bancs :
+`secure-http.sh` (traces du déclencheur, retenue imposée par
+`VIVACITY_HOLD_OUTPUT=force` : natif sous normal, `-q`, `-v`, rendu sans
+rien avant la raison, mode `loaded`), et `verbosity.sh`, `steps.sh`,
+`flex-update.sh` passés avec la retenue imposée. Mesures dans DECISIONS.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -594,10 +607,14 @@ la décision revient au mainteneur.
     `realpath`** (Factory.php:335) : un composer.json lien symbolique fait
     lire un autre auth.json (identifiants et réglage). Avant écriture :
     oui. S. Corpus : non. Sans coût : non (un `realpath` par run).
-18d. **Retenue de la sortie avant une délégation tardive** : non faite
-    (second passage) — la première ligne d'un `update` attendrait la fin de
-    la résolution (mesuré ~1 à ~4,7 s sur les fixtures). Décision du
-    mainteneur.
+18d. **Retenue de la sortie avant une délégation tardive** : décidée
+    (2026-10-30, déclencheur étroit : `secure-http` vrai et un dépôt
+    distant autre que packagist.org) et faite — retenue jusqu'au pool
+    construit (pas la résolution), et pour `install` jusqu'à la fin des
+    téléchargements (aussi quand un dist du lock est hors des hôtes sûrs).
+    Restent tardifs : `require`/`remove` (avant la retenue), l'installation
+    qui suit un `update` (lock écrit), un dist `http://` d'un projet
+    Packagist seul, le miroir préféré d'un paquet du pool.
 18e. **Faits établis par le relecteur pour la retenue** (troisième
     passage) : Composer 2.10.3 ne réécrit ni ne relève un dist `http://` ;
     les pilotes GitHub et Bitbucket écrivent `https` en dur, GitLab garde le
