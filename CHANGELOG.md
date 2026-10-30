@@ -129,12 +129,15 @@ byte-identical-output promise are the public API.
   the global or the project's auth.json or in `COMPOSER_AUTH` (Composer
   merges them under `config`), the minimal-changes mode now sends
   `update`, `require` and `remove` to Composer at startup, the last layer
-  winning; a value that is not a boolean in any layer does too. `require`
-  and `remove --no-update`, which resolve nothing, stay native.
+  winning; a value that is not a boolean in any layer does too, for
+  `require` and `remove --no-update` as well (Composer validates the layers
+  on every command). Otherwise `require` and `remove --no-update`, which
+  resolve nothing, ignore the mode.
 - **`require <package>:<constraint> --no-update` stays native** whatever
   repositories are configured: with every constraint given nothing is
   resolved and no repository is opened; only a definition Composer itself
-  refuses (no type, an unregistered type, no `url`) hands it over.
+  refuses (no type, an unregistered type, no `url`, a `package` entry
+  without a package definition) hands it over.
 - **Output held while a `secure-http` hand-over may still come.** With
   `secure-http` true and a remote `composer` repository other than
   packagist.org configured (in composer.json or the global config.json) —

@@ -599,10 +599,30 @@ elle arrête la résolution ; l'état de l'édition en attente non remis à
 zéro entre deux runs embarqués — remis ; un motif de délégation trop large
 dans les cas W — resserré sur la raison du pool.
 
+## Septième revue (02ef0a7..52ff54e) : plan
+
+1. `Cli::minimal_changes` : `--no-update` n'exempte que le mode ; le
+   contrôle de type des six couches tourne toujours (composer.json non
+   booléen : erreur de Composer, sortie 1 ; config.json global, auth.json :
+   avertissement) — rendu.
+2. `unregistered_repository_issue` : un dépôt `package` dont `package`
+   n'est ni un objet ni une liste d'objets (chacun avec `name` et `version`
+   chaînes) — rendu, sans réécrire le schéma.
+3. `flush_for_panic` : l'édition écrite compte (`MANIFEST_WRITTEN`).
+4. `take_held_write_error` lu dès le retour de `session.update`, avant
+   toute autre issue (Composer échoue à l'écriture, avant la résolution).
+
+Cas : 1 et 2 au banc (rouges sur 52ff54e) ; 3 par un test unitaire de
+`io` ; 4 non exercé (une écriture qui échoue entre le test d'inscriptibilité
+et le pool), relu. Méta : sur ce lot, revue indépendante seulement (sous-
+agent frais, sur le code) ; elle a relevé que le test de 3 partageait l'état
+de sortie du processus avec l'autre test d'`io` (tests en fils parallèles) :
+fondu dans ce test unique.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue, 103 après la cinquième revue, 116 après la sixième), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue, 103 après la cinquième revue, 116 après la sixième, 122 après la septième), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -830,6 +850,13 @@ la décision revient au mainteneur.
     gestionnaire demande une dépendance (`signal-hook` ou `libc`) et pose
     un gestionnaire pour tout le processus (à peser pour un embarquement
     en bibliothèque). Corpus : non.
+32c. **URL de dépôt `composer` sans hôte** (`https:///x`) : Composer lève
+    dans le constructeur de `ComposerRepository` (sortie 1) ; vivacity
+    tourne en natif. Antérieur à la branche. Avant écriture : oui
+    (configuration en mémoire). S. Corpus : non. Sans coût : oui.
+32d. **Avertissement « Repository … has a packagist key »** que Composer
+    écrit à `requireComposer()` : non écrit. Antérieur à la branche. Avant
+    écriture : oui. S. Corpus : non. Sans coût : oui.
 
 ### Installation, plugins, système de fichiers
 

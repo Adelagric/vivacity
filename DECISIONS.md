@@ -5780,3 +5780,35 @@ que ni composer.json ni le répertoire du projet `--no-fallback` n'ont été
 **Laissé.** H3 et S sortis de cette revue par le mainteneur, inventoriés
 (32a, 32b). Le cache de dépôts et la sonde du store restent écrits par une
 délégation décidée au chargement.
+
+## 2026-10-30 — Septième revue : `--no-update` valide encore les couches ; dépôt `package` sans définition (docs/plans/parity-gaps-026.md)
+
+**Constat.** `require`/`remove --no-update` sortaient de `Cli::minimal_changes`
+avant le contrôle de type : une valeur non booléenne de
+`update-with-minimal-changes` (erreur de Composer dans composer.json, sortie
+1 ; avertissement dans le config.json global ou un auth.json) restait
+native, composer.json édité. Un dépôt `package` sans définition de paquet
+(`{"type": "package"}`, `"package": "x"`) arrête Composer à
+`requireComposer()` ; `require … --no-update` l'éditait et sortait en 0. La
+vidange d'une panique écrivait l'édition retenue sans la compter comme
+écrite ; l'erreur d'une écriture différée n'était lue que sur une
+résolution réussie.
+
+**Fait.** Le mode reste ignoré sous `--no-update`, le contrôle de type des
+six couches non : une valeur non booléenne rend. Un dépôt `package` dont
+`package` n'est pas un objet ou une liste non vide d'objets à `name` et
+`version` chaînes rend (au moindre doute, sans réécrire le schéma). La
+vidange compte l'écriture ; l'erreur d'écriture différée est lue dès le
+retour de la résolution, avant son issue (Composer échoue à l'écriture,
+avant de résoudre).
+
+**Vu rouge (52ff54e) puis vert.** `minimal-changes-require-no-update-string`,
+`-null`, `-global`, `minimal-changes-remove-no-update-zero`,
+`repo-package-no-key-require-no-update`,
+`repo-package-string-require-no-update` ; la vidange par le test
+`io::levels_and_symfony_parsing`. L'erreur d'écriture différée n'est pas
+exercée (relue).
+
+**Laissé** (antérieurs à la branche, inventoriés 32c, 32d) : une URL de dépôt
+`composer` sans hôte, que Composer refuse dans le constructeur ;
+l'avertissement « has a packagist key ».
