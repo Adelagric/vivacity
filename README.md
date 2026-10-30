@@ -239,6 +239,10 @@ Linux and macOS; on Windows a lock with a `path` package goes through the
 Composer fallback). Not yet: `vcs` repositories, `--minimal-changes`, the
 audit (`--no-audit` is the compared behaviour).
 
+`require` reverts composer.json on SIGINT, SIGTERM and SIGHUP as
+Composer does (macOS and Linux; installed by the binary only, not by the
+library) (`harness/require-signals.sh`).
+
 `config.secure-http` is Composer's, read from the same layers (global
 config and auth.json, composer.json, the project's auth.json,
 `COMPOSER_AUTH`): with it on (the default), a run that would fetch an

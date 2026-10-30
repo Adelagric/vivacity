@@ -125,6 +125,28 @@ byte-identical-output promise are the public API.
   be.
 
 ### Fixed
+- **`require` puts composer.json back on SIGINT, SIGTERM and SIGHUP**, as
+  Composer does: from the moment it has read its backups to the end of the
+  command, a termination signal writes what the run held back, prints
+  `Installation failed, reverting …` (or deletes the composer.json it
+  created, and its lock), restores the files and ends the process by the
+  same signal. Not during the package operations, where Composer's
+  installer handles the signal itself, and not on Windows. Installed by the
+  binary only: an embedder of the library keeps its own signal handling.
+- **Repository definitions Composer refuses or warns about go to Composer
+  at startup**: a `composer` URL without a host or with an invalid port, a
+  user `filter` that is not booleans by list name, a malformed
+  `only`/`exclude`/`canonical`, a definition without a type, and the
+  `packagist: false` key Composer warns about — for `install`, `update`,
+  `require`, `remove`, `config` and `dump-autoload`.
+- **A local repository's packages.json is judged before anything is
+  printed**: the v1 protocol, a custom policy list the configuration
+  declares and the repository advertises, and (for `install`) a filter
+  `api-url` behind its `malware` list now hand the command over first
+  instead of after « Loading composer repositories… ».
+- **`remove` judges its second plugin load before printing anything**: a
+  plugin vivacity hands to Composer there no longer comes after
+  `./composer.json has been updated` (printed twice).
 - **`update-with-minimal-changes` read where Composer reads it.** Set in
   the global or the project's auth.json or in `COMPOSER_AUTH` (Composer
   merges them under `config`), the minimal-changes mode now sends

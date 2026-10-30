@@ -5812,3 +5812,57 @@ exercée (relue).
 **Laissé** (antérieurs à la branche, inventoriés 32c, 32d) : une URL de dépôt
 `composer` sans hôte, que Composer refuse dans le constructeur ;
 l'avertissement « has a packagist key ».
+
+## 2026-10-30 — Inventaire fermé avant 0.26 : signaux de `require`, définitions de dépôt, dépôts locaux, second chargement de `remove` (docs/plans/parity-gaps-026.md)
+
+**Constat.** (32b) Composer rétablit composer.json sur SIGINT/SIGTERM/SIGHUP
+pendant `require` ; vivacity laissait le fichier édité. (32c/32d) Une
+définition de dépôt que la création du `Composer` refuse (URL sans hôte,
+port invalide, `filter` mal formé…) ou signale (`packagist: false`) passait
+en natif. (32a) Le protocole v1, une liste personnalisée et l'`api-url` de
+filtre d'un dépôt local étaient rendus après « Loading… ». (18g) Le second
+chargement des plugins de `remove` était rendu après « has been updated ».
+(18h) Supposé : l'index de Flex lu avant le contrôle des paquets figés.
+
+**Fait.**
+
+- Signaux : `vivacity_core::signals`, `sigaction` de libc (déjà une
+  dépendance de vivacity-core sur macOS et Linux) — aucune dépendance
+  ajoutée. signal-hook-registry, déjà dans l'arbre par tokio, a été écarté :
+  retirer son action laisse le signal ignoré au lieu de rétablir l'action
+  par défaut. Gestionnaire minimal (marque + octet dans un tube), un fil
+  fait le retour en arrière ; une porte tenue pendant chaque écriture de
+  composer.json ou du lock, prise pour de bon par ce fil ; les autres fils
+  s'arrêtent à leur ligne suivante ; mort par le signal comme
+  `exitWithLastSignal`. Suspendu pendant les opérations sur les paquets
+  (le gestionnaire d'`InstallationManager` passe devant chez Composer),
+  retiré avant un Composer enfant, posé par le binaire seul (un
+  embarquement garde ses signaux). Aucun coût pour les autres commandes
+  qu'un chargement atomique par ligne écrite.
+- Définitions de dépôt : contrôle au démarrage sur le JSON en mémoire
+  (composer.json, config.json global gardé pour le run), rendu sur ce que
+  `createRepos`, `createRepository` et les constructeurs refusent ou
+  signalent ; `parse_url` reproduit seulement là où c'est bon marché, un
+  doute rend.
+- Dépôts locaux : packages.json lu une fois (partagé avec le contrôle
+  `secure-http` et la session), v1 et liste personnalisée à la résolution,
+  liste personnalisée et `api-url` de `malware` pour `install`. Rien sur un
+  chemin Packagist seul.
+- `remove` : second chargement jugé sur le manifeste édité en mémoire, avant
+  toute ligne, et réutilisé.
+- 18h : vérifié sans objet (`flex::activation_lines` ne fait pas de
+  requête ; l'index est lu après le contrôle).
+
+**Vu rouge (9f1117a) puis vert.** `harness/require-signals.sh` (7 cas :
+`int`, `term`, `hup`, `lock`, `created`, `held`, `verbose`) ;
+`harness/remove-plugin-load.sh` (2 cas) ; secure-http.sh : `repo-url-no-host`,
+`-update`, `-dump`, `repo-url-bad-port`, `repo-filter-int-key`,
+`repo-only-string`, `repo-packagist-key`, `-global`, `local-v1`,
+`local-custom-list`, `-install`, `local-api-url-install`. Tests unitaires des
+règles d'URL et de `filter`.
+
+**Laissé.** Windows (Composer rétablit sur Ctrl-C) ; le `runCleanup`
+d'`InstallationManager` ; un Composer enfant attendu sans relais des
+signaux (antérieur) ; l'`api-url` d'un dépôt local à la résolution et les
+dépôts distants (tardifs) ; l'avertissement « packagist key » des dépôts de
+COMPOSER_HOME/composer.json.

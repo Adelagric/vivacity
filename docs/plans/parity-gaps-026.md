@@ -619,10 +619,83 @@ agent frais, sur le code) ; elle a relevé que le test de 3 partageait l'état
 de sortie du processus avec l'autre test d'`io` (tests en fils parallèles) :
 fondu dans ce test unique.
 
+## Inventaire fermé avant 0.26 : plan, puis ce qui a été fait
+
+- **32c/32d.** Au démarrage (`install`, `update`, `require`, `remove`,
+  `config` ; `dump-autoload` une fois composer.json lu), sur le JSON brut en
+  mémoire (`repositories` de composer.json et du config.json global gardé
+  pour le run ; rien à faire sans cette section) : une entrée typée à
+  `"packagist": false` (l'avertissement de `createRepository`, écrit à
+  chaque création du `Composer` : rendre est sûr à l'octet) ; une définition
+  que `createRepos` ou les constructeurs refusent — pas un objet, sans type,
+  `only`/`exclude`/`canonical` mal formés, URL `composer` que `parse_url`
+  refuse (pas d'hôte hors `file`, port qui n'est pas 1 à 5 chiffres jusqu'à
+  65535 ; URL absente ou non chaîne), `filter` utilisateur qui n'est pas des
+  booléens par nom de liste (une clé numérique est un entier en PHP). Un
+  doute rend (un port `8a`, que PHP lit 8, est rendu). Plus large que la
+  liste fusionnée (une définition désactivée par nom compte encore).
+- **32a.** Dépôts locaux seulement (rien sur un chemin Packagist seul : ni
+  fusion ni lecture) : leur packages.json, lu une fois et gardé pour la
+  session (`read_local`, que le contrôle `secure-http` partage), juge avant
+  tout — à la résolution (`insecure_repository_issue`) le protocole v1 et une
+  liste personnalisée de la configuration que le dépôt annonce (après son
+  `filter` utilisateur) ; pour `install` (`local_install_issue`, quand
+  `malware` bloque `install`) la même liste, et une `api-url` de filtre
+  derrière une liste `malware` annoncée (la portée `install` ne lit jamais
+  les métadonnées : l'erreur est certaine). Reste tardif : l'`api-url` d'un
+  dépôt local à la résolution (elle dépend de ce que le pool a lu dans ce
+  dépôt, connu au chargement), et tout dépôt distant (son packages.json
+  demande une requête).
+- **32b.** `require` pose, après la lecture des sauvegardes (là où Composer
+  crée son `SignalHandler`), des gestionnaires SIGINT/SIGTERM/SIGHUP
+  (`sigaction` de libc, déjà une dépendance de vivacity-core sur macOS et
+  Linux : aucune dépendance ajoutée ; signal-hook-registry, déjà dans
+  l'arbre par tokio, laisse le signal ignoré au retrait). Le gestionnaire
+  marque le run et écrit le numéro dans un tube ; un fil fait ce que fait
+  `revertComposerFile` après ce que le run retenait (ligne, fichiers ; le
+  lock relu au signal sous `--no-update`), puis mort par le signal. Les
+  autres fils s'arrêtent à leur prochaine ligne, et chaque écriture de
+  composer.json ou du lock passe une porte que le fil du signal prend pour
+  de bon (une écriture en cours finit, aucune ne suit). Pendant les
+  opérations sur les paquets, pas de retour en arrière (le gestionnaire
+  d'`InstallationManager::execute` passe devant chez Composer) : mort par
+  le signal. Retiré à la fin de `require` (dispositions précédentes
+  rétablies) et avant qu'un Composer enfant prenne la main. Posé par le
+  seul binaire : la bibliothèque embarquée ne touche pas aux signaux.
+- **18g.** `remove` juge le second chargement des plugins sur le manifeste
+  édité en mémoire (mêmes recherches que la boucle, section vidée retirée ;
+  inchangé sous `--dry-run`) avant sa première ligne et l'édition, et
+  réutilise ce chargement.
+- **18h.** Rien à déplacer : `flex::activation_lines` ne fait aucune
+  requête (avertissements ou délégation), l'index est lu par
+  `flex::versions`, après le contrôle des paquets figés.
+
+### Méta et revue indépendante de ce lot
+
+Méta (sous-agent frais, sur le code) : pas de retour en arrière pendant les
+opérations sur les paquets (`InstallationManager` passe devant) ; une
+course avec le fil principal (porte sur les écritures) ; le lock de
+`--no-update` relu au signal ; gestionnaires réservés au binaire et retirés
+avant un Composer enfant ; `install` couvert pour les listes ; l'`api-url`
+certaine en portée `install` ; `config` et `dump-autoload` couverts ;
+règles de `parse_url` (clés numériques, `[]` accepté). Revue indépendante :
+course vérification-puis-écriture (la porte tenue pendant l'écriture,
+jamais pendant une ligne) ; marque posée dans le gestionnaire même ; une
+panique du retour en arrière n'empêche pas la mort par le signal ; un
+enfant entre `fork` et `exec` ne déclenche rien (pid vérifié) ; seul le
+garde qui a posé les gestionnaires les retire.
+
+Restent (inventaire) : Windows (Composer rétablit sur Ctrl-C par
+`sapi_windows_set_ctrl_handler`, vivacity non) ; le nettoyage de
+`runCleanup` pendant les opérations ; un Composer enfant attendu sans
+relais des signaux (antérieur) ; l'avertissement « packagist key » des
+dépôts de COMPOSER_HOME/composer.json (le `Composer` global) — lire ce
+fichier au démarrage coûterait une lecture à chaque commande.
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
-`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue, 103 après la cinquième revue, 116 après la sixième, 122 après la septième), `auth-hosts.sh`,
+`secure-http.sh` (32, puis 53 après la revue, 57 après le second passage, 61 après le troisième, 67 après le quatrième, 79 avec la sortie retenue, 103 après la cinquième revue, 116 après la sixième, 122 après la septième, 134 avec l'inventaire fermé), `auth-hosts.sh`,
 `transport-exit.sh`, `flex-update.sh` (30, puis 34), `flex-recipes.sh`, `flex-install.sh`,
 `download-lines.sh`, `fallback-args.sh`, `steps.sh` (279), `update.sh`,
 `verbosity.sh` (frais et en ligne), `allow-plugins.sh`, `plugin-lines.sh`
@@ -757,13 +830,12 @@ la décision revient au mainteneur.
     paquet d'un autre type de dépôt (`path`) amène n'est jugée qu'au lock
     résolu (tardif, cas `late-path-dependency`) ; un paquet figé non
     installé à dist `http://` hors dépôt local et hors `remove` aussi.
-18g. **`remove` : refus du second chargement des plugins** rendu après
-    « has been updated » (la ligne écrite deux fois) — décidable avant
-    l'édition sur le manifeste édité en mémoire, comme `require`. Hors
-    `secure-http`. S.
-18h. **Fixation par `update` après une requête de Flex** : sur un projet
-    Flex, les paquets figés sont jugés après la lecture de l'index de Flex
-    à l'activation (la même requête que Composer).
+18g. **`remove` : refus du second chargement des plugins** — fermé le
+    2026-10-30 : jugé avant toute ligne, sur le manifeste édité en mémoire
+    (`harness/remove-plugin-load.sh`).
+18h. **Fixation par `update` après une requête de Flex** — sans objet
+    (vérifié le 2026-10-30) : `flex::activation_lines` ne fait pas de
+    requête ; l'index est lu par `flex::versions`, après le contrôle.
 18c. **Dépôt local (`file://`) sous Windows** : le chemin `\\?\` de
     `canonicalize` suivi de `/packages.json` (écart antérieur du
     transport fichier) ; le contrôle `secure-http` de ses métadonnées n'y
@@ -833,30 +905,22 @@ la décision revient au mainteneur.
     alias) ; **`require`** ne rétablit pas le mtime du lock après
     `updateHash` ; **`JsonManipulator`** : limite de retour arrière de PCRE,
     `1e999`, demi-substituts UTF-16, imbrication > 512. S chacun.
-32a. **Données en mémoire rendues tard** : le protocole v1 d'un dépôt
-    composer, le `filter.api-url` d'un packages.json local et les listes de
-    politique personnalisées se décident à l'ouverture du dépôt ou au
-    chargement, après l'en-tête, alors que le packages.json local ou la
-    configuration est déjà en mémoire. Aujourd'hui : rendus à Composer au
-    moment de l'erreur (délégation tardive, lignes retenues sous le
-    déclencheur). Avant écriture : oui. S. Corpus : non. Sans coût : oui
-    sur un chemin Packagist seul (rien à lire de plus).
-32b. **Signal pendant `require`** : Composer rétablit composer.json (et
-    supprime le lock d'un fichier créé) sur SIGINT/SIGTERM/SIGHUP
-    (`RequireCommand.php:160-162`, du sauvegarde au `finally`, même pendant
-    l'installation) ; vivacity n'a pas de gestionnaire : le fichier reste
-    édité, les lignes retenues sont perdues. Déclencheur : un signal entre
-    l'écriture de composer.json et la fin du run. Coût : S, mais un
-    gestionnaire demande une dépendance (`signal-hook` ou `libc`) et pose
-    un gestionnaire pour tout le processus (à peser pour un embarquement
-    en bibliothèque). Corpus : non.
-32c. **URL de dépôt `composer` sans hôte** (`https:///x`) : Composer lève
-    dans le constructeur de `ComposerRepository` (sortie 1) ; vivacity
-    tourne en natif. Antérieur à la branche. Avant écriture : oui
-    (configuration en mémoire). S. Corpus : non. Sans coût : oui.
-32d. **Avertissement « Repository … has a packagist key »** que Composer
-    écrit à `requireComposer()` : non écrit. Antérieur à la branche. Avant
-    écriture : oui. S. Corpus : non. Sans coût : oui.
+32a. **Données en mémoire rendues tard** — fermé le 2026-10-30 pour les
+    dépôts locaux : protocole v1 et liste personnalisée rendus avant tout,
+    `api-url` de filtre en portée `install`. Reste tardif : l'`api-url` d'un
+    dépôt local à la résolution (dépend de ce que le pool y a lu) et les
+    dépôts distants (packages.json par requête).
+32b. **Signal pendant `require`** — fermé le 2026-10-30 (macOS, Linux ;
+    binaire seulement, `harness/require-signals.sh`). Restent : Windows
+    (Ctrl-C), le `runCleanup` d'`InstallationManager` pendant les
+    opérations, un Composer enfant attendu sans relais des signaux.
+32c. **URL de dépôt `composer` que le constructeur refuse** — fermé le
+    2026-10-30 (rendu au démarrage, avec les `filter`, `only`/`exclude`/
+    `canonical` et définitions mal formés).
+32d. **Avertissement « Repository … has a packagist key »** — fermé le
+    2026-10-30 pour composer.json et le config.json global (rendu au
+    démarrage). Reste : les dépôts de COMPOSER_HOME/composer.json (le
+    `Composer` global les crée aussi), non lus au démarrage.
 
 ### Installation, plugins, système de fichiers
 
