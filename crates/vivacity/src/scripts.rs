@@ -78,6 +78,7 @@ impl Runner {
             return Ok(0);
         }
         // The line vivacity holds comes before what the script writes.
+        vivacity_core::io::release_output();
         vivacity_core::io::release_held();
         let mut cmd = std::process::Command::new(&self.composer);
         cmd.arg("run-script")

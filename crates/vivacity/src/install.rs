@@ -78,7 +78,13 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     }
     // `Installer::run`.
     let run = proceed!(pre_install_cmd(run)?);
-    // `Installer::doInstall`.
+    // `Installer::doInstall`. Under `secure-http`'s trigger (or a dist on a
+    // host that may redirect), the headline and what follows are held
+    // until the downloads end: a refused redirect hands over with nothing
+    // printed (the archives it cached taken back, F3).
+    if crate::fallback::install_hold_trigger(&run.manifest, &run.lock, run.with_dev) {
+        crate::fallback::start_holding("the downloads end");
+    }
     proceed!(headline(&run)?);
     let verification = spawn_verification(&run)?;
     let root = verification.as_ref().map(|v| root_package(&run, v));
@@ -1326,7 +1332,11 @@ fn execute_operations(
         fetcher,
         &opts,
     )) {
-        Ok(r) => r,
+        Ok(r) => {
+            // Every download is in: what was held goes out as it was.
+            vivacity_core::io::release_output();
+            r
+        }
         // Emulation refusal detected before any write: vendor/ is intact.
         Err(vivacity_core::Error::Unsupported(msg)) => {
             let scope = vivacity_core::scope::ScopeReport {

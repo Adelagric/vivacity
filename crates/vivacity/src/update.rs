@@ -768,6 +768,16 @@ pub(crate) fn resolve_and_lock(
     if let Some(line) = &args.lockless_install {
         vivacity_core::say!("{line}");
     }
+    // `secure-http` under its trigger (a remote repository other than
+    // packagist.org): « Loading… » and what loading writes are held until
+    // the pool's dists are judged, so that a hand-over then prints nothing.
+    if loaded_manifest
+        .as_ref()
+        .is_some_and(crate::fallback::hold_trigger)
+    {
+        crate::fallback::start_holding("the pool's dists are judged");
+        session.scan_pool_dists = true;
+    }
     vivacity_core::say!("Loading composer repositories with package information");
     // (`Updating dependencies` is printed by the session once the pool is
     // built — Flex's notice comes before it.)

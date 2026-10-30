@@ -516,6 +516,11 @@ pub struct FlexSession {
 }
 
 pub struct UpdateSession {
+    /// The command holds its output (`secure-http` under its trigger): once
+    /// the pool is built, its dists are judged — one `secure-http` does not
+    /// let through hands the run over, nothing printed — and the output is
+    /// released.
+    pub scan_pool_dists: bool,
     /// `None`: no Flex filter at `PRE_POOL_CREATE`.
     pub flex: Option<FlexSession>,
     pub arena: Vec<Package>,
@@ -820,6 +825,7 @@ impl UpdateSession {
         }
 
         Ok(UpdateSession {
+            scan_pool_dists: false,
             flex: None,
             arena,
             root,
@@ -1338,6 +1344,34 @@ impl UpdateSession {
         .map_err(SessionError::from)?;
         for w in warnings {
             vivacity_core::say!("{w}");
+        }
+        // The output held since « Loading composer repositories »: every
+        // dist the pool could hand the install is known now. One
+        // `secure-http` does not let through (broader than the download:
+        // versions the solver will not pick count) is Composer's run, with
+        // nothing printed; otherwise the output goes out as it was.
+        if self.scan_pool_dists {
+            use vivacity_core::secure_http::{classify, insecure, Verdict};
+            for &i in &pool.packages {
+                let Some(dist) = self.arena[i].dist.as_ref() else {
+                    continue;
+                };
+                if insecure(&dist.url).is_none() {
+                    continue;
+                }
+                let why = match classify(&dist.url) {
+                    Verdict::Refuse => "which secure-http refuses".to_owned(),
+                    Verdict::HandOver(reason) => format!("with {reason}"),
+                    Verdict::Allowed | Verdict::Warn { .. } => continue,
+                };
+                let mut e = SessionError::new(format!(
+                    "the dist of {} is downloaded over an insecure protocol, {why}",
+                    self.arena[i].name
+                ));
+                e.kind = SessionErrorKind::Unsupported;
+                return Err(e);
+            }
+            vivacity_core::io::release_output();
         }
         if std::env::var_os("VIVACITY_TRACE").is_some() {
             eprintln!(

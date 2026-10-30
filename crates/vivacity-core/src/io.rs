@@ -102,7 +102,9 @@ impl Scope {
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        // Whatever a run still defers is its own output: written, not lost.
+        // Whatever a run still holds or defers is its own output: written,
+        // not lost.
+        release_output();
         release_deferred();
         drop_held();
         LEVEL.store(Verbosity::Normal as u8, Ordering::Relaxed);
@@ -150,10 +152,92 @@ pub fn drop_deferred() {
     slot.clear();
 }
 
+/// The output a run holds while a hand-over may still come (`secure-http`
+/// under its trigger, [`hold_output`]): every line, stdout and stderr in
+/// order, released as it was ([`release_output`]) or dropped for Composer
+/// ([`drop_output`]). Not the `-v` deferral, which a run that stops writes
+/// out: held output is never Composer's to repeat, nor the run's to print
+/// before a hand-over. The common case — not holding — takes no lock.
+static OUTPUT: Mutex<Vec<(bool, String)>> = Mutex::new(Vec::new());
+static HOLDING_OUTPUT: AtomicBool = AtomicBool::new(false);
+
+fn output() -> std::sync::MutexGuard<'static, Vec<(bool, String)>> {
+    OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// From now on, every line is held ([`release_output`], [`drop_output`]).
+pub fn hold_output() {
+    HOLDING_OUTPUT.store(true, Ordering::Release);
+}
+
+/// Whether the run holds its output.
+pub fn holding_output() -> bool {
+    HOLDING_OUTPUT.load(Ordering::Acquire)
+}
+
+/// Writes the held output, in order — into the `-v` deferral when it is
+/// on — and stops holding.
+pub fn release_output() {
+    if !HOLDING_OUTPUT.load(Ordering::Acquire) {
+        return;
+    }
+    let lines: Vec<(bool, String)> = {
+        let mut slot = output();
+        HOLDING_OUTPUT.store(false, Ordering::Release);
+        slot.drain(..).collect()
+    };
+    for (stdout, line) in lines {
+        pass_on(stdout, line);
+    }
+}
+
+/// Forgets the held output and stops holding: the command goes to
+/// Composer, which writes its own.
+pub fn drop_output() {
+    if !HOLDING_OUTPUT.load(Ordering::Acquire) {
+        return;
+    }
+    let mut slot = output();
+    HOLDING_OUTPUT.store(false, Ordering::Release);
+    slot.clear();
+}
+
+/// Keeps a line in the held output, if the run holds it; `false` otherwise.
+fn keep_output(stdout: bool, line: &str) -> bool {
+    if !HOLDING_OUTPUT.load(Ordering::Acquire) {
+        return false;
+    }
+    let mut slot = output();
+    // Checked again under the lock: a release may have just ended.
+    if !HOLDING_OUTPUT.load(Ordering::Acquire) {
+        return false;
+    }
+    slot.push((stdout, line.to_owned()));
+    true
+}
+
+/// A line past the output hold: deferred under `-v`, written otherwise.
+fn pass_on(stdout: bool, line: String) {
+    if DEFERRING.load(Ordering::Acquire) {
+        let mut d = deferred();
+        if DEFERRING.load(Ordering::Acquire) {
+            d.push((stdout, line));
+            return;
+        }
+    }
+    write_line(stdout, line);
+}
+
 /// Writes one line on stderr (`stdout` false) or stdout, after the held
-/// lines — or keeps it while the run defers. The writing macros' body.
+/// lines — or keeps it while the run holds or defers its output. The
+/// writing macros' body.
 pub fn emit(stdout: bool, line: std::fmt::Arguments<'_>) {
     release_held();
+    if HOLDING_OUTPUT.load(Ordering::Acquire) && keep_output(stdout, &line.to_string()) {
+        return;
+    }
     if DEFERRING.load(Ordering::Acquire) {
         let mut slot = deferred();
         // Checked again under the lock: a release may have just ended.
@@ -253,6 +337,19 @@ pub fn release_held() {
     PLUGIN_HELD.store(0, Ordering::Release);
     HOLDING.store(false, Ordering::Release);
     drop(slot);
+    if HOLDING_OUTPUT.load(Ordering::Acquire) {
+        let mut rest = lines.into_iter();
+        for line in rest.by_ref() {
+            if !keep_output(false, &line) {
+                pass_on(false, line);
+                break;
+            }
+        }
+        for line in rest {
+            pass_on(false, line);
+        }
+        return;
+    }
     if DEFERRING.load(Ordering::Acquire) {
         let mut d = deferred();
         if DEFERRING.load(Ordering::Acquire) {

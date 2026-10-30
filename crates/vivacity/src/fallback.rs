@@ -111,6 +111,92 @@ pub(crate) fn resolution_fallback(
     delegate_resolution(&issues, no_fallback).map(Some)
 }
 
+/// Whether the command holds its output while a `secure-http` hand-over
+/// may still come late (the maintainer's narrow trigger, 2026-10-30): a
+/// remote `composer` repository other than packagist.org in the merged
+/// configuration, and `secure-http` true — such a repository may serve
+/// metadata or dists over `http`, which only its files tell. Packagist
+/// alone: never (its dists are `https`, on hosts that do not redirect to
+/// `http`). The setting is read only once such a repository is there.
+/// `VIVACITY_HOLD_OUTPUT=force` holds whatever the configuration (the
+/// harnesses: no local `https` server stands in for a remote repository).
+pub(crate) fn hold_trigger(manifest: &serde_json::Value) -> bool {
+    if std::env::var("VIVACITY_HOLD_OUTPUT").as_deref() == Ok("force") {
+        return true;
+    }
+    let home = vivacity_core::fetch::composer_home();
+    let Ok(config) = vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref())
+    else {
+        return false;
+    };
+    let remote = config.repositories.iter().any(|repo| {
+        let def = &repo.definition;
+        if def.get("type").and_then(serde_json::Value::as_str) != Some("composer") {
+            return false;
+        }
+        let Some(url) = def.get("url").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let url = vivacity_resolver::repository::repo_urls(url).url;
+        let Some(rest) = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+        else {
+            return false;
+        };
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        host != "repo.packagist.org" && host != "packagist.org"
+    });
+    remote && secure_http_refuses()
+}
+
+/// The install phase's trigger: [`hold_trigger`], or a dist of the lock on
+/// a host other than those whose archives are served over `https` without
+/// a redirect to `http` (api.github.com, codeload.github.com,
+/// bitbucket.org, gitlab.com) with `secure-http` true — known before the
+/// headline, so it counts here, while for a resolution the Packagist dists
+/// are only known once loaded.
+pub(crate) fn install_hold_trigger(
+    manifest: &serde_json::Value,
+    lock: &vivacity_core::lock::Lock,
+    with_dev: bool,
+) -> bool {
+    if hold_trigger(manifest) {
+        return true;
+    }
+    const SAFE: [&str; 4] = [
+        "api.github.com",
+        "codeload.github.com",
+        "bitbucket.org",
+        "gitlab.com",
+    ];
+    let other_host = lock.wanted_packages(with_dev).any(|p| {
+        p.dist_url_expanded().is_some_and(|url| {
+            let rest = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"));
+            rest.is_some_and(|r| !SAFE.contains(&r.split(['/', ':']).next().unwrap_or("")))
+        })
+    });
+    other_host && secure_http_refuses()
+}
+
+fn secure_http_refuses() -> bool {
+    use vivacity_core::secure_http::{classify, Verdict};
+    matches!(
+        classify("http://localhost/"),
+        Verdict::Refuse | Verdict::HandOver(_)
+    )
+}
+
+/// Starts holding the output, with a trace marker the harnesses look for.
+pub(crate) fn start_holding(until: &str) {
+    vivacity_core::io::hold_output();
+    if std::env::var_os("VIVACITY_TRACE").is_some() {
+        eprintln!("trace: output held until {until} (secure-http)");
+    }
+}
+
 /// What a resolution's pool starts from, as the command knows it before
 /// anything is printed: `update <packages>` (the allow list and its
 /// transitive mode), `require` (the requirements it adds, which a lock
@@ -487,6 +573,9 @@ pub(crate) fn delegate_resolution(
     // QUIET when the run stops here, so that an exit 3 is never mute.
     let composer = which_composer();
     let stops = no_fallback || composer.is_none();
+    // Output held for a hand-over that might come: it came, nothing of it
+    // is written (Composer writes its own, or the run stops on the reason).
+    vivacity_core::io::drop_output();
     if stops {
         // The run ends here: what it kept under -v is its output.
         vivacity_core::io::release_deferred();
@@ -581,6 +670,7 @@ pub(crate) fn hand_over(
     // The Composer started here writes its own root-version warning: what
     // vivacity still holds is dropped, not written twice.
     vivacity_core::io::drop_held();
+    vivacity_core::io::drop_output();
     // The archives this run put in Composer's files cache (an install, Flex
     // reading dists) would spare Composer their `  - Downloading` lines:
     // taken back first; one that cannot be stops the run here.
@@ -678,6 +768,7 @@ pub(crate) fn fallback_or_fail(
 ) -> anyhow::Result<i32> {
     let composer = which_composer();
     let stops = args.no_fallback || args.check_scope || composer.is_none();
+    vivacity_core::io::drop_output();
     if !stops {
         // Composer writes what vivacity held (the root-version warning).
         vivacity_core::io::drop_held();
