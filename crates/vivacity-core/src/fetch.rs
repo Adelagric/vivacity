@@ -265,8 +265,65 @@ pub fn global_config_files() -> std::result::Result<(Option<Value>, Option<Value
     Ok((config, auth))
 }
 
+/// The archives this run put in Composer's files cache, from every path
+/// that downloads (the install, Flex reading dists before the lock is
+/// written): a run that hands over takes them back, or Composer would find
+/// them and print no `  - Downloading` line for them
+/// (FileDownloader.php:180-193). A channel: sending takes no lock.
+fn cached_dists() -> &'static (
+    std::sync::mpsc::Sender<PathBuf>,
+    std::sync::Mutex<std::sync::mpsc::Receiver<PathBuf>>,
+) {
+    static CACHED: std::sync::OnceLock<(
+        std::sync::mpsc::Sender<PathBuf>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<PathBuf>>,
+    )> = std::sync::OnceLock::new();
+    CACHED.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, std::sync::Mutex::new(rx))
+    })
+}
+
+fn note_cached_dist(path: &Path) {
+    let _ = cached_dists().0.send(path.to_path_buf());
+}
+
+/// The archives noted since the last call ([`cached_dists`]).
+pub fn take_cached_dists() -> Vec<PathBuf> {
+    cached_dists()
+        .1
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .try_iter()
+        .collect()
+}
+
+/// Removes the archives this run put in Composer's files cache
+/// ([`take_cached_dists`]), before the run is handed to Composer. `Err`
+/// (the path and why) when one cannot be removed: Composer would then find
+/// it and print one `  - Downloading` line fewer than it does from a clean
+/// cache, so the hand-over could not be made identical — the caller stops
+/// with that error instead.
+pub fn take_back_cached_dists() -> std::result::Result<(), String> {
+    for path in take_cached_dists() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot take {} back from Composer's files cache before handing the run over ({e}); remove it and run again",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A new run: the configuration files are read again.
 pub fn forget_global_files() {
+    // (And the archives a previous run cached are its own.)
+    let _ = take_cached_dists();
     GLOBAL_FILES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -916,12 +973,6 @@ impl Fetcher {
     }
 
     /// `dist_bytes` for a given dist type (the cache file's extension).
-    /// Where [`Self::dist_bytes_of`] keeps a dist it fetched (Composer's
-    /// files cache).
-    pub fn dist_cache_file(&self, name: &str, url: &str, dist_type: &str) -> PathBuf {
-        dist_cache_path_of(&self.cache_root, name, url, dist_type)
-    }
-
     pub async fn dist_bytes_of(
         &self,
         name: &str,
@@ -1138,8 +1189,9 @@ impl Fetcher {
         if let Some(parent) = cache_path.parent() {
             if std::fs::create_dir_all(parent).is_ok() {
                 let tmp = cache_path.with_extension("zip.vivacity-tmp");
-                if std::fs::write(&tmp, bytes).is_ok() {
-                    let _ = std::fs::rename(&tmp, cache_path);
+                if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, cache_path).is_ok()
+                {
+                    note_cached_dist(cache_path);
                 }
             }
         }
@@ -1191,6 +1243,26 @@ impl Fetcher {
 
 #[cfg(test)]
 mod tests {
+    /// Every archive a run writes to Composer's files cache is noted, from
+    /// whichever caller downloads it (the install, Flex's dist reader): a
+    /// hand-over takes them back.
+    #[test]
+    fn an_archive_written_to_the_files_cache_is_noted() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("a.zip");
+        std::fs::write(&src, b"zip bytes").expect("write");
+        let fetcher = Fetcher::new(dir.path().join("cache"), Auth::default()).expect("fetcher");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let url = src.to_string_lossy().into_owned();
+        runtime
+            .block_on(fetcher.dist_bytes_of("acme/a", &url, "zip", None, false))
+            .expect("read");
+        let cached = dist_cache_path_of(&dir.path().join("cache"), "acme/a", &url, "zip");
+        assert!(cached.exists());
+        // Other tests may note theirs at the same time: this one is there.
+        assert!(take_cached_dists().contains(&cached));
+    }
+
     use super::*;
 
     /// A machine described in the test: its environment, the directories

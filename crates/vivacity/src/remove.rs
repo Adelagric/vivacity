@@ -117,7 +117,23 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
         !args.no_install && !args.dry_run,
         !args.dry_run,
         !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
-        &[],
+        &PoolStart {
+            allow: packages.clone(),
+            mode: Some(
+                if args.update_with_all_dependencies
+                    || args.with_all_dependencies
+                    || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES")
+                {
+                    vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDeps
+                } else if args.no_update_with_dependencies {
+                    vivacity_resolver::pool::UpdateMode::OnlyListed
+                } else {
+                    vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDepsNoRootRequire
+                },
+            ),
+            removed: packages.clone(),
+            ..PoolStart::default()
+        },
     )? {
         return Ok(code);
     }

@@ -568,13 +568,22 @@ pub fn repo_urls(url: &str) -> RepoUrls {
     }
 }
 
-/// What [`local_insecure_url`] looks at in a local repository.
-pub struct LocalScan<'a> {
-    /// The packages whose files the resolution reads for sure (the root's
-    /// requirements, the locked packages, `require`'s arguments),
-    /// lowercased: only their dists are judged, from their files only —
-    /// Composer reads no other.
-    pub names: &'a [String],
+/// What the pool of a resolution loads, as `PoolBuilder::buildPool`
+/// decides it before reading anything (PoolBuilder.php:215-290): the
+/// starting requirements, the locked packages a partial update fixes
+/// (their files are not read), and the stabilities it accepts.
+pub struct LocalScope {
+    /// Name (lowercased) → constraint, as marked for loading first: the
+    /// root's requirements not fixed, and the requirements of the fixed
+    /// packages that are not fixed themselves.
+    pub requires: Vec<(String, String)>,
+    /// Locked packages a partial update fixes, and the names they replace.
+    pub skipped: BTreeSet<String>,
+    /// `minimum-stability`.
+    pub minimum_stability: String,
+    /// Names with a stability flag in the root's requirements (`@dev`…):
+    /// every stability counts for them.
+    pub flagged: BTreeSet<String>,
     /// The command installs: the dists count.
     pub with_dists: bool,
     /// `policy.ignore-unreachable` off for the resolution: the policy
@@ -582,24 +591,42 @@ pub struct LocalScan<'a> {
     pub filters_fatal: bool,
 }
 
-/// For a `composer` repository whose files are local (`file://`), the
-/// first URL a run would request from what it names that `secure-http`
-/// does not let through as is (refused, or read from a setting vivacity
-/// hands over) — decided before the command prints or writes anything,
-/// and nothing read unless the setting can refuse at all. Read: its
-/// packages.json (the URLs it requests to load packages — `metadata-url`,
-/// the v1 provider URLs and includes, `providers-api`, `includes`, the
-/// dist mirrors of `mirrors` — and, when `filters_fatal`, the policy
-/// filters' URLs), then, when the command installs, the dists of the
-/// versions of `names` — inline, or in their files under a local
-/// `metadata-url`. Nothing Composer would not read itself (a package the
-/// resolution adds that `names` does not hold is judged once the lock is
-/// solved — the late hand-over of HANDOVER.md). `None` for a remote
-/// repository (its packages.json URL is judged on its own) or files that
-/// cannot be read (the session reports them).
+/// A local repository as read for [`local_insecure_url`].
+struct LocalRepo {
+    /// `metadata-url` naming local files: one per package name.
+    template: Option<String>,
+    listed: Option<Vec<String>>,
+    patterns: Vec<Regex>,
+    /// The versions held by packages.json (and, for a full repository, its
+    /// local includes), by name.
+    inline: BTreeMap<String, Vec<Value>>,
+    /// Package files read, by name (each once).
+    files: BTreeMap<String, Vec<Value>>,
+}
+
+/// For the local (`file://`) `composer` repositories of a resolution, the
+/// first URL a run would request that `secure-http` does not let through
+/// as is (refused, or read from a setting vivacity hands over) — decided
+/// before the command prints or writes anything, and nothing read unless
+/// the setting can refuse at all. Read: each packages.json (the URLs it
+/// requests to load packages — `metadata-url`, the v1 provider URLs and
+/// includes, `providers-api`, remote `includes`, the dist mirrors of
+/// `mirrors` — and, when `filters_fatal`, the policy filters' URLs); then,
+/// when the command installs, the packages the pool would load, as
+/// `PoolBuilder` loads them: from `scope.requires`, the versions each
+/// constraint admits (and the stabilities accept), then their `require`
+/// links, recursively, skipping the fixed packages — each version's dist
+/// (and mirrors) judged. The files are those Composer reads: a full
+/// repository's packages.json and local includes (`loadIncludes`), or one
+/// file per loaded name under a local `metadata-url`, within its
+/// `available-packages`. Broader than the download only by versions the
+/// pool loads and the solver does not pick (a hand-over Composer would not
+/// need). A package another repository provides is not followed (its
+/// dependencies are judged once the lock is solved, late). `None` when
+/// nothing is found or a file cannot be read (the session reports it).
 pub fn local_insecure_url(
-    configured: &str,
-    scan: &LocalScan<'_>,
+    repositories: &[String],
+    scope: &LocalScope,
 ) -> Option<(String, vivacity_core::secure_http::Verdict)> {
     use vivacity_core::secure_http::{classify, insecure, Verdict};
     // `secure-http` false (or offline): nothing can be refused, nothing to
@@ -610,26 +637,6 @@ pub fn local_insecure_url(
     ) {
         return None;
     }
-    let urls = repo_urls(configured);
-    let path = urls.packages_json_url.strip_prefix("file://")?.to_owned();
-    let scheme_host = |u: &str| -> String {
-        // `canonicalizeUrl`'s `{^[^:]++://[^/]*+}`.
-        match u.find("://") {
-            Some(i) => {
-                let rest = &u[i + 3..];
-                let end = rest.find('/').unwrap_or(rest.len());
-                u[..i + 3 + end].to_owned()
-            }
-            None => String::new(),
-        }
-    };
-    let canonical = |u: &str| -> String {
-        if u.starts_with('/') {
-            format!("{}{u}", scheme_host(&urls.url))
-        } else {
-            u.to_owned()
-        }
-    };
     let judge = |u: &str| -> Option<(String, Verdict)> {
         insecure(u)?;
         match classify(u) {
@@ -637,154 +644,264 @@ pub fn local_insecure_url(
             Verdict::Allowed | Verdict::Warn { .. } => None,
         }
     };
-    let read = |p: &std::path::Path| -> Option<Value> {
-        serde_json::from_slice(&std::fs::read(p).ok()?).ok()
-    };
-    // The dists of every version a package's entry holds.
-    fn dists<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
-        let versions: Vec<&Value> = match v {
-            Value::Array(a) => a.iter().collect(),
-            Value::Object(o) => o.values().collect(),
+    let read = |p: &str| -> Option<Value> { serde_json::from_slice(&std::fs::read(p).ok()?).ok() };
+    // A package entry's versions: a list or a map, expanded when minified.
+    fn versions_of(v: &Value, minified: bool) -> Vec<Value> {
+        let list: Vec<Value> = match v {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => o.values().cloned().collect(),
             _ => Vec::new(),
         };
-        for version in versions {
-            let Some(dist) = version.get("dist") else {
-                continue;
-            };
-            out.extend(dist.get("url").and_then(Value::as_str));
-            for m in dist
-                .get("mirrors")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                out.extend(m.get("url").and_then(Value::as_str));
+        if minified {
+            expand_minified_owned(list)
+        } else {
+            list
+        }
+    }
+    fn add_packages(into: &mut BTreeMap<String, Vec<Value>>, data: &Value) {
+        let minified = data.get("minified").and_then(Value::as_str) == Some("composer/2.0");
+        if let Some(packages) = data.get("packages").and_then(Value::as_object) {
+            for (name, v) in packages {
+                into.entry(name.to_lowercase())
+                    .or_default()
+                    .extend(versions_of(v, minified));
             }
         }
     }
-    let root = read(std::path::Path::new(&path))?;
-    let mut found: Vec<String> = Vec::new();
-    for key in [
-        "metadata-url",
-        "providers-url",
-        "providers-lazy-url",
-        "providers-api",
-    ] {
-        if let Some(u) = root.get(key).and_then(Value::as_str) {
-            found.push(canonical(u));
-        }
-    }
-    // The policy filters' URLs: Composer catches their refusal under
-    // `policy.ignore-unreachable` (the default) and vivacity writes it as
-    // Composer does; without it, the refusal stops Composer.
-    if scan.filters_fatal {
-        for (outer, inner) in [
-            ("security-advisories", "api-url"),
-            ("filter", "summary-url"),
-            ("filter", "api-url"),
+    let mut repos: Vec<LocalRepo> = Vec::new();
+    for configured in repositories {
+        let urls = repo_urls(configured);
+        let Some(path) = urls.packages_json_url.strip_prefix("file://") else {
+            continue;
+        };
+        let scheme_host = |u: &str| -> String {
+            // `canonicalizeUrl`'s `{^[^:]++://[^/]*+}`.
+            match u.find("://") {
+                Some(i) => {
+                    let rest = &u[i + 3..];
+                    let end = rest.find('/').unwrap_or(rest.len());
+                    u[..i + 3 + end].to_owned()
+                }
+                None => String::new(),
+            }
+        };
+        let canonical = |u: &str| -> String {
+            if u.starts_with('/') {
+                format!("{}{u}", scheme_host(&urls.url))
+            } else {
+                u.to_owned()
+            }
+        };
+        let root = read(path)?;
+        let mut found: Vec<String> = Vec::new();
+        for key in [
+            "metadata-url",
+            "providers-url",
+            "providers-lazy-url",
+            "providers-api",
         ] {
-            if let Some(u) = root
-                .get(outer)
-                .and_then(|o| o.get(inner))
-                .and_then(Value::as_str)
-            {
+            if let Some(u) = root.get(key).and_then(Value::as_str) {
                 found.push(canonical(u));
             }
         }
-    }
-    for (include, _) in root
-        .get("provider-includes")
-        .into_iter()
-        .chain(root.get("includes"))
-        .filter_map(Value::as_object)
-        .flatten()
-    {
-        if include.contains("://") {
-            found.push(include.clone());
-        }
-    }
-    for m in root
-        .get("mirrors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(u) = m.get("dist-url").and_then(Value::as_str) {
-            found.push(canonical(u));
-        }
-    }
-    for u in &found {
-        if let Some(hit) = judge(u) {
-            return Some(hit);
-        }
-    }
-    if !scan.with_dists {
-        return None;
-    }
-    // Inline: `initializePartialPackages` / `loadIncludes` key by the
-    // version's name; the entry of each name.
-    let wanted = |name: &str| scan.names.iter().any(|n| n.eq_ignore_ascii_case(name));
-    let mut out = Vec::new();
-    if let Some(packages) = root.get("packages").and_then(Value::as_object) {
-        for (name, v) in packages {
-            if wanted(name) {
-                dists(v, &mut out);
+        // The policy filters' URLs: Composer catches their refusal under
+        // `policy.ignore-unreachable` (the default) and vivacity writes it
+        // as Composer does; without it, the refusal stops Composer.
+        if scope.filters_fatal {
+            for (outer, inner) in [
+                ("security-advisories", "api-url"),
+                ("filter", "summary-url"),
+                ("filter", "api-url"),
+            ] {
+                if let Some(u) = root
+                    .get(outer)
+                    .and_then(|o| o.get(inner))
+                    .and_then(Value::as_str)
+                {
+                    found.push(canonical(u));
+                }
             }
         }
-    }
-    for u in &out {
-        if let Some(hit) = judge(u) {
-            return Some(hit);
+        for (include, _) in root
+            .get("provider-includes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            if include.contains("://") {
+                found.push(include.clone());
+            }
         }
-    }
-    // A local `metadata-url`: the file of each name the repository lists
-    // (`available-packages`, `available-package-patterns`: a name outside
-    // them is never requested), as `startCachedAsyncDownload` reads it.
-    let template = root
-        .get("metadata-url")
-        .and_then(Value::as_str)
-        .map(canonical)
-        .and_then(|u| u.strip_prefix("file://").map(str::to_owned))?;
-    let listed: Option<Vec<String>> = root
-        .get("available-packages")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_lowercase)
-                .collect()
-        });
-    let patterns: Vec<Regex> = root
-        .get("available-package-patterns")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(package_name_regexp)
-        .collect();
-    let declared = listed.is_some() || !patterns.is_empty();
-    for name in scan.names {
-        let name = name.to_lowercase();
-        if is_platform_package(&name) {
-            continue;
+        for m in root
+            .get("mirrors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(u) = m.get("dist-url").and_then(Value::as_str) {
+                found.push(canonical(u));
+            }
         }
-        let in_list = listed.as_ref().is_some_and(|l| l.contains(&name));
-        let in_patterns = patterns
+        let lazy = ["metadata-url", "providers-lazy-url"]
             .iter()
-            .any(|re| re.is_match(name.as_bytes()).unwrap_or(false));
-        if declared && !in_list && !in_patterns {
-            continue;
+            .any(|k| !php_empty(root.get(*k)));
+        // A full repository (`loadIncludes`): packages.json and its
+        // includes, recursively, all read by Composer.
+        let mut inline: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        add_packages(&mut inline, &root);
+        if !lazy {
+            let mut pending: Vec<Value> = vec![root.clone()];
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            while let Some(data) = pending.pop() {
+                for (include, _) in data
+                    .get("includes")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    let u = canonical(include);
+                    let u = if u.contains("://") {
+                        u
+                    } else {
+                        format!("{}/{}", urls.base_url, u.trim_start_matches('/'))
+                    };
+                    match u.strip_prefix("file://") {
+                        Some(local) if scope.with_dists => {
+                            if seen.insert(local.to_owned()) {
+                                let included = read(local)?;
+                                add_packages(&mut inline, &included);
+                                pending.push(included);
+                            }
+                        }
+                        Some(_) => {}
+                        None => found.push(u),
+                    }
+                }
+            }
         }
-        let Some(data) = read(std::path::Path::new(&template.replace("%package%", &name))) else {
-            continue;
-        };
-        let mut out = Vec::new();
-        if let Some(v) = data.get("packages").and_then(|p| p.get(name.as_str())) {
-            dists(v, &mut out);
-        }
-        for u in &out {
+        for u in &found {
             if let Some(hit) = judge(u) {
                 return Some(hit);
+            }
+        }
+        let template = root
+            .get("metadata-url")
+            .and_then(Value::as_str)
+            .map(canonical)
+            .and_then(|u| u.strip_prefix("file://").map(str::to_owned));
+        repos.push(LocalRepo {
+            template,
+            listed: root
+                .get("available-packages")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_lowercase)
+                        .collect()
+                }),
+            patterns: root
+                .get("available-package-patterns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(package_name_regexp)
+                .collect(),
+            inline,
+            files: BTreeMap::new(),
+        });
+    }
+    if !scope.with_dists || repos.is_empty() {
+        return None;
+    }
+    let min_rank = stability_rank(&scope.minimum_stability);
+    let mut queue: Vec<(String, String)> = scope.requires.clone();
+    let mut done: BTreeSet<(String, String)> = BTreeSet::new();
+    while let Some((name, constraint)) = queue.pop() {
+        let name = name.to_lowercase();
+        if scope.skipped.contains(&name)
+            || is_platform_package(&name)
+            || !done.insert((name.clone(), constraint.clone()))
+        {
+            continue;
+        }
+        // An unreadable constraint counts as any version (broader).
+        let parsed = crate::constraint::parse_constraints(&constraint)
+            .map(|p| p.constraint)
+            .unwrap_or(Constraint::MatchAll);
+        let every_stability = scope.flagged.contains(&name);
+        for repo in &mut repos {
+            let mut versions: Vec<Value> = repo.inline.get(&name).cloned().unwrap_or_default();
+            if let Some(template) = &repo.template {
+                let declared = repo.listed.is_some() || !repo.patterns.is_empty();
+                let in_list = repo.listed.as_ref().is_some_and(|l| l.contains(&name));
+                let in_patterns = repo
+                    .patterns
+                    .iter()
+                    .any(|re| re.is_match(name.as_bytes()).unwrap_or(false));
+                if !declared || in_list || in_patterns {
+                    let file = repo.files.entry(name.clone()).or_insert_with(|| {
+                        // `~dev` too when dev versions are acceptable for it.
+                        let mut out = Vec::new();
+                        let mut files = vec![template.replace("%package%", &name)];
+                        if every_stability || min_rank >= stability_rank("dev") {
+                            files.push(template.replace("%package%", &format!("{name}~dev")));
+                        }
+                        for f in files {
+                            if let Some(data) = read(&f) {
+                                let minified = data.get("minified").and_then(Value::as_str)
+                                    == Some("composer/2.0");
+                                if let Some(v) =
+                                    data.get("packages").and_then(|p| p.get(name.as_str()))
+                                {
+                                    out.extend(versions_of(v, minified));
+                                }
+                            }
+                        }
+                        out
+                    });
+                    versions.extend(file.iter().cloned());
+                }
+            }
+            for version in &versions {
+                let pretty = version.get("version").and_then(Value::as_str).unwrap_or("");
+                let normalized = version
+                    .get("version_normalized")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| normalize(pretty, None).ok())
+                    .unwrap_or_default();
+                if !every_stability && stability_rank(parse_stability(pretty)) > min_rank {
+                    continue;
+                }
+                if !parsed.matches_version(&normalized) {
+                    continue;
+                }
+                if let Some(dist) = version.get("dist") {
+                    let urls = dist.get("url").and_then(Value::as_str).into_iter().chain(
+                        dist.get("mirrors")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|m| m.get("url").and_then(Value::as_str)),
+                    );
+                    for u in urls {
+                        if let Some(hit) = judge(u) {
+                            return Some(hit);
+                        }
+                    }
+                }
+                for (dep, c) in version
+                    .get("require")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(c) = c.as_str() {
+                        queue.push((dep.to_lowercase(), c.to_owned()));
+                    }
+                }
             }
         }
     }

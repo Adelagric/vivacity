@@ -23,7 +23,7 @@ pub(crate) fn resolution_fallback(
     with_install: bool,
     post_update_cmd: bool,
     with_dev: bool,
-    extra_names: &[String],
+    start: &PoolStart,
 ) -> anyhow::Result<Option<i32>> {
     let mut issues = vivacity_core::scope::resolution_issues(
         project,
@@ -102,7 +102,7 @@ pub(crate) fn resolution_fallback(
         manifest,
         with_install,
         with_dev,
-        extra_names,
+        start,
     ));
     if issues.is_empty() {
         return Ok(None);
@@ -110,21 +110,33 @@ pub(crate) fn resolution_fallback(
     delegate_resolution(&issues, no_fallback).map(Some)
 }
 
+/// What a resolution's pool starts from, as the command knows it before
+/// anything is printed: `update <packages>` (the allow list and its
+/// transitive mode), `require` (the requirements it adds, which a lock
+/// makes the allow list), `remove` (the packages it drops). Empty: a full
+/// update.
+#[derive(Default)]
+pub(crate) struct PoolStart {
+    pub allow: Vec<String>,
+    pub mode: Option<vivacity_resolver::pool::UpdateMode>,
+    pub added: Vec<(String, String)>,
+    pub removed: Vec<String>,
+}
+
 /// The first `composer` repository of the merged configuration (the global
 /// config.json, then composer.json, `MergedConfig::load`) that `secure-http`
 /// does not let through as is — refused, or judged on a setting vivacity
 /// hands over — as a hand-over reason: its packages.json URL for a remote
-/// one; for a local one (`file://`), the URLs its metadata names — its
-/// dists too when the command installs
-/// ([`vivacity_resolver::repository::local_insecure_url`]) — read without a
-/// request. Over the common path (every repository `https`): a string test
-/// each, on files the run has read already.
+/// one; for the local ones (`file://`), what their files name, read as the
+/// pool would read them ([`vivacity_resolver::repository::local_insecure_url`]),
+/// without a request. Over the common path (every repository `https`): a
+/// string test each, on files the run has read already.
 fn insecure_repository_issue(
     project: &std::path::Path,
     manifest: &serde_json::Value,
     with_install: bool,
     with_dev: bool,
-    extra_names: &[String],
+    start: &PoolStart,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
     use serde_json::Value;
     use vivacity_core::secure_http::{classify, insecure, Verdict};
@@ -136,17 +148,21 @@ fn insecure_repository_issue(
         Verdict::HandOver(reason) => Some(format!("with {reason}")),
         Verdict::Allowed | Verdict::Warn { .. } => None,
     };
-    // `policy.ignore-unreachable` off for the resolution's filters: their
-    // refusal stops Composer (a policy vivacity cannot read: counted).
-    let filters_fatal = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy)
-        .map_or(true, |p| {
-            !(p.ignore_unreachable.update && p.ignore_unreachable.install)
-        });
-    let mut names: Option<Vec<String>> = None;
+    let mut local: Vec<String> = Vec::new();
     for repo in &config.repositories {
         let def = &repo.definition;
         if def.get("type").and_then(Value::as_str) != Some("composer") {
             continue;
+        }
+        // `allow_ssl_downgrade` (=== true): without a `metadata-url`,
+        // Composer reads the rest of the repository over `http` once its
+        // packages.json is in (ComposerRepository.php:190, :1552-1555) —
+        // refused, or warned about; not reproduced.
+        if def.get("allow_ssl_downgrade") == Some(&Value::Bool(true)) {
+            return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                "repository {} sets allow_ssl_downgrade (not reproduced)",
+                def.get("url").and_then(Value::as_str).unwrap_or("?")
+            )));
         }
         let Some(url) = def.get("url").and_then(Value::as_str) else {
             continue;
@@ -165,63 +181,187 @@ fn insecure_repository_issue(
             }
             continue;
         }
-        if !urls.packages_json_url.starts_with("file://") {
-            continue;
+        if urls.packages_json_url.starts_with("file://") {
+            local.push(url.to_owned());
         }
-        // The names whose files the resolution reads for sure: the root's
-        // requirements, the locked packages, `require`'s arguments (read
-        // once, for the first local repository only).
-        let names = names.get_or_insert_with(|| {
-            let sections = if with_dev {
-                &["require", "require-dev"][..]
-            } else {
-                &["require"][..]
-            };
-            let mut names: Vec<String> = sections
-                .iter()
-                .filter_map(|k| manifest.get(*k).and_then(Value::as_object))
-                .flat_map(|o| o.keys().map(|k| k.to_lowercase()))
-                .chain(extra_names.iter().map(|n| n.to_lowercase()))
-                .collect();
-            if with_install {
-                if let Some(lock) = vivacity_core::jsonfile::read(&project.join("composer.lock")) {
-                    let lock_sections = if with_dev {
-                        &["packages", "packages-dev"][..]
-                    } else {
-                        &["packages"][..]
-                    };
-                    names.extend(
-                        lock_sections
-                            .iter()
-                            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
-                            .flatten()
-                            .filter_map(|p| p.get("name").and_then(Value::as_str))
-                            .map(str::to_lowercase),
-                    );
+    }
+    if local.is_empty() {
+        return None;
+    }
+    // `policy.ignore-unreachable` off for the resolution's filters: their
+    // refusal stops Composer (a policy vivacity cannot read: counted).
+    let filters_fatal = vivacity_resolver::policy_config::PolicyConfig::from_raw(&config.policy)
+        .map_or(true, |p| {
+            !(p.ignore_unreachable.update && p.ignore_unreachable.install)
+        });
+    let scope = pool_scope(
+        project,
+        manifest,
+        with_install,
+        with_dev,
+        start,
+        filters_fatal,
+    );
+    let (found, verdict) = vivacity_resolver::repository::local_insecure_url(&local, &scope)?;
+    why(verdict).map(|why| {
+        vivacity_core::scope::ScopeIssue::Layout(format!(
+            "a local repository names {} (an insecure protocol), {why}",
+            vivacity_resolver::metacache::sanitize_url(&found)
+        ))
+    })
+}
+
+/// `PoolBuilder::buildPool`'s start (PoolBuilder.php:215-290): the root's
+/// requirements (`require`, `require-dev` in dev mode, `require`'s
+/// additions, not `remove`'s drops); in a partial update (an allow list and
+/// a lock), the locked packages outside the allow list — widened along the
+/// lock's `require` links for the transitive modes, root requirements left
+/// out for `-w` — are fixed: their files are not read, and their own
+/// requirements are marked for loading unless fixed too. The lock is read
+/// only then, and only for a local repository.
+fn pool_scope(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    with_install: bool,
+    with_dev: bool,
+    start: &PoolStart,
+    filters_fatal: bool,
+) -> vivacity_resolver::repository::LocalScope {
+    use serde_json::Value;
+    use vivacity_resolver::pool::UpdateMode;
+    let removed: Vec<String> = start.removed.iter().map(|n| n.to_lowercase()).collect();
+    let sections: &[&str] = if with_dev {
+        &["require", "require-dev"]
+    } else {
+        &["require"]
+    };
+    let mut root: Vec<(String, String)> = sections
+        .iter()
+        .filter_map(|k| manifest.get(*k).and_then(Value::as_object))
+        .flatten()
+        .filter_map(|(n, c)| Some((n.to_lowercase(), c.as_str()?.to_owned())))
+        .filter(|(n, _)| !removed.contains(n))
+        .collect();
+    for (name, constraint) in &start.added {
+        let name = name.to_lowercase();
+        root.retain(|(n, _)| *n != name);
+        root.push((name, constraint.clone()));
+    }
+    let flagged = root
+        .iter()
+        .filter(|(_, c)| c.contains('@'))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let minimum_stability = match manifest
+        .get("minimum-stability")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("rc") => "RC".to_owned(),
+        Some(s @ ("dev" | "alpha" | "beta")) => s.to_owned(),
+        _ => "stable".to_owned(),
+    };
+    let mut skipped = std::collections::BTreeSet::new();
+    let mut requires = root.clone();
+    let mut allow: Vec<String> = start.allow.iter().map(|n| n.to_lowercase()).collect();
+    allow.extend(start.added.iter().map(|(n, _)| n.to_lowercase()));
+    let lock = (!allow.is_empty())
+        .then(|| vivacity_core::jsonfile::read(&project.join("composer.lock")))
+        .flatten();
+    if let Some(lock) = lock {
+        let locked: Vec<&Value> = ["packages", "packages-dev"]
+            .iter()
+            .filter_map(|k| lock.get(*k).and_then(Value::as_array))
+            .flatten()
+            .collect();
+        let name_of = |p: &Value| {
+            p.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase()
+        };
+        let patterns: Vec<_> = allow
+            .iter()
+            .map(|a| vivacity_resolver::pool::package_name_regexp(a))
+            .collect();
+        let mut allowed: std::collections::BTreeSet<String> = locked
+            .iter()
+            .map(|p| name_of(p))
+            .filter(|n| {
+                patterns
+                    .iter()
+                    .any(|re| re.is_match(n.as_bytes()).unwrap_or(false))
+            })
+            .collect();
+        // The transitive modes: the dependencies of what is allowed, as the
+        // lock links them (`-w` leaves the root's requirements locked).
+        if let Some(mode) = start.mode.filter(|m| *m != UpdateMode::OnlyListed) {
+            let root_names: Vec<&String> = root.iter().map(|(n, _)| n).collect();
+            let mut pending: Vec<String> = allowed.iter().cloned().collect();
+            while let Some(name) = pending.pop() {
+                let Some(p) = locked.iter().find(|p| name_of(p) == name) else {
+                    continue;
+                };
+                for dep in p
+                    .get("require")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .map(|(d, _)| d.to_lowercase())
+                {
+                    if mode == UpdateMode::ListedWithTransitiveDepsNoRootRequire
+                        && root_names.contains(&&dep)
+                    {
+                        continue;
+                    }
+                    if allowed.insert(dep.clone()) {
+                        pending.push(dep);
+                    }
                 }
             }
-            names.sort();
-            names.dedup();
-            names
-        });
-        let scan = vivacity_resolver::repository::LocalScan {
-            names,
-            with_dists: with_install,
-            filters_fatal,
-        };
-        if let Some((found, verdict)) =
-            vivacity_resolver::repository::local_insecure_url(url, &scan)
-        {
-            if let Some(why) = why(verdict) {
-                return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
-                    "repository {} names {} (an insecure protocol), {why}",
-                    vivacity_resolver::metacache::sanitize_url(&urls.url),
-                    vivacity_resolver::metacache::sanitize_url(&found)
-                )));
+        }
+        for p in &locked {
+            let name = name_of(p);
+            if allowed.contains(&name) {
+                continue;
+            }
+            skipped.insert(name);
+            for (target, _) in p
+                .get("replace")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                skipped.insert(target.to_lowercase());
+            }
+        }
+        // A fixed package's requirements are marked for loading.
+        for p in &locked {
+            if allowed.contains(&name_of(p)) {
+                continue;
+            }
+            for (dep, c) in p
+                .get("require")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(c) = c.as_str() {
+                    requires.push((dep.to_lowercase(), c.to_owned()));
+                }
             }
         }
     }
-    None
+    requires.retain(|(n, _)| !skipped.contains(n));
+    vivacity_resolver::repository::LocalScope {
+        requires,
+        skipped,
+        minimum_stability,
+        flagged,
+        with_dists: with_install,
+        filters_fatal,
+    }
 }
 
 /// Prints the reasons, then re-runs the command under Composer (or stops
@@ -336,6 +476,13 @@ pub(crate) fn hand_over(
     // The Composer started here writes its own root-version warning: what
     // vivacity still holds is dropped, not written twice.
     vivacity_core::io::drop_held();
+    // The archives this run put in Composer's files cache (an install, Flex
+    // reading dists) would spare Composer their `  - Downloading` lines:
+    // taken back first; one that cannot be stops the run here.
+    if let Err(why) = vivacity_core::fetch::take_back_cached_dists() {
+        vivacity_core::say_always!("Error: {why}");
+        return Ok(1);
+    }
     let line = args
         .iter()
         .map(|a| a.to_string_lossy().into_owned())

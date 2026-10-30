@@ -423,11 +423,26 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
                 !(args.update_no_dev || env_flag("COMPOSER_NO_DEV")),
-                &args
-                    .packages
-                    .iter()
-                    .map(|p| crate::package_of_requirement(p).to_owned())
-                    .collect::<Vec<_>>(),
+                &crate::PoolStart {
+                    added: parse_name_version_pairs(&args.packages)
+                        .into_iter()
+                        .map(|(n, v)| (n, v.unwrap_or_else(|| "*".to_owned())))
+                        .collect(),
+                    mode: if args.update_with_all_dependencies
+                        || args.with_all_dependencies
+                        || env_flag("COMPOSER_WITH_ALL_DEPENDENCIES")
+                    {
+                        Some(vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDeps)
+                    } else if args.update_with_dependencies
+                        || args.with_dependencies
+                        || env_flag("COMPOSER_WITH_DEPENDENCIES")
+                    {
+                        Some(vivacity_resolver::pool::UpdateMode::ListedWithTransitiveDepsNoRootRequire)
+                    } else {
+                        None
+                    },
+                    ..crate::PoolStart::default()
+                },
             )? {
                 return Ok(code);
             }

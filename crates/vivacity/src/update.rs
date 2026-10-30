@@ -257,7 +257,11 @@ pub(crate) fn run_update(args: &UpdateArgs) -> anyhow::Result<i32> {
                 !args.no_install && !args.dry_run,
                 !args.dry_run,
                 !(args.no_dev || env_no_dev()),
-                &[],
+                &PoolStart {
+                    allow: allow_list.clone(),
+                    mode: Some(transitive),
+                    ..PoolStart::default()
+                },
             )? {
                 return Ok(code);
             }
