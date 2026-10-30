@@ -5866,3 +5866,115 @@ d'`InstallationManager` ; un Composer enfant attendu sans relais des
 signaux (antérieur) ; l'`api-url` d'un dépôt local à la résolution et les
 dépôts distants (tardifs) ; l'avertissement « packagist key » des dépôts de
 COMPOSER_HOME/composer.json.
+
+## 2026-10-30 — `signals.rs` : pourquoi du `unsafe` (libc brute plutôt que signal-hook), et ses invariants (docs/plans/parity-gaps-026.md)
+
+**Pourquoi le code sûr ne suffit pas.** La bibliothèque standard n'expose ni
+`sigaction`, ni `kill`, ni `pipe2`, ni l'adresse d'`errno` : poser un
+gestionnaire, rétablir l'action précédente, renvoyer un signal à soi-même
+(`exitWithLastSignal`) ou à un enfant passent par la FFI de libc (déjà une
+dépendance de vivacity-core sur macOS et Linux). Aucune dépendance ajoutée.
+
+**Invariants.**
+
+- **Le gestionnaire** (`on_signal`) ne fait que : sauver puis rétablir
+  `errno` ; `getpid` ; charger et stocker des atomiques (sans verrou) ;
+  `write` d'un octet pris sur sa pile vers l'extrémité d'écriture du tube,
+  non bloquante. Rien d'autre : ni allocation, ni verrou, ni E/S Rust.
+  Tout le reste (retour en arrière, relais à l'enfant, mort par le signal)
+  se fait dans un fil ordinaire qui lit le tube.
+- **`WRITES`** n'est tenu que par une `WriteGate`, le temps d'une écriture de
+  composer.json ou du lock (l'édition, le lock, la mise à jour des
+  contraintes, le retour en arrière, les recettes de Flex), et aucune ligne
+  n'est écrite sous une `WriteGate` (un fil arrêté à son `checkpoint` la
+  tiendrait). Le fil du signal la prend — en essayant pendant cinq secondes
+  au plus — et ne la rend jamais : une écriture en cours finit, aucune ne
+  suit. Passé ce délai (un fil qui la tiendrait bloqué ailleurs), le retour
+  en arrière se fait sans elle, et une écriture alors en cours pourrait
+  finir après lui : le prix de ne jamais rester suspendu.
+- **Signal pris avant le retrait** : le gestionnaire marque le run
+  (`ABORTING`) ; si les gestionnaires sont retirés avant que le fil lise
+  l'octet, `release` garde le retour en arrière et le fil le fait quand
+  même — le signal n'est ni perdu ni laissé à mi-chemin.
+- **Mort par le signal** : action par défaut rétablie puis `raise(3)` (le
+  signal va au fil qui l'envoie, pas à un fil qui ne tournerait plus), puis
+  `exit(128 + n)` s'il survit.
+- **`fork`/`exec`** : un enfant hérite des gestionnaires entre `fork` et
+  `exec` ; le gestionnaire compare `getpid` au processus qui les a posés et
+  ne fait rien d'autre dans un enfant.
+- **CLOEXEC** : `pipe2(O_CLOEXEC)` sous Linux ; macOS n'a pas `pipe2`,
+  `pipe` puis `FD_CLOEXEC` (un processus lancé par un autre fil entre les
+  deux hérite des descripteurs, sans jamais y écrire).
+- **Le tube n'est jamais fermé** : un seul tube et un seul fil pour le
+  processus, créés au premier besoin (la boucle de lecture traite une erreur
+  par défense : la mort par le signal si un signal était déjà pris). Un gestionnaire qui a lu le
+  descripteur juste avant le retrait n'écrit jamais dans un descripteur
+  réutilisé ; un octet arrivé après le retrait est ignoré (mode « aucun »).
+  Coût : deux descripteurs jusqu'à la sortie, seulement pour un run qui a
+  posé des gestionnaires.
+
+**Ce que signal-hook ferait, et ne ferait pas ici** (relevé par la revue).
+`Signals`, `flag::register` et `emulate_default_handler` remplaceraient le
+tube et le `sigaction`. Mais : noter `SUSPENDED` au moment du signal, dans le
+gestionnaire, demande `low_level::register` (non sûr de toute façon) ; le
+registre ne rétablit jamais la disposition précédente — après le retrait,
+un répartiteur qui ne fait rien reste à la place de SIG_DFL ou SIG_IGN (un
+signal ignoré, ou plus mortel, pour la suite du processus et pour un
+programme qui embarque vivacity) ; relayer à un enfant demande `kill` de
+toute façon ; et rien n'y remplace `WriteGate`, `checkpoint` ni `suspend`.
+signal-hook-registry, déjà dans l'arbre par tokio, a le même défaut de
+retrait.
+
+**Preuve.** miri ne sait pas exécuter ces appels système : la preuve est
+`harness/require-signals.sh`, qui compare à Composer, octet pour octet,
+code de sortie (mort par le signal), sortie et fichiers, pour les trois
+signaux, un lock, un composer.json créé, la sortie retenue, `-v`, et une
+commande rendue à Composer dont vivacity seul reçoit le signal.
+
+## 2026-10-30 — Huitième revue : relais des signaux à un Composer enfant, portes de Flex, durcissements (docs/plans/parity-gaps-026.md)
+
+**Constat.** Une commande rendue à Composer laissait vivacity en parent nu :
+un SIGTERM envoyé à vivacity seul (`timeout`, `docker stop`, systemd
+`KillMode=process`) le tuait et laissait l'enfant PHP finir seul,
+composer.json édité ; un enfant tué par un signal donnait la sortie 1. Les
+écritures de composer.json et du lock par les recettes de Flex
+contournaient la porte. Le fil du signal pouvait attendre la porte sans
+fin ; une erreur de lecture du tube abandonnait la mort par le signal ; le
+tube était fermé au retrait (course avec un gestionnaire en vol), `errno`
+non rétabli, l'écriture bloquante. `parse_url` acceptait des ports que
+vivacity refusait. 18g comparait les clés sans la casse.
+
+**Fait.** Dès avant le lancement d'un Composer enfant (toute délégation)
+et jusqu'à sa fin, les trois signaux lui sont relayés (`kill` ; un signal
+venu pendant le lancement l'est une fois son pid connu ; l'enfant est
+attendu sans être récolté — `waitid(WNOWAIT)` — tant que le relais est
+posé, pour ne jamais viser un pid réutilisé) ; il les traite comme Composer
+seul puis vivacity meurt du même signal (`128 + n` pour la bibliothèque, et
+pour un signal qui produit un core : le core de vivacity n'est pas celui de
+Composer). Choix :
+relayer toujours plutôt qu'ignorer — un signal de terminal envoyé au groupe
+atteint l'enfant deux fois, mais ses gestionnaires (et l'action par défaut)
+le terminent au premier : rien d'observable ; ignorer laisserait l'enfant
+sourd à un signal adressé au seul vivacity. Rien n'est posé hors
+délégation. Recettes de Flex derrière la porte ; porte attendue cinq
+secondes au plus ; tube unique jamais fermé, non bloquant, `pipe2` sous
+Linux ; `errno` sauvé ; `raise(3)` pour mourir ; un signal pris juste avant
+le retrait des gestionnaires est traité quand même. Ports lus comme `strtol` les lit (`80a`, `+80`,
+` 80`), hôtes entre crochets comme PHP. 18g : clés exactes. Sans `pcntl`
+dans le PHP sondé par ce run, pas de retour en arrière (Composer n'a pas de
+gestionnaire) ; sans `posix`, sortie `128 + n`, pendant les opérations sur
+les paquets aussi (le gestionnaire d'`InstallationManager` finit par le
+même `exitWithLastSignal`).
+
+**Vu rouge (23ff273) puis vert.** `handed-term`, `handed-int`
+(require-signals.sh) ; test unitaire des URL (`80a`, `[::1]x`…). `hold-vv`
+stabilisé (`COMPOSER_TEST_SUITE`, le ramasse-miettes tiré au sort de
+Composer à `-vv`).
+
+**Laissé.** `runCleanup` d'`InstallationManager` (téléchargements et
+extractions partiels retirés) non reproduit ; avant la sonde de plateforme
+du run, `pcntl` supposé présent, et la sonde dit « extension chargée » là
+où seld teste `function_exists` (des fonctions retirées par
+`disable_functions` passent pour présentes) ; sans `pcntl` sous `nohup`,
+Composer ignore SIGHUP (disposition héritée) quand vivacity, qui a posé son
+gestionnaire, meurt ; Windows.

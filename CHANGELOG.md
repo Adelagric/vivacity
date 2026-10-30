@@ -133,6 +133,11 @@ byte-identical-output promise are the public API.
   same signal. Not during the package operations, where Composer's
   installer handles the signal itself, and not on Windows. Installed by the
   binary only: an embedder of the library keeps its own signal handling.
+- **A command handed to Composer passes termination signals on.** While
+  vivacity waits for the Composer it started, SIGINT, SIGTERM and SIGHUP
+  sent to vivacity alone (`timeout`, `docker stop`) reach that Composer,
+  which reverts and ends as it would run directly; vivacity then ends by
+  the same signal instead of exiting 1.
 - **Repository definitions Composer refuses or warns about go to Composer
   at startup**: a `composer` URL without a host or with an invalid port, a
   user `filter` that is not booleans by list name, a malformed

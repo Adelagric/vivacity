@@ -692,6 +692,37 @@ relais des signaux (antérieur) ; l'avertissement « packagist key » des
 dépôts de COMPOSER_HOME/composer.json (le `Composer` global) — lire ce
 fichier au démarrage coûterait une lecture à chaque commande.
 
+## Huitième revue (9f1117a..23ff273) : plan et fait
+
+- **D.** DECISIONS justifie le `unsafe` de `signals.rs` (invariants, ce que
+  signal-hook ferait ou non, preuve par `harness/require-signals.sh`).
+- **1.** Délégation : `signals::spawn_forwarding` relaie SIGINT/SIGTERM/SIGHUP
+  au Composer enfant dès avant son lancement (un signal venu pendant est
+  relayé une fois le pid connu ; enfant attendu sans être récolté tant que
+  le relais est posé), puis `exit_code_of` fait mourir vivacity du même
+  signal (`128 + n` pour la bibliothèque et les signaux à core). Relais
+  toujours (un signal de groupe arrive deux fois à l'enfant, sans effet
+  observable).
+- Revue indépendante de ce lot : signal pris juste avant le retrait (traité
+  quand même), trou entre lancement et relais (fermé), `raise(3)` au lieu
+  de `kill(getpid())`, `posix` aussi pendant les opérations, pid réutilisé
+  (`waitid(WNOWAIT)`), crochets de `parse_url` (hôte tout entier entre
+  crochets seulement), affirmations de DECISIONS corrigées ; inventoriés :
+  `nohup` sans `pcntl`, `function_exists` contre extension chargée.
+- **2.** Recettes de Flex : composer.json et le lock derrière `write_gate` ;
+  doc du module exacte ; `runCleanup` inventorié (32b).
+- **3, 4.** Un tube et un fil pour le processus, jamais fermés ; écriture
+  non bloquante, `pipe2(O_CLOEXEC)` sous Linux, `FD_CLOEXEC` sous macOS ;
+  `errno` sauvé ; porte attendue cinq secondes au plus ; mort par le signal
+  si le tube ne se lit plus pendant un retour en arrière ; plus de
+  `unsafe impl Send`.
+- **5.** Ports lus comme `strtol`, crochets comme PHP (test unitaire contre
+  les sorties de `parse_url`).
+- **6.** 18g : clés exactes. `pcntl`/`posix` lus dans la sonde de plateforme
+  du run quand elle a eu lieu, sinon supposés (inventaire 32b).
+- Bancs : `COMPOSER_TEST_SUITE` dans secure-http.sh (`hold-vv` instable :
+  ramasse-miettes tiré au sort à `-vv`).
+
 ## Résultats
 
 Les trois points sont fermés. Bancs verts sur le binaire final :
@@ -911,12 +942,22 @@ la décision revient au mainteneur.
     dépôt local à la résolution (dépend de ce que le pool y a lu) et les
     dépôts distants (packages.json par requête).
 32b. **Signal pendant `require`** — fermé le 2026-10-30 (macOS, Linux ;
-    binaire seulement, `harness/require-signals.sh`). Restent : Windows
-    (Ctrl-C), le `runCleanup` d'`InstallationManager` pendant les
-    opérations, un Composer enfant attendu sans relais des signaux.
+    binaire seulement, `harness/require-signals.sh`) ; le Composer enfant
+    d'une délégation reçoit les signaux envoyés à vivacity, qui meurt du
+    même signal (huitième revue). Restent : Windows (Ctrl-C) ; le
+    `runCleanup` d'`InstallationManager` (téléchargements et extractions
+    partiels retirés quand un signal arrive pendant les opérations) — non
+    reproduit, ce que vivacity extrayait reste en place ; avant la sonde de
+    plateforme du run, `pcntl` est supposé chargé (Composer sans `pcntl`
+    n'a pas de gestionnaire : vivacity n'en tient compte qu'une fois la
+    sonde faite, sans en lancer une pour cela) ; la sonde dit « extension
+    chargée », seld teste `function_exists` (`disable_functions`) ; sans
+    `pcntl` sous `nohup`, Composer survit à SIGHUP, vivacity non.
 32c. **URL de dépôt `composer` que le constructeur refuse** — fermé le
     2026-10-30 (rendu au démarrage, avec les `filter`, `only`/`exclude`/
-    `canonical` et définitions mal formés).
+    `canonical` et définitions mal formés). Ports et hôtes entre crochets lus
+    comme `parse_url` (huitième revue : `80a`, `+80`, ` 80`, `[::1`,
+    `[::1]x` acceptés comme PHP les accepte).
 32d. **Avertissement « Repository … has a packagist key »** — fermé le
     2026-10-30 pour composer.json et le config.json global (rendu au
     démarrage). Reste : les dépôts de COMPOSER_HOME/composer.json (le
