@@ -139,6 +139,11 @@ pub fn refusal(sanitized_url: &str) -> String {
     )
 }
 
+/// Whether a transport error is a [`refusal`].
+pub fn is_refusal(message: &str) -> bool {
+    message.starts_with("Your configuration does not allow connections to ")
+}
+
 /// The warning line for one host.
 pub fn warning(scheme: &str, host: &str) -> String {
     format!("Warning: Accessing {host} over {scheme} which is an insecure protocol.")
@@ -225,61 +230,82 @@ pub fn request(url: &str) -> Result<Option<String>, Verdict> {
 }
 
 /// The run's setting: `Ok(secure-http)` as `Config::get('secure-http')`
-/// returns it, or why Composer would read it from where vivacity does not.
-/// Read only once an insecure URL shows up.
+/// returns it, or why the run is Composer's. Read only once an insecure URL
+/// shows up.
 fn read_setting(project: Option<&Path>) -> Result<bool, String> {
-    // COMPOSER_AUTH is merged under `config` last of all, after the project
-    // (Factory.php:344): a setting there wins over everything, unread here.
-    let env_auth = std::env::var("COMPOSER_AUTH").unwrap_or_default();
-    if !env_auth.is_empty() && env_auth != "0" {
-        match serde_json::from_str::<Value>(&env_auth) {
-            Ok(v) => {
-                for key in ["secure-http", "disable-tls"] {
-                    if v.get(key).is_some() {
-                        return Err(format!("{key} in COMPOSER_AUTH"));
-                    }
-                }
-            }
-            Err(_) => return Err("COMPOSER_AUTH is not valid JSON".to_owned()),
-        }
-    }
     let manifest = project.and_then(|p| crate::jsonfile::read(&p.join("composer.json")));
     let project_config = manifest.as_ref().and_then(|m| m.get("config"));
     // The project's auth.json is merged under `config` after composer.json
-    // (Factory.php:334-338): a setting there is not read here.
-    if let Some(auth) = project.and_then(|p| crate::jsonfile::read(&p.join("auth.json"))) {
-        for key in ["secure-http", "disable-tls"] {
-            if auth.get(key).is_some() {
-                return Err(format!("{key} in auth.json"));
-            }
-        }
-    }
-    let global = |key: &str| crate::fetch::global_config_value_checked(key);
-    let disable_tls = match project_config.and_then(|c| c.get("disable-tls")) {
-        Some(v) => Some(v.clone()),
-        None => global("disable-tls")?,
+    // (Factory.php:334-338); one that is not valid JSON stops Composer.
+    let project_auth = match project.map(|p| p.join("auth.json")) {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Err(_) => None,
+            Ok(text) => Some(
+                serde_json::from_str::<Value>(&text)
+                    .map_err(|_| format!("{} is not valid JSON", path.display()))?,
+            ),
+        },
+        None => None,
     };
     // `disable-tls` true turns `secure-http` off, and does more (no TLS, a
-    // warning of its own at `Factory::createHttpDownloader`): not ported.
-    if disable_tls.as_ref().is_some_and(config_bool) {
+    // line of its own at `Factory::createHttpDownloader`): the commands hand
+    // it to Composer before anything ([`disable_tls_reason`]).
+    if layered("disable-tls", project_config, project_auth.as_ref())? == Some(true) {
         return Err("disable-tls is set".to_owned());
     }
-    let value = match project_config.and_then(|c| c.get("secure-http")) {
-        Some(v) => Some(v.clone()),
-        None => global("secure-http")?,
-    };
-    Ok(value.as_ref().is_none_or(config_bool))
+    Ok(layered("secure-http", project_config, project_auth.as_ref())?.unwrap_or(true))
 }
 
-/// `$this->config[$key] !== 'false' && (bool) $this->config[$key]`.
-fn config_bool(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !(s.is_empty() || s == "0" || s == "false"),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
+/// One key of `Config` as `Factory` merges it under `config`, each layer
+/// replacing the previous value (`Config::merge`, `null` included): the
+/// global config.json's `config`, the global auth.json, COMPOSER_AUTH
+/// (`createConfig`, Factory.php:209-215), then composer.json's `config`, the
+/// project's auth.json and COMPOSER_AUTH again (`createComposer`,
+/// :325-344). `Err` for what Composer reports or stops on: a file or
+/// COMPOSER_AUTH it cannot read, or a value that is not a JSON boolean
+/// (composer.json's schema refuses it; the other layers' schema check
+/// warns) — the key is typed boolean in both schemas.
+fn layered(
+    key: &str,
+    project_config: Option<&Value>,
+    project_auth: Option<&Value>,
+) -> Result<Option<bool>, String> {
+    let (global_config, global_auth) = crate::fetch::global_config_files()?;
+    let env = crate::fetch::composer_auth_env(std::env::var("COMPOSER_AUTH").ok().as_deref())?;
+    let layers = [
+        (
+            "the global config.json",
+            global_config.as_ref().and_then(|c| c.get("config")),
+        ),
+        ("the global auth.json", global_auth.as_ref()),
+        ("composer.json", project_config),
+        ("auth.json", project_auth),
+        ("COMPOSER_AUTH", env.as_ref()),
+    ];
+    let mut value = None;
+    for (source, layer) in layers {
+        match layer.and_then(|l| l.get(key)) {
+            None => {}
+            Some(Value::Bool(b)) => value = Some(*b),
+            Some(_) => return Err(format!("{key} in {source} is not a boolean")),
+        }
+    }
+    Ok(value)
+}
+
+/// `disable-tls` as `Config::get` returns it, on the layers a command has
+/// in memory before it writes anything — all of them but the project's
+/// auth.json, which only the transport reads (opening it on every run to
+/// look for a key that is never there is a cost the common path does not
+/// pay; set only there, the setting is found once an insecure URL shows
+/// up). `Some(reason)` where Composer writes « You are running Composer with
+/// SSL/TLS protection disabled. » (Factory.php:649-651) and turns TLS off,
+/// or reports the value: the command is Composer's.
+pub fn disable_tls_reason(project_config: Option<&Value>) -> Option<String> {
+    match layered("disable-tls", project_config, None) {
+        Ok(Some(true)) => Some("disable-tls is set".to_owned()),
+        Ok(_) => None,
+        Err(why) => Some(why),
     }
 }
 
@@ -323,16 +349,6 @@ mod tests {
         assert!(!curl_exempt("http://example.org/p/$x"));
     }
 
-    #[test]
-    fn the_setting_is_read_as_config_get_reads_it() {
-        assert!(config_bool(&Value::Bool(true)));
-        assert!(!config_bool(&Value::String("false".into())));
-        assert!(!config_bool(&Value::String("0".into())));
-        assert!(config_bool(&Value::String("no".into())));
-        assert!(!config_bool(&Value::Bool(false)));
-        assert!(!config_bool(&serde_json::json!(0)));
-    }
-
     /// The one test that drives the process-wide state (the others do not
     /// touch it): a run, its `Config`'s warned hosts, a second `Composer`.
     #[test]
@@ -372,12 +388,17 @@ mod tests {
             classify(url),
             Verdict::Refuse | Verdict::Warn { .. } | Verdict::HandOver(_)
         ));
+        // The project's auth.json is merged after composer.json: read.
         std::fs::write(dir.path().join("auth.json"), r#"{"secure-http": false}"#).expect("auth");
         begin(Some(dir.path()), false);
-        assert_eq!(
+        assert!(matches!(
             classify(url),
-            Verdict::HandOver("secure-http in auth.json".into())
-        );
+            Verdict::Warn { .. } | Verdict::HandOver(_)
+        ));
+        // A value the schema refuses: Composer says so, the run is its own.
+        std::fs::write(dir.path().join("auth.json"), r#"{"secure-http": "false"}"#).expect("auth");
+        begin(Some(dir.path()), false);
+        assert!(matches!(classify(url), Verdict::HandOver(_)));
         begin(None, false);
     }
 

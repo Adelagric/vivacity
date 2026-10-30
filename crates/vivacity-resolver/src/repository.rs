@@ -160,6 +160,36 @@ impl Transport for FileTransport {
     }
 }
 
+/// A `file://` repository whose metadata names remote URLs (a
+/// `metadata-url` in `http(s)://`): Composer's `HttpDownloader` reads both,
+/// so each URL goes to the transport of its scheme.
+pub struct MixedTransport {
+    pub remote: HttpTransport,
+}
+
+impl Transport for MixedTransport {
+    fn fetch(&self, url: &str, if_modified_since: Option<&str>) -> Result<Fetched, RepoError> {
+        if url.starts_with("file://") {
+            FileTransport.fetch(url, if_modified_since)
+        } else {
+            self.remote.fetch(url, if_modified_since)
+        }
+    }
+    fn post_form(&self, url: &str, body: &str) -> Result<Fetched, RepoError> {
+        self.remote.post_form(url, body)
+    }
+    fn fetch_many(&self, requests: &[Request]) -> Vec<Result<Fetched, RepoError>> {
+        if requests.iter().any(|(u, _)| u.starts_with("file://")) {
+            requests
+                .iter()
+                .map(|(u, ims)| self.fetch(u, ims.as_deref()))
+                .collect()
+        } else {
+            self.remote.fetch_many(requests)
+        }
+    }
+}
+
 /// `StabilityFilter::isPackageAcceptable`.
 pub fn is_package_acceptable(
     acceptable: &BTreeMap<String, i32>,
@@ -487,42 +517,257 @@ fn url_path(url: &str) -> &str {
     &rest[..end]
 }
 
+/// The URLs `ComposerRepository::__construct` derives from a configured
+/// one: the repository URL (a path made `file://` by `realpath`, `http://`
+/// otherwise), its base, and `getPackagesJsonUrl`.
+pub struct RepoUrls {
+    pub url: String,
+    pub base_url: String,
+    pub packages_json_url: String,
+}
+
+/// [`RepoUrls`] of a configured URL.
+pub fn repo_urls(url: &str) -> RepoUrls {
+    static SCHEME: OnceLock<Regex> = OnceLock::new();
+    static PACKAGIST: OnceLock<Regex> = OnceLock::new();
+    static BASE: OnceLock<Regex> = OnceLock::new();
+    let mut url = url.to_owned();
+    if !regex(&SCHEME, r"^[\w.]+\??://", false)
+        .is_match(url.as_bytes())
+        .unwrap_or(false)
+    {
+        match std::fs::canonicalize(&url) {
+            Ok(p) => url = format!("file://{}", p.to_string_lossy()),
+            Err(_) => url = format!("http://{url}"),
+        }
+    }
+    url = url.trim_end_matches('/').to_owned();
+    if let Some(rest) = url.strip_prefix("https?") {
+        url = format!("https{rest}");
+    }
+    if let Ok(Some(caps)) =
+        regex(&PACKAGIST, r"^(?P<proto>https?)://packagist\.org/?$", true).captures(url.as_bytes())
+    {
+        url = format!("{}://repo.packagist.org", crate::version::group(&caps, 1));
+    }
+    let base_re = regex(&BASE, r"(?:/[^/\\]+\.json)?(?:[?#].*)?$", false);
+    let base_url = match base_re.find(url.as_bytes()).ok().flatten() {
+        Some(m) => url[..m.start()].trim_end_matches('/').to_owned(),
+        None => url.clone(),
+    };
+    // `getPackagesJsonUrl`: `.json` looked up in the path only.
+    let packages_json_url = if url_path(&url).contains(".json") {
+        url.clone()
+    } else {
+        format!("{url}/packages.json")
+    };
+    RepoUrls {
+        url,
+        base_url,
+        packages_json_url,
+    }
+}
+
+/// For a `composer` repository whose files are local (`file://`), the
+/// first URL its metadata names that a run would request and that
+/// `secure-http` does not let through as is (refused, or read from a
+/// setting vivacity hands over): the URLs of packages.json Composer
+/// requests to load packages (`metadata-url`, the v1 provider URLs and
+/// includes, `providers-api`, `includes`, the dist mirrors of `mirrors` —
+/// not the policy filters' URLs, whose refusal Composer catches under
+/// `policy.ignore-unreachable`), and the dists (with their
+/// mirrors) of the versions it holds when the command installs
+/// (`with_dists`) — inline, in its includes, and in the files under a local
+/// `metadata-url`. Read without a request, before
+/// the command prints or writes anything; broader than what Composer will
+/// request (every version, not the ones the resolution needs), which only
+/// costs a hand-over. `None` for a remote repository (its packages.json
+/// URL is judged on its own) or files that cannot be read (the session
+/// reports them).
+pub fn local_insecure_url(
+    configured: &str,
+    with_dists: bool,
+) -> Option<(String, vivacity_core::secure_http::Verdict)> {
+    use vivacity_core::secure_http::{classify, insecure, Verdict};
+    let urls = repo_urls(configured);
+    let path = urls.packages_json_url.strip_prefix("file://")?.to_owned();
+    let scheme_host = |u: &str| -> String {
+        // `canonicalizeUrl`'s `{^[^:]++://[^/]*+}`.
+        match u.find("://") {
+            Some(i) => {
+                let rest = &u[i + 3..];
+                let end = rest.find('/').unwrap_or(rest.len());
+                u[..i + 3 + end].to_owned()
+            }
+            None => String::new(),
+        }
+    };
+    let canonical = |u: &str| -> String {
+        if u.starts_with('/') {
+            format!("{}{u}", scheme_host(&urls.url))
+        } else {
+            u.to_owned()
+        }
+    };
+    let judge = |u: &str| -> Option<(String, Verdict)> {
+        insecure(u)?;
+        match classify(u) {
+            v @ (Verdict::Refuse | Verdict::HandOver(_)) => Some((u.to_owned(), v)),
+            Verdict::Allowed | Verdict::Warn { .. } => None,
+        }
+    };
+    let read = |p: &std::path::Path| -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(p).ok()?).ok()
+    };
+    // The dists of every version an object of packages holds.
+    fn dists<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+        let versions: Vec<&Value> = match v {
+            Value::Array(a) => a.iter().collect(),
+            Value::Object(o) => o.values().collect(),
+            _ => Vec::new(),
+        };
+        for version in versions {
+            let Some(dist) = version.get("dist") else {
+                continue;
+            };
+            out.extend(dist.get("url").and_then(Value::as_str));
+            for m in dist
+                .get("mirrors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                out.extend(m.get("url").and_then(Value::as_str));
+            }
+        }
+    }
+    let root = read(std::path::Path::new(&path))?;
+    let mut found: Vec<String> = Vec::new();
+    for key in [
+        "metadata-url",
+        "providers-url",
+        "providers-lazy-url",
+        "providers-api",
+    ] {
+        if let Some(u) = root.get(key).and_then(Value::as_str) {
+            found.push(canonical(u));
+        }
+    }
+    // Not what the policy filters request (advisories, lists): Composer
+    // catches their refusal under `policy.ignore-unreachable` (the default)
+    // and vivacity writes it as Composer does; without it, the refusal
+    // reaches the session and the run is handed over then.
+    for (include, _) in root
+        .get("provider-includes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if include.contains("://") {
+            found.push(include.clone());
+        }
+    }
+    for m in root
+        .get("mirrors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(u) = m.get("dist-url").and_then(Value::as_str) {
+            found.push(canonical(u));
+        }
+    }
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for (include, _) in root
+        .get("includes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let u = canonical(include);
+        let u = if u.contains("://") {
+            u
+        } else {
+            format!("{}/{}", urls.base_url, u.trim_start_matches('/'))
+        };
+        match u.strip_prefix("file://") {
+            Some(local) => files.push(local.into()),
+            None => found.push(u),
+        }
+    }
+    for u in &found {
+        if let Some(hit) = judge(u) {
+            return Some(hit);
+        }
+    }
+    if !with_dists {
+        return None;
+    }
+    // A local `metadata-url`: the files under the directory before
+    // `%package%`.
+    if let Some(dir) = root
+        .get("metadata-url")
+        .and_then(Value::as_str)
+        .map(canonical)
+        .and_then(|u| u.strip_prefix("file://").map(str::to_owned))
+        .and_then(|t| t.split("%package%").next().map(str::to_owned))
+        .map(|prefix| match prefix.rfind('/') {
+            Some(i) => prefix[..i].to_owned(),
+            None => prefix,
+        })
+    {
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                // Links not followed (a cycle would not end).
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                let p = entry.path();
+                if kind.is_dir() {
+                    stack.push(p);
+                } else if kind.is_file() && p.extension().is_some_and(|e| e == "json") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(packages) = root.get("packages").and_then(Value::as_object) {
+        for v in packages.values() {
+            dists(v, &mut out);
+        }
+    }
+    for u in &out {
+        if let Some(hit) = judge(u) {
+            return Some(hit);
+        }
+    }
+    for file in files {
+        let Some(data) = read(&file) else { continue };
+        let mut out = Vec::new();
+        if let Some(packages) = data.get("packages").and_then(Value::as_object) {
+            for v in packages.values() {
+                dists(v, &mut out);
+            }
+        }
+        for u in &out {
+            if let Some(hit) = judge(u) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
 impl ComposerRepository {
     /// Constructor (no reading: `loadRootServerFile` is lazy).
     pub fn open(url: &str, transport: Box<dyn Transport>) -> Result<ComposerRepository, RepoError> {
-        static SCHEME: OnceLock<Regex> = OnceLock::new();
-        static PACKAGIST: OnceLock<Regex> = OnceLock::new();
-        static BASE: OnceLock<Regex> = OnceLock::new();
-        let mut url = url.to_owned();
-        if !regex(&SCHEME, r"^[\w.]+\??://", false)
-            .is_match(url.as_bytes())
-            .unwrap_or(false)
-        {
-            match std::fs::canonicalize(&url) {
-                Ok(p) => url = format!("file://{}", p.to_string_lossy()),
-                Err(_) => url = format!("http://{url}"),
-            }
-        }
-        url = url.trim_end_matches('/').to_owned();
-        if let Some(rest) = url.strip_prefix("https?") {
-            url = format!("https{rest}");
-        }
-        if let Ok(Some(caps)) = regex(&PACKAGIST, r"^(?P<proto>https?)://packagist\.org/?$", true)
-            .captures(url.as_bytes())
-        {
-            url = format!("{}://repo.packagist.org", crate::version::group(&caps, 1));
-        }
-        let base_re = regex(&BASE, r"(?:/[^/\\]+\.json)?(?:[?#].*)?$", false);
-        let base_url = match base_re.find(url.as_bytes()).ok().flatten() {
-            Some(m) => url[..m.start()].trim_end_matches('/').to_owned(),
-            None => url.clone(),
-        };
-        // `getPackagesJsonUrl`: `.json` looked up in the path only.
-        let packages_json_url = if url_path(&url).contains(".json") {
-            url.clone()
-        } else {
-            format!("{url}/packages.json")
-        };
+        let RepoUrls {
+            url,
+            base_url,
+            packages_json_url,
+        } = repo_urls(url);
         Ok(ComposerRepository {
             url,
             base_url,
@@ -1523,34 +1768,35 @@ impl ComposerRepository {
             .map(|((_, _, url), c)| (url.clone(), c.as_ref().and_then(|(_, lm)| lm.clone())))
             .collect();
         // Each request is checked as it would start, in order; the refused
-        // ones never leave.
-        let mut results: Vec<Option<Result<Fetched, RepoError>>> =
-            (0..requests.len()).map(|_| None).collect();
-        let mut sent: Vec<usize> = Vec::new();
-        for (i, (url, _)) in requests.iter().enumerate() {
-            match self.guard(url) {
-                Ok(()) => sent.push(i),
-                Err(e) if e.1 == RepoErrorKind::Unsupported => return Err(e),
-                Err(e) => results[i] = Some(Err(e)),
+        // ones never leave. The common path (every URL `https`) is a string
+        // test each, and the batch goes as it is.
+        let results: Vec<Result<Fetched, RepoError>> = if requests
+            .iter()
+            .all(|(url, _)| vivacity_core::secure_http::insecure(url).is_none())
+        {
+            self.transport.fetch_many(&requests)
+        } else {
+            let mut results: Vec<Option<Result<Fetched, RepoError>>> =
+                (0..requests.len()).map(|_| None).collect();
+            let mut sent: Vec<usize> = Vec::new();
+            for (i, (url, _)) in requests.iter().enumerate() {
+                match self.guard(url) {
+                    Ok(()) => sent.push(i),
+                    Err(e) if e.1 == RepoErrorKind::Unsupported => return Err(e),
+                    Err(e) => results[i] = Some(Err(e)),
+                }
             }
-        }
-        if sent.len() == requests.len() {
-            results = self
-                .transport
-                .fetch_many(&requests)
+            if !sent.is_empty() {
+                let subset: Vec<Request> = sent.iter().map(|&i| requests[i].clone()).collect();
+                for (i, r) in sent.iter().zip(self.transport.fetch_many(&subset)) {
+                    results[*i] = Some(r);
+                }
+            }
+            results
                 .into_iter()
-                .map(Some)
-                .collect();
-        } else if !sent.is_empty() {
-            let subset: Vec<Request> = sent.iter().map(|&i| requests[i].clone()).collect();
-            for (i, r) in sent.iter().zip(self.transport.fetch_many(&subset)) {
-                results[*i] = Some(r);
-            }
-        }
-        let results: Vec<Result<Fetched, RepoError>> = results
-            .into_iter()
-            .map(|r| r.unwrap_or_else(|| Err(RepoError::transport("not fetched"))))
-            .collect();
+                .map(|r| r.unwrap_or_else(|| Err(RepoError::transport("not fetched"))))
+                .collect()
+        };
         self.fresh_metadata.set(true);
         let mut settled = Vec::with_capacity(todo.len());
         for (((key, package_name, url), c), result) in todo.into_iter().zip(cached).zip(results) {

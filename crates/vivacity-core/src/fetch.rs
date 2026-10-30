@@ -205,7 +205,87 @@ impl Host for RealHost {
         cfg!(target_os = "macos")
     }
     fn global_config(&self, home: &str, key: &str) -> std::result::Result<Option<Value>, String> {
-        global_config_layer(home, key, std::env::var("COMPOSER_AUTH").ok().as_deref())
+        let config = global_json(Path::new(home), "config.json");
+        let auth = global_json(Path::new(home), "auth.json");
+        layer_of(
+            home,
+            key,
+            config,
+            auth,
+            std::env::var("COMPOSER_AUTH").ok().as_deref(),
+        )
+    }
+}
+
+/// A JSON file of Composer's configuration as a run reads it: `Ok(None)`
+/// when it is absent, `Err` (the message) when it cannot be read or is not
+/// valid JSON. Read once per run and path ([`forget_global_files`] starts a
+/// run): the cache directory, the merged repositories and `secure-http` all
+/// ask for the global config.json and auth.json, which used to be read
+/// again for each.
+pub fn global_json(path_dir: &Path, name: &str) -> std::result::Result<Option<Value>, String> {
+    let path = path_dir.join(name);
+    let mut memo = GLOBAL_FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, v)) = memo.iter().find(|(p, _)| *p == path) {
+        return v.clone();
+    }
+    // Absent is nothing; present but unreadable stops Composer
+    // (`JsonFile::read`), like invalid JSON.
+    let v = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+    };
+    memo.push((path, v.clone()));
+    v
+}
+
+/// The files [`global_json`] read, by path.
+type JsonMemo = Vec<(PathBuf, std::result::Result<Option<Value>, String>)>;
+static GLOBAL_FILES: std::sync::Mutex<JsonMemo> = std::sync::Mutex::new(Vec::new());
+
+/// The global config.json and auth.json of `Config::get('home')`, as
+/// [`global_json`] keeps them; `Err` when the home cannot be resolved or a
+/// file is not valid JSON (Composer stops).
+pub fn global_config_files() -> std::result::Result<(Option<Value>, Option<Value>), String> {
+    let home = config_home(&RealHost)?;
+    let invalid = |name: &str| {
+        format!(
+            "{} is not valid JSON",
+            Path::new(&home).join(name).display()
+        )
+    };
+    let config =
+        global_json(Path::new(&home), "config.json").map_err(|_| invalid("config.json"))?;
+    let auth = global_json(Path::new(&home), "auth.json").map_err(|_| invalid("auth.json"))?;
+    Ok((config, auth))
+}
+
+/// A new run: the configuration files are read again.
+pub fn forget_global_files() {
+    GLOBAL_FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// `Factory::loadComposerAuthEnv`: COMPOSER_AUTH unset or empty is nothing
+/// (Factory.php:686); anything else must decode to a JSON object — a value
+/// that does not decode stops Composer, one that is not an object fails
+/// the auth schema, which Composer reports (twice: the function runs for
+/// `createConfig` and again for `createComposer`). `Err` for both.
+pub fn composer_auth_env(raw: Option<&str>) -> std::result::Result<Option<Value>, String> {
+    let Some(text) = raw.filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<Value>(text) {
+        Ok(v @ Value::Object(_)) => Ok(Some(v)),
+        Ok(_) => Err("COMPOSER_AUTH is not a JSON object".to_owned()),
+        Err(_) => Err("COMPOSER_AUTH is not valid JSON".to_owned()),
     }
 }
 
@@ -215,30 +295,42 @@ impl Host for RealHost {
 /// `Err` where Composer would read something vivacity does not: a file or
 /// COMPOSER_AUTH that is not valid JSON (Composer stops), or `key` set by
 /// auth.json or COMPOSER_AUTH.
+#[cfg(test)]
 fn global_config_layer(
     home: &str,
     key: &str,
     composer_auth: Option<&str>,
 ) -> std::result::Result<Option<Value>, String> {
     let read = |name: &str| -> std::result::Result<Option<Value>, String> {
-        let path = Path::new(home).join(name);
-        match std::fs::read_to_string(&path) {
+        match std::fs::read_to_string(Path::new(home).join(name)) {
             Err(_) => Ok(None),
             Ok(text) => serde_json::from_str(&text)
                 .map(Some)
-                .map_err(|_| format!("{} is not valid JSON", path.display())),
+                .map_err(|e| e.to_string()),
         }
     };
-    let config = read("config.json")?;
-    let auth = read("auth.json")?;
-    // `if ($composerAuthEnv)`: PHP truthiness.
-    let env_auth = match composer_auth.filter(|a| !a.is_empty() && *a != "0") {
-        Some(text) => Some(
-            serde_json::from_str::<Value>(text)
-                .map_err(|_| "COMPOSER_AUTH is not valid JSON".to_owned())?,
-        ),
-        None => None,
-    };
+    layer_of(
+        home,
+        key,
+        read("config.json"),
+        read("auth.json"),
+        composer_auth,
+    )
+}
+
+/// [`global_config_layer`] on files already read.
+fn layer_of(
+    home: &str,
+    key: &str,
+    config: std::result::Result<Option<Value>, String>,
+    auth: std::result::Result<Option<Value>, String>,
+    composer_auth: Option<&str>,
+) -> std::result::Result<Option<Value>, String> {
+    let invalid =
+        |name: &str| format!("{} is not valid JSON", Path::new(home).join(name).display());
+    let config = config.map_err(|_| invalid("config.json"))?;
+    let auth = auth.map_err(|_| invalid("auth.json"))?;
+    let env_auth = composer_auth_env(composer_auth)?;
     for (source, layer) in [("auth.json", &auth), ("COMPOSER_AUTH", &env_auth)] {
         if layer.as_ref().and_then(|l| l.get(key)).is_some() {
             return Err(format!("{key} in {source}"));
@@ -520,15 +612,6 @@ fn cache_dir_hand_over_with(h: &dyn Host, reads_cache: bool) -> Option<String> {
     None
 }
 
-/// `config.<key>` of the global layer as `Config::get` sees it: config.json,
-/// `Err` where auth.json or COMPOSER_AUTH set the key, a file is not valid
-/// JSON, or the home cannot be resolved ([`global_config_layer`]).
-pub fn global_config_value_checked(key: &str) -> std::result::Result<Option<Value>, String> {
-    let host = RealHost;
-    let home = config_home(&host)?;
-    host.global_config(&home, key)
-}
-
 /// `Config::get('home')`: the directory of Composer's global config.json,
 /// auth.json and composer.json (`Factory::getHomeDir`, expanded and
 /// trimmed). `None` where Composer stops.
@@ -712,11 +795,27 @@ impl std::fmt::Display for InsecureRedirect {
 impl std::error::Error for InsecureRedirect {}
 
 impl InsecureRedirect {
-    /// The command's error for it: Composer's transport failure, or the
-    /// hand-over.
+    /// The command's error for a metadata request: Composer's transport
+    /// failure (caught where Composer catches it, a hand-over where it
+    /// does not — `session_kind`), or the hand-over.
     fn into_error(self) -> Error {
         match self {
             InsecureRedirect::Refused(m) => Error::Transport(m),
+            InsecureRedirect::HandOver(m) => Error::Unsupported(m),
+        }
+    }
+
+    /// The command's error for a dist download: a hand-over either way.
+    /// Composer's refusal of the target is a `TransportException` that
+    /// `DownloadManager` turns into « Failed to download … from dist », then
+    /// a try from source when there is one, or the exception box
+    /// (DownloadManager.php:218-245) — after the « Downloading » lines; not
+    /// reproduced.
+    fn into_dist_error(self) -> Error {
+        match self {
+            InsecureRedirect::Refused(m) => {
+                Error::Unsupported(format!("a redirect secure-http refuses ({m})"))
+            }
             InsecureRedirect::HandOver(m) => Error::Unsupported(m),
         }
     }
@@ -885,7 +984,7 @@ impl Fetcher {
                 Err(Attempt {
                     insecure_redirect: Some(stop),
                     ..
-                }) => return Err(stop.into_error()),
+                }) => return Err(stop.into_dist_error()),
                 Err(a) => {
                     if !a.retryable || retries >= MAX_RETRIES {
                         break a.message;
@@ -1406,8 +1505,12 @@ mod tests {
         assert!(layer(None, None, Some("{not json")).is_err());
         assert!(layer(None, Some(r#"{"cache-dir":"/a"}"#), None).is_err());
         assert!(layer(None, None, Some(r#"{"cache-dir":"/a"}"#)).is_err());
-        // An empty COMPOSER_AUTH is PHP-falsy: ignored.
+        // An empty COMPOSER_AUTH is ignored.
         assert_eq!(layer(None, None, Some("")), Ok(None));
+        // `"0"` is not unset in 2.10.3 (`false === $env || '' === $env`):
+        // it decodes to an integer, which the auth schema refuses.
+        assert!(layer(None, None, Some("0")).is_err());
+        assert!(layer(None, None, Some("[]")).is_err());
     }
 
     #[test]

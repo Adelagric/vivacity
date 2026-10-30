@@ -150,17 +150,20 @@ pub fn endpoint_hosts(manifest: &Value) -> Result<Vec<(String, String)>, String>
 /// package arguments reads the index — `getAliases` for a name without `/`
 /// that is not a platform package, a pattern or a skipped word,
 /// `getVersions` for a `symfony/*` name (`parseVersion`) — which requests
-/// every endpoint (`Downloader::initialize`) while the `Composer` is being
-/// created, before the command writes anything. `secure-http` false: the
-/// warnings for the insecure endpoint hosts, written now. Nothing when
-/// Flex is not active or its downloader is disabled (symfony/flex not
-/// required by the root).
-pub(crate) fn activation_warnings(
+/// every endpoint (`Downloader::initialize`, whether the downloader is
+/// enabled or not: `disable()` only clears `$enabled`) while the `Composer`
+/// is being created, before the command writes anything. The warnings for
+/// the insecure endpoint hosts (`secure-http` false), for the caller to
+/// write where `Factory` would; `Err` (the hand-over reason) when
+/// `secure-http` refuses an endpoint — Flex retries, then throws or
+/// degrades (Downloader.php:406-412), not emulated. Nothing when Flex is not
+/// active or no argument reads the index.
+pub(crate) fn activation_lines(
     project: &Path,
     manifest: &Value,
     plugins_enabled: bool,
     packages: &[String],
-) {
+) -> Result<Vec<String>, String> {
     let reads_index = packages.iter().any(|argument| {
         let name = argument.split([':', '=']).next().unwrap_or("");
         let skipped = ["mirrors", "nothing", "", "lock"].contains(&name);
@@ -176,18 +179,16 @@ pub(crate) fn activation_warnings(
         alias || name.starts_with("symfony/")
     });
     if !reads_index
-        || !crate::flex_install::flex_downloader_enabled(manifest)
         || !vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
             .iter()
             .any(|p| p == "symfony/flex")
     {
-        return;
+        return Ok(Vec::new());
     }
-    for (scheme, host) in endpoint_hosts(manifest).unwrap_or_default() {
-        if let Some(line) = vivacity_core::secure_http::warn_once(&scheme, &host) {
-            vivacity_core::say!("{line}");
-        }
-    }
+    Ok(endpoint_hosts(manifest)?
+        .into_iter()
+        .filter_map(|(scheme, host)| vivacity_core::secure_http::warn_once(&scheme, &host))
+        .collect())
 }
 
 /// `[a-z0-9_/-]`, case-insensitively: a `*` next to one makes a pattern.

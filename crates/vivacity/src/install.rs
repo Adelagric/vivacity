@@ -55,9 +55,13 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // anything (an install after an update was decided on its solved lock).
     // A dry run downloads nothing.
     if !args.after_update() && !args.dry_run {
-        if let Some(reason) =
-            insecure_dist_reason(&run.project, &run.manifest, &run.lock, run.with_dev)
-        {
+        if let Some(reason) = insecure_dist_reason(
+            &run.project,
+            &run.manifest,
+            &run.lock,
+            run.with_dev,
+            !args.no_plugins,
+        ) {
             let scope = vivacity_core::scope::ScopeReport {
                 issues: vec![vivacity_core::scope::ScopeIssue::Layout(reason)],
                 skipped_plugins: vec![],
@@ -765,57 +769,15 @@ fn local_repository_transaction(
     };
     // The entries as loaded, for the classes the plugins declare.
     let installed_raw_names = installed_raw.clone();
-    let mut installed_now = purge_missing(&composer_dir, installed_raw);
-    // `LibraryInstaller::isInstalled` looks at the path the installer of
-    // this run computes: a package an installer plugin laid out elsewhere,
-    // under `--no-plugins` (or with that plugin no longer active), is looked
-    // for at `<vendor-dir>/<name>` — absent, it is installed again there.
-    if let Ok(layout) = vivacity_core::layout::Layout::resolve(
+    let installed_now = present_packages(
         &run.project,
-        &run.lock,
         &run.manifest,
+        &run.lock,
         run.with_dev,
         plugins_enabled,
-    ) {
-        installed_now.retain(|p| {
-            let name = p
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if p.get("type").and_then(serde_json::Value::as_str) == Some("metapackage")
-                || layout.install_path(name).is_none()
-            {
-                return true;
-            }
-            layout.abs(name).is_none_or(|d| d.exists())
-        });
-    }
-    // A `symfony-pack` laid out by Flex's pack installer has no install
-    // path in installed.json (`MetapackageInstaller`), which the purge above
-    // reads as "always installed". `Factory::createComposer` loads the
-    // installed plugins (`loadInstalledPlugins`) before `purgePackages`:
-    // without Flex among them (`--no-plugins`, Flex not installed or not
-    // allowed), the pack's installer is `LibraryInstaller`, whose
-    // `isInstalled` asks for `<vendor-dir>/<name>` (`Filesystem::isReadable`:
-    // a file would do, a dangling link would not) — absent, the pack is not
-    // installed and the run installs it.
-    if !vivacity_core::scope::active_plugins(&run.project, &run.manifest, !run.args.no_plugins)
-        .iter()
-        .any(|p| p == "symfony/flex")
-    {
-        let vendor = vivacity_core::dirs::Dirs::resolve(&run.manifest)
-            .unwrap_or_default()
-            .vendor_dir(&run.project);
-        installed_now.retain(|p| {
-            let pack = p.get("type").and_then(serde_json::Value::as_str) == Some("symfony-pack");
-            let no_path = p.get("install-path").is_none_or(serde_json::Value::is_null);
-            let name = p
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            !(pack && no_path && !vendor.join(name).exists())
-        });
-    }
+        &composer_dir,
+        installed_raw,
+    );
     trace("installed.json", run.t0);
     // Nothing to do at all (the commonest install): proved on the raw
     // entries, so the two repositories are not loaded into the arena —
@@ -2168,6 +2130,7 @@ pub(crate) fn insecure_dist_reason(
     manifest: &serde_json::Value,
     lock: &vivacity_core::lock::Lock,
     with_dev: bool,
+    plugins_enabled: bool,
 ) -> Option<String> {
     use serde_json::Value;
     use vivacity_core::secure_http::{classify, Verdict};
@@ -2193,14 +2156,7 @@ pub(crate) fn insecure_dist_reason(
         if !any {
             continue;
         }
-        let first_mirror = dist
-            .and_then(|d| d.get("mirrors"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|m| m.get("preferred").is_some_and(crate::manifest::php_truthy))
-            .and_then(|m| m.get("url").and_then(Value::as_str))
-            .map(str::to_owned);
+        let first_mirror = first_preferred_mirror(dist);
         let mut why = None;
         for url in first_mirror.into_iter().chain(p.dist_url_expanded()) {
             why = match classify(&url) {
@@ -2211,21 +2167,21 @@ pub(crate) fn insecure_dist_reason(
             break;
         }
         let Some(why) = why else { continue };
-        let reference = |v: &Value, key: &str| {
-            v.get(key)
-                .and_then(|d| d.get("reference"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
-        let held = installed
-            .get_or_insert_with(|| vivacity_core::layout::installed_packages_of(project, manifest))
-            .iter()
-            .any(|i| {
-                i.get("name").and_then(Value::as_str) == Some(p.name())
-                    && i.get("version_normalized") == p.raw.get("version_normalized")
-                    && reference(i, "dist") == reference(&Value::Object(p.raw.clone()), "dist")
-            });
-        if held {
+        // Present as locked (`Transaction`'s identity), install path there:
+        // no operation, no download.
+        let present = installed.get_or_insert_with(|| {
+            let composer_dir = composer_dir_of(project, manifest);
+            present_packages(
+                project,
+                manifest,
+                lock,
+                with_dev,
+                plugins_enabled,
+                &composer_dir,
+                plugin_order::installed_json_packages(&composer_dir),
+            )
+        });
+        if installed_as_locked(present, p) {
             continue;
         }
         return Some(format!(
@@ -2234,6 +2190,37 @@ pub(crate) fn insecure_dist_reason(
         ));
     }
     None
+}
+
+/// The mirror `FileDownloader` tries first, if any: `Package::getUrls`
+/// starts from the dist URL and, mirror by mirror, skips one already listed
+/// (`in_array`), puts a preferred one at the head (`array_unshift`) and the
+/// others at the end (Package.php:688-704). Compared as written (the
+/// placeholders `ComposerMirror::processUrl` fills in are left).
+fn first_preferred_mirror(dist: Option<&serde_json::Value>) -> Option<String> {
+    use serde_json::Value;
+    let main = dist.and_then(|d| d.get("url")).and_then(Value::as_str)?;
+    let mut urls: std::collections::VecDeque<&str> = std::collections::VecDeque::from([main]);
+    for m in dist
+        .and_then(|d| d.get("mirrors"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(url) = m.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        if urls.contains(&url) {
+            continue;
+        }
+        if m.get("preferred").is_some_and(crate::manifest::php_truthy) {
+            urls.push_front(url);
+        } else {
+            urls.push_back(url);
+        }
+    }
+    let first = *urls.front()?;
+    (first != main).then(|| first.to_owned())
 }
 
 /// Whether any dist URL of a lock (as JSON) has an insecure scheme: the
@@ -2381,8 +2368,13 @@ pub(crate) fn download_lines(
                 DisplayRef::SourceRefIfDev
             )
         ));
+        // The request goes to the URL `FileDownloader` tries first: the last
+        // preferred mirror, else the dist URL (vivacity downloads the latter,
+        // the line is Composer's).
+        let requested =
+            first_preferred_mirror(locked.raw.get("dist")).unwrap_or_else(|| url.clone());
         if let vivacity_core::secure_http::Verdict::Warn { scheme, host } =
-            vivacity_core::secure_http::classify(&url)
+            vivacity_core::secure_http::classify(&requested)
         {
             if started < max_jobs {
                 lines.extend(vivacity_core::secure_http::warn_once(&scheme, &host));
@@ -2392,7 +2384,7 @@ pub(crate) fn download_lines(
         }
         // Only an `http(s)://` download takes a curl job; anything else goes
         // through `RemoteFilesystem`, synchronously (`canUseCurl`).
-        let scheme = url.split("://").next().unwrap_or("");
+        let scheme = requested.split("://").next().unwrap_or("");
         if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
             started += 1;
         }
@@ -2653,6 +2645,71 @@ pub(crate) fn installed_packages(
         &composer_dir,
         plugin_order::installed_json_packages(&composer_dir),
     )
+}
+
+/// installed.json's packages as `Factory::purgePackages` leaves them: those
+/// whose install path is gone are dropped (`purge_missing`) — the path the
+/// installer of this run computes (`LibraryInstaller::isInstalled`), and a
+/// `symfony-pack` without Flex is looked for in the vendor directory. The
+/// one decision both the local-repository transaction and `secure-http`'s
+/// "already installed, nothing downloaded" ([`insecure_dist_reason`]) read.
+pub(crate) fn present_packages(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    lock: &vivacity_core::lock::Lock,
+    with_dev: bool,
+    plugins_enabled: bool,
+    composer_dir: &std::path::Path,
+    installed_raw: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut installed_now = purge_missing(composer_dir, installed_raw);
+    // `LibraryInstaller::isInstalled` looks at the path the installer of
+    // this run computes: a package an installer plugin laid out elsewhere,
+    // under `--no-plugins` (or with that plugin no longer active), is looked
+    // for at `<vendor-dir>/<name>` — absent, it is installed again there.
+    if let Ok(layout) =
+        vivacity_core::layout::Layout::resolve(project, lock, manifest, with_dev, plugins_enabled)
+    {
+        installed_now.retain(|p| {
+            let name = p
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if p.get("type").and_then(serde_json::Value::as_str) == Some("metapackage")
+                || layout.install_path(name).is_none()
+            {
+                return true;
+            }
+            layout.abs(name).is_none_or(|d| d.exists())
+        });
+    }
+    // A `symfony-pack` laid out by Flex's pack installer has no install
+    // path in installed.json (`MetapackageInstaller`), which the purge above
+    // reads as "always installed". `Factory::createComposer` loads the
+    // installed plugins (`loadInstalledPlugins`) before `purgePackages`:
+    // without Flex among them (`--no-plugins`, Flex not installed or not
+    // allowed), the pack's installer is `LibraryInstaller`, whose
+    // `isInstalled` asks for `<vendor-dir>/<name>` (`Filesystem::isReadable`:
+    // a file would do, a dangling link would not) — absent, the pack is not
+    // installed and the run installs it.
+    if !vivacity_core::scope::active_plugins(project, manifest, plugins_enabled)
+        .iter()
+        .any(|p| p == "symfony/flex")
+    {
+        let vendor = vivacity_core::dirs::Dirs::resolve(manifest)
+            .unwrap_or_default()
+            .vendor_dir(project);
+        installed_now.retain(|p| {
+            let pack = p.get("type").and_then(serde_json::Value::as_str) == Some("symfony-pack");
+            let no_path = p.get("install-path").is_none_or(serde_json::Value::is_null);
+            let name = p
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            !(pack && no_path && !vendor.join(name).exists())
+        });
+    }
+    installed_now
 }
 
 /// `Factory::purgePackages`: the packages whose install path is gone leave

@@ -92,53 +92,73 @@ pub(crate) fn resolution_fallback(
             }
         }
     }
-    // `secure-http` on the project's `composer` repositories: a resolution
-    // reads their packages.json first, which Composer refuses over an
-    // insecure protocol. Decided on the manifest in memory, before `require`
-    // or `remove` edit it; the global config's repositories are checked
-    // when the session opens them (`open_repository_with`).
-    issues.extend(insecure_repository_issue(manifest));
+    // `secure-http` on the `composer` repositories the resolution reads —
+    // the project's and the global config.json's, merged as `Config::merge`
+    // merges them: decided here, before `require` or `remove` edit
+    // composer.json and before anything is printed.
+    issues.extend(insecure_repository_issue(manifest, with_install));
     if issues.is_empty() {
         return Ok(None);
     }
     delegate_resolution(&issues, no_fallback).map(Some)
 }
 
-/// The first `composer` repository of the manifest that `secure-http`
-/// refuses (or that Composer would judge on a setting vivacity does not
-/// read), as a hand-over reason. The URL as `ComposerRepository` makes it:
-/// one without a scheme is a local path when it exists, `http://` otherwise.
+/// The first `composer` repository of the merged configuration (the global
+/// config.json, then composer.json, `MergedConfig::load`) that `secure-http`
+/// does not let through as is — refused, or judged on a setting vivacity
+/// hands over — as a hand-over reason: its packages.json URL for a remote
+/// one; for a local one (`file://`), the URLs its metadata names — its
+/// dists too when the command installs
+/// ([`vivacity_resolver::repository::local_insecure_url`]) — read without a
+/// request. Over the common path (every repository `https`): a string test
+/// each, on files the run has read already.
 fn insecure_repository_issue(
     manifest: &serde_json::Value,
+    with_install: bool,
 ) -> Option<vivacity_core::scope::ScopeIssue> {
     use serde_json::Value;
-    use vivacity_core::secure_http::{classify, Verdict};
-    let repos: Vec<&Value> = match manifest.get("repositories") {
-        Some(Value::Array(a)) => a.iter().collect(),
-        Some(Value::Object(o)) => o.values().collect(),
-        _ => return None,
+    use vivacity_core::secure_http::{classify, insecure, Verdict};
+    let home = vivacity_core::fetch::composer_home();
+    // An unreadable global config.json is the session's to report.
+    let config = vivacity_resolver::session::MergedConfig::load(manifest, home.as_deref()).ok()?;
+    let why = |v: Verdict| match v {
+        Verdict::Refuse => Some("which secure-http refuses".to_owned()),
+        Verdict::HandOver(reason) => Some(format!("with {reason}")),
+        Verdict::Allowed | Verdict::Warn { .. } => None,
     };
-    for repo in repos {
-        if repo.get("type").and_then(Value::as_str) != Some("composer") {
+    for repo in &config.repositories {
+        let def = &repo.definition;
+        if def.get("type").and_then(Value::as_str) != Some("composer") {
             continue;
         }
-        let Some(url) = repo.get("url").and_then(Value::as_str) else {
+        let Some(url) = def.get("url").and_then(Value::as_str) else {
             continue;
         };
-        let url = if url.contains("://") || std::path::Path::new(url).exists() {
-            url.to_owned()
-        } else {
-            format!("http://{url}")
-        };
-        let why = match classify(&url) {
-            Verdict::Refuse => "which secure-http refuses".to_owned(),
-            Verdict::HandOver(reason) => format!("with {reason}"),
-            Verdict::Allowed | Verdict::Warn { .. } => continue,
-        };
-        return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
-            "repository {} is read over an insecure protocol, {why}",
-            vivacity_resolver::metacache::sanitize_url(url.trim_end_matches('/'))
-        )));
+        // The common path: an `https` URL is not a path either.
+        if url.starts_with("https://") {
+            continue;
+        }
+        let urls = vivacity_resolver::repository::repo_urls(url);
+        if insecure(&urls.packages_json_url).is_some() {
+            if let Some(why) = why(classify(&urls.packages_json_url)) {
+                return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                    "repository {} is read over an insecure protocol, {why}",
+                    vivacity_resolver::metacache::sanitize_url(&urls.url)
+                )));
+            }
+            continue;
+        }
+        if let Some((found, verdict)) =
+            vivacity_resolver::repository::local_insecure_url(url, with_install)
+        {
+            if let Some(why) = why(verdict) {
+                return Some(vivacity_core::scope::ScopeIssue::Layout(format!(
+                    "repository {} names {} (an insecure protocol), {why}",
+                    vivacity_resolver::metacache::sanitize_url(&urls.url),
+                    vivacity_resolver::metacache::sanitize_url(&found)
+                )));
+            }
+        }
     }
     None
 }

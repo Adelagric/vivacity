@@ -562,6 +562,19 @@ pub fn run_require(args: &RequireArgs) -> anyhow::Result<i32> {
                 );
                 let (canonical, constraint) = match guessed {
                     Ok(r) => r,
+                    // A request discovery would make that Composer does not
+                    // recover from (`secure-http`): its run, nothing edited
+                    // (a composer.json this run created goes).
+                    Err(e) if e.downcast_ref::<crate::HandOverReason>().is_some() => {
+                        if newly_created {
+                            files.revert()?;
+                        }
+                        let reason = e.to_string();
+                        return crate::delegate_resolution(
+                            &[vivacity_core::scope::ScopeIssue::Layout(reason)],
+                            args.no_fallback,
+                        );
+                    }
                     Err(e) => {
                         if newly_created {
                             files.revert()?;

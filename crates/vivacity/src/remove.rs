@@ -120,8 +120,24 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     )? {
         return Ok(code);
     }
-    // The first `Composer`'s Flex read its index on these arguments.
-    crate::flex::activation_warnings(&project, &manifest, !args.no_plugins, &args.packages);
+    // The first `Composer`'s Flex read its index on these arguments, as it
+    // activated: after `Factory`'s lines, before `BaseCommand::initialize`'s
+    // (the platform variables); refused, the run is Composer's, before the
+    // edit.
+    match crate::flex::activation_lines(&project, &manifest, !args.no_plugins, &args.packages) {
+        Ok(lines) => {
+            vivacity_core::io::hold_after_factory(vivacity_core::io::Verbosity::Normal, &lines)
+        }
+        Err(reason) => {
+            return crate::delegate_resolution(
+                &[vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                    "symfony/flex".to_owned(),
+                    reason,
+                )],
+                args.no_fallback,
+            );
+        }
+    }
     let backup = manifest_text.clone();
     let json = JsonConfigSource::new(&file);
     let (link_type, alt_type) = if args.dev {
@@ -321,7 +337,12 @@ pub(crate) fn run_remove(args: &RemoveArgs) -> anyhow::Result<i32> {
     // The second `Composer` (`resetComposer` + `requireComposer`): a new
     // `Config`, whose `secure-http` warnings start afresh.
     vivacity_core::secure_http::new_composer();
-    crate::flex::activation_warnings(&project, &manifest, !args.no_plugins, &args.packages);
+    // Its Flex reads the index again (refused, the first one stopped).
+    for line in crate::flex::activation_lines(&project, &manifest, !args.no_plugins, &args.packages)
+        .unwrap_or_default()
+    {
+        vivacity_core::say!("{line}");
+    }
     vivacity_core::say!("Running composer update {}{flags}", packages.join(" "));
     // `setUpdateAllowList` only if a lock exists.
     let mut options = if locked_data.is_some() {

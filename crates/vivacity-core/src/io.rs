@@ -217,17 +217,25 @@ pub fn factory_held() -> Vec<String> {
     slot[..n].to_vec()
 }
 
-/// Holds lines of the same `Factory` run (the plugins it loads): after its
-/// lines already held, before those the command held since.
+/// How many held lines follow the `Factory` ones and belong to the same
+/// run (the plugins it loads, Flex's activation): those of
+/// [`hold_after_factory`], kept in the order they were held.
+static PLUGIN_HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds lines of the same `Factory` run (the plugins it loads, what they
+/// write as they activate): after its lines and those of this kind already
+/// held, before those the command held since. Not among [`factory_held`].
 pub fn hold_after_factory(level: Verbosity, lines: &[String]) {
     if !shows(level) || lines.is_empty() {
         return;
     }
     let mut slot = held();
-    let at = FACTORY_HELD.load(Ordering::Acquire).min(slot.len());
+    let at = (FACTORY_HELD.load(Ordering::Acquire) + PLUGIN_HELD.load(Ordering::Acquire))
+        .min(slot.len());
     for (i, line) in lines.iter().enumerate() {
         slot.insert(at + i, line.clone());
     }
+    PLUGIN_HELD.fetch_add(lines.len(), Ordering::AcqRel);
     HOLDING.store(true, Ordering::Release);
 }
 
@@ -242,6 +250,7 @@ pub fn release_held() {
     let mut slot = held();
     let lines: Vec<String> = slot.drain(..).collect();
     FACTORY_HELD.store(0, Ordering::Release);
+    PLUGIN_HELD.store(0, Ordering::Release);
     HOLDING.store(false, Ordering::Release);
     drop(slot);
     if DEFERRING.load(Ordering::Acquire) {
@@ -270,6 +279,7 @@ pub fn drop_held() {
     }
     held().clear();
     FACTORY_HELD.store(0, Ordering::Release);
+    PLUGIN_HELD.store(0, Ordering::Release);
     HOLDING.store(false, Ordering::Release);
 }
 

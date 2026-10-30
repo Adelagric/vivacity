@@ -412,6 +412,13 @@ pub async fn install(
     // Nothing was written to the project before this point: a hand-over
     // above leaves it as it was (vendor/ included).
     let vendor_existed = vendor.is_dir();
+    // The topmost directory `create_dir_all` makes (a nested vendor-dir
+    // creates its parents), for a hand-over below to take back.
+    let created_from = vendor
+        .ancestors()
+        .take_while(|a| !a.exists())
+        .last()
+        .map(Path::to_path_buf);
     std::fs::create_dir_all(&vendor).map_err(Error::io(&vendor))?;
 
     // Fetch + extraction into the store, with bounded parallelism. Packages to
@@ -479,10 +486,29 @@ pub async fn install(
         });
     }
     while let Some(joined) = tasks.join_next().await {
-        let provenance = joined.map_err(|e| Error::Http {
+        let provenance = match joined.map_err(|e| Error::Http {
             url: "join".to_owned(),
             message: e.to_string(),
-        })??;
+        })? {
+            Ok(p) => p,
+            // A download the run hands to Composer (a redirect `secure-http`
+            // refuses): the other downloads stop, and a vendor/ this run
+            // created goes, so that the project is as it was. What reached
+            // the files cache stays: Composer downloads the same archives.
+            Err(e @ Error::Unsupported(_)) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                if let Some(top) = &created_from {
+                    for dir in vendor.ancestors() {
+                        if std::fs::remove_dir(dir).is_err() || dir == top.as_path() {
+                            break;
+                        }
+                    }
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         match provenance {
             Some(Provenance::Cache) => report.from_cache += 1,
             Some(Provenance::Network) => report.from_network += 1,

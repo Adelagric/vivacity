@@ -562,6 +562,8 @@ where
 
 /// [`run`], between the two moments git's answers are forgotten.
 fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
+    // The configuration files are read once per run (`fetch::global_json`).
+    vivacity_core::fetch::forget_global_files();
     // Kept for the resolution fallback, which re-runs the whole command
     // under Composer with the same arguments.
     if let Ok(mut a) = ARGV.lock() {
@@ -614,7 +616,16 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
     // Composer's cache directory as `Config::get('cache-dir')` resolves it:
     // what vivacity does not reproduce is Composer's, whole, before anything
     // is read or written (docs/plans/action-cache.md).
-    if let Some(reason) = cli.cache_dir_hand_over() {
+    let (cache_reason, tls_reason) = cli.startup_hand_over();
+    if let Some(reason) = tls_reason {
+        let remedy = if reason == "disable-tls is set" {
+            "unset disable-tls".to_owned()
+        } else {
+            format!("fix the configuration ({reason})")
+        };
+        return delegate_for_verbosity(tail, &reason, &remedy);
+    }
+    if let Some(reason) = cache_reason {
         return delegate_for_verbosity(
             tail,
             &reason,
@@ -694,12 +705,27 @@ fn foreign_vcs_root(project: &std::path::Path) -> Option<&'static str> {
 fn session_error(e: vivacity_resolver::session::SessionError) -> anyhow::Error {
     if e.kind == vivacity_resolver::session::SessionErrorKind::Transport {
         anyhow::Error::new(TransportFailure(e.message))
+    } else if e.kind == vivacity_resolver::session::SessionErrorKind::Unsupported {
+        anyhow::Error::new(HandOverReason(e.message))
     } else if e.message == vivacity_resolver::repository::LOCK_WITHOUT_DEV {
         anyhow::Error::new(ComposerException(e.message))
     } else {
         anyhow::anyhow!("{}", e.message)
     }
 }
+
+/// What vivacity does not reproduce, carried up to a caller that can hand
+/// the command over (`require`'s version discovery): the reason.
+#[derive(Debug)]
+pub(crate) struct HandOverReason(pub(crate) String);
+
+impl std::fmt::Display for HandOverReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HandOverReason {}
 
 /// An exception whose message is Composer's word for word: printed as
 /// vivacity prints `RootPackageLoader`'s refusals — the message alone at
@@ -818,31 +844,60 @@ impl Cli {
     /// there (`Config::realpath`, after `Application::doRun`'s `chdir`)
     /// where vivacity, which never changes directory, would not.
     /// `dump-autoload` reads no cache; `config` answers on its own.
-    fn cache_dir_hand_over(&self) -> Option<String> {
+    /// What sends the whole command to Composer before anything is read or
+    /// written: the cache directory settings vivacity does not reproduce
+    /// (first), and `disable-tls` or a COMPOSER_AUTH Composer reports
+    /// (second, [`vivacity_core::secure_http::disable_tls_reason`]) — on the
+    /// files this reads anyway: the global ones, composer.json for the
+    /// commands that read the cache (`dump-autoload` checks its own once it
+    /// has read it).
+    fn startup_hand_over(&self) -> (Option<String>, Option<String>) {
         let reads_cache = match self {
-            Cli::Config(_) => return None,
+            // `Application::doRun` creates the project's `Composer` to list
+            // plugin commands (`getPluginCommands`), so a composer.json's
+            // `disable-tls` writes its line there (measured); without one,
+            // the global layers alone (broader than Composer, which then
+            // creates only a global `Composer`, if any).
+            Cli::Config(_) => {
+                let manifest = project_dir(self.working_dir())
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p.join("composer.json")).ok())
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+                return (
+                    None,
+                    vivacity_core::secure_http::disable_tls_reason(
+                        manifest.as_ref().and_then(|m| m.get("config")),
+                    ),
+                );
+            }
             Cli::DumpAutoload(_) => false,
             Cli::Install(_) | Cli::Update(_) | Cli::Remove(_) | Cli::Require(_) => true,
         };
+        let manifest = reads_cache
+            .then(|| {
+                project_dir(self.working_dir())
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p.join("composer.json")).ok())
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            })
+            .flatten();
+        let tls = vivacity_core::secure_http::disable_tls_reason(
+            manifest.as_ref().and_then(|m| m.get("config")),
+        );
         if let Some(why) = vivacity_core::fetch::cache_dir_hand_over(reads_cache) {
-            return Some(why);
+            return (Some(why), tls);
         }
-        if reads_cache {
-            let manifest = project_dir(self.working_dir())
-                .ok()
-                .and_then(|p| std::fs::read_to_string(p.join("composer.json")).ok())
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-            if let Some(why) = manifest
-                .as_ref()
-                .and_then(vivacity_core::fetch::project_cache_config)
-            {
-                return Some(why);
-            }
+        if let Some(why) = manifest
+            .as_ref()
+            .and_then(vivacity_core::fetch::project_cache_config)
+        {
+            return (Some(why), tls);
         }
-        (reads_cache
+        let cache = (reads_cache
             && self.working_dir().is_some()
             && vivacity_core::fetch::cache_dir_is_relative())
-        .then(|| "a relative cache-dir with --working-dir".to_owned())
+        .then(|| "a relative cache-dir with --working-dir".to_owned());
+        (cache, tls)
     }
 }
 

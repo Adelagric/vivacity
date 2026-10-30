@@ -602,6 +602,31 @@ pub(crate) fn resolve_and_lock(
             None => Ok(()),
         }
     };
+    // Flex reads its index as it activates, while the `Composer` is created
+    // (`BaseCommand::initialize`), if the package arguments make it: its
+    // warnings come after `Factory`'s lines and before the command's own
+    // (the platform variables, `--no-suggest`) and anything `prepare_update`
+    // may refuse; a refused endpoint is Composer's run. `require` and
+    // `remove` do it themselves.
+    if !args.command_dispatched {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
+            match flex::activation_lines(&project, &m, !args.no_plugins, &args.packages) {
+                Ok(lines) => vivacity_core::io::hold_after_factory(
+                    vivacity_core::io::Verbosity::Normal,
+                    &lines,
+                ),
+                Err(reason) => {
+                    return Ok(Resolved {
+                        hand_over: Some(vivacity_core::scope::ScopeIssue::ResolutionPlugin(
+                            "symfony/flex".to_owned(),
+                            reason,
+                        )),
+                        ..Resolved::stopped(0)
+                    })
+                }
+            }
+        }
+    }
     let home = vivacity_core::fetch::composer_home();
     let http = http_transport(&project, args.offline)?;
     let cache_repo_dir = vivacity_core::fetch::composer_cache_dir().join("repo");
@@ -730,9 +755,6 @@ pub(crate) fn resolve_and_lock(
     // `remove` have dispatched theirs already.
     if !args.command_dispatched {
         if let Ok(m) = serde_json::from_str::<serde_json::Value>(&manifest_text) {
-            // Flex read its index while the `Composer` was created, if the
-            // package arguments made it (`require`/`remove` do it themselves).
-            flex::activation_warnings(&project, &m, !args.no_plugins, &args.packages);
             bamarni_command_event(&project, &m, !args.no_plugins);
         }
     }
@@ -893,9 +915,13 @@ pub(crate) fn resolve_and_lock(
         let parsed = vivacity_core::lock::Lock::from_value(&lock);
         let null = serde_json::Value::Null;
         let m = loaded_manifest.as_ref().unwrap_or(&null);
-        if let Some(reason) =
-            crate::install::insecure_dist_reason(&project, m, &parsed, installer_dev_mode)
-        {
+        if let Some(reason) = crate::install::insecure_dist_reason(
+            &project,
+            m,
+            &parsed,
+            installer_dev_mode,
+            !args.no_plugins,
+        ) {
             return Ok(Resolved {
                 hand_over: Some(vivacity_core::scope::ScopeIssue::Layout(reason)),
                 ..Resolved::stopped(0)

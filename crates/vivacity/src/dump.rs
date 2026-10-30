@@ -213,6 +213,16 @@ pub(crate) fn run_dump(args: &DumpArgs) -> anyhow::Result<i32> {
         .context("cannot read composer.json")?;
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_text).context("invalid composer.json")?;
+    // `Factory::createComposer` creates the HTTP downloader before it loads
+    // the root package (Factory.php:370, :394): `disable-tls` set in
+    // composer.json writes its line first (the global layers were checked at
+    // startup).
+    if let Some(reason) = vivacity_core::secure_http::disable_tls_reason(manifest.get("config")) {
+        return crate::delegate_resolution(
+            &[vivacity_core::scope::ScopeIssue::Layout(reason)],
+            args.no_fallback,
+        );
+    }
     if let Some(code) = refuse_invalid_root(&manifest) {
         return Ok(code);
     }

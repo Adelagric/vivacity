@@ -85,15 +85,40 @@ impl SessionError {
     }
 }
 
+/// The nature of a lower layer's error. A `secure-http` refusal that
+/// reaches the session is one Composer did not catch: its
+/// `TransportException` stops the run with Symfony Console's box, which
+/// vivacity does not print — the command is Composer's (a late hand-over:
+/// what loading wrote is written again).
+fn session_kind(kind: &crate::repository::RepoErrorKind, message: &str) -> SessionErrorKind {
+    match kind {
+        crate::repository::RepoErrorKind::Transport
+            if vivacity_core::secure_http::is_refusal(message) =>
+        {
+            SessionErrorKind::Unsupported
+        }
+        crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
+        crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
+        crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
+    }
+}
+
+/// The message of [`session_kind`]'s hand-over: the refusal, named.
+fn refusal_reason(kind: &crate::repository::RepoErrorKind, message: String) -> String {
+    if *kind == crate::repository::RepoErrorKind::Transport
+        && vivacity_core::secure_http::is_refusal(&message)
+    {
+        format!("secure-http refuses a request Composer does not recover from ({message})")
+    } else {
+        message
+    }
+}
+
 impl From<PoolError> for SessionError {
     fn from(e: PoolError) -> SessionError {
         SessionError {
-            kind: match e.1 {
-                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
-                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
-                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
-            },
-            message: e.0,
+            kind: session_kind(&e.1, &e.0),
+            message: refusal_reason(&e.1, e.0),
             stdout: None,
             parts: Vec::new(),
             annotation: None,
@@ -125,12 +150,8 @@ session_error_from!(
 impl From<crate::pool_filters::FilterError> for SessionError {
     fn from(e: crate::pool_filters::FilterError) -> SessionError {
         SessionError {
-            kind: match e.1 {
-                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
-                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
-                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
-            },
-            message: e.0,
+            kind: session_kind(&e.1, &e.0),
+            message: refusal_reason(&e.1, e.0),
             stdout: None,
             parts: Vec::new(),
             annotation: None,
@@ -146,12 +167,8 @@ impl From<crate::pool_filters::FilterError> for SessionError {
 impl From<crate::repository::RepoError> for SessionError {
     fn from(e: crate::repository::RepoError) -> SessionError {
         SessionError {
-            kind: match e.1 {
-                crate::repository::RepoErrorKind::Transport => SessionErrorKind::Transport,
-                crate::repository::RepoErrorKind::Unsupported => SessionErrorKind::Unsupported,
-                crate::repository::RepoErrorKind::Data => SessionErrorKind::Other,
-            },
-            message: e.0,
+            kind: session_kind(&e.1, &e.0),
+            message: refusal_reason(&e.1, e.0),
             stdout: None,
             parts: Vec::new(),
             annotation: None,
@@ -307,14 +324,18 @@ impl MergedConfig {
             platform: Map::new(),
             policy: crate::policy_config::RawPolicyConfig::default(),
         };
+        // Through the run's copy (`fetch::global_json`): the startup checks
+        // read the same file.
         if let Some(home) = composer_home {
-            let global = home.join("config.json");
-            if global.is_file() {
-                let text = std::fs::read_to_string(&global)
-                    .map_err(|e| SessionError::new(format!("{}: {e}", global.display())))?;
-                let v: Value = serde_json::from_str(&text)
-                    .map_err(|e| SessionError::new(format!("{}: {e}", global.display())))?;
-                cfg.merge(&v);
+            match vivacity_core::fetch::global_json(home, "config.json") {
+                Ok(Some(v)) => cfg.merge(&v),
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(SessionError::new(format!(
+                        "{}: {e}",
+                        home.join("config.json").display()
+                    )))
+                }
             }
         }
         cfg.merge(manifest);
@@ -2028,7 +2049,18 @@ fn open_repository_with(
         SessionError::new(format!("repository {} has no url", key_string(&repo.key)))
     })?;
     let transport: Box<dyn crate::repository::Transport> = if url.starts_with("file://") {
-        Box::new(FileTransport)
+        // Its metadata may name remote URLs, which the network transport
+        // reads when there is one.
+        match http {
+            Some(h) => Box::new(crate::repository::MixedTransport {
+                remote: HttpTransport {
+                    fetch: h.0.clone(),
+                    fetch_many: h.1.clone(),
+                    post: h.2.clone(),
+                },
+            }),
+            None => Box::new(FileTransport),
+        }
     } else if url.starts_with("http://") || url.starts_with("https://") || !url.contains("://") {
         match http {
             Some(h) => Box::new(HttpTransport {
@@ -2093,6 +2125,25 @@ fn key_string(key: &RepoKey) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refusal_reaching_the_session_hands_the_run_over() {
+        use crate::repository::RepoErrorKind;
+        let refusal = vivacity_core::secure_http::refusal("http://h/p2/a/b.json");
+        assert_eq!(
+            session_kind(&RepoErrorKind::Transport, &refusal),
+            SessionErrorKind::Unsupported
+        );
+        assert!(refusal_reason(&RepoErrorKind::Transport, refusal.clone()).contains(&refusal));
+        assert_eq!(
+            session_kind(&RepoErrorKind::Transport, "HTTP/404"),
+            SessionErrorKind::Transport
+        );
+        assert_eq!(
+            session_kind(&RepoErrorKind::Data, &refusal),
+            SessionErrorKind::Other
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
