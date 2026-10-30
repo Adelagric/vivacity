@@ -287,7 +287,14 @@ case_() {
       "$@" > "$d/$side.out" 2> "$d/$side.err"); echo $? > "$d/$side.code"
     sort -u "$LOG" > "$d/$side.requests"
   }
-  cp "$d/ref/composer.json" "$d/start.json"
+  # Sans composer.json (`rm:composer.json`) : `require` le crée.
+  if [ -e "$d/ref/composer.json" ]; then cp "$d/ref/composer.json" "$d/start.json"; else rm -f "$d/start.json"; fi
+  # Une date ancienne sur le projet de `--no-fallback` et son composer.json :
+  # une écriture (même rendue à l'identique) les rend plus récents que le
+  # témoin.
+  touch -t 200001010001 "$d/stamp"
+  [ ! -e "$d/nofb/composer.json" ] || touch -t 200001010000 "$d/nofb/composer.json"
+  touch -t 200001010000 "$d/nofb"
   vendor_sum() { (cd "$1" && find vendor -type f -exec shasum {} + 2>/dev/null | sort); }
   [ "$installed" = 0 ] || vendor_sum "$d/nofb" > "$d/nofb.vendor.before"
   # `offline` : `--offline` pour vivacity, `COMPOSER_DISABLE_NETWORK=1` pour
@@ -358,7 +365,18 @@ case_() {
       fi
       [ -z "$(find "$d/store-nofb" -type f 2>/dev/null)" ] || bad="$bad --no-fallback a écrit dans le store;"
     fi
-    cmp -s "$d/nofb/composer.json" "$d/start.json" || bad="$bad --no-fallback a touché composer.json;"
+    if [ -e "$d/start.json" ]; then
+      cmp -s "$d/nofb/composer.json" "$d/start.json" || bad="$bad --no-fallback a touché composer.json;"
+    else
+      [ ! -e "$d/nofb/composer.json" ] || bad="$bad --no-fallback a laissé un composer.json;"
+    fi
+    # Rien avant la raison : rien d'écrit non plus, pas même composer.json
+    # remis à l'identique, ni un fichier créé puis retiré (le répertoire).
+    if [ "$late" = 0 ]; then
+      { [ ! -e "$d/nofb/composer.json" ] || [ ! "$d/nofb/composer.json" -nt "$d/stamp" ]; } \
+        || bad="$bad --no-fallback a écrit composer.json (puis l'a remis);"
+      [ ! "$d/nofb" -nt "$d/stamp" ] || bad="$bad --no-fallback a écrit dans le projet;"
+    fi
     { [ ! -e "$WORK/seed/$seedname/composer.lock" ] || [ ! -e "$d/nofb/composer.lock" ] || cmp -s "$d/nofb/composer.lock" "$WORK/seed/$seedname/composer.lock"; } \
       || bad="$bad --no-fallback a touché composer.lock;"
     if [ "$installed" = 0 ]; then
@@ -543,8 +561,9 @@ want hold-install-packagist && trace_ hold-install-packagist free '{"require": {
 # Packagist seul, un dist du lock sur un autre hôte `https` que GitHub
 # (downloads.wordpress.org, git.drupalcode.org le sont) : pas de retenue.
 want hold-install-other-host && trace_ hold-install-other-host free '{"require": {"acme/a": "1.0.0"}}' "lock:${LOCKA/URL/https://downloads.wordpress.org/a.zip}" -- install
-# Retenue imposée (aucun dépôt `https` ici) : natif, octet pour octet, à
-# chaque niveau ; rendu, rien avant la raison.
+# Retenue imposée (aucun dépôt `https` ici) : natif, octet pour octet, sous
+# normal, `-v` et `-q` (`-vv`/`-vvv` partent au démarrage) ; rendu, rien
+# avant la raison.
 want hold-native && case_ hold-native filel native hold -- update
 want hold-native-v && case_ hold-native-v filel native hold -- update -v
 want hold-native-q && case_ hold-native-q filel native hold -- update -q
@@ -553,11 +572,21 @@ want hold-install-v && case_ hold-install-v local native hold -- install -v
 want hold-install-dists && case_ hold-install-dists pkg native hold 'jq:.config["secure-http"]=false' 'expect:^Warning: Accessing dist.test' -- install
 want hold-handover && case_ hold-handover pathp 'delegates:secure-http' hold loaded nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- update
 # … dès avant l'édition de `require`/`remove`, avant la ligne de l'install
-# sans lock : rien d'écrit avant la raison, composer.json rendu tel quel.
-want hold-require-handover && case_ hold-require-handover pathq 'delegates:secure-http' hold loaded 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/p:1.0.0
+# sans lock : rien d'écrit avant la raison, composer.json jamais écrit.
+want hold-require-handover && case_ hold-require-handover pathq 'delegates:downloaded over an insecure protocol' hold loaded 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/p:1.0.0
 # (acme/a, installé et figé, a un dist `http://` : le pool le juge — plus
 # large que le téléchargement, Composer mène le `remove` à bien.)
-want hold-remove-handover && case_ hold-remove-handover pathpq 'delegates:secure-http' hold loaded installed 'expect:Removing acme/w' -- remove acme/w
+want hold-remove-handover && case_ hold-remove-handover pathpq 'delegates:downloaded over an insecure protocol' hold loaded installed 'expect:Removing acme/w' -- remove acme/w
+# Aucun argument ne nomme un lien : rien n'est édité, rien n'est remis.
+want hold-remove-nomatch-handover && case_ hold-remove-nomatch-handover pathpq 'delegates:downloaded over an insecure protocol' hold loaded installed -- remove acme/zzz
+# Sans composer.json : `require` le crée — en mémoire sous la retenue,
+# jamais écrit avant de rendre.
+want hold-require-created-handover && case_ hold-require-created-handover pathq 'delegates:downloaded over an insecure protocol' hold loaded 'rm:composer.json' 'rm:composer.lock' 'global:{"repositories": [{"type": "path", "url": "'"$WORK"'/pathp"}, {"type": "composer", "url": "file://'"$WORK"'/srvfile"}, {"packagist.org": false}]}' 'expect:does not allow connections to http://dist.test/dist/a.zip' -- require acme/p:1.0.0
+# Témoins (verts avant comme après) : une sortie qui n'est pas une
+# délégation laisse le fichier comme Composer — créé et gardé sur une
+# `--fixed` refusé, remis après un échec de résolution.
+want hold-require-created-fixed && case_ hold-require-created-fixed pathq native hold 'rm:composer.json' 'rm:composer.lock' 'global:{"repositories": [{"type": "path", "url": "'"$WORK"'/pathp"}, {"packagist.org": false}]}' -- require acme/p:1.0.0 --fixed
+want hold-require-unsolvable && case_ hold-require-unsolvable filel native hold anyreq 'jq:del(.require["acme/l"])' 'expect:could not be resolved' -- require acme/l:9.9.9
 want hold-lockless-handover && case_ hold-lockless-handover pathp 'delegates:secure-http' hold loaded nolock 'expect:does not allow connections to http://dist.test/dist/a.zip' -- install
 # Natifs sous retenue : `require`, `remove`, l'install qui suit un update.
 want hold-require && case_ hold-require filel native hold anyreq 'jq:del(.require["acme/l"])' -- require acme/l:1.0.0
@@ -587,4 +616,20 @@ want minimal-changes-option && case_ minimal-changes-option filel 'delegates:min
 # rien, natif.
 want repo-type-package-no-update && case_ repo-type-package-no-update pkg native -- remove acme/b --no-update
 want minimal-changes-require && case_ minimal-changes-require filel 'delegates:minimal-changes' anyreq 'jq:del(.require["acme/l"])' -- require acme/l:1.0.0 --minimal-changes
+# La clé dans une couche d'auth (`Factory` la fusionne sous `config`) : la
+# dernière couche gagne ; une valeur non booléenne y est signalée par
+# Composer.
+want minimal-changes-auth-env && case_ minimal-changes-auth-env filel 'delegates:minimal-changes' 'env:COMPOSER_AUTH={"update-with-minimal-changes": true}' -- update --no-install
+want minimal-changes-auth-json && case_ minimal-changes-auth-json filel 'delegates:minimal-changes' 'authjson:{"update-with-minimal-changes": true}' -- update --no-install
+want minimal-changes-auth-global && case_ minimal-changes-auth-global filel 'delegates:minimal-changes' 'globalauth:{"update-with-minimal-changes": true}' -- update --no-install
+want minimal-changes-auth-string && case_ minimal-changes-auth-string filel 'delegates:minimal-changes' 'authjson:{"update-with-minimal-changes": "no"}' -- update --no-install
+want minimal-changes-auth-json-wins && case_ minimal-changes-auth-json-wins filel native 'jq:.config["update-with-minimal-changes"]=true' 'authjson:{"update-with-minimal-changes": false}' -- update --no-install
+# `--no-update` ne résout rien : ni le mode, ni un dépôt `package` (toutes
+# les contraintes données) n'y changent rien, natif.
+want minimal-changes-require-no-update && case_ minimal-changes-require-no-update filel native 'jq:.config["update-with-minimal-changes"]=true|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+want minimal-changes-remove-no-update && case_ minimal-changes-remove-no-update filel native 'jq:.config["update-with-minimal-changes"]=true' -- remove acme/l --no-update
+# … mais `requireComposer()` instancie les dépôts : une définition que le
+# `RepositoryManager` refuse arrête Composer : rendu.
+want repo-path-no-url-require-no-update && case_ repo-path-no-url-require-no-update filel 'delegates:has no url' 'jq:.repositories += [{"type": "path"}]|del(.require["acme/l"])' -- require acme/l:1.0.0 --no-update
+want repo-type-package-require-no-update && case_ repo-type-package-require-no-update pkg native 'jq:del(.require["acme/b"])' -- require acme/b:1.0.0 --no-update
 exit $status
