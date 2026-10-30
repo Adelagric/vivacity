@@ -6001,7 +6001,9 @@ La sonde construisait l'ensemble de toutes les extensions pour deux noms.
   mode de `require` passe outre une ignorance, comme `pcntl_signal` dans
   seld (vérifié dans SignalHandler.php).
 - `SA_SIGINFO` : sous Linux, un signal de terminal (`SI_KERNEL`) n'est pas
-  relayé — l'enfant l'a déjà. Sous macOS un tel signal porte le pid du
+  relayé une fois l'enfant lancé — il l'a déjà ; avant, il passe par le
+  signal en attente comme un autre (au pire, la double remise documentée ;
+  dixième revue, avec `SeqCst` sur la remise `CHILD`/`PENDING`). Sous macOS un tel signal porte le pid du
   meneur de session et aucun code propre (relevé : `si_pid` du processus
   `script` qui tient le terminal, `si_code` 0, comme pour un `kill`) : il
   ne se distingue pas d'un `kill` et reste relayé. Un `kill` adressé au
