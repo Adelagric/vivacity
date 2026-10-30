@@ -49,11 +49,14 @@ run() {
 # case_ <nom> <signal> [created] [lock] [env…] -- <arguments de require>
 case_() {
   local name="$1" sig="$2"; shift 2
-  local created=0 lock=0 held=0 envs=() side
+  local created=0 lock=0 held=0 handed=0 envs=() side
   while [ "$1" != "--" ]; do
     case "$1" in
       created) created=1 ;; lock) lock=1 ;;
       held) held=1; envs+=("VIVACITY_HOLD_OUTPUT=force" "VIVACITY_TRACE=1") ;;
+      # Rendu au démarrage (le mode minimal-changes, des deux côtés) : le
+      # signal va à vivacity seul, le Composer enfant est bloqué sur la FIFO.
+      handed) handed=1; envs+=("COMPOSER_MINIMAL_CHANGES=1") ;;
       *) envs+=("$1") ;;
     esac; shift
   done; shift
@@ -74,6 +77,10 @@ case_() {
     else run "$d" "$sig" "${envs[@]+"${envs[@]}"}" -- "$VIVACITY" "$@"; fi
   done
   local r="$WORK/$name/ref" v="$WORK/$name/viv" bad=""
+  if [ "$handed" = 1 ]; then
+    grep -q '^vivacity: delegating to ' "$v/err" || bad="$bad vivacity ne rend pas la commande;"
+    awk 'f {print} /^vivacity: delegating to /{f=1}' "$v/err" > "$v/err.t"; mv "$v/err.t" "$v/err"
+  fi
   sed "s#$r/#<d>/#g" "$r/err" > "$r/err.n"; sed "s#$v/#<d>/#g" "$v/err" > "$v/err.n"
   [ "$(cat "$r/code")" = "$(cat "$v/code")" ] || bad="$bad codes $(cat "$r/code") vs $(cat "$v/code");"
   cmp -s "$r/out" "$v/out" || bad="$bad stdout différente;"
@@ -102,4 +109,10 @@ want created && case_ created INT created -- require acme/l:1.0.0 --no-install
 # avant celle du retour en arrière, comme Composer les avait écrites.
 want held && case_ held INT held -- require acme/l:1.0.0 --no-install
 want verbose && case_ verbose INT -- require acme/l:1.0.0 --no-install -v
+# La commande rendue à Composer : le signal envoyé à vivacity seul (`timeout`,
+# `docker stop`) passe au Composer enfant, qui rétablit et meurt ; vivacity
+# meurt du même signal (sans relais : le parent meurt, l'enfant orphelin
+# finit sa commande, composer.json reste édité).
+want handed-term && case_ handed-term TERM handed -- require acme/l:1.0.0 --no-install
+want handed-int && case_ handed-int INT handed -- require acme/l:1.0.0 --no-install
 exit $status

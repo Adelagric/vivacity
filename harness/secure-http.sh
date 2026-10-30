@@ -45,6 +45,13 @@ unset COMPOSER_AUTH HTTP_PROXY HTTPS_PROXY https_proxy NO_PROXY no_proxy CGI_HTT
 # COLUMNS large : l'encadré d'une exception de Composer sur une ligne.
 export COLUMNS=400 COMPOSER_HOME="$WORK/home" COMPOSER_NO_INTERACTION=1 COMPOSER_ROOT_VERSION=1.0.0 COMPOSER_NO_AUDIT=1 COMPOSER_TESTS_ARE_RUNNING=1
 echo '{}' > "$WORK/home/config.json"
+# `COMPOSER_TEST_SUITE` : sans lui, `Cache::gcIsNecessary` tire au sort (une
+# fois sur 51) un ramasse-miettes du cache, et `FileDownloader` écrit
+# « Running cache garbage collection » au niveau `-vv` — d'un seul côté des
+# cas `-vv`/`-vvv` (`hold-vv` vu instable ainsi), où les deux sorties sont
+# celles de Composer. Seule lecture de la variable dans Composer 2.10.3
+# (Cache.php:245), comme verbosity.sh.
+export COMPOSER_TEST_SUITE=1
 
 # Les zips : acme/<nom>, un fichier chacun.
 NAMES="a b c r s x p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14"
