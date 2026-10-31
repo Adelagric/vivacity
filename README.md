@@ -24,6 +24,33 @@ Flags: `--no-dev`, `-o`, `-a`, `--no-autoloader`, `--no-install`,
 `config.classmap-authoritative`, `config.platform`, `config.allow-plugins`
 and `config.lock` are read from `composer.json` the way Composer reads them.
 
+## Known issue: a file edited in place in vendor/
+
+Found on 2026-10-31, reproduced, not fixed yet in 0.26.0. vivacity assumes
+that nothing edits `vendor/` after it installs it. Composer assumes nothing
+of the kind, and two things break when that assumption does:
+
+- **Projects are not isolated on file systems without copy-on-write.** On
+  Linux ext4 and overlayfs (most CI runners and Docker images), on Windows
+  when the cache and the project share a volume, and on macOS outside APFS,
+  the files in `vendor/` are hard links to vivacity's store. A file edited
+  in place in one project is edited in the store, in every other project
+  installed from that entry, and in every project installed from it later.
+  APFS (`clonefile`) and btrfs or xfs (reflinks) copy on write and are not
+  affected.
+- **The class map of a store package is not revalidated.** It is cached per
+  store entry. After a class is renamed, added or removed in a `vendor/`
+  file, `vivacity dump-autoload` (and the autoloader dump that ends
+  `install`, `update`, `require` and `remove`) can keep the old class where
+  Composer rescans the file. `VIVACITY_NO_CLASSMAP_CACHE=1` turns that cache
+  off.
+
+Until it is fixed: don't edit files in `vendor/` in place on the file
+systems above. If you did, delete vivacity's store (`store/` under its cache
+directory: `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
+`%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) and reinstall
+the projects that used it.
+
 ## Install
 
 ```bash
