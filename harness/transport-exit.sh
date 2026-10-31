@@ -33,7 +33,8 @@
 #
 # Section 7, ce que Composer décide après un échec qui n'est pas un délai :
 # archive en 500 (16 requêtes), JSON invalide (avec et sans cache, le
-# résumé), ordre de deux dépôts dans le filtre.
+# résumé), ordre de deux dépôts dans le filtre, lot de fichiers p2 dont un
+# échoue.
 #
 # Usage : harness/transport-exit.sh
 set -uo pipefail
@@ -655,6 +656,17 @@ for side in ref viv; do
   echo "$gb" > "$d/g2"
 done
 launch order-two-repos 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect order-two-repos 0 20 "Filter list data could not be fetched"
+# 7e. Un lot de fichiers p2 dont un échoue (500) : Composer écrit en cache
+# chaque réponse réussie (`$accept`) et attend tout le lot (`Loop::wait`)
+# avant de lever ; le résumé désigne acme/bad et acme/lib.
+FAIL_PATH=/p2/acme/bad.json s6_case p2-batch
+for side in ref viv; do
+  d="$WORK/s6/p2-batch/$side"; g=$(cat "$d/g")
+  printf '{"filter": {"malware": {"acme/bad": "*", "acme/lib": "*"}}}\n' > "$d/reg/summary.json"
+  packages_json "$d" "http://127.0.0.1:$g/summary.json" null true > "$d/reg/packages.json"
+  project "$d" "http://127.0.0.1:$g"
+done
+launch p2-batch 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect p2-batch 0 20 "Filter list data could not be fetched"
 wait "${S6_JOBS[@]}"
 for i in "${!S6_NAME[@]}"; do
   judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"

@@ -2273,11 +2273,22 @@ impl ComposerRepository {
                 .collect()
         };
         self.fresh_metadata.set(true);
+        // Every response is settled — each success written to the cache, as
+        // `$accept` does for each job — before the first failure is raised:
+        // `Loop::wait` waits for the whole batch (Loop.php l. 56-100).
         let mut settled = Vec::with_capacity(todo.len());
+        let mut first_error = None;
         for (((key, package_name, url), c), result) in todo.into_iter().zip(cached).zip(results) {
             let cache_key = crate::metacache::MetadataCache::provider_key(&key);
-            let data = self.settle(&url, &cache_key, c, result, true)?;
-            settled.push((key, Self::parse_provider(&package_name, data)));
+            match self.settle(&url, &cache_key, c, result, true) {
+                Ok(data) => settled.push((key, Self::parse_provider(&package_name, data))),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = first_error {
+            return Err(e);
         }
         let mut memo = self.fetched.borrow_mut();
         for (key, value) in settled {
