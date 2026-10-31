@@ -361,6 +361,17 @@ readfile($file);
 return true;
 PHP
 free_port() { php -r '$s = stream_socket_server("tcp://127.0.0.1:0", $e, $m); $n = stream_socket_get_name($s, false); fclose($s); echo substr($n, strrpos($n, ":") + 1);'; }
+# A free port no other server of this run has drawn — nor the closed port of
+# section 2, which 7d needs closed: in FRESH_PORT.
+USED_PORTS=("$port" "$closed")
+fresh_port() {
+  local p
+  while :; do
+    p=$(free_port)
+    case " ${USED_PORTS[*]} " in *" $p "*) continue ;; esac
+    USED_PORTS+=("$p"); FRESH_PORT=$p; return
+  done
+}
 S6_PIDS=()
 trap 'kill $server ${S6_PIDS[*]:-} 2>/dev/null' EXIT
 # `servers <dir>` : G and H for one side, ports in <dir>/g and <dir>/h, the
@@ -370,7 +381,7 @@ trap 'kill $server ${S6_PIDS[*]:-} 2>/dev/null' EXIT
 servers() {
   local d="$1" g h
   mkdir -p "$d/reg"; tar -C "$d/reg" -xzf "$ROOT/fixtures/registry/solver-policies.tar.gz"
-  g=$(free_port); h=$(free_port)
+  fresh_port; g=$FRESH_PORT; fresh_port; h=$FRESH_PORT
   : > "$d/fail.log"
   OFFLINE_ROOT="$d/reg" FAIL_LOG="$d/fail.log" php -S "127.0.0.1:$g" "$WORK/router7.php" >/dev/null 2>&1 &
   S6_PIDS+=($!)
@@ -439,9 +450,11 @@ ports() { # <side dir> (stdin → stdout)
 # (contents hashed), vendor/, the lock. Ports replaced.
 effects() { # <side dir>
   local d="$1"
-  ( cd "$d" && find cache/repo cache/files p/vendor -type f 2>/dev/null | LC_ALL=C sort | while read -r f; do
-      printf '%s %s\n' "$f" "$(ports "$d" < "$f" | shasum | cut -c1-12)"; done
-    ports "$d" < p/composer.lock | shasum | cut -c1-12 ) | ports "$d"
+  # Sorted after the ports are replaced: two repository caches named after
+  # random ports would otherwise come in either order.
+  ( cd "$d" && find cache/repo cache/files p/vendor -type f 2>/dev/null | while read -r f; do
+      printf '%s %s\n' "$(printf '%s' "$f" | ports "$d")" "$(ports "$d" < "$f" | shasum | cut -c1-12)"; done | LC_ALL=C sort
+    ports "$d" < p/composer.lock | shasum | cut -c1-12 )
 }
 # `judge <case> <min s> <max s> <motif Composer must print, or -> [compare stderr: yes|no]`
 judge() {

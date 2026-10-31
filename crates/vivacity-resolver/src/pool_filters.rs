@@ -390,11 +390,25 @@ pub fn filter_list_filter(
             }
         }
     }
+    if let Some(e) = fatal {
+        // With a custom list configured, Composer's own set of lists is not
+        // known here (a later repository may advertise one, and the
+        // constructor throws before any is read): the run is Composer's.
+        if !policy.custom_lists.is_empty() {
+            return Err(FilterError(
+                format!(
+                    "a repository failed while custom policy lists are configured: {}",
+                    e.0
+                ),
+                crate::repository::RepoErrorKind::Unsupported,
+            ));
+        }
+        if !union.is_empty() {
+            return Err(FilterError::from(e));
+        }
+    }
     if union.is_empty() {
         return Ok(pool);
-    }
-    if let Some(e) = fatal {
-        return Err(FilterError::from(e));
     }
     let mut ignore_unreachable = policy.ignore_unreachable.for_block_scope(block_scope);
     if check_locked_against_install {

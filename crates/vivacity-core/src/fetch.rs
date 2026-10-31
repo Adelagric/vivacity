@@ -845,20 +845,48 @@ const TOTAL_TIMEOUT_FLOOR: std::time::Duration = std::time::Duration::from_secs(
 fn php_socket_timeout() -> Option<u64> {
     static VALUE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
+        use std::io::Read;
         let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
-        let out = std::process::Command::new(php)
-            .args(["-r", "echo (int) ini_get('default_socket_timeout');"])
+        let mut child = std::process::Command::new(php)
+            // A marker before the value: a startup warning printed on stdout
+            // is not mistaken for it.
+            .args([
+                "-r",
+                "echo 'socket-timeout:', (int) ini_get('default_socket_timeout');",
+            ])
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .output()
+            .spawn()
             .ok()?;
-        let text = String::from_utf8(out.stdout).ok()?;
-        // `(int)` of a negative value: `max(…, 300)` keeps the floor.
-        text.trim()
-            .parse::<i64>()
-            .ok()
-            .and_then(|v| u64::try_from(v).ok())
+        // Bounded: a php that does not answer (a shim waiting for input, a
+        // wrapper) must not undo the timeout it is asked about. It runs on
+        // the worker that waited 300 s already, once per process.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+        let mut text = String::new();
+        child.stdout.take()?.read_to_string(&mut text).ok()?;
+        socket_timeout_of(&text)
     })
+}
+
+/// The value php printed after its marker. `(int)` of a negative value is
+/// negative: `max(…, 300)` keeps the floor, so does `None`.
+fn socket_timeout_of(stdout: &str) -> Option<u64> {
+    let (_, value) = stdout.rsplit_once("socket-timeout:")?;
+    u64::try_from(value.trim().parse::<i64>().ok()?).ok()
 }
 
 /// `FileDownloader::download`'s own loop (FileDownloader.php l. 135,
@@ -1973,6 +2001,18 @@ mod tests {
         assert!(runtime
             .block_on(fetcher.within_total(async { Ok::<_, Attempt>(7) }))
             .is_ok());
+    }
+
+    #[test]
+    fn the_socket_timeout_is_read_after_its_marker() {
+        assert_eq!(socket_timeout_of("socket-timeout:60"), Some(60));
+        assert_eq!(
+            socket_timeout_of("PHP Warning:  Module \"x\" is already loaded\nsocket-timeout:600"),
+            Some(600)
+        );
+        assert_eq!(socket_timeout_of("socket-timeout:-1"), None);
+        assert_eq!(socket_timeout_of("60"), None);
+        assert_eq!(socket_timeout_of(""), None);
     }
 
     /// `FileDownloader`'s own rounds: 500, 502, 503 and 504 only.
