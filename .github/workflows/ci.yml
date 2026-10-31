@@ -150,6 +150,10 @@ jobs:
         run: harness/net-retry.sh harness/download-lines.sh
       - name: Artifact repositories (local dists read off the disk, modes kept)
         run: harness/net-retry.sh harness/artifact-repo.sh
+      # No network, so no net-retry.sh. ubuntu: the runner's ext4, where
+      # vivacity <= 0.26.0 hard-linked; macOS: an HFS+ disk image (hdiutil).
+      - name: vendor/ isolation (a write in place in one project reaches neither the store nor another project)
+        run: harness/vendor-isolation.sh
       - name: The comparator's own tolerances (anchored, not substrings)
         run: harness/net-retry.sh harness/compare-selftest.sh
       - name: net-retry.sh on scripted failures and the captured GitHub refusal (no retry, cause named)

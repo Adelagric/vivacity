@@ -635,6 +635,60 @@ harnais permanent `harness/vendor-isolation.sh` câblé dans `ci.yml` —
   acceptable tel quel, ou faut-il l'écrire dans le README ?
 - **Q5** : `getattrlistbulk` (macOS) dans ce chantier ou après ?
 
+## Décisions du mainteneur (2026-10-31)
+
+- **Q1** (P1, plus tard) : identité par métadonnées, ctime compris ; le
+  condensat seulement quand elles changent.
+- **Q2** : Windows mesuré avant de choisir ; les résultats Unix ne s'y
+  transposent pas.
+- **Q3** : oui, bump du format du store (`LAYOUT` `v4`) ; une ancienne
+  entrée n'est jamais servie.
+- **Q4** : les copies par projet sont acceptées ; leur coût disque est
+  écrit dans le README.
+- **Q5** : `getattrlistbulk` reporté à un chantier séparé.
+- **La justesse avant la vitesse** : 0.26.1 rétablit les garanties même à
+  un coût mesuré ; aucune optimisation nouvelle dans ce chantier (la copie
+  parallèle par fichier et le renommage à store froid de « Options P0 »
+  restent hors de 0.26.1).
+- **P0 puis P1**, chacun avec ses commits et ses tests de régression ; le
+  cache de classmap n'est pas touché par P0.
+
+### Réserves du mainteneur sur P0, et ce qu'elles changent
+
+1. **La sonde « le clone échoue » n'est pas un critère de justesse.** Elle
+   ne sert qu'à reproduire le défaut historique (phase rouge, FS à liens
+   durs). Le critère repose sur des propriétés observables — octets de A
+   (écriture acceptée), de B et du store (octets d'origine contre une
+   extraction à part de l'archive), modes — et les mêmes contrôles d'octets
+   passent sur un FS à copie sur écriture (`ISO_FS=cow`). Le harnais
+   n'affirme nulle part « pas de clone » ni une technique particulière ;
+   `nlink` n'y est qu'une information, et la garde d'inode partagé ne vaut
+   que pour la phase rouge.
+2. **`iso-upgrade` distingue migration et réparation.** Projet installé
+   avant le correctif, fichiers de vendor/ encore liés à une ancienne
+   entrée :
+   - *migration* : chaque fichier encore lié reçoit sa propre copie,
+     **contenu courant préservé** (un correctif local délibéré n'est jamais
+     détruit) ;
+   - le nouveau store (`v4`) ne se reconstruit que depuis l'archive (cache
+     de zips de Composer ou dist, vérifiés par `dist.shasum` quand il n'est
+     pas vide — il l'est souvent pour les dists GitHub), jamais depuis une
+     ancienne entrée, peut-être contaminée ;
+   - *ambiguïté* : un fichier lié dont le contenu diffère de l'archive ne
+     s'attribue pas (correctif délibéré ici, ou propagé d'ailleurs). Il
+     n'est pas « réparé » en silence. Le signaler sans toucher stdout ni
+     stderr (parité) est un **point de décision** du mainteneur : la partie
+     sûre (déliaison, contenu préservé) est faite, les options de
+     signalement sont décrites dans le rapport d'exécution ;
+   - cas testé : une ancienne entrée éditée avant la mise à jour ne devient
+     pas la référence (nouveau store = octets de l'archive ; le projet garde
+     ses octets courants ; un projet installé ensuite reçoit l'archive).
+3. **Le harnais exerce vivacity, pas Composer.** `update` confie les dépôts
+   `artifact` à Composer depuis 0.26 : le harnais installe depuis un lock
+   (`install`, comme `harness/artifact-repo.sh`) et affirme dans chaque cas
+   l'absence de passation (`--no-fallback`, code 0, la ligne de résumé de
+   vivacity, aucune ligne `delegating`).
+
 ## Annexe A — le spike de mesure (non commité)
 
 Quatre fichiers, tout derrière des variables d'environnement ; retiré par
