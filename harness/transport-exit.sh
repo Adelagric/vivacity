@@ -32,7 +32,8 @@
 # TRANSPORT_EXIT_SLOW=1.
 #
 # Section 7, ce que Composer décide après un échec qui n'est pas un délai :
-# archive en 500 (16 requêtes).
+# archive en 500 (16 requêtes), JSON invalide (avec et sans cache, le
+# résumé).
 #
 # Usage : harness/transport-exit.sh
 set -uo pipefail
@@ -594,6 +595,42 @@ for side in ref viv; do
   jq -n --arg url "http://127.0.0.1:$(cat "$d/g")/broken.zip" '{"_readme": [], "content-hash": "0", "packages": [{"name": "probe/broken", "version": "1.0.0", "dist": {"type": "zip", "url": $url, "shasum": ""}, "type": "library"}], "packages-dev": [], "aliases": [], "minimum-stability": "stable", "stability-flags": {}, "prefer-stable": false, "prefer-lowest": false, "platform": {}, "platform-dev": {}, "plugin-api-version": "2.6.0"}' > "$d/p/composer.lock"
 done
 launch dist-500 30 install --no-plugins --no-scripts -- install --no-scripts --no-fallback; expect dist-500 0 20 - no
+# 7b. packages.json répond 200 avec autre chose que du JSON. Avec un cache
+# (vieux de plus de 600 s, avec ou sans `last-modified`) : `fetchFile` et
+# `fetchFileIfLastModified` rattrapent toute exception, avertissent et
+# servent le cache (ComposerRepository.php l. 1801-1825, 1885-1900) ; le
+# message est celui de `Response::decodeJson`, pas un message de transport.
+# Sans cache : la `ParsingException` n'est pas une `TransportException`,
+# `ignore-unreachable` n'y peut rien, sortie 1.
+for variant in warm-lm warm-nolm cold; do
+  name=json-pkg-$variant
+  BAD_JSON_PATH=/packages.json s6_case "$name"
+  for side in ref viv; do
+    d="$WORK/s6/$name/$side"; g=$(cat "$d/g")
+    packages_json "$d" "http://127.0.0.1:$g/summary.json" null true > "$d/reg/packages.json"
+    project "$d" "http://127.0.0.1:$g"
+    if [ "$variant" != cold ]; then
+      mkdir -p "$d/cache/repo/http---127.0.0.1-$g"
+      if [ "$variant" = warm-lm ]; then
+        jq -c '. + {"last-modified": "Thu, 01 Jan 2026 00:00:00 GMT"}' "$d/reg/packages.json" > "$d/cache/repo/http---127.0.0.1-$g/packages.json"
+      else
+        cp "$d/reg/packages.json" "$d/cache/repo/http---127.0.0.1-$g/packages.json"
+      fi
+      touch -t 202601010000 "$d/cache/repo/http---127.0.0.1-$g/packages.json"
+    fi
+  done
+  launch "$name" 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect "$name" 0 20 "does not contain valid JSON"
+done
+# 7c. Le résumé des listes en JSON invalide : l'exception part de `$accept`,
+# que le `$reject` du même `then` ne rattrape pas (l. 1950-2010) : sortie 1,
+# sous `ignore-unreachable` comme sans.
+BAD_JSON_PATH=/summary.json s6_case json-summary
+for side in ref viv; do
+  d="$WORK/s6/json-summary/$side"; g=$(cat "$d/g")
+  packages_json "$d" "http://127.0.0.1:$g/summary.json" null true > "$d/reg/packages.json"
+  project "$d" "http://127.0.0.1:$g"
+done
+launch json-summary 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect json-summary 0 20 "does not contain valid JSON"
 wait "${S6_JOBS[@]}"
 for i in "${!S6_NAME[@]}"; do
   judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"

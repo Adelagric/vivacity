@@ -50,6 +50,15 @@ impl RepoError {
 /// `--offline`), followed by the URL. `asyncFetchFile` answers it like a 404.
 pub const NETWORK_DISABLED: &str = "Network disabled, request canceled: ";
 
+/// `Response::decodeJson`'s message for a body that is not JSON
+/// (Response.php l. 89-99), the URL `Url::sanitize`d.
+pub fn invalid_json(url: &str) -> String {
+    format!(
+        "\"{}\" does not contain valid JSON",
+        crate::metacache::sanitize_url(url)
+    )
+}
+
 /// Fetching a URL: `Ok(None)` = 404 (unknown package, tolerated by
 /// Composer over HTTP).
 /// Result of a conditional fetch (`If-Modified-Since`).
@@ -1633,8 +1642,20 @@ impl ComposerRepository {
                 bytes,
                 last_modified,
             }) => {
-                let data: Value = serde_json::from_slice(&bytes)
-                    .map_err(|e| RepoError::data(format!("{url}: invalid JSON: {e}")))?;
+                let Ok(data) = serde_json::from_slice::<Value>(&bytes) else {
+                    // `Response::decodeJson` (Response.php l. 89-99): not a
+                    // transport failure, so `ignore-unreachable` never
+                    // covers it. `fetchFile` and `fetchFileIfLastModified`
+                    // catch every exception and fall back on the cache like
+                    // after a transport error; `asyncFetchFile` throws it
+                    // from `$accept`, which its `$reject` does not catch.
+                    let e = RepoError::data(invalid_json(url));
+                    return if asynchronous {
+                        Err(e)
+                    } else {
+                        self.fall_back(e, cached, false)
+                    };
+                };
                 if let Some(cache) = &self.cache {
                     match &last_modified {
                         Some(lm) => {
@@ -1651,34 +1672,44 @@ impl ComposerRepository {
                 }
                 Ok(Some(data))
             }
-            Err(e) => {
-                let conditional = cached.as_ref().is_some_and(|(_, lm)| lm.is_some());
-                let degrade = |e: &RepoError| {
-                    if !self.degraded.replace(true) {
-                        let line = format!(
-                            "{} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
-                            crate::metacache::sanitize_url(&self.url),
-                            e.0
-                        );
-                        self.write_line(line);
-                    }
-                };
-                if !asynchronous {
-                    return match cached {
-                        Some((v, _)) => {
-                            degrade(&e);
-                            Ok(Some(v))
-                        }
-                        None => Err(e),
-                    };
-                }
-                degrade(&e);
-                match cached {
-                    Some((v, _)) if conditional => Ok(Some(v)),
-                    _ if e.0.starts_with(NETWORK_DISABLED) => Ok(None),
-                    _ => Err(e),
-                }
+            Err(e) => self.fall_back(e, cached, asynchronous),
+        }
+    }
+
+    /// What a failed request leaves, as [`Self::settle`] describes it: the
+    /// repository degraded (its warning once), then the cached copy or the
+    /// error.
+    fn fall_back(
+        &self,
+        e: RepoError,
+        cached: Option<(Value, Option<String>)>,
+        asynchronous: bool,
+    ) -> Result<Option<Value>, RepoError> {
+        let conditional = cached.as_ref().is_some_and(|(_, lm)| lm.is_some());
+        let degrade = |e: &RepoError| {
+            if !self.degraded.replace(true) {
+                let line = format!(
+                    "{} could not be fully loaded ({}), package information was loaded from the local cache and may be out of date",
+                    crate::metacache::sanitize_url(&self.url),
+                    e.0
+                );
+                self.write_line(line);
             }
+        };
+        if !asynchronous {
+            return match cached {
+                Some((v, _)) => {
+                    degrade(&e);
+                    Ok(Some(v))
+                }
+                None => Err(e),
+            };
+        }
+        degrade(&e);
+        match cached {
+            Some((v, _)) if conditional => Ok(Some(v)),
+            _ if e.0.starts_with(NETWORK_DISABLED) => Ok(None),
+            _ => Err(e),
         }
     }
 
@@ -1949,7 +1980,7 @@ impl ComposerRepository {
                 };
                 responses.push(
                     serde_json::from_slice(&bytes)
-                        .map_err(|e| RepoError::data(format!("{api_url}: {e}")))?,
+                        .map_err(|_| RepoError::data(invalid_json(api_url)))?,
                 );
             }
             let mut warned = false;
@@ -3031,6 +3062,75 @@ mod degraded_tests {
         assert!(r.root_data().is_err());
         assert!(r.take_held().is_empty());
     }
+
+    #[test]
+    fn packages_json_that_is_not_json_falls_back_like_a_transport_error() {
+        // `fetchFile` catches every exception: `Response::decodeJson`'s
+        // message in the warning, the cached copy served. Without a copy,
+        // the same message as a data error — never under
+        // `ignore-unreachable`.
+        let not_json = || Fetched::Body {
+            bytes: b"<html>not json</html>".to_vec(),
+            last_modified: None,
+        };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let r = repo(
+            tmp.path(),
+            vec![Ok(Fetched::Body {
+                bytes: ROOT.as_bytes().to_vec(),
+                last_modified: None,
+            })],
+            "unused",
+        );
+        r.root_data().expect("first load");
+        let r = repo(tmp.path(), vec![Ok(not_json())], "unused");
+        r.root_data().expect("served from the cache");
+        assert_eq!(
+            r.take_held(),
+            vec!["https://user:***@satis.example.org could not be fully loaded (\"https://user:***@satis.example.org/packages.json\" does not contain valid JSON), package information was loaded from the local cache and may be out of date".to_owned()]
+        );
+        let empty = tempfile::tempdir().expect("tmp");
+        let r = repo(empty.path(), vec![Ok(not_json())], "unused");
+        let e = r.root_data().expect_err("no copy");
+        assert!(!e.is_transport());
+        assert_eq!(
+            e.0,
+            "\"https://user:***@satis.example.org/packages.json\" does not contain valid JSON"
+        );
+        assert!(r.take_held().is_empty());
+    }
+
+    #[test]
+    fn a_package_file_that_is_not_json_is_fatal_without_a_warning() {
+        // `asyncFetchFile`: thrown from `$accept`, which its `$reject` does
+        // not catch — no degraded warning, even with a cached copy.
+        struct NotJson;
+        impl Transport for NotJson {
+            fn fetch(&self, url: &str, _ims: Option<&str>) -> Result<Fetched, RepoError> {
+                Ok(Fetched::Body {
+                    bytes: if url.ends_with("/packages.json") {
+                        ROOT.as_bytes().to_vec()
+                    } else {
+                        b"{".to_vec()
+                    },
+                    last_modified: None,
+                })
+            }
+        }
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut r =
+            ComposerRepository::open("https://satis.example.org", Box::new(NotJson)).expect("open");
+        r.cache = Some(crate::metacache::MetadataCache::new(tmp.path(), &r.url));
+        r.hold_output();
+        let e = load(&r).expect_err("not JSON");
+        assert!(!e.is_transport());
+        assert_eq!(
+            e.0,
+            "\"https://satis.example.org/p2/acme/lib.json\" does not contain valid JSON"
+        );
+        assert!(r.take_held().is_empty());
+    }
+
 }
 
 #[cfg(test)]
