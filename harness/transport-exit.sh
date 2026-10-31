@@ -34,7 +34,7 @@
 # Section 7, ce que Composer décide après un échec qui n'est pas un délai :
 # archive en 500 (16 requêtes), JSON invalide (avec et sans cache, le
 # résumé), ordre de deux dépôts dans le filtre, lot de fichiers p2 dont un
-# échoue.
+# échoue, include d'un dépôt complet que Composer ne demande pas.
 #
 # Usage : harness/transport-exit.sh
 set -uo pipefail
@@ -667,6 +667,17 @@ for side in ref viv; do
   project "$d" "http://127.0.0.1:$g"
 done
 launch p2-batch 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect p2-batch 0 20 "Filter list data could not be fetched"
+# 7f. Un dépôt « complet » (sans `metadata-url`) dont l'include répond 500 :
+# `hasFilter` ne lit que packages.json (`loadRootServerFile` ne charge pas
+# les includes) et ce dépôt n'annonce pas de liste ; l'install depuis le lock
+# ne charge aucun paquet de dépôt : l'include n'est jamais demandé.
+FAIL_PATH=/include/all.json s6_case plain-includes
+for side in ref viv; do
+  d="$WORK/s6/plain-includes/$side"; g=$(cat "$d/g")
+  printf '{"packages": {}, "includes": {"include/all.json": {"sha1": "0000000000000000000000000000000000000000"}}}\n' > "$d/reg/packages.json"
+  project "$d" "http://127.0.0.1:$g"
+done
+launch plain-includes 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect plain-includes 0 20 -
 wait "${S6_JOBS[@]}"
 for i in "${!S6_NAME[@]}"; do
   judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"

@@ -244,9 +244,12 @@ struct RootData {
     /// (`[{url, preferred}]`).
     source_mirrors: BTreeMap<String, Vec<Value>>,
     dist_mirrors: Vec<Value>,
-    /// Repository without `metadata-url` or providers: all the metadata
-    /// (`packages` + `includes`), in `loadIncludes` order.
-    plain: Option<Vec<Value>>,
+    /// Repository without `metadata-url` or providers: its packages.json,
+    /// whose `packages` and `includes` [`ComposerRepository::plain`] loads
+    /// when packages are asked for — not with the root data, which the
+    /// list filter and the advisories read too (`loadRootServerFile` does
+    /// not fetch the includes).
+    plain: Option<Value>,
     /// Repository using the v1 protocol (`providers-url`...): rejected for
     /// resolution.
     v1_protocol: bool,
@@ -470,6 +473,9 @@ pub struct ComposerRepository {
     /// Full repository: arena indices of its packages once loaded
     /// (`getPackages()`), [alias, base] per aliased version.
     members: std::cell::OnceCell<Vec<usize>>,
+    /// The metadata of a plain repository (`packages` + `includes`, in
+    /// `loadIncludes` order), loaded once.
+    plain_packages: std::cell::OnceCell<Vec<Value>>,
     /// Metadata cache in Composer's format (`cache-repo-dir`).
     pub cache: Option<crate::metacache::MetadataCache>,
     /// The repository was already reported in degraded mode (network down,
@@ -1183,6 +1189,7 @@ impl ComposerRepository {
             root: std::cell::OnceCell::new(),
             fetched: std::cell::RefCell::new(BTreeMap::new()),
             members: std::cell::OnceCell::new(),
+            plain_packages: std::cell::OnceCell::new(),
             cache: None,
             degraded: std::cell::Cell::new(false),
             held: None,
@@ -1526,10 +1533,23 @@ impl ComposerRepository {
             // "Full" repository (Satis, static `packages.json`): all packages
             // come from `packages` and the `includes` (`loadIncludes`),
             // loaded in one go like `initialize()`.
-            r.plain = Some(self.load_includes(&data)?);
+            r.plain = Some(data);
         }
         let _ = self.root.set(r);
         Ok(self.root.get().expect("just set"))
+    }
+
+    /// `initialize()` of a plain repository: its `packages` and `includes`
+    /// (`loadDataFromServer`), the first time packages are asked for.
+    fn plain(&self, root: &RootData) -> Result<Option<&Vec<Value>>, RepoError> {
+        let Some(data) = &root.plain else {
+            return Ok(None);
+        };
+        if let Some(loaded) = self.plain_packages.get() {
+            return Ok(Some(loaded));
+        }
+        let loaded = self.load_includes(data)?;
+        Ok(Some(self.plain_packages.get_or_init(|| loaded)))
     }
 
     /// `loadIncludes($data)`: metadata from `packages` (by name, by
@@ -1854,7 +1874,7 @@ impl ComposerRepository {
                 self.what_provides_partial(root, &name, &all, &flags, &already, origin, arena)?,
             );
         }
-        if let Some(plain) = &root.plain {
+        if let Some(plain) = self.plain(root)? {
             if self.members.get().is_none() {
                 let configs: Vec<Value> = plain
                     .iter()
@@ -2508,7 +2528,7 @@ impl ComposerRepository {
                 self.url
             )));
         }
-        if let Some(plain) = &root.plain {
+        if let Some(plain) = self.plain(root)? {
             // `parent::loadPackages` (ArrayRepository) on `getPackages()`.
             if self.members.get().is_none() {
                 let configs: Vec<Value> = plain
