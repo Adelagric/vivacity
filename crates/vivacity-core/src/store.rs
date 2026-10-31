@@ -53,6 +53,10 @@ const DETACHED: &str = ".detached";
 /// per pass that found linked files (`detach_report`).
 const DETACH_REPORTS: &str = ".detached-reports";
 
+/// Beside the markers: one file per vendor directory naming the packages
+/// whose copy there does not come from their entry ([`Store::foreign_copies`]).
+const FOREIGN: &str = ".foreign";
+
 /// Where extractions happen, swept of orphans on the way in. Six hours is well
 /// past any install, and short enough that a killed process does not leave a
 /// tree there for a month: a parallel install's staging directory is minutes
@@ -216,6 +220,119 @@ impl Store {
             .join(LAYOUT)
             .join(vendor_key(vendor))
     }
+
+    /// The packages whose copy under `vendor` was laid out from an archive
+    /// Composer downloaded and whose tree differs from their entry (point 55,
+    /// DECISIONS 2026-10-31): the entry stays as it is — other projects hold
+    /// copies of it, and the classmap cache keys its records on its path —
+    /// and the dump must not serve the entry's records for that copy. Empty
+    /// when the file is absent (the common case: one failed `open`).
+    pub fn foreign_copies(&self, vendor: &std::path::Path) -> std::collections::BTreeSet<String> {
+        std::fs::read_to_string(self.foreign_file(vendor))
+            .map(|text| {
+                text.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Records [`Store::foreign_copies`] for `vendor` (temp+rename; the file
+    /// goes when the set is empty).
+    pub fn set_foreign_copies(
+        &self,
+        vendor: &std::path::Path,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        let file = self.foreign_file(vendor);
+        if names.is_empty() {
+            return match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
+                    path: file,
+                    source: e,
+                }),
+                _ => Ok(()),
+            };
+        }
+        let dir = file.parent().unwrap_or(&self.root).to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(Error::io(&dir))?;
+        let mut text = String::new();
+        for n in names {
+            text.push_str(n);
+            text.push('\n');
+        }
+        let tmp = tempfile::NamedTempFile::new_in(&dir).map_err(Error::io(&dir))?;
+        std::fs::write(tmp.path(), text).map_err(Error::io(tmp.path()))?;
+        tmp.persist(&file).map_err(|e| Error::Io {
+            path: file.clone(),
+            source: e.error,
+        })?;
+        Ok(())
+    }
+
+    fn foreign_file(&self, vendor: &std::path::Path) -> PathBuf {
+        self.root
+            .join(FOREIGN)
+            .join(LAYOUT)
+            .join(vendor_key(vendor))
+    }
+}
+
+/// Whether two extracted trees would lay out the same copy: the same
+/// relative paths, of the same kinds, the same bytes in every file, the same
+/// targets for the links, the same permission bits (Unix) for files and
+/// directories, the roots included. Read in full: only the desynchronized
+/// path asks (an archive Composer downloaded against the entry already in
+/// the store).
+pub fn same_tree(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn kind_and_mode(m: &std::fs::Metadata) -> (u8, u32) {
+        let kind = if m.file_type().is_symlink() {
+            0
+        } else if m.is_dir() {
+            1
+        } else {
+            2
+        };
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt as _;
+            m.permissions().mode() & 0o7777
+        };
+        #[cfg(not(unix))]
+        let mode = u32::from(m.permissions().readonly());
+        (kind, mode)
+    }
+    fn walk(a: &std::path::Path, b: &std::path::Path) -> std::io::Result<bool> {
+        let (ma, mb) = (std::fs::symlink_metadata(a)?, std::fs::symlink_metadata(b)?);
+        if kind_and_mode(&ma) != kind_and_mode(&mb) {
+            return Ok(false);
+        }
+        if ma.file_type().is_symlink() {
+            return Ok(std::fs::read_link(a)? == std::fs::read_link(b)?);
+        }
+        if !ma.is_dir() {
+            return Ok(ma.len() == mb.len() && std::fs::read(a)? == std::fs::read(b)?);
+        }
+        let names = |dir: &std::path::Path| -> std::io::Result<Vec<std::ffi::OsString>> {
+            let mut v: Vec<_> = std::fs::read_dir(dir)?
+                .map(|e| e.map(|e| e.file_name()))
+                .collect::<std::io::Result<_>>()?;
+            v.sort();
+            Ok(v)
+        };
+        let (na, nb) = (names(a)?, names(b)?);
+        if na != nb {
+            return Ok(false);
+        }
+        for n in &na {
+            if !walk(&a.join(n), &b.join(n))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    walk(a, b).unwrap_or(false)
 }
 
 /// The sha1 of the canonical path of a vendor directory.
@@ -239,6 +356,62 @@ mod tests {
             .expect("f");
         w.write_all(b"{}").expect("w");
         w.finish().expect("finish").into_inner()
+    }
+
+    #[test]
+    fn same_tree_compares_what_a_copy_would_hold() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let make = |name: &str, body: &[u8]| {
+            let root = dir.path().join(name);
+            std::fs::create_dir_all(root.join("src/empty")).expect("mkdir");
+            std::fs::write(root.join("src/A.php"), body).expect("write");
+            root
+        };
+        let a = make("a", b"<?php class A {}");
+        let b = make("b", b"<?php class A {}");
+        assert!(same_tree(&a, &b));
+        let c = make("c", b"<?php class B {}");
+        assert!(!same_tree(&a, &c), "other bytes");
+        let d = make("d", b"<?php class A {}");
+        std::fs::write(d.join("extra.txt"), b"x").expect("write");
+        assert!(!same_tree(&a, &d), "one more file");
+        let e = make("e", b"<?php class A {}");
+        std::fs::remove_dir(e.join("src/empty")).expect("rmdir");
+        assert!(!same_tree(&a, &e), "an empty directory less");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let f = make("f", b"<?php class A {}");
+            std::fs::set_permissions(f.join("src/A.php"), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            assert!(!same_tree(&a, &f), "another mode");
+            let g = make("g", b"<?php class A {}");
+            let h = make("h", b"<?php class A {}");
+            std::os::unix::fs::symlink("src/A.php", g.join("l")).expect("link");
+            std::os::unix::fs::symlink("src", h.join("l")).expect("link");
+            assert!(!same_tree(&g, &h), "another link target");
+        }
+        assert!(!same_tree(&a, &dir.path().join("absent")));
+    }
+
+    #[test]
+    fn foreign_copies_are_recorded_per_vendor() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let store = Store::at(dir.path().join("store"));
+        let vendor = dir.path().join("p/vendor");
+        std::fs::create_dir_all(&vendor).expect("mkdir");
+        assert!(store.foreign_copies(&vendor).is_empty());
+        let names: std::collections::BTreeSet<String> =
+            ["a/b".to_owned(), "c/d".to_owned()].into_iter().collect();
+        store.set_foreign_copies(&vendor, &names).expect("record");
+        assert_eq!(store.foreign_copies(&vendor), names);
+        let other = dir.path().join("q/vendor");
+        std::fs::create_dir_all(&other).expect("mkdir");
+        assert!(store.foreign_copies(&other).is_empty(), "another project");
+        store
+            .set_foreign_copies(&vendor, &std::collections::BTreeSet::new())
+            .expect("cleared");
+        assert!(store.foreign_copies(&vendor).is_empty());
     }
 
     #[test]
