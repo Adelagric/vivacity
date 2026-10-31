@@ -46,8 +46,10 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static ABORTING: AtomicBool = AtomicBool::new(false);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 /// [`SUSPENDED`] when the signal came (read by the handling thread).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static SUSPENDED_AT_SIGNAL: AtomicBool = AtomicBool::new(false);
 /// The signal being handled under [`MODE_REVERT`].
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 static HANDLING_THREAD: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
 /// Held across each write of composer.json or the lock; the handling
@@ -75,6 +77,7 @@ static CHILD: AtomicI32 = AtomicI32::new(0);
 /// lock in progress (one file write: milliseconds) before it reverts
 /// anyway: a thread that would hold the gate while blocked elsewhere must
 /// not keep the process alive.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The binary handles termination signals as Composer does (the library
