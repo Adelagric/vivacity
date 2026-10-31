@@ -14,7 +14,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/fixture.sh"
 # shellcheck source=lib/compare.sh
 . "$ROOT/harness/lib/compare.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 # Windows (Git Bash) : l'artefact cargo est vivacity.exe — le préférer quand
 # il existe, pour qu'un binaire unixy résiduel ne le masque pas. Gardé par
 # uname : sous WSL, l'interop binfmt rend un .exe « exécutable » aussi.

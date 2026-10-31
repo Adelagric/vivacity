@@ -3,7 +3,7 @@
 # compris), doit démarrer. Aucun appel à Composer ici.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/boot"
 boot_cmd() { # bash 3.2 (macOS) : pas de tableaux associatifs
   case "$1" in

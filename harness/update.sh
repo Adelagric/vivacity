@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/registry.sh"
 # shellcheck source=lib/fixture.sh
 . "$ROOT/harness/lib/fixture.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/update"
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius rector drupal path-repos solver-held-branch)
 # Cas de mise à jour partielle : "fixture|arguments de composer update".

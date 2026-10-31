@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/registry.sh"
 # shellcheck source=lib/fixture.sh
 . "$ROOT/harness/lib/fixture.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/steps"
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -eq 0 ] && FIXTURES=(laravel symfony sylius rector drupal solver-policies solver-conflict solver-problems path-repos)
 # "fixture|arguments" : la commande et ses arguments. Les mots finaux en

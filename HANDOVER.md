@@ -61,6 +61,11 @@ tools/linux-release.sh check <triple> [bin]  # plancher : aucune GLIBC_ > 2.17 d
 bench/profile.sh ; bench/spike-vs-composer.sh   # M0, longs
 ```
 
+Les harnais qui lancent vivacity sur la machine prennent `VIVACITY_BIN`
+s'il est posé, `target/release/vivacity` sinon : tous depuis le 2026-10-31
+(douze l'ignoraient et testaient en silence le binaire du dossier de travail).
+`harness/linux.sh` compile le sien dans le conteneur.
+
 Les tests intégration `tests/oracle_*.rs` et `tests/fixtures_*.rs` copient le
 binaire `composer` du PATH dans `$TMPDIR` (`tools/oracle_phar.rs`, une copie par
 identité de Composer : une mise à jour est prise en compte) et

@@ -34,7 +34,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/harness/lib/fixture.sh"
 # shellcheck source=lib/compare.sh
 . "$ROOT/harness/lib/compare.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/corpus"
 scan_only=0; only=""; modes="dev,no-dev"
 while [ $# -gt 0 ]; do

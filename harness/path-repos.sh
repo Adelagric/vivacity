@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/fixture.sh
 . "$ROOT/harness/lib/fixture.sh"
-VIVACITY="$ROOT/target/release/vivacity"
+VIVACITY="${VIVACITY_BIN:-$ROOT/target/release/vivacity}"
 WORK="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/path-repos"
 [ -x "$VIVACITY" ] || { echo "binaire absent : cargo build --release"; exit 1; }
 mkdir -p "$WORK"
