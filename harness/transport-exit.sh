@@ -15,7 +15,9 @@
 # 423/425/500/502/503/504/507/510 (et un 400 de codeload.github.com).
 #
 # Et, section 4, ce que `--offline` écrit : la même chose que Composer sous
-# `COMPOSER_DISABLE_NETWORK=1` (stderr entière, trois états du cache).
+# `COMPOSER_DISABLE_NETWORK=1` (stderr entière, trois états du cache) ;
+# section 5, une connexion refusée sous `policy.ignore-unreachable` (code et
+# sortie hors du message de transport, dont le texte diffère, inventorié).
 #
 # Usage : harness/transport-exit.sh
 set -uo pipefail
@@ -225,5 +227,57 @@ offline_case offline-cold 1 froid "  - Network disabled, request canceled: http:
 # `policy.ignore-unreachable` faux : le résumé refusé devient l'exception, après
 # l'avertissement du dépôt dégradé, que Composer a déjà écrit.
 offline_case offline-unreachable-fatal 0 chaud "could not be fully loaded (Network disabled, request canceled" '.config.policy["ignore-unreachable"]=false'
+
+# 5. Connexion refusée (pas `--offline`) : le dépôt de la section 4, servi le
+# temps de remplir le cache, puis arrêté. Le code de sortie et toute la
+# sortie hors du message de transport sont comparés ; ce message, lui,
+# diffère (le texte de curl chez Composer, celui de reqwest chez vivacity :
+# inventaire de docs/plans/parity-gaps-026.md, point 54), et le cas vérifie
+# que chacun écrit bien le sien.
+refused_case() { # <nom> <chaud|froid> <ignore-unreachable true|false>
+  local name="$1" warmth="$2" iu="$3" reg="$WORK/ref-$1" p rc=0 vc=0
+  mkdir -p "$reg"; tar -C "$reg" -xzf "$ROOT/fixtures/registry/solver-policies.tar.gz"
+  p=$(php -r '$s = stream_socket_server("tcp://127.0.0.1:0", $e, $m); $n = stream_socket_get_name($s, false); fclose($s); echo substr($n, strrpos($n, ":") + 1);')
+  printf '{"packages": [], "metadata-url": "http://127.0.0.1:%s/p2/%%package%%.json", "available-package-patterns": ["*"], "security-advisories": {"metadata": true, "api-url": null}, "filter": {"metadata": true, "lists": {"malware": {"enabled": true}}, "summary-url": "http://127.0.0.1:%s/summary.json"}}\n' "$p" "$p" > "$reg/packages.json"
+  [ -f "$reg/summary.json" ] || printf '{"filter": {"malware": {}}}\n' > "$reg/summary.json"
+  mkdir -p "$WORK/ref-home-$name" "$WORK/$name/ref" "$WORK/$name/viv" "$WORK/ref-cache-$name"
+  printf '{"repositories": {"snap": {"type": "composer", "url": "http://127.0.0.1:%s"}, "packagist.org": false}, "config": {"secure-http": false}}\n' "$p" > "$WORK/ref-home-$name/config.json"
+  for side in ref viv; do
+    cp "$ROOT/fixtures/projects/solver-policies/composer.lock" "$WORK/$name/$side/"
+    jq ".config.policy[\"ignore-unreachable\"]=$iu" "$ROOT/fixtures/projects/solver-policies/composer.json" > "$WORK/$name/$side/composer.json"
+  done
+  if [ "$warmth" = chaud ]; then
+    OFFLINE_ROOT="$reg" php -S "127.0.0.1:$p" "$WORK/router.php" >/dev/null 2>&1 &
+    local srv=$!
+    for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$p/packages.json" && break; sleep 0.1; done
+    (cd "$WORK/$name/ref" && COMPOSER_HOME="$WORK/ref-home-$name" COMPOSER_CACHE_DIR="$WORK/ref-cache-$name" COMPOSER_ROOT_VERSION=dev-main \
+      composer install --dry-run --no-plugins --no-scripts --no-interaction -q) || { echo "FAIL $name : le remplissage du cache a échoué"; status=1; kill $srv; return; }
+    kill $srv 2>/dev/null; wait $srv 2>/dev/null
+  fi
+  cp -R "$WORK/ref-cache-$name" "$WORK/ref-cache-$name-ref"; cp -R "$WORK/ref-cache-$name" "$WORK/ref-cache-$name-viv"
+  (cd "$WORK/$name/ref" && COLUMNS=400 COMPOSER_HOME="$WORK/ref-home-$name" COMPOSER_CACHE_DIR="$WORK/ref-cache-$name-ref" COMPOSER_ROOT_VERSION=dev-main COMPOSER_TESTS_ARE_RUNNING=1 \
+    composer install --dry-run --no-plugins --no-scripts --no-interaction --no-ansi >/dev/null 2>"$WORK/$name.ref.err") || rc=$?
+  (cd "$WORK/$name/viv" && COMPOSER_HOME="$WORK/ref-home-$name" COMPOSER_CACHE_DIR="$WORK/ref-cache-$name-viv" COMPOSER_ROOT_VERSION=dev-main \
+    "$VIVACITY" install --dry-run --no-fallback >/dev/null 2>"$WORK/$name.viv.err") || vc=$?
+  if [ "$rc" != "$vc" ]; then echo "FAIL $name : codes $rc (composer) vs $vc (vivacity)"; tail -3 "$WORK/$name.viv.err"; status=1; return; fi
+  if [ "$iu" = false ]; then
+    grep -q "Failed to connect to" "$WORK/$name.ref.err" || { echo "FAIL $name : Composer n'écrit pas l'échec de connexion (cas mal choisi)"; status=1; return; }
+    grep -q "error sending request for url" "$WORK/$name.viv.err" || { echo "FAIL $name : vivacity n'écrit pas l'échec de connexion"; status=1; return; }
+  fi
+  # Toute la sortie sauf les lignes qui portent le message de transport :
+  # l'avertissement du dépôt dégradé, l'encadré de Composer (titre, message,
+  # synopsis, lignes vides), la ligne `Error:` de vivacity, et la ligne
+  # `  - <message>` de la liste des sources ignorées.
+  local drop='could not be fully loaded|^In [A-Za-z0-9_]*\.php line [0-9]*:$|curl error [0-9]+ while|HTTP failure for |^install \[|^Error: '
+  grep -vE "$drop" "$WORK/$name.ref.err" | grep -v '^ *$' > "$WORK/$name.ref.rest"
+  grep -vE "$drop" "$WORK/$name.viv.err" | grep -v '^ *$' > "$WORK/$name.viv.rest"
+  if ! diff -q "$WORK/$name.ref.rest" "$WORK/$name.viv.rest" >/dev/null; then
+    echo "FAIL $name : sortie différente hors du message de transport"; diff "$WORK/$name.ref.rest" "$WORK/$name.viv.rest" | head -8; status=1; return
+  fi
+  echo "OK   $name : code $rc, $(wc -l < "$WORK/$name.ref.rest" | tr -d ' ') lignes identiques hors du message de transport"
+}
+refused_case refused-warm-fatal chaud false
+refused_case refused-cold-fatal froid false
+refused_case refused-warm-ignored chaud true
 
 exit $status

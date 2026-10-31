@@ -886,6 +886,22 @@ la décision revient au mainteneur.
 19. **`require` sans contrainte** : Composer relit `p2/<nom>.json` et
     `~dev.json` à la découverte de version, vivacity non (requêtes seulement,
     sortie identique, `secure-http.sh` `repo-require`).
+54. **Texte d'un échec de transport** (ajouté le 2026-10-31) : une
+    connexion refusée (mesuré ; un DNS en échec ou un délai dépassé sont du
+    même ordre, non mesurés) s'écrit avec le message de curl chez
+    Composer (« curl error 7 while downloading <url>: Failed to connect to … Could not connect to server », dans un encadré)
+    et celui de reqwest chez vivacity (« HTTP failure for <url>: failed
+    after 4 attempts: error sending request for url (<url>) », après
+    `Error:`) — dans l'erreur finale, l'avertissement « could not be fully
+    loaded » et la liste des sources ignorées sous
+    `policy.ignore-unreachable`. Le code de sortie (100, ou 0 sous
+    `ignore-unreachable` vrai) et le reste de la sortie sont identiques :
+    `harness/transport-exit.sh`, section 5 (connexion refusée, cache chaud
+    et froid), vue rouge sur un faux binaire qui sort en 1 et ajoute une
+    ligne. Avant écriture : non (réponse du réseau). Coût : M (table des
+    messages de curl par cause ; le nombre de tentatives de chaque côté,
+    non mesuré). Corpus : non. Sans coût : oui (chemin d'erreur
+    seulement).
 
 ### Résolution, `update`/`require`/`remove`
 
@@ -1047,8 +1063,9 @@ la décision revient au mainteneur.
     Corpus : non. Sans coût : non (une validation de schéma par exécution).
 48. **`require Psr/Log:^3`** (une ligne de plus, note inversée) ;
     `{"require":{"0":"^1"}}` sort en 1 (Composer 255). S.
-49. **`COMPOSER=<fichier>`** refusé (sortie 1) au lieu d'être suivi ou
-    rendu. Avant écriture : oui. S. Sans coût : oui.
+49. ~~**`COMPOSER=<fichier>`** refusé (sortie 1) au lieu d'être suivi ou
+    rendu.~~ Fermé à la cinquième revue (« Dépôts `package` et autres ») :
+    rendu à Composer au démarrage, avant toute lecture ou écriture.
 
 ### Autoload
 
@@ -1070,7 +1087,8 @@ la décision revient au mainteneur.
 ### Docs peut-être périmées (à revérifier, pas des écarts établis)
 
 HANDOVER:213 (`acme/NOPE` 1 contre 2 : la validation des noms de liens est
-portée), HANDOVER:208 (`--with` non porté : livré en 0.18 ; « le message
-d'install d'un lock bloqué ne liste que les versions retirées »), HANDOVER:215
-(`remove --dry-run` refusé, `vendor-dir`/`bin-dir` non lus, transport de
-`remove` en 1), un `vendor-dir` posé seulement dans le config.json global.
+portée), HANDOVER:208 (« le message d'install d'un lock bloqué ne liste que
+les versions retirées »), un `vendor-dir` posé seulement dans le config.json
+global. Corrigés dans HANDOVER le 2026-10-31 (bd9b3f6, 78ad7ec) : `--with`
+porté, `remove --dry-run` porté, `vendor-dir`/`bin-dir` lus, transport de
+`remove` en 100, source injoignable en 100 (mesuré).
