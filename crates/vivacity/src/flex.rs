@@ -774,12 +774,23 @@ pub struct DistReader {
 
 impl DistReader {
     pub fn new(project: &Path) -> anyhow::Result<DistReader> {
+        let mut fetcher = vivacity_core::fetch::Fetcher::new(
+            vivacity_core::fetch::composer_cache_dir(),
+            vivacity_core::fetch::Auth::load(project),
+        )?;
+        // No files cache this run (`fetch::files_cache`): none read, none written.
+        let manifest = vivacity_core::jsonfile::read(&project.join("composer.json"));
+        let auth = vivacity_core::fetch::with_global_json(project, "auth.json", |a| a.cloned());
+        if vivacity_core::fetch::files_cache(
+            manifest.as_ref().and_then(|m| m.get("config")),
+            auth.as_ref(),
+        ) == Ok(vivacity_core::fetch::FilesCache::Disabled)
+        {
+            fetcher = fetcher.without_files_cache();
+        }
         Ok(DistReader {
             runtime: tokio::runtime::Runtime::new().context("cannot start the async runtime")?,
-            fetcher: vivacity_core::fetch::Fetcher::new(
-                vivacity_core::fetch::composer_cache_dir(),
-                vivacity_core::fetch::Auth::load(project),
-            )?,
+            fetcher,
         })
     }
 

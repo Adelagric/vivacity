@@ -64,7 +64,13 @@ pub(crate) fn dump_autoload_plan(
                 // plugin runs or not (`--no-plugins`, refused, removed);
                 // and the copies mlocati/composer-patcher patches (or did:
                 // installed.json says so).
+                // … and the copies laid out from an archive Composer
+                // downloaded whose tree is not their entry's (point 55).
                 mutable_copies: std::iter::once(vivacity_core::effect_plugins::DRUPOL.to_owned())
+                    .chain(
+                        vivacity_core::store::Store::default_location()
+                            .foreign_copies(&layout.vendor_dir()),
+                    )
                     .chain(vivacity_core::composer_patcher::patched_copies(
                         manifest,
                         lock.packages

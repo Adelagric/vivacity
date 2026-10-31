@@ -371,7 +371,7 @@ fn commit_held_write() {
 /// `is_writable` (an existing file), or whether the file can be created
 /// (its directory): `access(2)` where available, the read-only flag
 /// otherwise.
-fn writable(path: &std::path::Path) -> bool {
+pub(crate) fn writable(path: &std::path::Path) -> bool {
     let target = if path.exists() {
         path
     } else {

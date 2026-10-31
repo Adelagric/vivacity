@@ -186,6 +186,10 @@ pub(crate) trait Host {
     /// `config.<key>` of the global layer under `<home>`
     /// ([`global_config_layer`]).
     fn global_config(&self, home: &str, key: &str) -> std::result::Result<Option<Value>, String>;
+    /// `Cache::isEnabled`'s test: `(is_dir || mkdir(…, 0777, true)) &&
+    /// is_writable`, without creating anything — a directory that can be
+    /// written, or whose nearest existing ancestor is a directory that can.
+    fn dir_writable_or_creatable(&self, path: &str) -> bool;
 }
 
 /// The running process.
@@ -217,6 +221,20 @@ impl Host for RealHost {
             auth,
             std::env::var("COMPOSER_AUTH").ok().as_deref(),
         )
+    }
+    fn dir_writable_or_creatable(&self, path: &str) -> bool {
+        let path = Path::new(path);
+        if path.is_dir() {
+            return crate::io::writable(path);
+        }
+        // Something else there (a file, a dangling link): `mkdir` fails.
+        if std::fs::symlink_metadata(path).is_ok() {
+            return false;
+        }
+        match path.ancestors().skip(1).find(|a| a.exists()) {
+            Some(existing) => existing.is_dir() && crate::io::writable(existing),
+            None => false,
+        }
     }
 }
 
@@ -779,6 +797,247 @@ fn sha1_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// `hash_file('sha1', …)`, read in chunks; `None` when the file cannot be
+/// read.
+fn sha1_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = Sha1::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => h.update(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Whether Composer **downloads** a dist rather than copying it from its
+/// files cache: `FileDownloader::download` (FileDownloader.php l. 176-198)
+/// copies it only when
+/// `$this->cache !== null && ($checksum === null || $checksum === '' ||
+/// $checksum === $this->cache->sha1($cacheKey)) && $this->cache->copyTo(…)`
+/// — a cache this run has (`files_cache`, [`FilesCache`]), a file at the key
+/// ([`dist_cache_path_of`]), and, when the lock gives a `dist.shasum`, that
+/// file's sha1 equal to it. Otherwise the `  - Downloading` line and the
+/// request. The one predicate for both: the line ([`crate::installer`]'s
+/// caller) and the request ([`Fetcher::dist_bytes_decided`]) follow what it
+/// answered once.
+///
+/// Not reproduced here, handed over or consigned elsewhere: the key of a
+/// preferred mirror (handed over before anything), `updateDistReference`
+/// (the key on the URL as the lock writes it, point 14), a custom cache key
+/// from a `PRE_FILE_DOWNLOAD` listener (no plugin runs), and the garbage
+/// collection Composer draws once in 51 runs (`Cache::gcIsNecessary`),
+/// whose run is the one this answers for.
+pub fn composer_downloads(
+    cache_path: &Path,
+    expected_sha1: Option<&str>,
+    files_cache: bool,
+) -> bool {
+    if !files_cache {
+        return true;
+    }
+    match expected_sha1 {
+        None => !cache_path.is_file(),
+        Some(exp) => sha1_file(cache_path).is_none_or(|actual| actual != exp),
+    }
+}
+
+/// Composer's files cache for a run, as `Factory::createDownloadManager`
+/// (Factory.php l. 504-510) and `Cache` (Cache.php l. 50-108) make it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesCache {
+    /// Read and written as usual.
+    Enabled,
+    /// No cache (`cache-files-ttl`, else `cache-ttl`, at 0), or one
+    /// `Cache::isUsable` refuses (`$null`, `nul`, `NUL`, `/dev/null`): every
+    /// dist is downloaded, none is written, and nothing is said.
+    Disabled,
+}
+
+/// `Cache::isUsable`: `'{(^|[\\/])(\$null|nul|NUL|/dev/null)([\\/]|$)}'`.
+fn cache_dir_usable(path: &str) -> bool {
+    let b = path.as_bytes();
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    for start in 0..=b.len() {
+        if start > 0 && !sep(b[start - 1]) {
+            continue;
+        }
+        for word in ["$null", "nul", "NUL", "/dev/null"] {
+            let end = start + word.len();
+            if b[start..].starts_with(word.as_bytes()) && (end == b.len() || sep(b[end])) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The files cache of this run ([`FilesCache`]), or why the command must go
+/// to Composer: a cache in read-only mode (`cache-read-only` or
+/// `COMPOSER_CACHE_READ_ONLY`, `Config.php` l. 400-412 — vivacity writes
+/// the repository caches as well), a lifetime that is not an integer, one of
+/// these keys where vivacity does not read it (the global auth.json,
+/// COMPOSER_AUTH, the project's auth.json), or a `files/` directory that can
+/// neither be written nor created (Composer warns « Cannot create cache
+/// directory … » and goes on without it, Cache.php l. 90-108). Decided from
+/// the configuration before anything is written; `project_config` is the
+/// `config` of composer.json.
+pub fn files_cache(
+    project_config: Option<&Value>,
+    project_auth: Option<&Value>,
+) -> std::result::Result<FilesCache, String> {
+    files_cache_with(&RealHost, project_config, project_auth)
+}
+
+fn files_cache_with(
+    h: &dyn Host,
+    project_config: Option<&Value>,
+    project_auth: Option<&Value>,
+) -> std::result::Result<FilesCache, String> {
+    let home = config_home(h)?;
+    // `Config::merge`: the last layer that sets the key wins — the global
+    // config.json (the auth layers are refused by `global_config`), then
+    // composer.json, then the project's auth.json (refused).
+    let layered = |key: &str| -> std::result::Result<Option<Value>, String> {
+        let mut value = h.global_config(&home, key)?;
+        if let Some(v) = project_config.and_then(|c| c.get(key)) {
+            value = Some(v.clone());
+        }
+        if project_auth.is_some_and(|a| a.get(key).is_some()) {
+            return Err(format!("{key} in the project's auth.json"));
+        }
+        Ok(value)
+    };
+    // `getComposerEnv` first, then the layers; `$val !== 'false' && (bool) $val`.
+    let read_only = match h.env("COMPOSER_CACHE_READ_ONLY") {
+        Some(v) => !(v.is_empty() || v == "0" || v == "false"),
+        None => match layered("cache-read-only")? {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            Some(other) => return Err(format!("cache-read-only {other}")),
+        },
+    };
+    if read_only {
+        return Err("a read-only cache (cache-read-only)".to_owned());
+    }
+    // `cache-files-ttl` when set, else `cache-ttl` (Config.php l. 428-463),
+    // `max(0, (int) …)`; only an integer is taken as it is.
+    let integer = |key: &str, v: Value| -> std::result::Result<i64, String> {
+        v.as_i64().ok_or_else(|| format!("{key} {v}"))
+    };
+    let ttl = match layered("cache-files-ttl")? {
+        Some(v) => integer("cache-files-ttl", v)?,
+        None => match layered("cache-ttl")? {
+            Some(v) => integer("cache-ttl", v)?,
+            None => 15_552_000,
+        },
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let files = format!(
+        "{}/files",
+        config_realpath(&cache_dir_setting_with(h)?, &cwd.to_string_lossy())
+    );
+    // The cache is built only when the lifetime is positive; `isUsable` is
+    // asked in its constructor, before any write test.
+    if ttl <= 0 || !cache_dir_usable(&files) {
+        return Ok(FilesCache::Disabled);
+    }
+    if !h.dir_writable_or_creatable(&files) {
+        return Err(format!(
+            "the cache directory {files} can neither be written nor created"
+        ));
+    }
+    Ok(FilesCache::Enabled)
+}
+
+/// `Url::sanitize` (Url.php l. 130-148): an `access_token` query value
+/// masked, a password replaced by `***`, a user name that looks like a
+/// token shortened (`Url::sanitizeUsername`).
+pub fn sanitize_url(url: &str) -> String {
+    static TOKEN: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
+    static CREDS: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
+    let token = compiled(&TOKEN, r"([&?]access_token=)[^&]+", false);
+    let mut out = String::new();
+    let mut last = 0;
+    for m in token.find_iter(url.as_bytes()).flatten() {
+        out.push_str(&url[last..m.start()]);
+        let matched = &url[m.start()..m.end()];
+        let eq = matched.find('=').map(|i| i + 1).unwrap_or(matched.len());
+        out.push_str(&matched[..eq]);
+        out.push_str("***");
+        last = m.end();
+    }
+    out.push_str(&url[last..]);
+    let url = out;
+    let creds = compiled(
+        &CREDS,
+        r"(?:(?P<prefix>[a-z0-9][a-z0-9+.-]*://)|\A)(?P<user>[^:/\s?#]*)(?::(?P<password>[^\s/?#]+))?@",
+        true,
+    );
+    match creds.captures(url.as_bytes()) {
+        Ok(Some(caps)) => {
+            let whole = caps.get(0).map(|m| (m.start(), m.end())).unwrap_or((0, 0));
+            let prefix = caps.get(1).map(|m| &url[m.start()..m.end()]).unwrap_or("");
+            let user = caps.get(2).map(|m| &url[m.start()..m.end()]).unwrap_or("");
+            let user = sanitize_username(user);
+            let replacement = if caps.get(3).is_some_and(|m| m.end() > m.start()) {
+                format!("{prefix}{user}:***@")
+            } else {
+                format!("{prefix}{user}@")
+            };
+            format!("{}{}{}", &url[..whole.0], replacement, &url[whole.1..])
+        }
+        _ => url,
+    }
+}
+
+/// `Url::sanitizeUsername`.
+fn sanitize_username(user: &str) -> String {
+    const NON_SECRET: &[&str] = &[
+        "gitlab-ci-token",
+        "x-token-auth",
+        "oauth2",
+        "x-oauth-basic",
+        "git",
+        "user",
+        "token",
+    ];
+    static GH: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
+    if NON_SECRET.contains(&user) {
+        return user.to_owned();
+    }
+    let gh = compiled(&GH, r"^(?:ghp|gho|ghu|ghs|ghr|github_pat)_", false);
+    if gh.is_match(user.as_bytes()).unwrap_or(false) || user.len() >= 12 {
+        // `substr($user, 0, 3)` counts bytes; cut at a character boundary
+        // at or before the third one (PHP would split the character).
+        let cut = (0..=user.len().min(3))
+            .rev()
+            .find(|&i| user.is_char_boundary(i))
+            .unwrap_or(0);
+        return format!("{}***", &user[..cut]);
+    }
+    user.to_owned()
+}
+
+/// A pattern compiled once.
+fn compiled(
+    cell: &'static std::sync::OnceLock<pcre2::bytes::Regex>,
+    pattern: &str,
+    caseless: bool,
+) -> &'static pcre2::bytes::Regex {
+    cell.get_or_init(|| {
+        pcre2::bytes::RegexBuilder::new()
+            .caseless(caseless)
+            .build(pattern)
+            .unwrap_or_else(|e| panic!("regex `{pattern}`: {e}"))
+    })
+}
+
 /// Response of a conditional metadata GET.
 #[derive(Debug, Clone)]
 pub enum MetadataResponse {
@@ -800,6 +1059,9 @@ pub struct Fetcher {
     /// `ini_get("default_socket_timeout")` of the php Composer would run,
     /// asked only once an attempt has lasted `total_floor`.
     socket_timeout: fn() -> Option<u64>,
+    /// Whether Composer has a files cache this run ([`FilesCache`]): when it
+    /// has none, nothing is read from `files/` nor written there.
+    files_cache: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1117,7 +1379,15 @@ impl Fetcher {
             auth,
             total_floor: TOTAL_TIMEOUT_FLOOR,
             socket_timeout: php_socket_timeout,
+            files_cache: true,
         })
+    }
+
+    /// This fetcher for a run where Composer has no files cache
+    /// ([`FilesCache::Disabled`]): every archive is fetched, none is cached.
+    pub fn without_files_cache(mut self) -> Fetcher {
+        self.files_cache = false;
+        self
     }
 
     /// One attempt within its total time: `max(default_socket_timeout,
@@ -1151,8 +1421,14 @@ impl Fetcher {
         &self.cache_root
     }
 
-    /// Bytes of the dist: cache first (shasum re-checked), network otherwise
-    /// (3 attempts, backoff), cache fed through temp+rename.
+    /// Whether Composer has a files cache this run ([`Fetcher::without_files_cache`]).
+    pub fn files_cache(&self) -> bool {
+        self.files_cache
+    }
+
+    /// Bytes of the dist: from Composer's files cache when Composer would
+    /// copy it from there ([`composer_downloads`]), fetched otherwise
+    /// (Composer's attempts and delays), the cache fed through temp+rename.
     pub async fn dist_bytes(
         &self,
         name: &str,
@@ -1174,30 +1450,65 @@ impl Fetcher {
         offline: bool,
     ) -> Result<(Vec<u8>, Provenance)> {
         let cache_path = dist_cache_path_of(&self.cache_root, name, url, dist_type);
-        if let Ok(bytes) = std::fs::read(&cache_path) {
-            match expected_sha1 {
-                Some(exp) if sha1_hex(&bytes) != exp => {
-                    // Corrupted/poisoned cache entry: throw it away.
-                    let _ = std::fs::remove_file(&cache_path);
-                }
-                _ => return Ok((bytes, Provenance::Cache)),
+        let download = composer_downloads(&cache_path, expected_sha1, self.files_cache);
+        self.dist_bytes_decided(name, url, dist_type, expected_sha1, offline, download)
+            .await
+    }
+
+    /// The copy Composer's files cache holds of a dist, and nothing else: no
+    /// request, no local read, nothing written — what an unchanged package
+    /// (one Composer leaves alone) may borrow to fill the store. `None` when
+    /// there is no copy, or none that matches `expected_sha1`.
+    pub fn cached_dist_bytes(
+        &self,
+        name: &str,
+        url: &str,
+        dist_type: &str,
+        expected_sha1: Option<&str>,
+    ) -> Option<Vec<u8>> {
+        if !self.files_cache {
+            return None;
+        }
+        let bytes =
+            std::fs::read(dist_cache_path_of(&self.cache_root, name, url, dist_type)).ok()?;
+        match expected_sha1 {
+            Some(exp) if sha1_hex(&bytes) != exp => None,
+            _ => Some(bytes),
+        }
+    }
+
+    /// The bytes of a dist whose source is already decided: `download`
+    /// false, the copy in Composer's files cache (the caller ran
+    /// [`composer_downloads`] on it, which is not run again); true, the
+    /// request `FileDownloader` makes. A cached copy gone since the decision
+    /// is downloaded, as Composer's `copyTo` failing would.
+    ///
+    /// What the request leaves is Composer's (FileDownloader.php l. 200-247):
+    /// the archive is written to the files cache (`$accept`) **before** its
+    /// checksum is verified, so a mismatching download stays there; a stale
+    /// copy whose checksum did not match is not removed beforehand, only
+    /// overwritten by a successful download. A dist on this filesystem
+    /// (`file://`, a plain path) is read through `RemoteFilesystem`, which
+    /// `COMPOSER_DISABLE_NETWORK` does not stop (HttpDownloader.php
+    /// l. 236-264, 328-338); any other request offline is refused with
+    /// Composer's words (status 499: no new attempt, no other URL,
+    /// FileDownloader.php l. 272-275).
+    pub async fn dist_bytes_decided(
+        &self,
+        name: &str,
+        url: &str,
+        dist_type: &str,
+        expected_sha1: Option<&str>,
+        offline: bool,
+        download: bool,
+    ) -> Result<(Vec<u8>, Provenance)> {
+        let cache_path = dist_cache_path_of(&self.cache_root, name, url, dist_type);
+        if !download && self.files_cache {
+            if let Ok(bytes) = std::fs::read(&cache_path) {
+                return Ok((bytes, Provenance::Cache));
             }
         }
-        if offline {
-            return Err(Error::Http {
-                url: url.to_owned(),
-                message: format!("missing cache for {name} in offline mode"),
-            });
-        }
-
-        // A dist that lives on this filesystem is read, not downloaded: that
-        // is what Composer does with it, and refusing it lost the whole
-        // `artifact` repository family (offline installs, private builds).
-        if let Some(path) = Self::local_dist_path(url) {
-            let bytes = std::fs::read(&path).map_err(|e| Error::Http {
-                url: url.to_owned(),
-                message: format!("{} could not be read: {e}", path.display()),
-            })?;
+        let verified = |bytes: Vec<u8>| -> Result<(Vec<u8>, Provenance)> {
             if let Some(exp) = expected_sha1 {
                 let actual = sha1_hex(&bytes);
                 if actual != exp {
@@ -1208,8 +1519,25 @@ impl Fetcher {
                     });
                 }
             }
+            Ok((bytes, Provenance::Network))
+        };
+
+        // A dist that lives on this filesystem is read, not downloaded: that
+        // is what Composer does with it, and refusing it lost the whole
+        // `artifact` repository family (offline installs, private builds).
+        if let Some(path) = Self::local_dist_path(url) {
+            let bytes = std::fs::read(&path).map_err(|e| Error::Http {
+                url: url.to_owned(),
+                message: format!("{} could not be read: {e}", path.display()),
+            })?;
             self.cache_dist(&cache_path, &bytes);
-            return Ok((bytes, Provenance::Network));
+            return verified(bytes);
+        }
+        if offline {
+            return Err(Error::Transport(format!(
+                "Network disabled, request canceled: {}",
+                sanitize_url(url)
+            )));
         }
 
         refuse_insecure(url)?;
@@ -1219,18 +1547,8 @@ impl Fetcher {
         let last_err = loop {
             match self.within_total(self.try_download(url)).await {
                 Ok(bytes) => {
-                    if let Some(exp) = expected_sha1 {
-                        let actual = sha1_hex(&bytes);
-                        if actual != exp {
-                            return Err(Error::ShasumMismatch {
-                                name: name.to_owned(),
-                                expected: exp.to_owned(),
-                                actual,
-                            });
-                        }
-                    }
                     self.cache_dist(&cache_path, &bytes);
-                    return Ok((bytes, Provenance::Network));
+                    return verified(bytes);
                 }
                 Err(Attempt {
                     insecure_redirect: Some(stop),
@@ -1401,6 +1719,9 @@ impl Fetcher {
     /// Writes a dist into Composer's own files cache, through a temporary
     /// name so a killed process never leaves a half-written entry behind.
     fn cache_dist(&self, cache_path: &Path, bytes: &[u8]) {
+        if !self.files_cache {
+            return;
+        }
         if let Some(parent) = cache_path.parent() {
             if std::fs::create_dir_all(parent).is_ok() {
                 let tmp = cache_path.with_extension("zip.vivacity-tmp");
@@ -1459,6 +1780,282 @@ impl Fetcher {
 
 #[cfg(test)]
 mod tests {
+    /// `FileDownloader::download` l. 180: a copy at the key serves unless the
+    /// lock's checksum says otherwise, or the run has no files cache.
+    #[test]
+    fn composer_downloads_what_its_files_cache_does_not_serve() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let at = dir.path().join("files/acme/a/k.zip");
+        assert!(composer_downloads(&at, None, true), "absent");
+        std::fs::create_dir_all(at.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&at, b"zip bytes").expect("write");
+        let good = sha1_hex(b"zip bytes");
+        assert!(!composer_downloads(&at, None, true), "present, no checksum");
+        assert!(
+            !composer_downloads(&at, Some(&good), true),
+            "checksum matches"
+        );
+        assert!(
+            composer_downloads(&at, Some(&sha1_hex(b"other")), true),
+            "checksum differs"
+        );
+        assert!(composer_downloads(&at, None, false), "no files cache");
+        // A directory at the key: `copyTo` cannot copy it.
+        let d = dir.path().join("files/acme/b/k.zip");
+        std::fs::create_dir_all(&d).expect("mkdir");
+        assert!(composer_downloads(&d, None, true));
+    }
+
+    #[test]
+    fn cache_dir_usable_is_composers_is_usable() {
+        for bad in [
+            "/dev/null/files",
+            "/dev/null",
+            "nul/files",
+            "C:\\x\\NUL\\files",
+            "/a/$null/files",
+            "/a/nul",
+        ] {
+            assert!(!cache_dir_usable(bad), "{bad}");
+        }
+        for good in [
+            "/home/u/.cache/composer/files",
+            "/a/nulx/files",
+            "/a/xnul/files",
+            "/a/Nul/files",
+            "/dev/nullx/files",
+        ] {
+            assert!(cache_dir_usable(good), "{good}");
+        }
+    }
+
+    #[test]
+    fn the_files_cache_of_a_run() {
+        let base = || FakeHost::linux("/home/u").with("COMPOSER_CACHE_DIR", "/c");
+        let global = |key: &str, v: Value| {
+            let mut h = base();
+            h.config_json.insert(format!("/home/u/.composer|{key}"), v);
+            h
+        };
+        let cfg = |v: Value| v;
+        assert_eq!(
+            files_cache_with(&base(), None, None),
+            Ok(FilesCache::Enabled)
+        );
+        // COMPOSER_CACHE_READ_ONLY: `!== 'false' && (bool)`.
+        for (v, read_only) in [
+            ("1", true),
+            ("yes", true),
+            ("false", false),
+            ("0", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                files_cache_with(&base().with("COMPOSER_CACHE_READ_ONLY", v), None, None).is_err(),
+                read_only,
+                "{v:?}"
+            );
+        }
+        assert!(
+            files_cache_with(&global("cache-read-only", Value::Bool(true)), None, None).is_err()
+        );
+        assert_eq!(
+            files_cache_with(&global("cache-read-only", Value::Bool(false)), None, None),
+            Ok(FilesCache::Enabled)
+        );
+        assert!(
+            files_cache_with(&global("cache-read-only", Value::from("false")), None, None).is_err()
+        );
+        // The project's composer.json wins over the global layer.
+        assert_eq!(
+            files_cache_with(
+                &global("cache-read-only", Value::Bool(true)),
+                Some(&cfg(serde_json::json!({"cache-read-only": false}))),
+                None
+            ),
+            Ok(FilesCache::Enabled)
+        );
+        // The lifetimes: `cache-files-ttl`, else `cache-ttl`; 0 = no cache.
+        let project = |v: Value| files_cache_with(&base(), Some(&v), None);
+        assert_eq!(
+            project(serde_json::json!({"cache-files-ttl": 0})),
+            Ok(FilesCache::Disabled)
+        );
+        assert_eq!(
+            project(serde_json::json!({"cache-ttl": 0})),
+            Ok(FilesCache::Disabled)
+        );
+        assert_eq!(
+            project(serde_json::json!({"cache-ttl": -5})),
+            Ok(FilesCache::Disabled)
+        );
+        assert_eq!(
+            project(serde_json::json!({"cache-ttl": 0, "cache-files-ttl": 60})),
+            Ok(FilesCache::Enabled)
+        );
+        assert!(project(serde_json::json!({"cache-files-ttl": "60"})).is_err());
+        assert!(project(serde_json::json!({"cache-ttl": null})).is_err());
+        assert_eq!(
+            files_cache_with(&global("cache-ttl", Value::from(0)), None, None),
+            Ok(FilesCache::Disabled)
+        );
+        // Where vivacity does not read the key: handed over.
+        assert!(files_cache_with(
+            &base(),
+            None,
+            Some(&serde_json::json!({"cache-files-ttl": 0}))
+        )
+        .is_err());
+        let mut h = base();
+        h.config_errors.insert(
+            "/home/u/.composer|cache-ttl".to_owned(),
+            "cache-ttl in COMPOSER_AUTH".to_owned(),
+        );
+        assert!(files_cache_with(&h, None, None).is_err());
+        // `Cache::isUsable`, silently; a directory that cannot be made, out.
+        assert_eq!(
+            files_cache_with(
+                &FakeHost::linux("/home/u").with("COMPOSER_CACHE_DIR", "/dev/null"),
+                None,
+                None
+            ),
+            Ok(FilesCache::Disabled)
+        );
+        let mut h = base();
+        h.unwritable.push("/c/files".to_owned());
+        assert!(files_cache_with(&h, None, None).is_err());
+        // … unless there is no cache to write to anyway.
+        assert_eq!(
+            files_cache_with(&h, Some(&serde_json::json!({"cache-files-ttl": 0})), None),
+            Ok(FilesCache::Disabled)
+        );
+    }
+
+    #[test]
+    fn a_files_directory_is_writable_or_creatable() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let at = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        assert!(
+            RealHost.dir_writable_or_creatable(&at("cache/files")),
+            "creatable"
+        );
+        std::fs::create_dir_all(dir.path().join("cache/files")).expect("mkdir");
+        assert!(
+            RealHost.dir_writable_or_creatable(&at("cache/files")),
+            "there"
+        );
+        std::fs::write(dir.path().join("plain"), b"x").expect("write");
+        assert!(
+            !RealHost.dir_writable_or_creatable(&at("plain")),
+            "a file in the way"
+        );
+        assert!(
+            !RealHost.dir_writable_or_creatable(&at("plain/files")),
+            "a file above"
+        );
+    }
+
+    #[test]
+    fn a_long_user_name_is_shortened_without_splitting_a_character() {
+        assert_eq!(
+            sanitize_url("https://ààààààà@host/x.zip"),
+            "https://à***@host/x.zip"
+        );
+        assert_eq!(
+            sanitize_url("https://abcdefghijklm@host/x.zip"),
+            "https://abc***@host/x.zip"
+        );
+        assert_eq!(
+            sanitize_url("https://u:p@host/x.zip?access_token=t&a=1"),
+            "https://u:***@host/x.zip?access_token=***&a=1"
+        );
+    }
+
+    /// `RemoteFilesystem` reads a local dist even with the network disabled;
+    /// a request is refused in Composer's words (`HttpDownloader::startJob`),
+    /// the URL sanitised.
+    #[test]
+    fn offline_a_local_dist_is_read_and_a_request_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("a.zip");
+        std::fs::write(&src, b"zip bytes").expect("write");
+        let fetcher = Fetcher::new(dir.path().join("cache"), Auth::default()).expect("fetcher");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let local = src.to_string_lossy().into_owned();
+        let (bytes, _) = runtime
+            .block_on(fetcher.dist_bytes_decided("acme/a", &local, "zip", None, true, true))
+            .expect("read offline");
+        assert_eq!(bytes, b"zip bytes");
+        assert!(dist_cache_path_of(&dir.path().join("cache"), "acme/a", &local, "zip").is_file());
+        let err = runtime
+            .block_on(fetcher.dist_bytes_decided(
+                "acme/b",
+                "https://user:secret@example.invalid/b.zip",
+                "zip",
+                None,
+                true,
+                true,
+            ))
+            .expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "Network disabled, request canceled: https://user:***@example.invalid/b.zip"
+        );
+    }
+
+    /// `$accept` writes the download into the cache before the checksum is
+    /// verified (FileDownloader.php l. 239-242, then 213-215); a stale copy
+    /// is overwritten, not removed first.
+    #[test]
+    fn a_mismatching_dist_is_cached_before_it_fails() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("a.zip");
+        std::fs::write(&src, b"new bytes").expect("write");
+        let cache = dir.path().join("cache");
+        let fetcher = Fetcher::new(cache.clone(), Auth::default()).expect("fetcher");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let url = src.to_string_lossy().into_owned();
+        let at = dist_cache_path_of(&cache, "acme/a", &url, "zip");
+        std::fs::create_dir_all(at.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&at, b"stale").expect("write");
+        let err = runtime
+            .block_on(fetcher.dist_bytes_of(
+                "acme/a",
+                &url,
+                "zip",
+                Some(&sha1_hex(b"locked")),
+                false,
+            ))
+            .expect_err("checksum");
+        assert!(matches!(err, Error::ShasumMismatch { .. }), "{err}");
+        assert_eq!(std::fs::read(&at).expect("cached"), b"new bytes");
+    }
+
+    /// Without a files cache, nothing is read from it nor written to it.
+    #[test]
+    fn without_a_files_cache_nothing_is_read_or_written() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let src = dir.path().join("a.zip");
+        std::fs::write(&src, b"fresh").expect("write");
+        let cache = dir.path().join("cache");
+        let url = src.to_string_lossy().into_owned();
+        let at = dist_cache_path_of(&cache, "acme/a", &url, "zip");
+        std::fs::create_dir_all(at.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&at, b"cached").expect("write");
+        let fetcher = Fetcher::new(cache, Auth::default())
+            .expect("fetcher")
+            .without_files_cache();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let (bytes, provenance) = runtime
+            .block_on(fetcher.dist_bytes_of("acme/a", &url, "zip", None, false))
+            .expect("fetched");
+        assert_eq!(
+            (bytes.as_slice(), provenance),
+            (&b"fresh"[..], Provenance::Network)
+        );
+        assert_eq!(std::fs::read(&at).expect("untouched"), b"cached");
+    }
+
     /// Every archive a run writes to Composer's files cache is noted, from
     /// whichever caller downloads it (the install, Flex's dist reader): a
     /// hand-over takes them back.
@@ -1492,6 +2089,8 @@ mod tests {
         config_json: BTreeMap<String, Value>,
         /// `<home>|<key>` whose global layer cannot be reproduced.
         config_errors: BTreeMap<String, String>,
+        /// Directories that can neither be written nor created.
+        unwritable: Vec<String>,
     }
 
     impl FakeHost {
@@ -1534,6 +2133,9 @@ mod tests {
                 Some(e) => Err(e.clone()),
                 None => Ok(self.config_json.get(&at).cloned()),
             }
+        }
+        fn dir_writable_or_creatable(&self, path: &str) -> bool {
+            !self.unwritable.iter().any(|d| d == path)
         }
     }
 

@@ -12,66 +12,9 @@ pub struct MetadataCache {
     root: PathBuf,
 }
 
-/// `Url::sanitize` reduced to credentials in the URL (`user:pass@`) and the
-/// `access_token` parameter.
+/// `Url::sanitize` (vivacity-core's, which the dist downloads use too).
 pub fn sanitize_url(url: &str) -> String {
-    static TOKEN: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
-    static CREDS: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
-    let token = crate::version::regex(&TOKEN, r"([&?]access_token=)[^&]+", false);
-    let mut out = String::new();
-    let mut last = 0;
-    for m in token.find_iter(url.as_bytes()).flatten() {
-        out.push_str(&url[last..m.start()]);
-        let matched = &url[m.start()..m.end()];
-        let eq = matched.find('=').map(|i| i + 1).unwrap_or(matched.len());
-        out.push_str(&matched[..eq]);
-        out.push_str("***");
-        last = m.end();
-    }
-    out.push_str(&url[last..]);
-    let url = out;
-    let creds = crate::version::regex(
-        &CREDS,
-        r"(?:(?P<prefix>[a-z0-9][a-z0-9+.-]*://)|\A)(?P<user>[^:/\s?#]*)(?::(?P<password>[^\s/?#]+))?@",
-        true,
-    );
-    match creds.captures(url.as_bytes()) {
-        Ok(Some(caps)) => {
-            let whole = caps.get(0).map(|m| (m.start(), m.end())).unwrap_or((0, 0));
-            let prefix = caps.get(1).map(|m| &url[m.start()..m.end()]).unwrap_or("");
-            let user = caps.get(2).map(|m| &url[m.start()..m.end()]).unwrap_or("");
-            let user = sanitize_username(user);
-            let replacement = if caps.get(3).is_some_and(|m| m.end() > m.start()) {
-                format!("{prefix}{user}:***@")
-            } else {
-                format!("{prefix}{user}@")
-            };
-            format!("{}{}{}", &url[..whole.0], replacement, &url[whole.1..])
-        }
-        _ => url,
-    }
-}
-
-/// `Url::sanitizeUsername`.
-fn sanitize_username(user: &str) -> String {
-    const NON_SECRET: &[&str] = &[
-        "gitlab-ci-token",
-        "x-token-auth",
-        "oauth2",
-        "x-oauth-basic",
-        "git",
-        "user",
-        "token",
-    ];
-    static GH: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
-    if NON_SECRET.contains(&user) {
-        return user.to_owned();
-    }
-    let gh = crate::version::regex(&GH, r"^(?:ghp|gho|ghu|ghs|ghr|github_pat)_", false);
-    if gh.is_match(user.as_bytes()).unwrap_or(false) || user.len() >= 12 {
-        return format!("{}***", &user[..user.len().min(3)]);
-    }
-    user.to_owned()
+    vivacity_core::fetch::sanitize_url(url)
 }
 
 impl MetadataCache {

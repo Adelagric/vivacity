@@ -1322,21 +1322,32 @@ fn execute_operations(
         &run.manifest,
     )?;
     // Composer decides these before it fetches anything; computed here for the
-    // same reason `operation_lines` is — our own fetch fills that cache.
-    let downloading = download_lines(
+    // same reason `operation_lines` is — our own fetch fills that cache. The
+    // names are the downloads themselves (one predicate for both).
+    // `startup_hand_over` handed over what `files_cache` refuses.
+    let files_cache = vivacity_core::fetch::files_cache(
+        run.manifest.get("config"),
+        vivacity_core::fetch::with_global_json(&run.project, "auth.json", |a| a.cloned()).as_ref(),
+    )
+    .unwrap_or(vivacity_core::fetch::FilesCache::Enabled);
+    let (downloading, downloads) = download_lines(
         &run.lock,
         &tx.arena,
         &tx.transaction.operations,
         run.with_dev,
+        files_cache,
+        args.offline,
     );
 
     // Transaction.
     let store = Arc::new(vivacity_core::store::Store::default_location());
     let auth = vivacity_core::fetch::Auth::load(&run.project);
-    let fetcher = Arc::new(vivacity_core::fetch::Fetcher::new(
-        vivacity_core::fetch::composer_cache_dir(),
-        auth,
-    )?);
+    let mut fetcher =
+        vivacity_core::fetch::Fetcher::new(vivacity_core::fetch::composer_cache_dir(), auth)?;
+    if files_cache == vivacity_core::fetch::FilesCache::Disabled {
+        fetcher = fetcher.without_files_cache();
+    }
+    let fetcher = Arc::new(fetcher);
     // The identities the dump that follows can use: none without a dump,
     // or when scripts run between the placement and the dump (which then
     // takes nothing from the placement).
@@ -1356,6 +1367,7 @@ fn execute_operations(
         offline: args.offline,
         plugins_enabled: !args.no_plugins,
         placement_identities,
+        downloads: Some(downloads),
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;
@@ -1385,6 +1397,21 @@ fn execute_operations(
         Err(vivacity_core::Error::Refused(msg)) => {
             vivacity_core::say_always!("{msg}");
             return Ok(Flow::Break(1));
+        }
+        // A download that failed: Composer printed every line of the batch
+        // (the registration loop) before the error — point 12, for the
+        // downloads.
+        Err(
+            e @ (vivacity_core::Error::Http { .. }
+            | vivacity_core::Error::Transport(_)
+            | vivacity_core::Error::ShasumMismatch { .. }),
+        ) => {
+            // The run's own end: what was held goes out first.
+            vivacity_core::io::release_output();
+            for line in &downloading {
+                vivacity_core::say!("{line}");
+            }
+            return Err(e.into());
         }
         Err(e) => return Err(e.into()),
     };
@@ -2333,10 +2360,15 @@ fn max_parallel_http() -> usize {
 /// `FileDownloader` and no line. A dry run downloads nothing and prints none
 /// (measured).
 ///
-/// The decision is Composer's: the line appears when its files cache does not
-/// serve the archive. Checked by presence alone — a cached archive whose sha1 no
-/// longer matches makes Composer print where we do not, which is the one corner
-/// left (our own fetch throws that entry away and re-downloads either way).
+/// The decision is Composer's (`fetch::composer_downloads`): the line appears
+/// when its files cache does not serve the archive — absent, a `dist.shasum`
+/// its copy does not match, or no files cache this run (`files_cache`). The
+/// same answer decides the request: the names come back with the lines, and
+/// the installer downloads exactly those, store or not (point 55).
+///
+/// Offline (`--offline`, Composer's `COMPOSER_DISABLE_NETWORK`), the curl
+/// jobs are refused in `startJob` before `initDownload` runs: no
+/// `secure-http` warning (measured).
 ///
 /// `secure-http` false: the request a line announces starts right after it
 /// (`addCopy` → `startJob` → `CurlDownloader::initDownload`), which writes
@@ -2349,7 +2381,9 @@ pub(crate) fn download_lines(
     arena: &[vivacity_resolver::package::Package],
     operations: &[vivacity_resolver::transaction::Operation],
     with_dev: bool,
-) -> Vec<String> {
+    files_cache: vivacity_core::fetch::FilesCache,
+    offline: bool,
+) -> (Vec<String>, std::collections::BTreeSet<String>) {
     use vivacity_resolver::transaction::{DisplayRef, Operation};
     let by_name: std::collections::BTreeMap<&str, &vivacity_core::lock::LockPackage> = lock
         .wanted_packages(with_dev)
@@ -2357,6 +2391,8 @@ pub(crate) fn download_lines(
         .collect();
     let cache_root = vivacity_core::fetch::composer_cache_dir();
     let mut lines = Vec::new();
+    let mut downloads = std::collections::BTreeSet::new();
+    let enabled = files_cache == vivacity_core::fetch::FilesCache::Enabled;
     let max_jobs = max_parallel_http();
     let mut started = 0usize;
     let mut queued: Vec<(String, String)> = Vec::new();
@@ -2412,9 +2448,10 @@ pub(crate) fn download_lines(
         };
         let cached =
             vivacity_core::fetch::dist_cache_path_of(&cache_root, locked.name(), &url, &kind);
-        if cached.exists() {
+        if !vivacity_core::fetch::composer_downloads(&cached, locked.dist_shasum(), enabled) {
             continue;
         }
+        downloads.insert(locked.name().to_owned());
         lines.push(format!(
             "  - Downloading {} ({})",
             package.name,
@@ -2429,6 +2466,9 @@ pub(crate) fn download_lines(
         // the line is Composer's).
         let requested =
             first_preferred_mirror(locked.raw.get("dist")).unwrap_or_else(|| url.clone());
+        if offline {
+            continue;
+        }
         if let vivacity_core::secure_http::Verdict::Warn { scheme, host } =
             vivacity_core::secure_http::classify(&requested)
         {
@@ -2448,7 +2488,7 @@ pub(crate) fn download_lines(
     for (scheme, host) in queued {
         lines.extend(vivacity_core::secure_http::warn_once(&scheme, &host));
     }
-    lines
+    (lines, downloads)
 }
 
 pub(crate) fn operation_lines(

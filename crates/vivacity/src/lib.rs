@@ -1027,6 +1027,20 @@ impl Cli {
         {
             return (Some(why), tls);
         }
+        // Composer's files cache in a mode vivacity does not reproduce
+        // (read-only, a lifetime it does not read, a directory it cannot
+        // write): `fetch::files_cache`.
+        if reads_cache {
+            let project_auth = project_dir(self.working_dir()).ok().and_then(|p| {
+                vivacity_core::fetch::with_global_json(&p, "auth.json", |a| a.cloned())
+            });
+            if let Err(why) = vivacity_core::fetch::files_cache(
+                manifest.as_ref().and_then(|m| m.get("config")),
+                project_auth.as_ref(),
+            ) {
+                return (Some(why), tls);
+            }
+        }
         let cache = (reads_cache
             && self.working_dir().is_some()
             && vivacity_core::fetch::cache_dir_is_relative())

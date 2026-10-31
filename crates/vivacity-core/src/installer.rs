@@ -27,6 +27,12 @@ pub struct InstallOptions {
     /// taken right after the placement, for the class map of the dump that
     /// follows in the same run (`InstallReport::placed`).
     pub placement_identities: PlacementIdentities,
+    /// The packages whose archive Composer downloads in this run
+    /// (`fetch::composer_downloads`, decided once by the caller that prints
+    /// their `  - Downloading` lines): each is fetched even when the store
+    /// holds it, and written where Composer caches it. `None`: decided here,
+    /// with the same predicate, for the packages this install lays out.
+    pub downloads: Option<std::collections::BTreeSet<String>>,
 }
 
 /// What the dump after the install will scan in a placed package: nothing
@@ -48,6 +54,7 @@ impl Default for InstallOptions {
             jobs: 16,
             plugins_enabled: true,
             placement_identities: PlacementIdentities::None,
+            downloads: None,
         }
     }
 }
@@ -327,6 +334,24 @@ pub fn source_install_issues(
     issues
 }
 
+/// What a fetch task brings back: where the bytes came from, the entry it
+/// extracted (for the detach report), or the tree of an archive that differs
+/// from the package's entry (laid out instead of it).
+#[derive(Default)]
+struct Fetched {
+    provenance: Option<Provenance>,
+    extracted: Option<(
+        String,
+        (std::path::PathBuf, crate::detach_report::ArchiveId),
+    )>,
+    foreign: Option<(String, tempfile::TempDir)>,
+}
+
+/// `Filesystem::isDirEmpty` on vendor/: absent counts as not to remove.
+fn vendor_is_empty(vendor: &Path) -> bool {
+    std::fs::read_dir(vendor).is_ok_and(|mut d| d.next().is_none())
+}
+
 pub async fn install(
     _project_dir: &Path,
     lock: &Lock,
@@ -441,6 +466,41 @@ pub async fn install(
         .map(Path::to_path_buf);
     std::fs::create_dir_all(&vendor).map_err(Error::io(&vendor))?;
 
+    // What Composer downloads (`FileDownloader::download`, l. 176-198): the
+    // caller's decision, or the same predicate here.
+    let downloads: std::collections::BTreeSet<String> = match &opts.downloads {
+        Some(set) => set.clone(),
+        None => to_install
+            .iter()
+            .filter(|p| matches!(p.dist_kind(), DistKind::Zip | DistKind::Tar))
+            .filter_map(|p| {
+                let url = p.dist_url_expanded()?;
+                let dist_type = if p.dist_kind() == DistKind::Tar {
+                    "tar"
+                } else {
+                    "zip"
+                };
+                let path = crate::fetch::dist_cache_path_of(
+                    fetcher.cache_root(),
+                    p.name(),
+                    &url,
+                    dist_type,
+                );
+                crate::fetch::composer_downloads(&path, p.dist_shasum(), fetcher.files_cache())
+                    .then(|| p.name().to_owned())
+            })
+            .collect(),
+    };
+    // Downloaded but laid out by nobody here (a package without an install
+    // path that Composer still downloads): fetched, cached, not extracted.
+    let fetch_only: Vec<&LockPackage> = wanted
+        .iter()
+        .copied()
+        .filter(|p| {
+            downloads.contains(p.name()) && !to_install.iter().any(|q| q.name() == p.name())
+        })
+        .collect();
+
     // Fetch + extraction into the store, with bounded parallelism. Packages to
     // "warm" only use the local cache (never the network) and their failure
     // is silent: it is an optimisation, not an obligation.
@@ -451,16 +511,24 @@ pub async fn install(
     // instead of the archive a second time. Nothing is hashed here.
     let detach_pending = !store.detached_marker(&vendor).exists();
     let warm_names: std::collections::BTreeSet<&str> = to_warm.iter().map(|p| p.name()).collect();
-    for p in to_install.iter().chain(to_warm.iter()) {
+    // An unchanged package Composer still downloads is fetched, not warmed.
+    let warming = to_warm.iter().filter(|p| !downloads.contains(p.name()));
+    for p in to_install.iter().chain(warming).chain(fetch_only.iter()) {
         if matches!(p.dist_kind(), DistKind::Path | DistKind::Missing) {
             continue;
         }
-        if store.contains(p.name(), p.version(), p.store_reference().as_deref()) {
+        let warm_only = warm_names.contains(p.name())
+            && !downloads.contains(p.name())
+            && !to_install.iter().any(|q| q.name() == p.name());
+        let only_fetch = fetch_only.iter().any(|q| q.name() == p.name());
+        // Composer downloads it: the store does not stand in for the request
+        // (point 55). Otherwise an entry in the store is the copy, as always.
+        let download = !warm_only && downloads.contains(p.name());
+        let in_store = store.contains(p.name(), p.version(), p.store_reference().as_deref());
+        if in_store && !download {
             report.store_hits += 1;
             continue;
         }
-        let warm_only =
-            warm_names.contains(p.name()) && !to_install.iter().any(|q| q.name() == p.name());
         let (name, version) = (p.name().to_owned(), p.version().to_owned());
         let dist_ref = p.store_reference();
         let kind = if p.dist_kind() == DistKind::Tar {
@@ -483,25 +551,56 @@ pub async fn install(
             crate::fetch::dist_cache_path_of(fetcher.cache_root(), &name, &url, dist_type)
         });
         let (store, fetcher, sem) = (store.clone(), fetcher.clone(), sem.clone());
-        let offline = opts.offline || warm_only;
+        let opts_offline = opts.offline;
         tasks.spawn(async move {
             let _permit = sem.acquire().await.map_err(|_| Error::Http {
                 url: url.clone(),
                 message: "semaphore closed".to_owned(),
             })?;
-            let fetched = fetcher
-                .dist_bytes_of(&name, &url, dist_type, shasum.as_deref(), offline)
-                .await;
-            let (bytes, provenance) = match fetched {
-                Ok(v) => v,
-                // Warming: zip missing from the cache, do not insist.
-                Err(_) if warm_only => return Ok::<_, Error>((None, None)),
-                Err(e) => return Err(e),
+            // Warming an unchanged package, which Composer leaves alone: its
+            // copy in the files cache or nothing — no request, no local read,
+            // nothing written there.
+            let fetched = if warm_only {
+                match fetcher.cached_dist_bytes(&name, &url, dist_type, shasum.as_deref()) {
+                    Some(bytes) => Ok((bytes, Provenance::Cache)),
+                    None => return Ok::<_, Error>(Fetched::default()),
+                }
+            } else {
+                fetcher
+                    .dist_bytes_decided(
+                        &name,
+                        &url,
+                        dist_type,
+                        shasum.as_deref(),
+                        opts_offline,
+                        download,
+                    )
+                    .await
             };
+            let (bytes, provenance) = fetched?;
+            if only_fetch {
+                return Ok(Fetched::default());
+            }
             let store_name = name.clone();
             let version2 = version.clone();
             let dist_ref2 = dist_ref.clone();
-            let extracted = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
+                if in_store {
+                    // The archive Composer downloads, against the entry made
+                    // from another download: the same tree, the entry is the
+                    // copy; another tree, the copy is this archive's, and the
+                    // entry stays as other projects (and the classmap cache)
+                    // know it.
+                    let staged = store.extract_staged(&store_name, &version2, &bytes, kind)?;
+                    let entry = store.entry_path(&store_name, &version2, dist_ref2.as_deref());
+                    let foreign = (!crate::store::same_tree(staged.path(), &entry))
+                        .then_some((store_name, staged));
+                    return Ok::<_, Error>(Fetched {
+                        provenance: Some(provenance),
+                        extracted: None,
+                        foreign,
+                    });
+                }
                 let (entry, made) = store.ensure_made(
                     &store_name,
                     &version2,
@@ -514,27 +613,31 @@ pub async fn install(
                         url,
                         cache_path,
                         from_cache: provenance == Provenance::Cache,
-                        // `dist_bytes_of` checked the bytes against it.
+                        // `dist_bytes_decided` checked the bytes against it.
                         checked_shasum: shasum,
                     };
                     (store_name, (entry, archive))
                 });
-                Ok::<_, Error>(archive)
+                Ok::<_, Error>(Fetched {
+                    provenance: Some(provenance),
+                    extracted: archive,
+                    foreign: None,
+                })
             })
             .await
             .map_err(|e| Error::Http {
                 url: name.clone(),
                 message: format!("extraction task interrupted: {e}"),
-            })??;
-            Ok::<_, Error>((Some(provenance), extracted))
+            })?
         });
     }
     let mut extracted_here: BTreeMap<
         String,
         (std::path::PathBuf, crate::detach_report::ArchiveId),
     > = BTreeMap::new();
+    let mut foreign_trees: BTreeMap<String, tempfile::TempDir> = BTreeMap::new();
     while let Some(joined) = tasks.join_next().await {
-        let (provenance, extracted) = match joined.map_err(|e| Error::Http {
+        let fetched = match joined.map_err(|e| Error::Http {
             url: "join".to_owned(),
             message: e.to_string(),
         })? {
@@ -564,12 +667,26 @@ pub async fn install(
                 }
                 return Err(e);
             }
-            Err(e) => return Err(e),
+            // A failed download: Composer's `cleanup` after the failed batch
+            // (FileDownloader.php l. 316-343) removes the directories its
+            // download made when they are empty — vendor/ among them, even
+            // one that was there before — not their parents.
+            Err(e) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                if vendor_is_empty(&vendor) && vendor != project_dir {
+                    let _ = std::fs::remove_dir(&vendor);
+                }
+                return Err(e);
+            }
         };
-        if let Some((name, entry)) = extracted {
+        if let Some((name, entry)) = fetched.extracted {
             extracted_here.insert(name, entry);
         }
-        match provenance {
+        if let Some((name, tree)) = fetched.foreign {
+            foreign_trees.insert(name, tree);
+        }
+        match fetched.provenance {
             Some(Provenance::Cache) => report.from_cache += 1,
             Some(Provenance::Network) => report.from_network += 1,
             None => {}
@@ -660,6 +777,16 @@ pub async fn install(
     // contends: 607 ms -> 635 ms on an M4 Max). Each package stays atomic
     // (remove-before-clone); only the inter-package order changes, which
     // affects nothing but mtimes. `VIVACITY_PARALLEL_IO=0|1` overrides.
+    // The copies laid out from an archive and not from their entry, known to
+    // the dump: recorded before the placement (an interrupted run leaves the
+    // careful record), settled after it. A copy the record cannot name is
+    // not laid out: the dump would serve its entry's records for it.
+    let foreign_before = store.foreign_copies(&vendor);
+    let mut foreign_after = foreign_before.clone();
+    foreign_after.extend(foreign_trees.keys().cloned());
+    if foreign_after != foreign_before {
+        store.set_foreign_copies(&vendor, &foreign_after)?;
+    }
     // Each placement returns whether it placed, and — for a copy of a store
     // entry with autoload rules — the identity of its PHP files right after,
     // once nothing else of the placement touches them.
@@ -692,7 +819,10 @@ pub async fn install(
             std::fs::rename(staged, &dest).map_err(Error::io(&dest))?;
             return Ok((true, None));
         }
-        let src = store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
+        let src = match foreign_trees.get(p.name()) {
+            Some(tree) => tree.path().to_path_buf(),
+            None => store.entry_path(p.name(), p.version(), p.store_reference().as_deref()),
+        };
         crate::clone::clone_tree(&src, &dest)?;
         // What Composer's download left at LibraryInstaller's path.
         if let Some(dir) = layout.download_leftover(p.name()) {
@@ -736,6 +866,21 @@ pub async fn install(
         .into_iter()
         .filter_map(|(_, identities)| identities.map(std::sync::Arc::new))
         .collect();
+    // A package laid out from its entry again, or gone, is no longer a
+    // foreign copy.
+    let settled: std::collections::BTreeSet<String> = foreign_after
+        .iter()
+        .filter(|n| {
+            foreign_trees.contains_key(n.as_str())
+                || (wanted_names.contains(n.as_str())
+                    && !to_install.iter().any(|p| p.name() == n.as_str()))
+        })
+        .cloned()
+        .collect();
+    // Best effort: a name left over only makes the dump scan that copy.
+    if settled != foreign_after {
+        let _ = store.set_foreign_copies(&vendor, &settled);
+    }
     // A project laid out by an older version may still share inodes with
     // its store: the unchanged packages get their own, no-op included. After
     // the last hand-over point and the placement (a replaced package is a
