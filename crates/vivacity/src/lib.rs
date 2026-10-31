@@ -694,8 +694,16 @@ fn run_once(argv: Vec<std::ffi::OsString>) -> i32 {
                 vivacity_core::io::github_action_error(message);
                 return 1;
             }
-            vivacity_core::say_always!("Error: {e:?}");
-            exit_code_of(&e)
+            let code = exit_code_of(&e);
+            let message = format!("{e:?}");
+            // `Application::renderException` (Application.php l. 597-608),
+            // at QUIET, for a TransportException of curl error 28 — a
+            // timeout; the DNS forms of the same hint are not reproduced.
+            if code == 100 && message.contains(vivacity_core::fetch::TIMED_OUT) {
+                vivacity_core::say_always!("If you intend to run Composer without connecting to the internet, run the command again prefixed with COMPOSER_DISABLE_NETWORK=1 to make Composer run in offline mode.");
+            }
+            vivacity_core::say_always!("Error: {message}");
+            code
         }
     }
 }

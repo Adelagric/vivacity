@@ -794,6 +794,12 @@ pub struct Fetcher {
     client: reqwest::Client,
     cache_root: PathBuf,
     auth: Auth,
+    /// The floor of an attempt's total time ([`TOTAL_TIMEOUT_FLOOR`];
+    /// shorter in tests).
+    total_floor: std::time::Duration,
+    /// `ini_get("default_socket_timeout")` of the php Composer would run,
+    /// asked only once an attempt has lasted `total_floor`.
+    socket_timeout: fn() -> Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,6 +821,72 @@ pub enum Provenance {
 /// - at most three retries, with Composer's own delays:
 ///   `restartJobWithDelay` sleeps not at all, then 100 ms, then 500 ms.
 const MAX_RETRIES: u32 = 3;
+
+/// `CURLOPT_CONNECTTIMEOUT, 10` (CurlDownloader.php l. 221): curl counts the
+/// name resolution, the TCP connection and the TLS handshake in it, and so
+/// does reqwest's `connect_timeout` with the rustls connector — measured,
+/// not assumed (`the_connect_timeout_covers_the_tls_handshake`): without it,
+/// a server that accepts TCP and never answers the ClientHello held
+/// `install` forever (cypht's composer.tiki.org, 2026-10-31).
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `CURLOPT_TIMEOUT, max((int) ini_get("default_socket_timeout"), 300)`
+/// (l. 222): the whole attempt — connection, headers and body — and a
+/// timed-out GET is retried like any curl error 28. A caller's
+/// `http.timeout` replaces it (the advisories API: 10 s, [`Fetcher::post_form`]).
+const TOTAL_TIMEOUT_FLOOR: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// `default_socket_timeout` as the php that runs Composer reads it: the php
+/// of the platform probe (`VIVACITY_PHP`, else `php` from the PATH — the one
+/// `#!/usr/bin/env php` picks for the `composer` the fallback runs). Asked at
+/// most once per process, and only by an attempt that has already waited
+/// [`TOTAL_TIMEOUT_FLOOR`]: no process on any other path. `None` when php
+/// does not answer — the floor then stands.
+fn php_socket_timeout() -> Option<u64> {
+    static VALUE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        let php = std::env::var("VIVACITY_PHP").unwrap_or_else(|_| "php".to_owned());
+        let out = std::process::Command::new(php)
+            .args(["-r", "echo (int) ini_get('default_socket_timeout');"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        // `(int)` of a negative value: `max(…, 300)` keeps the floor.
+        text.trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(|v| u64::try_from(v).ok())
+    })
+}
+
+/// `FileDownloader::download`'s own loop (FileDownloader.php l. 135,
+/// 249-290): an archive whose request ended on a 500, 502, 503 or 504 —
+/// after `CurlDownloader`'s own retries — is asked for again, three times,
+/// 500 ms apart. Any other failure is final there: a curl error's
+/// `TransportException` carries the code 400 (TransportException.php), which
+/// sets `$retries` to 0.
+const DIST_ROUNDS: u32 = 3;
+
+/// Part of the message of every failure that ran out of time — the
+/// connection or the whole attempt: curl's error 28, after which Composer
+/// prints its offline hint (Application.php l. 597-608).
+pub const TIMED_OUT: &str = "operation timed out";
+
+/// A reqwest error as the message says it: a timeout says so (reqwest's own
+/// text does not name the cause).
+fn describe(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        format!("{e}: {TIMED_OUT}")
+    } else {
+        e.to_string()
+    }
+}
+
+fn dist_round_is_retryable(status: Option<u16>) -> bool {
+    matches!(status, Some(500 | 502 | 503 | 504))
+}
 
 fn status_is_retryable(status: u16, url: &str) -> bool {
     if matches!(status, 423 | 425 | 500 | 502 | 503 | 504 | 507 | 510) {
@@ -862,6 +934,20 @@ struct Attempt {
     retryable: bool,
     /// A redirect `secure-http` stopped: never retried.
     insecure_redirect: Option<InsecureRedirect>,
+    /// The HTTP status the attempt ended on, when one came back.
+    status: Option<u16>,
+}
+
+impl Attempt {
+    /// An attempt that outlived its total time: curl error 28, retried.
+    fn timed_out(after: std::time::Duration) -> Attempt {
+        Attempt {
+            message: format!("{TIMED_OUT} after {} milliseconds", after.as_millis()),
+            retryable: true,
+            insecure_redirect: None,
+            status: None,
+        }
+    }
 }
 
 /// A redirect `secure-http` stops (the request's error source).
@@ -965,6 +1051,23 @@ fn refuse_insecure(url: &str) -> Result<()> {
     )))
 }
 
+/// The client every request goes through: Composer's redirect rule and its
+/// connection timeout.
+fn client(
+    redirects: reqwest::redirect::Policy,
+    connect_timeout: std::time::Duration,
+) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(format!("vivacity/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(redirects)
+        .connect_timeout(connect_timeout)
+        .build()
+        .map_err(|e| Error::Http {
+            url: "client".to_owned(),
+            message: e.to_string(),
+        })
+}
+
 impl Fetcher {
     pub fn new(cache_root: PathBuf, auth: Auth) -> Result<Fetcher> {
         // `CurlDownloader::handleRedirect` starts a new request, which
@@ -979,19 +1082,39 @@ impl Fetcher {
                 attempt.follow()
             }
         });
-        let client = reqwest::Client::builder()
-            .user_agent(format!("vivacity/{}", env!("CARGO_PKG_VERSION")))
-            .redirect(redirects)
-            .build()
-            .map_err(|e| Error::Http {
-                url: "client".to_owned(),
-                message: e.to_string(),
-            })?;
+        let client = client(redirects, CONNECT_TIMEOUT)?;
         Ok(Fetcher {
             client,
             cache_root,
             auth,
+            total_floor: TOTAL_TIMEOUT_FLOOR,
+            socket_timeout: php_socket_timeout,
         })
+    }
+
+    /// One attempt within its total time: `max(default_socket_timeout,
+    /// 300)`. Not reqwest's own `timeout`, which cannot be lengthened once
+    /// the request is sent: the attempt is awaited for the floor, and only
+    /// then — when php says the setting is longer — for the rest.
+    async fn within_total<T>(
+        &self,
+        attempt: impl std::future::Future<Output = std::result::Result<T, Attempt>>,
+    ) -> std::result::Result<T, Attempt> {
+        let mut attempt = std::pin::pin!(attempt);
+        if let Ok(r) = tokio::time::timeout(self.total_floor, &mut attempt).await {
+            return r;
+        }
+        let total = (self.socket_timeout)()
+            .map(std::time::Duration::from_secs)
+            .unwrap_or_default()
+            .max(self.total_floor);
+        let rest = total - self.total_floor;
+        if !rest.is_zero() {
+            if let Ok(r) = tokio::time::timeout(rest, &mut attempt).await {
+                return r;
+            }
+        }
+        Err(Attempt::timed_out(total))
     }
 
     /// The directory Composer's caches live under, as this fetcher reads
@@ -1063,8 +1186,10 @@ impl Fetcher {
 
         refuse_insecure(url)?;
         let mut retries = 0u32;
+        let mut rounds = 0u32;
+        let mut in_round = 0u32;
         let last_err = loop {
-            match self.try_download(url).await {
+            match self.within_total(self.try_download(url)).await {
                 Ok(bytes) => {
                     if let Some(exp) = expected_sha1 {
                         let actual = sha1_hex(&bytes);
@@ -1084,11 +1209,20 @@ impl Fetcher {
                     ..
                 }) => return Err(stop.into_dist_error()),
                 Err(a) => {
-                    if !a.retryable || retries >= MAX_RETRIES {
+                    if a.retryable && in_round < MAX_RETRIES {
+                        retries += 1;
+                        in_round += 1;
+                        tokio::time::sleep(retry_delay(in_round)).await;
+                    } else if dist_round_is_retryable(a.status) && rounds < DIST_ROUNDS {
+                        // `FileDownloader`: a new job, whose curl retries
+                        // start from zero again.
+                        retries += 1;
+                        rounds += 1;
+                        in_round = 0;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else {
                         break a.message;
                     }
-                    retries += 1;
-                    tokio::time::sleep(retry_delay(retries)).await;
                 }
             }
         };
@@ -1109,8 +1243,10 @@ impl Fetcher {
     }
 
     /// `application/x-www-form-urlencoded` POST (the security advisories
-    /// API: `packages[]=...`), 10 s timeout like Composer, a single attempt;
-    /// 404 -> `NotFound`.
+    /// API: `packages[]=...`): 10 s in all, Composer's `http.timeout`
+    /// (ComposerRepository.php l. 777), which replaces the total time of
+    /// [`within_total`](Self::within_total); a single attempt, as
+    /// `CurlDownloader` retries a GET only; 404 -> `NotFound`.
     pub async fn post_form(&self, url: &str, body: &str) -> Result<MetadataResponse> {
         refuse_insecure(url)?;
         let mut req = self
@@ -1129,7 +1265,7 @@ impl Fetcher {
             Some(stop) => stop.into_error(),
             None => Error::Http {
                 url: url.to_owned(),
-                message: e.to_string(),
+                message: describe(&e),
             },
         })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -1137,11 +1273,11 @@ impl Fetcher {
         }
         let resp = resp.error_for_status().map_err(|e| Error::Http {
             url: url.to_owned(),
-            message: e.to_string(),
+            message: describe(&e),
         })?;
         let bytes = resp.bytes().await.map_err(|e| Error::Http {
             url: url.to_owned(),
-            message: e.to_string(),
+            message: describe(&e),
         })?;
         Ok(MetadataResponse::Body {
             bytes: bytes.to_vec(),
@@ -1160,54 +1296,12 @@ impl Fetcher {
         refuse_insecure(url)?;
         let mut retries = 0u32;
         let last_err = loop {
-            let mut req = self.client.get(url);
-            if let Some(authz) = self.auth.authorization_for_url(url) {
-                req = req.header(reqwest::header::AUTHORIZATION, authz);
-            }
-            if let Some(ims) = if_modified_since {
-                req = req.header(reqwest::header::IF_MODIFIED_SINCE, ims);
-            }
-            let attempt = match req.send().await {
-                Ok(resp) => {
-                    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                        return Ok(MetadataResponse::NotFound);
-                    }
-                    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-                        return Ok(MetadataResponse::NotModified);
-                    }
-                    let last_modified = resp
-                        .headers()
-                        .get(reqwest::header::LAST_MODIFIED)
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_owned);
-                    match resp.error_for_status() {
-                        Ok(resp) => match resp.bytes().await {
-                            Ok(b) => {
-                                return Ok(MetadataResponse::Body {
-                                    bytes: b.to_vec(),
-                                    last_modified,
-                                })
-                            }
-                            Err(e) => Attempt {
-                                retryable: transport_is_retryable(&e),
-                                insecure_redirect: None,
-                                message: e.to_string(),
-                            },
-                        },
-                        Err(e) => Attempt {
-                            retryable: e
-                                .status()
-                                .is_some_and(|s| status_is_retryable(s.as_u16(), url)),
-                            insecure_redirect: None,
-                            message: e.to_string(),
-                        },
-                    }
-                }
-                Err(e) => Attempt {
-                    retryable: transport_is_retryable(&e),
-                    insecure_redirect: insecure_redirect(&e),
-                    message: e.to_string(),
-                },
+            let attempt = match self
+                .within_total(self.metadata_attempt(url, if_modified_since))
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(a) => a,
             };
             if let Some(stop) = attempt.insecure_redirect {
                 return Err(stop.into_error());
@@ -1222,6 +1316,58 @@ impl Fetcher {
             url: url.to_owned(),
             message: attempts_message(retries, &last_err),
         })
+    }
+
+    /// One conditional GET, headers and body.
+    async fn metadata_attempt(
+        &self,
+        url: &str,
+        if_modified_since: Option<&str>,
+    ) -> std::result::Result<MetadataResponse, Attempt> {
+        let mut req = self.client.get(url);
+        if let Some(authz) = self.auth.authorization_for_url(url) {
+            req = req.header(reqwest::header::AUTHORIZATION, authz);
+        }
+        if let Some(ims) = if_modified_since {
+            req = req.header(reqwest::header::IF_MODIFIED_SINCE, ims);
+        }
+        let resp = req.send().await.map_err(|e| Attempt {
+            retryable: transport_is_retryable(&e),
+            insecure_redirect: insecure_redirect(&e),
+            message: describe(&e),
+            status: None,
+        })?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(MetadataResponse::NotFound);
+        }
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(MetadataResponse::NotModified);
+        }
+        let last_modified = resp
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let resp = resp.error_for_status().map_err(|e| Attempt {
+            retryable: e
+                .status()
+                .is_some_and(|s| status_is_retryable(s.as_u16(), url)),
+            insecure_redirect: None,
+            message: describe(&e),
+            status: e.status().map(|s| s.as_u16()),
+        })?;
+        match resp.bytes().await {
+            Ok(b) => Ok(MetadataResponse::Body {
+                bytes: b.to_vec(),
+                last_modified,
+            }),
+            Err(e) => Err(Attempt {
+                retryable: transport_is_retryable(&e),
+                insecure_redirect: None,
+                message: describe(&e),
+                status: None,
+            }),
+        }
     }
 
     /// Writes a dist into Composer's own files cache, through a temporary
@@ -1266,11 +1412,12 @@ impl Fetcher {
     async fn try_download(&self, url: &str) -> std::result::Result<Vec<u8>, Attempt> {
         let fail = |e: reqwest::Error, url: &str| Attempt {
             insecure_redirect: insecure_redirect(&e),
-            message: e.to_string(),
+            message: describe(&e),
             retryable: match e.status() {
                 Some(s) => status_is_retryable(s.as_u16(), url),
                 None => transport_is_retryable(&e),
             },
+            status: e.status().map(|s| s.as_u16()),
         };
         let mut req = self.client.get(url);
         if let Some(authz) = self.auth.authorization_for_url(url) {
@@ -1681,6 +1828,163 @@ mod tests {
             "https://codeload.github.com/acme/widget/zip/abc"
         ));
         assert!(!status_is_retryable(400, "https://github.com/acme/widget"));
+    }
+
+    /// A listener that accepts every connection and never writes a byte:
+    /// an `https://` URL waits for a ServerHello, an `http://` one for a
+    /// response. With `answer`, each connection gets it once, then silence.
+    fn silent_listener(answer: Option<&'static [u8]>) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for mut stream in listener.incoming().flatten() {
+                if let Some(bytes) = answer {
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(bytes);
+                }
+                held.push(stream);
+            }
+        });
+        port
+    }
+
+    impl Fetcher {
+        /// A fetcher whose attempts last `floor`, and `socket_timeout`'s
+        /// answer when it is longer.
+        fn with_total(floor: std::time::Duration, socket_timeout: fn() -> Option<u64>) -> Fetcher {
+            let mut f = Fetcher::new(
+                std::env::temp_dir().join("vivacity-fetch-test"),
+                Auth::default(),
+            )
+            .expect("fetcher");
+            f.total_floor = floor;
+            f.socket_timeout = socket_timeout;
+            f
+        }
+    }
+
+    /// The experiment behind [`CONNECT_TIMEOUT`], kept as a test: with the
+    /// reqwest, hyper-rustls and rustls of the lock (ring provider), the
+    /// connection timeout stops a TLS handshake the server never answers —
+    /// the TCP connection itself is up, as the `http://` request to the same
+    /// listener shows by outliving it.
+    #[cfg(feature = "rustls-tls-ring")]
+    #[test]
+    fn the_connect_timeout_covers_the_tls_handshake() {
+        let port = silent_listener(None);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let limit = std::time::Duration::from_millis(500);
+        let c = client(reqwest::redirect::Policy::none(), limit).expect("client");
+        let t0 = std::time::Instant::now();
+        // Bounded here, so that a client without the timeout fails the test
+        // instead of hanging it.
+        let e = runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    limit * 6,
+                    c.get(format!("https://127.0.0.1:{port}/")).send(),
+                )
+                .await
+            })
+            .expect("the connection timeout fired before the test's own limit")
+            .expect_err("no ServerHello ever comes");
+        let elapsed = t0.elapsed();
+        assert!(e.is_connect() && e.is_timeout(), "{e:?}");
+        assert!(elapsed >= limit && elapsed < limit * 6, "{elapsed:?}");
+        assert!(describe(&e).ends_with(TIMED_OUT), "{}", describe(&e));
+        let plain = runtime.block_on(async {
+            tokio::time::timeout(limit * 3, c.get(format!("http://127.0.0.1:{port}/")).send()).await
+        });
+        assert!(
+            plain.is_err(),
+            "connected over TCP, the response never comes"
+        );
+    }
+
+    /// The total time covers the body: headers and the start of a body,
+    /// then silence, is curl error 28 after the total — retried, as a GET.
+    #[test]
+    fn an_attempt_is_bounded_by_its_total_time_body_included() {
+        let port = silent_listener(Some(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"pa",
+        ));
+        let floor = std::time::Duration::from_millis(300);
+        let fetcher = Fetcher::with_total(floor, || None);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let t0 = std::time::Instant::now();
+        let url = format!("http://127.0.0.1:{port}/packages.json");
+        let e = runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    fetcher.metadata_fetch(&url, None),
+                )
+                .await
+            })
+            .expect("the total time fired before the test's own limit")
+            .expect_err("the body never ends");
+        let elapsed = t0.elapsed();
+        // Four attempts of 300 ms, 0 + 100 + 500 ms between them.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(1800),
+            "{elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(6), "{elapsed:?}");
+        assert!(
+            e.to_string()
+                .ends_with("failed after 4 attempts: operation timed out after 300 milliseconds"),
+            "{e}"
+        );
+    }
+
+    /// `max((int) ini_get("default_socket_timeout"), 300)`: a longer
+    /// setting lengthens the wait, a shorter one leaves the floor.
+    #[test]
+    fn default_socket_timeout_lengthens_the_total_never_shortens_it() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let floor = std::time::Duration::from_millis(200);
+        for (setting, total) in [
+            ((|| Some(1)) as fn() -> Option<u64>, 1000u128),
+            (|| Some(0), 200),
+            (|| None, 200),
+        ] {
+            let fetcher = Fetcher::with_total(floor, setting);
+            let t0 = std::time::Instant::now();
+            let r = runtime.block_on(
+                fetcher.within_total(std::future::pending::<std::result::Result<(), Attempt>>()),
+            );
+            let elapsed = t0.elapsed().as_millis();
+            let a = r.expect_err("never answers");
+            assert!(a.retryable);
+            assert_eq!(
+                a.message,
+                format!("operation timed out after {total} milliseconds")
+            );
+            assert!(
+                elapsed >= total && elapsed < total + 500,
+                "{elapsed} for {total}"
+            );
+        }
+        // A request that answers within the floor is not held.
+        let fetcher = Fetcher::with_total(floor, || panic!("not asked"));
+        assert!(runtime
+            .block_on(fetcher.within_total(async { Ok::<_, Attempt>(7) }))
+            .is_ok());
+    }
+
+    /// `FileDownloader`'s own rounds: 500, 502, 503 and 504 only.
+    #[test]
+    fn only_a_server_error_starts_a_new_download_round() {
+        for s in [500, 502, 503, 504] {
+            assert!(dist_round_is_retryable(Some(s)), "{s}");
+        }
+        for s in [None, Some(404), Some(423), Some(507), Some(510)] {
+            assert!(!dist_round_is_retryable(s), "{s:?}");
+        }
+        assert_eq!(DIST_ROUNDS, 3);
     }
 
     #[test]

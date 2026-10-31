@@ -165,8 +165,10 @@ jobs:
         run: harness/net-retry.sh harness/auth-hosts.sh
       - name: unzip fails then ZipArchive resumes (duplicates, file/dir collisions)
         run: harness/net-retry.sh harness/two-stage.sh
-      - name: Transport failures exit 100 (404 dist, dead repository, missing local dist)
-        run: harness/net-retry.sh harness/transport-exit.sh
+      # Not under net-retry.sh: every server is local, and the timeout cases
+      # print the very errors net-retry.sh takes for a lost network.
+      - name: Transport failures exit 100, Composer's timeouts and what it decides after a failure
+        run: harness/transport-exit.sh
       - name: -q and -v print what Composer prints (stdout and stderr whole)
         run: harness/net-retry.sh harness/verbosity.sh
       - name: The fallback hands Composer the command line (argv, cwd, env, exit code)
