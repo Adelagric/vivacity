@@ -700,39 +700,11 @@ fn hunks_ignored(text: &str) -> bool {
     })
 }
 
-/// Before `patch` writes into a package laid out from the store (hardlinks
-/// on Linux): every regular file of `dir` that shares its inode gets one of
-/// its own (a copy, then a rename over it), so the store entry is never
-/// patched. A link (`path` packages) was handed over.
-pub fn detach(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Ok(());
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if meta.is_dir() {
-                detach(&path)?;
-            } else if meta.is_file() && meta.nlink() > 1 {
-                let tmp = path.with_file_name(format!(
-                    ".{}.vivacity-detach",
-                    entry.file_name().to_string_lossy()
-                ));
-                std::fs::copy(&path, &tmp).map_err(Error::io(&tmp))?;
-                std::fs::set_permissions(&tmp, meta.permissions()).map_err(Error::io(&tmp))?;
-                std::fs::rename(&tmp, &path).map_err(Error::io(&path))?;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
-}
+/// Before `patch` writes into a package: a project laid out by a version
+/// that linked vendor/ to its store (up to 0.26.0) may still share inodes
+/// with it until the one-time pass of `installer::detach_once` has run; the
+/// patch must never reach the store entry. Kept as a belt to that pass.
+pub use crate::clone::detach;
 
 #[cfg(test)]
 mod tests {
@@ -837,24 +809,6 @@ mod tests {
         assert!(config_issue(&json!({"extra": {"allow-subpatches": "yes"}})).is_some());
         assert!(config_issue(&json!({"extra": {"patch-errors-as-warnings": false}})).is_some());
         assert!(config_issue(&json!({"extra": {"patch-errors-as-warnings": true}})).is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn detach_gives_a_hardlinked_file_its_own_inode() {
-        use std::os::unix::fs::MetadataExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let store = tmp.path().join("store.txt");
-        std::fs::write(&store, "original\n").unwrap();
-        let pkg = tmp.path().join("vendor/acme/lib/src");
-        std::fs::create_dir_all(&pkg).unwrap();
-        let linked = pkg.join("Lib.php");
-        std::fs::hard_link(&store, &linked).unwrap();
-        detach(&tmp.path().join("vendor/acme/lib")).unwrap();
-        assert_eq!(std::fs::metadata(&linked).unwrap().nlink(), 1);
-        std::fs::write(&linked, "patched\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&store).unwrap(), "original\n");
-        assert_eq!(std::fs::metadata(&store).unwrap().nlink(), 1);
     }
 
     #[test]

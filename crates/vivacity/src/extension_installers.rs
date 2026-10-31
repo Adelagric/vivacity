@@ -118,10 +118,12 @@ fn constraint_into_string(c: &Constraint) -> String {
     )
 }
 
-/// The file lives inside a package cloned from the store — on Linux a
-/// hardlink: written through a temporary file and a rename (a new inode),
-/// never in place, or the store entry would carry one project's paths
-/// into the next (the rector fixture's file surfaced in sylius's warm run).
+/// The file lives inside a package cloned from the store: written through a
+/// temporary file and a rename (a new inode), never in place. Up to 0.26.0
+/// the clone was a hard link on Linux and an in-place write carried one
+/// project's paths into the store and the next project (the rector
+/// fixture's file surfaced in sylius's warm run); the clone copies now, and
+/// this stays as a belt for a project an older version laid out.
 /// Returns whether the contents changed — the plugins compare the old
 /// file's `md5` with the new contents (no file: changed).
 fn write_if_changed(path: &Path, contents: &str) -> Result<bool> {

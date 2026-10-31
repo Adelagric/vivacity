@@ -49,5 +49,12 @@ proptest.workspace = true
 # directory instead of waiting six hours for the sweep.
 filetime = "=0.2.29"
 
+# The number of links of a file (`clone::detach`): std's is unstable on
+# Windows. Already in the graph through walkdir and same-file; a safe wrapper
+# over GetFileInformationByHandle, so no `unsafe` of ours (DECISIONS
+# 2026-10-31, isolation of vendor/).
+[target.'cfg(windows)'.dependencies]
+winapi-util = "=0.1.11"
+
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "=1.0.0-alpha.4"

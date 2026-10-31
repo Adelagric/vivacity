@@ -662,6 +662,11 @@ pub async fn install(
     };
     let installed: usize = placed.into_iter().filter(|placed| *placed).count();
     report.installed += installed;
+    // A project laid out by an older version may still share inodes with
+    // its store: the unchanged packages get their own, no-op included. After
+    // the last hand-over point and the placement (a replaced package is a
+    // fresh copy already).
+    detach_once(&store, layout, &previous);
 
     // `BinaryInstaller::removeBinaries` runs `initializeBinDir` before
     // looking at the package's binaries: an update, a removal, or the
@@ -785,6 +790,51 @@ pub async fn install(
     report.local_repository = Some(local);
 
     Ok(report)
+}
+
+/// Up to 0.26.0, vivacity laid packages out by hard links to its store on
+/// file systems without copy-on-write: a project installed then still shares
+/// inodes with that store, and with every project laid out from the same
+/// entries — a no-op install places nothing, so the store's new layout alone
+/// would never reach it. Once per project (a marker in the store, per vendor
+/// directory and layout), every file of vendor/ and of the installed packages
+/// laid out outside it gets an inode of its own, with its current content
+/// ([`crate::clone::detach_all`]): a file an edit reached through a link
+/// keeps that edit, it cannot be told whether this project made it. Symbolic
+/// links (`path` packages) are not followed, nor a package placed at an
+/// ancestor of vendor/ (the walk would reach the project's own files).
+///
+/// Never an error and never a line: an install Composer completes completes
+/// here too. What the walk could not unshare (a read-only directory, a file
+/// it cannot read) stays as it was, and the marker is not written, so the
+/// next install tries again; a cleared cache runs it again, harmlessly. Not
+/// seen: links an older version makes again after the marker (a downgrade,
+/// an embedder of an older vivacity-core on the same cache directory).
+fn detach_once(store: &Store, layout: &Layout, previous: &BTreeMap<String, Installed>) {
+    let vendor = layout.vendor_dir();
+    let marker = store.detached_marker(&vendor);
+    if marker.exists() {
+        return;
+    }
+    let mut complete = crate::clone::detach_all(&vendor);
+    for name in previous.keys() {
+        let Some(dir) = layout.abs(name) else {
+            continue;
+        };
+        let linked_source =
+            std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink());
+        if dir.starts_with(&vendor) || vendor.starts_with(&dir) || linked_source {
+            continue;
+        }
+        complete &= crate::clone::detach_all(&dir);
+    }
+    if !complete {
+        return;
+    }
+    if let Some(parent) = marker.parent() {
+        // Not written: the walk runs again next time, nothing else.
+        let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&marker, b""));
+    }
 }
 
 /// Whether `dest` (or the nearest of its ancestors that exists) lives on the

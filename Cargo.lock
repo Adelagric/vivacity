@@ -1996,6 +1996,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "vivacity-pcre2",
+ "winapi-util",
  "zip",
 ]
 

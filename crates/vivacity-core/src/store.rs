@@ -35,7 +35,18 @@ pub struct Store {
 /// an old entry keeps serving the old tree forever, silently. Bumping this
 /// segment is what makes the change take effect; the previous trees stay on
 /// disk, unused, until the cache is cleared.
-const LAYOUT: &str = "v3";
+///
+/// `v4`: up to 0.26.0 vendor/ was laid out by hard links on file systems
+/// without copy-on-write, so a file written in place in a project was written
+/// in its store entry too. No entry written before the change can be trusted
+/// to hold its archive's bytes: none is served again, every entry is
+/// extracted afresh from its archive.
+const LAYOUT: &str = "v4";
+
+/// Beside the layouts: one empty file per vendor directory whose files laid
+/// out by an older version were given inodes of their own
+/// (`installer::detach_once`).
+const DETACHED: &str = ".detached";
 
 /// Where extractions happen, swept of orphans on the way in. Six hours is well
 /// past any install, and short enough that a killed process does not leave a
@@ -152,6 +163,17 @@ impl Store {
 
     pub fn contains(&self, name: &str, version: &str, dist_ref: Option<&str>) -> bool {
         self.entry_path(name, version, dist_ref).is_dir()
+    }
+
+    /// The marker saying `vendor`'s files no longer share an inode with an
+    /// older layout's entries: keyed by the canonical path of the directory
+    /// and by this layout (a later bump runs the pass again).
+    pub fn detached_marker(&self, vendor: &std::path::Path) -> PathBuf {
+        use sha1::Digest as _;
+        let canonical =
+            crate::pathutil::canonicalize(vendor).unwrap_or_else(|_| vendor.to_path_buf());
+        let key = hex::encode(sha1::Sha1::digest(canonical.to_string_lossy().as_bytes()));
+        self.root.join(DETACHED).join(LAYOUT).join(key)
     }
 }
 
