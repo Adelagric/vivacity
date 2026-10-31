@@ -21,6 +21,7 @@ pub mod effect_plugins;
 pub mod error;
 pub mod extract;
 pub mod fetch;
+pub mod file_identity;
 pub mod git_source;
 pub mod glob;
 pub mod installer;
