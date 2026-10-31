@@ -8,28 +8,52 @@ to Composer) where you think it shouldn't have to.
 
 1. Install Composer 2.10.3 and vivacity (a prebuilt binary, see the README:
    no Rust toolchain needed).
-2. On a project of yours, install with each tool **in the same directory**,
-   one after the other. Some plugins write absolute paths into vendor/
-   (phpstan's and rector's extension installers, in `GeneratedConfig.php`),
-   so two copies side by side differ by their directory name alone.
-   Composer runs with its plugins active, as vivacity emulates them, and
-   without scripts, which vivacity never runs:
+2. Work on disposable copies, never on your project itself, and give both
+   tools the same starting state: the same files and modes (`cp -Rp`), the
+   same path, the same shell (no `COMPOSER_*` variable or Composer config
+   changed in between). Plugins write outside `vendor/` too (symfony/flex
+   copies `.env` from `.env.dist`, codeception/c3 puts `c3.php` at the
+   root), so the first install changes what the second would start from;
+   and some write absolute paths (phpstan's and rector's extension
+   installers, in `GeneratedConfig.php`), so two copies side by side differ
+   by their directory name alone. Composer runs with its plugins active, as
+   vivacity emulates them, and without scripts, which vivacity never runs.
+   `--no-fallback` makes vivacity stop instead of handing the install to
+   Composer: exit code 0 means it installed natively.
    ```bash
-   cd your-project
-   rm -rf vendor && composer install --no-scripts
-   mv vendor /tmp/vendor-composer
-   vivacity install
-   diff -r /tmp/vendor-composer vendor
+   cp -Rp your-project /tmp/try-src && rm -rf /tmp/try-src/vendor
+   cp -Rp /tmp/try-src /tmp/try
+   (cd /tmp/try && composer install --no-scripts) > composer.log 2>&1
+   mv /tmp/try /tmp/try-composer
+   cp -Rp /tmp/try-src /tmp/try
+   (cd /tmp/try && vivacity install --no-fallback) > vivacity.log 2>&1
+   echo "exit code $?" >> vivacity.log
+   # contents, files created or deleted on either side
+   diff -r /tmp/try-composer /tmp/try > diff.log 2>&1
+   # what diff -r does not compare: link targets and executable bits
+   for d in /tmp/try-composer /tmp/try; do
+     (cd "$d" && { find . -type l -exec sh -c 'printf "%s -> %s\n" "$1" "$(readlink "$1")"' _ {} \;
+                   find . -type f -perm -u+x; } | sort) > "$(basename "$d").modes"
+   done
+   diff try-composer.modes try.modes >> diff.log
    ```
-3. If `diff -r` reports a difference, or if vivacity handed the install to
-   Composer where you think it shouldn't have, open an issue with the
-   **lock parity** template: `composer.json`, `composer.lock`, vivacity's
-   output, OS. Private packages: redact URLs/tokens, keep the structure.
-   A hand-over is printed on stderr before anything is written:
-   `vivacity: this lock is outside what vivacity handles natively:`, one
-   line per reason, then ``vivacity: delegating to `composer install …`…``,
-   and Composer does the install (`--no-fallback` stops there instead,
-   exit code 3).
+3. Read the end of `vivacity.log` first. `exit code 3` means vivacity
+   does not handle this lock natively: it printed
+   `vivacity: this lock is outside what vivacity handles natively:` and
+   one line per reason, wrote nothing, and there is nothing to compare.
+   Without `--no-fallback` it would have handed the install to Composer
+   (``vivacity: delegating to `composer install …`…``), and an empty diff
+   would then prove nothing.
+4. A dangling symlink present in both trees makes `diff -r` print "No such
+   file or directory": that is not a difference. If a difference looks
+   random, run Composer once more on a third copy made the same way: when
+   Composer's two runs differ from each other, the difference is not
+   vivacity's (some plugins write the time, the environment or a cache
+   path), and the issue should say so.
+5. If `diff.log` shows a difference, or if vivacity refused a lock you
+   think it should handle, open an issue with the **lock parity** template:
+   `composer.json`, `composer.lock`, the three logs, OS. Private packages:
+   redact URLs/tokens, keep the structure.
 
 That is enough: the differential harness (`harness/diff-vendor.sh`) turns a
 lock into a permanent regression test. Your bug becomes everyone's test.
