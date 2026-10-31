@@ -2,8 +2,8 @@
 
 > Niveau 2 : contrat de sortie publique (vendor/ identique à Composer
 > 2.10.3) et isolation entre projets. Le premier passage a couvert cadrage,
-> mesure, plan et méta-analyse ; **P0 est implémenté depuis** (section
-> « Exécution de P0 »), P1 ne l'est pas. Les mesures viennent
+> mesure, plan et méta-analyse ; **P0 puis P1 sont implémentés depuis**
+> (sections « Exécution de P0 » et « Exécution de P1 »). Les mesures viennent
 > d'un spike activé par variables d'environnement, retiré de l'arbre après
 > la mesure et jamais commité (annexe A). Ses chiffres exploratoires ne sont
 > pas publiés ; les performances sous Linux restent à mesurer sur le correctif
@@ -866,3 +866,129 @@ Quatre fichiers, tout derrière des variables d'environnement ; retiré par
 Banc macOS : `hyperfine -N --warmup 2 --runs 10` sur `env X=1 vivacity
 <cmd> -q` et les bras ; Linux : le même dans `vivacity-linux`, volumes
 `vi-iso-*` créés pour la mesure puis supprimés.
+
+## Exécution de P1 (2026-10-31)
+
+### Conception retenue (avant code)
+
+**Rouge d'abord.** `harness/classmap-revalidate.sh` : un paquet `artifact`
+à référence de dist (le chemin de l'enregistrement de store) et
+un sans (nommé par le sha1 de l'URL) ; chaque cas compare
+`autoload_classmap.php` à l'octet au cache coupé et à `composer
+dump-autoload -o`, et la sortie du dump à celle de Composer. Vu rouge sur
+main (P0, sans P1) : 27 échecs sur le critère, 0 garde.
+
+**Un enregistrement par projet pour tout répertoire scanné** (étape 2.3) :
+`FileCacheSlot` partout, vendor/ compris ; le répertoire est listé à chaque
+dump. Par fichier : identité, drapeau racy, sha1 du contenu, classes.
+`FILE_CACHE_FORMAT` `r2`, `CACHE_FORMAT` `v4`.
+
+**Identité** (`vivacity_core::file_identity`) : sous Unix (dev, inode,
+taille, mtime s+ns, ctime s+ns) de `metadata` du chemin réel. Sous Windows :
+aucune identité n'est tenue pour sûre ; chaque fichier est relu et condensé,
+la détection n'est rejouée que si le condensat change (variante juste et
+lente, à mesurer sur le runner).
+
+**Fenêtre racy** : l'horloge de référence est le ctime d'un fichier sonde
+anonyme, une par FS lu, prise AVANT le scan — dans le cache de vivacity
+s'il est sur ce FS, sinon dans `vendor/composer/` (révisé après la
+méta-analyse, ci-dessous ; d'abord : une sonde nommée dans
+`vendor/composer/`). Une entrée dont le ctime est ≥ sonde − 2 s est
+écrite « racy » et n'est pas servie sur son identité au dump suivant (relue
+et condensée). Sonde impossible : tout est racy. Marge unique de 2 s (pas de
+`statfs`) : la granularité la plus grossière visée (FAT 2 s, HFS+ 1 s).
+
+**Ordre de décision par fichier** :
+1. (a) identité égale à celle de l'enregistrement du projet, non racy :
+   servi (classes), rien lu ;
+2. (b) paquet posé PAR CE RUN depuis l'entrée E, identité égale à celle
+   relevée juste après la pose (manifeste de pose en mémoire) : classes de
+   l'enregistrement de store de E, rien lu dans vendor/ ; l'enregistrement
+   de E/<sous-répertoire> est construit s'il manque, en scannant E
+   lui-même ;
+3. (c) sinon le fichier est lu et condensé : sha1 égal à celui de
+   l'enregistrement du projet → ses classes ; égal à celui de
+   l'enregistrement de store de E (s'il existe déjà — jamais construit
+   ici) → ses classes ; sinon détection.
+Une classe ne dépend que du contenu : (c) est juste quelle que soit la
+provenance de l'enregistrement, au condensat près.
+
+**Écarts au plan, et pourquoi.**
+- *Manifeste de pose en mémoire seulement* (2.4 prévoyait un manifeste
+  écrit) : une identité relevée juste après la copie tombe par construction
+  dans la fenêtre racy de l'instant où on l'écrit ; un run ultérieur ne
+  pourrait pas la servir sur l'identité seule. Le condensat de
+  l'enregistrement de store (5 bis) fait ce travail : `install` sans `-o`
+  puis `dump-autoload -o`, ou un vendor/ restauré, relit et condense une
+  fois, sans détection.
+- *Pas de déliaison dans le dump* (1.4 : « un `nlink > 1` vu par le parcours
+  de P1 est traité de même ») : P0 est figé. Le ctime est celui de l'inode :
+  une écriture par un autre nom le fait avancer, l'identité la voit.
+- *sha1, pas xxh3* : déjà une dépendance ; calculé seulement quand
+  l'identité ne suffit pas (Q1).
+- *Enregistrement de store construit seulement pour un paquet posé par ce
+  run* (5) : en (c) le fichier est déjà lu, le scanner revient au même ;
+  scanner E en plus doublerait la lecture.
+
+### Méta-analyse de la conception (sous-agent frais, conception et code)
+
+Huit constats ; vérifiés dans le code, tous pris ou notés.
+
+| # | constat | gravité | suite |
+|---|---|---|---|
+| 1 | (b) sert des classes jamais confrontées à vendor/ ; un `pre-autoload-dump` (`--run-scripts`) de plus de 2 s ferait écrire ces entrées « non racy », servies ensuite en (a) indéfiniment | majeure | **pris** : toute entrée servie par (b) est écrite racy ; pas de manifeste quand des scripts tournent ; `mutable_copies` exclus de tout lien avec E |
+| 2 | la sonde est une écriture dans vendor/ avant une passation possible (dump planifié pendant l'attente réseau) | moyenne | **pris** : fichier anonyme (`tempfile_in` : `O_TMPFILE` sous Linux), dans le cache de vivacity d'abord ; `vendor/composer/` seulement si le cache est sur un autre FS |
+| 3 | une seule sonde pour plusieurs horloges (sources sur un bind mount, vendor/ sur un volume) | moyenne | **pris** : une sonde par `st_dev` des racines scannées ; pas de sonde possible : tout y est racy |
+| 4 | correspondance « E/sous-répertoire » fausse pour `target-dir`, un fichier unique en `classmap`, des paquets imbriqués, des liens | majeure | **pris** : le répertoire de pose réel du manifeste nomme la racine de E ; un fichier n'est pris que dans le manifeste de son paquet (le plus long chemin gagne) ; rien de (b) à travers un lien ; même base (parent d'un fichier) des deux côtés |
+| 5 | une entrée illisible ou disparue ferait échouer le dump | moyenne | **pris** : pas d'enregistrement, repli sur la copie |
+| 6 | croissance du cache sans élagage | moyenne | **noté** (README, HANDOVER ; risque 6) |
+| 7 | la réécriture doit voir les bascules racy → non racy | mineure | **pris** (toute entrée non servie réécrit l'enregistrement) |
+| 8 | Windows : (b), manifeste et sonde à couper explicitement ; pas d'enregistrement de store partagé | mineure | **pris** et écrit (README, DECISIONS) |
+
+Vérifié par le réfutateur, pas un défaut : la réutilisation par condensat
+est indépendante du chemin (`find_classes` ne prend aucun chemin).
+
+### Exécution (2026-10-31)
+
+**Fait.**
+- `vivacity_core::file_identity` : `FileIdentity` (Unix ; `None` sous
+  Windows), `Clock` (sonde anonyme par FS, marge 2 s, ctime ou mtime),
+  `PlacedPackage` (relevé après la pose, borné aux chemins que le dump
+  lira : `autoload_roots`).
+- `classmap.rs` : `FileCacheSlot` pour tout répertoire scanné (`r2`),
+  ordre servi / posé / lu ; `CacheSlot` (`v4`) construit depuis l'entrée
+  seule, clé portant l'identité de la racine de l'entrée ;
+  `verify_files`, `still_present`, `matches_entry` et `ScanCache` retirés ;
+  compteurs sous `VIVACITY_TRACE`.
+- `generator.rs` : `store_reference()`, racine de pose réelle, plus long
+  préfixe, paquets imbriqués exclus ; sonde avant le scan.
+- `installer.rs` / `install.rs` / `dump.rs` : `InstallReport::placed`,
+  `InstallOptions::placement_identities` (rien sans dump ni avec des
+  scripts ; règles `classmap` sans `-o`, PSR en plus avec `-o`).
+- Harnais permanent `harness/classmap-revalidate.sh` + pas dans le job
+  `parity` de `ci.yml`.
+
+**Vu rouge puis vert.** Sur main (P0, sans P1) : 29 échecs sur le critère,
+0 garde (tous les cas sauf `cm-revert (rétabli)` et `cm-cross-project (A
+édité)`, justes avant comme après : le premier garde contre un état
+« édité » collant, le second n'est que le témoin de A). Avec le correctif :
+vert sur macOS (APFS) et dans le conteneur `vivacity-linux` (volume ext4,
+racine overlayfs). Mutants (macOS), chacun attrapé par les cas attendus et
+eux seuls : identité comparée sans le ctime (`cm-same-size-mtime`,
+`cm-root-same-size`, `cm-revert`) ; enregistrement de store réécrit depuis
+le scan de la copie d'un projet (`cm-cross-project`, B).
+
+**Revue indépendante (sous-agent frais, sur le diff).** Douze constats, aucun
+bloquant ; pris ou notés, détail dans DECISIONS (2026-10-31, P1).
+
+**Suites lancées** (consigne : cas neufs et harnais touchés) :
+`vendor-isolation.sh` (`ISO_FS=link` sur image HFS+ et `cow` sur APFS ;
+link sur ext4 et overlayfs dans le conteneur), `plugins-round2.sh`,
+`root-scan.sh`, `diff-vendor.sh --with-autoloader` froid puis chaud ;
+`cargo test` des deux crates touchées, clippy `-D warnings` hôte et
+`x86_64-pc-windows-gnu`.
+
+**Reste à faire avant la release** : le pas `parity` sur les runners ;
+Windows (variante typecheckée, jamais lancée ; coût à mesurer) ; les bancs
+Linux et invoiceninja. Faits depuis par le mainteneur : les autres harnais
+(verts) et le corpus (inchangé).

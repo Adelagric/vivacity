@@ -24,7 +24,7 @@ Flags: `--no-dev`, `-o`, `-a`, `--no-autoloader`, `--no-install`,
 `config.classmap-authoritative`, `config.platform`, `config.allow-plugins`
 and `config.lock` are read from `composer.json` the way Composer reads them.
 
-## Known issue: a file edited in place in vendor/
+## Editing vendor/: isolation and class map revalidation
 
 Found on 2026-10-31 in 0.26.0. vivacity assumed that nothing edits
 `vendor/` after it installs it. Composer assumes nothing of the kind, and two
@@ -73,20 +73,56 @@ things break when that assumption does:
   `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
   `%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) are no longer
   read by the fixed version; delete them to get their space back.
-- **The class map of a store package is not revalidated.** It is cached per
-  store entry and shared by every project installed from that entry. After
-  a class is renamed, added or removed in a `vendor/` file, `vivacity
-  dump-autoload` (and the autoloader dump that ends `install`, `update`,
-  `require` and `remove`) can keep the old class where Composer rescans the
-  file, and a dump in the edited project can write a class map that the
-  other projects installed from the same entry then get.
-  `VIVACITY_NO_CLASSMAP_CACHE=1` turns that cache off. The fix above does
-  not change this point.
+- **The class map cache does not look at `vendor/` again.** Fixed on the
+  `classmap-revalidate` branch, not yet on main; planned for release in
+  0.26.1. In 0.26.0 and earlier it keeps one record per store entry and serves
+  it without reading `vendor/`: a class renamed, a file added or removed there
+  keeps the old class map in `dump-autoload` (and in the dump that ends
+  `install`, `update`, `require` and `remove`), and a record taken from one
+  project's edited copy is served to every other project. The project's own
+  sources are checked by modification time and size, which `touch -r` puts
+  back. With 0.26.0, after editing a file in `vendor/`, dump the autoloader
+  with `VIVACITY_NO_CLASSMAP_CACHE=1`; if a dump already ran with the cache
+  after the edit, delete `classmap/` and `classmap-files/` under vivacity's
+  cache directory. With the fix, the class map is the one Composer writes for
+  the current state of the project, `vendor/` included
+  (`harness/classmap-revalidate.sh`):
+  - every scanned directory is listed on every dump, so a file added or
+    removed is seen, and each project has its own record of each file;
+  - a file is served from that record without being read only while its
+    identity is the one recorded: device, inode, size, modification time
+    and change time (ctime), to the nanosecond. A write, `touch -r`, a
+    `chmod` or a replacement by rename (`sed -i`, an editor's safe write)
+    changes it. When it changed, the file is read and hashed, and the class
+    detection runs again only if its content is new;
+  - a record shared between projects comes from the store entry's own
+    directory, never from a copy in a project; a project takes classes from
+    it only for a file with the same content hash, or for a file the same
+    run placed whose identity is still the one taken right after the
+    placement (not when scripts run in between);
+  - a file whose ctime or mtime falls within two seconds of the dump that
+    recorded it (or later) is read again on the next dump — the timestamp
+    granularity of HFS+ is one second, of FAT two —, and that time is read
+    from the file system that holds the files, before the dump's scan, not
+    from the system clock.
 
-Until the second point is fixed: after editing a file in `vendor/`, dump the
-autoloader with `VIVACITY_NO_CLASSMAP_CACHE=1`; if a dump already ran with
-the cache after the edit, delete `classmap/` and `classmap-files/` under
-vivacity's cache directory.
+  This is a validation policy for a cache, not a proof that the bytes are
+  the same; the ctime is no cryptographic guarantee, nor is the content
+  hash (sha1) against crafted collisions. Not seen: a change made with the
+  system clock set back, a tool that writes the disk below the file system
+  (`debugfs`, root), a file system that does not keep a real ctime (some
+  FUSE and network mounts; FAT's is a creation time), and another process
+  rewriting a file in place, at the same size, while vivacity installs and
+  dumps, within the timestamp granularity of the placement (out of
+  contract, like two installs at once). On Windows no
+  identity is trusted (the standard library gives no ctime, and NTFS's
+  change time can be set by a program): every scanned file is read and
+  hashed on every dump, and the detection runs only for new content —
+  correct, slower, not measured yet. `VIVACITY_NO_CLASSMAP_CACHE=1` turns
+  the cache off: every file is read and scanned, as Composer does. The
+  cache grows with each project path it has seen (one record per scanned
+  directory, never pruned): delete `classmap/` and `classmap-files/` under
+  vivacity's cache directory to get the space back.
 
 ## Install
 
@@ -243,8 +279,9 @@ numbers, on his machine and an older vivacity; they are not reproduced here.
 Warm `install` is bound by writing tens of thousands of small files and
 rescanning class maps, not by PHP. vivacity extracts each package once into a
 content-addressed store, clones it into `vendor/` (`clonefile` on APFS,
-reflinks on btrfs and xfs, a plain copy elsewhere), and caches the class map
-per store entry. Measured numbers and the scripts that produce them are in
+reflinks on btrfs and xfs, a plain copy elsewhere), and caches the classes
+of each scanned file, checked again against the file on every dump.
+Measured numbers and the scripts that produce them are in
 [bench/](bench/); the short version is that a no-op install takes tens of
 milliseconds, a warm
 reinstall of Sylius under a second, and `update --no-install` on Sylius

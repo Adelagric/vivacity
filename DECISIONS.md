@@ -6209,3 +6209,115 @@ plusieurs noms que vivacity n'a pas faits (`cp -al`, `rsync --link-dest`) y
 figurent aussi : « lié » ne veut pas dire « lié au store ». Un paquet mis à
 jour ou retiré dans le même run n'y figure pas : il a été remplacé avant la
 passe.
+
+## 2026-10-31 — Cache de classmap revalidé sur l'état courant : identité par métadonnées, enregistrement de store depuis l'entrée seule (docs/plans/vendor-isolation.md, P1)
+
+**Le défaut.** `CacheSlot` tenait un enregistrement par (entrée de store,
+sous-répertoire), servi sans lister le répertoire ni lire un `stat` :
+renommer, ajouter ou supprimer une classe dans vendor/ ne changeait pas la
+classmap de vivacity, et un enregistrement écrit après le scan d'une copie
+éditée (même liste de fichiers : `matches_entry`) servait les autres projets,
+sur APFS aussi. Les sources du projet (`FileCacheSlot`) n'étaient validées
+que par (mtime, taille). Reproduit sur main (P0, sans P1) par
+`harness/classmap-revalidate.sh` (27 échecs sur le critère, 0 garde).
+
+**Ce qui est retenu.**
+- *Un enregistrement par projet pour tout répertoire scanné*, vendor/
+  compris : le répertoire est listé à chaque dump (ajouts, suppressions,
+  et donc le cas liborm85 de HANDOVER : `verify_files`/`still_present`
+  retirés). Par fichier : identité, drapeau racy, sha1 du contenu, classes
+  (`FILE_CACHE_FORMAT` `r2`).
+- *Identité* (décision Q1 du mainteneur) : (dev, inode, taille, mtime s+ns,
+  ctime s+ns) de `metadata` du chemin réel (`vivacity_core::file_identity`).
+  C'est une **politique de validation du cache, pas une preuve à l'octet** :
+  le ctime n'est pas une garantie cryptographique. Angles morts écrits dans
+  le README : horloge reculée, écriture sous le FS (`debugfs`, root), FS sans
+  vrai ctime (certains FUSE et montages réseau ; FAT).
+- *Condensat seulement quand l'identité change* : le fichier est lu et
+  haché (sha1, déjà une dépendance) ; la détection n'est rejouée que si
+  aucun enregistrement (du projet, ou de l'entrée de store) ne porte ce
+  condensat. Une classe ne dépend que du contenu (`find_classes` ne prend
+  aucun chemin, les filtres de chemin sont dans `merge_scanned`) : la
+  réutilisation par condensat est juste quelle que soit la provenance.
+- *Fenêtre racy* : référence = ctime d'une sonde (fichier anonyme :
+  `O_TMPFILE` sous Linux, créé puis délié ailleurs) prise AVANT le scan, une
+  par FS lu (`st_dev` des racines des scans), dans le cache de vivacity
+  quand il est sur ce FS, sinon dans `vendor/composer/`, sinon aucune
+  (tout y est racy). Marge unique de 2 s. Une entrée écrite racy est relue
+  au dump suivant.
+- *Enregistrement de store* (`CACHE_FORMAT` `v4`, condensat par fichier) :
+  écrit **seulement** depuis un scan du répertoire de l'entrée elle-même,
+  jamais depuis une copie sous vendor/ ; pas d'enregistrement d'une entrée
+  qui contient un lien symbolique ; une entrée illisible ou disparue ne fait
+  pas échouer le dump (repli sur la copie).
+- *Manifeste de pose, en mémoire* : l'installeur relève, juste après la pose
+  d'un paquet à règles d'autoload depuis l'entrée E, l'identité de ses
+  fichiers PHP (`PlacedPackage`, chemins canoniques). Dans le même run, un
+  fichier dont l'identité est encore celle-là prend les classes de
+  l'enregistrement de E sans être lu (l'enregistrement est construit depuis
+  E s'il manque) ; l'entrée est écrite racy (relue une fois au run suivant :
+  ses octets n'ont pas été lus ici). Pas de manifeste avec `--run-scripts`
+  (un script `pre-autoload-dump` qui réécrit en place dans la granularité
+  garderait l'identité), ni pour `mutable_copies`, ni pour une source git,
+  ni à travers un lien symbolique, ni pour un paquet imbriqué dans un
+  autre (le plus long chemin d'installation gagne, et un fichier n'est pris
+  que dans le manifeste de son paquet).
+- *Un seul nom pour E* : le générateur cherche l'entrée par
+  `store_reference()` comme l'installeur (une dist sans référence était
+  toujours rescannée), et par le répertoire de pose réel pour un paquet posé
+  par ce run (`target-dir` compris).
+- *Windows* (décision Q2 : variante juste, même lente) : aucune identité
+  n'est tenue pour sûre (`FileIdentity::of` rend `None`) ; chaque fichier
+  scanné est relu et haché à chaque dump, la détection seulement pour un
+  contenu neuf ; ni sonde, ni manifeste, ni construction d'enregistrement
+  de store. **À mesurer sur le runner.** `ChangeTime`/`FileId` écartés : le
+  premier se règle par `SetFileInformationByHandle`.
+
+**Écarts au plan.** Le manifeste de pose n'est pas écrit sur disque (une
+identité relevée juste après la copie est racy par construction à l'instant
+où on l'écrirait ; le condensat de l'enregistrement de store fait ce travail
+pour un run ultérieur) ; pas de déliaison dans le dump (P0 figé ; le ctime
+est celui de l'inode, une écriture par un autre nom le fait avancer) ; pas de
+marge par FS (`statfs`) ; sha1 plutôt que xxh3 (aucune dépendance nouvelle).
+
+**Méta-analyse (sous-agent frais, conception et code) et ce qu'elle a
+changé.** Huit constats, tous pris ou notés : une entrée servie par le
+manifeste est écrite racy, et pas de manifeste avec `--run-scripts` (sinon
+un script lent faisait écrire « non racy » des classes jamais confrontées à
+vendor/) ; sonde anonyme et dans le cache d'abord (pas d'écriture dans
+vendor/ quand le cache est sur le même FS, notamment pendant le dump planifié
+avant une passation) ; une sonde par FS ; correspondance par le répertoire de
+pose réel et par paquet (target-dir, paquets imbriqués, liens) ; repli sans
+erreur quand l'entrée ne se scanne pas ; drapeau racy pris en compte dans la
+réécriture ; Windows écrit ; croissance du cache notée (README).
+
+**Revue indépendante (sous-agent frais, sur le diff) et ce qu'elle a
+changé.** Aucun bloquant ; pris : la clé de l'enregistrement de store porte
+l'identité du répertoire racine de l'entrée (dev, inode, ctime : une entrée
+retirée puis réextraite sous le même nom, depuis une autre archive à la même
+URL, est un autre répertoire) ; un chemin non UTF-8 n'est jamais servi ni
+enregistré (une clé `to_string_lossy` pouvait nommer deux fichiers) ; les
+fichiers d'un paquet posé DANS un autre ne sont pas pris dans le manifeste du
+paquet externe ; la fenêtre racy regarde le plus tardif du ctime et du mtime
+(un FS dont le ctime ne bouge pas à l'écriture) ; écriture des
+enregistrements par un temporaire exclusif à nom aléatoire (`tempfile`, déjà
+une dépendance de l'espace de travail : deux conteneurs au même pid
+partageant un cache) ; le harnais vérifie que l'état est « reposé » (tout
+servi) avant l'édition et que le dump d'après ne sert plus tout, un cas
+`classmap` sur fichier unique, `jq` exigé, un pas dans le job `parity` ; le
+README dit l'angle mort d'un autre processus qui réécrit en place pendant
+l'install, et que sha1 ne résiste pas à une collision fabriquée (impact : la
+classmap, pas le code exécuté). Gardé : sha1 (sha2 n'est pas dans le graphe ;
+Q1 ne demandait pas de condensat cryptographique) ; `abs` contre la racine
+canonique de la pose : `abs` est déjà bâti sur le vendor/ canonique.
+
+**Coût, et une mesure qui a changé le code.** Premier banc : l'install à
+vendor/ vide sans `-o` (symfony, sylius) payait le relevé d'identité de
+TOUS les fichiers PHP des paquets posés, alors que le dump qui suit ne lit
+que leurs règles `classmap`. Le relevé est maintenant limité aux chemins que
+le dump lira (`PlacedPackage::autoload_roots` : règles `classmap`, plus les
+répertoires PSR avec `-o` ; tout le paquet pour un glob, un `..` ou un
+`target-dir`), et rien n'est relevé sans dump ou avec des scripts
+(`InstallOptions::placement_identities`). Ce n'est pas une optimisation de
+l'existant : le relevé est neuf, il est borné à son usage. Chiffres :
+rapport d'exécution au mainteneur, pas ici (consigne).

@@ -19,10 +19,11 @@ byte-identical-output promise are the public API.
   Composer never shares a file between projects. vivacity now copies each file
   there (APFS clones, btrfs and xfs reflinks, unchanged); a project gets its
   own copy of `vendor/`, which takes the disk space Composer's does (README,
-  "Known issue"). `harness/vendor-isolation.sh`, added to the CI parity job on
-  Linux (ext4) and macOS (an HFS+ image), writes in place into one project and
-  checks the other project and the store against a separate extraction of the
-  archive, in both orders, with the class map cache on and off.
+  "Editing vendor/"). `harness/vendor-isolation.sh`, added to the CI parity
+  job on Linux (ext4) and macOS (an HFS+ image), writes in place into one
+  project and checks the other project and the store against a separate
+  extraction of the archive, in both orders, with the class map cache on and
+  off.
 - **The store has a new layout (`store/v4`)**: an entry an earlier version
   wrote may have been modified through a link, so none is served again;
   each is extracted afresh from its archive (`dist.shasum` checked when the
@@ -34,6 +35,29 @@ byte-identical-output promise are the public API.
   modification time — an edit already made through a link is kept, never
   reset to the archive's. Nothing is printed and nothing fails: a file the
   pass cannot copy stays as it was and the next install tries again.
+- **The class map is revalidated against the current `vendor/` and
+  sources.** Up to 0.26.0 the class map cache served one record per store
+  entry without reading `vendor/` again: a class renamed, or a file added
+  or removed there, kept the old class map in `dump-autoload` and in the
+  dump that ends `install`, `update`, `require` and `remove`, whether or not
+  size and modification time changed; a record scanned from one project's
+  edited copy was then served to the other projects (on APFS too); and the
+  project's own sources were checked by (modification time, size), which
+  `touch -r` restores. Each project now has a record per scanned file,
+  every scanned directory is listed on every dump, and a file is served
+  without being read only while its identity — device, inode, size,
+  modification and change times to the nanosecond — is the recorded one
+  and was not taken within two seconds of the record's writing (the time
+  read on the file system itself). Otherwise it is read and hashed, and the
+  class detection runs again only for new content. A record shared between
+  projects is scanned from the store entry's own directory, never from a
+  project's copy, and serves only files with the entry's bytes. Under
+  Windows, where no file identity is trusted, every scanned file is read
+  and hashed on each dump (not measured yet). A dist without a reference is
+  now found in the store by the name the installer gives it. The cache
+  formats changed (`classmap` v4, `classmap-files` r2): the first dump of
+  each project scans again. README, "Editing vendor/";
+  `harness/classmap-revalidate.sh`.
 
 ### Added
 - **A report of the one-time unlinking pass**, in vivacity's cache
