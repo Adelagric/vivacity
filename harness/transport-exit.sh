@@ -889,6 +889,28 @@ for side in ref viv; do
   f=$(s8_cache_path "$d" probe/desync "$url"); mkdir -p "$(dirname "$f")"; cp "$S8/b.zip" "$f"
 done
 launch desync-stale-sha 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-stale-sha 0 20 "  - Downloading probe/desync"; requests desync-stale-sha 1
+# 8h-1. `dist.shasum` posé et juste. Témoin : l'archive en cache a ce sha1,
+# Composer la sert (FileDownloader.php l. 176-198) ; store chaud chez
+# vivacity. Aucune requête, ni d'un côté ni de l'autre.
+s6_case desync-sha-witness
+for side in ref viv; do
+  d="$WORK/s6/desync-sha-witness/$side"; url="http://127.0.0.1:$(cat "$d/g")/desync.zip"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "$url" "$a_sha"
+done
+ref_warm "$WORK/s6/desync-sha-witness/ref"; viv_warm "$WORK/s6/desync-sha-witness/viv" keep
+launch desync-sha-witness 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-sha-witness 0 20 -; requests desync-sha-witness 0
+# 8h-2. `dist.shasum` posé et juste, cache de Composer froid, store chaud
+# chez vivacity : une requête de chaque côté, l'archive vérifiée puis
+# écrite dans le cache.
+s6_case desync-sha-fetch
+for side in ref viv; do
+  d="$WORK/s6/desync-sha-fetch/$side"; url="http://127.0.0.1:$(cat "$d/g")/desync.zip"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "$url" "$a_sha"
+  [ "$side" = viv ] && viv_warm "$d"
+done
+launch desync-sha-fetch 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-sha-fetch 0 20 "  - Downloading probe/desync"; requests desync-sha-fetch 1
 # 8i. Un lot mixte : probe/cached dans les deux caches, probe/desync dans le
 # store seul. Une requête de chaque côté, celle de probe/desync.
 s6_case desync-mixed
