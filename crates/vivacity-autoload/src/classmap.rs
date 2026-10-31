@@ -21,7 +21,7 @@ use crate::pathutil::normalize_path;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 pub use vivacity_core::file_identity::{Clock, FileIdentity, PlacedPackage};
 
@@ -388,12 +388,14 @@ fn digest(bytes: &[u8]) -> Digest {
 }
 
 /// Relative path of `file` under `base` (the scanned directory, or the
-/// parent of a scanned file), as the records key it.
-fn rel_key(base: &Path, file: &Path) -> String {
+/// parent of a scanned file), as the records key it. `None` for a path that
+/// is not UTF-8: a lossy key could name two files, so such a file is never
+/// recorded nor served from a record (it is read and scanned every time).
+fn rel_key(base: &Path, file: &Path) -> Option<String> {
     file.strip_prefix(base)
         .unwrap_or(file)
-        .to_string_lossy()
-        .into_owned()
+        .to_str()
+        .map(str::to_owned)
 }
 
 /// The directory relative paths are taken from: the path itself, or the
@@ -410,8 +412,10 @@ fn base_of(path: &Path) -> PathBuf {
 type StoreRecord = HashMap<String, (Digest, Vec<Vec<u8>>)>;
 
 /// The record of a directory of a store entry, shared by every project that
-/// uses the entry: key = entry (name/version/ref) + relative subdirectory +
-/// format version. It is only ever written from a scan of the entry's own
+/// uses the entry: key = entry (name/version/ref) + the identity of the
+/// entry's root directory (an entry removed and extracted again under the
+/// same name, from another archive, is another directory) + relative
+/// subdirectory + format version. It is only ever written from a scan of the entry's own
 /// directory (`build`), never from a copy under vendor/ — a copy can have
 /// been edited, cleaned or added to — and a project's scan only takes from
 /// it the classes of a file whose bytes are the entry's: placed by this run
@@ -429,6 +433,13 @@ impl CacheSlot {
         h.update(CACHE_FORMAT.as_bytes());
         h.update(b"\0");
         h.update(store_entry.to_string_lossy().as_bytes());
+        h.update(b"\0");
+        if let Some(root) = FileIdentity::of(store_entry) {
+            h.update(root.dev.to_le_bytes());
+            h.update(root.ino.to_le_bytes());
+            h.update(root.ctime.0.to_le_bytes());
+            h.update(root.ctime.1.to_le_bytes());
+        }
         h.update(b"\0");
         h.update(rel_subdir.to_string_lossy().as_bytes());
         let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
@@ -496,8 +507,8 @@ impl CacheSlot {
         let record: StoreRecord = todo
             .iter()
             .zip(found)
-            .map(|((file, _, contents), classes)| {
-                (rel_key(&base, file), (digest(contents), classes))
+            .filter_map(|((file, _, contents), classes)| {
+                Some((rel_key(&base, file)?, (digest(contents), classes)))
             })
             .collect();
         self.store(&record);
@@ -520,23 +531,24 @@ impl CacheSlot {
     }
 }
 
-/// Writes `bytes` to `file` through a unique temporary name: the same slot
-/// can be written by two directories scanned in parallel (or by two
-/// processes); each writer renames its own complete file over the slot.
+/// Writes `bytes` to `file` through a temporary file of its own, created
+/// exclusively under a random name next to it: the same slot can be written
+/// by two directories scanned in parallel, by two processes, or by two
+/// containers sharing the cache (whose pids can be equal); each writer
+/// renames its own complete file over the slot. A failure leaves nothing.
 fn write_atomically(file: &Path, bytes: &[u8]) {
-    if let Some(parent) = file.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
+    use std::io::Write as _;
+    let Some(parent) = file.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
     }
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let tmp = file.with_extension(format!(
-        "{}.{}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, file).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let Ok(mut tmp) = tempfile::Builder::new().suffix(".tmp").tempfile_in(parent) else {
+        return;
+    };
+    if tmp.write_all(bytes).is_ok() {
+        let _ = tmp.persist(file);
     }
 }
 
@@ -600,6 +612,10 @@ impl CacheContext {
 pub struct StoreSeed {
     pub record: CacheSlot,
     pub placed: Option<Arc<PlacedPackage>>,
+    /// Install directories of other packages placed inside this one's
+    /// (canonical, OS bytes, with a trailing separator): their files are not
+    /// this placement's to vouch for, even if its walk saw them.
+    pub nested: Vec<Vec<u8>>,
 }
 
 /// Version of the per-file cache encoding; bump with `CACHE_FORMAT`.
@@ -928,22 +944,25 @@ impl Scanner {
         let placed = slot
             .seed
             .as_ref()
-            .and_then(|s| s.placed.as_ref())
+            .and_then(|s| s.placed.as_ref().map(|p| (p, &s.nested)))
             .filter(|_| !saw_symlink);
         let stats = &slot.ctx.stats;
 
-        let mut rels: Vec<String> = Vec::with_capacity(files.len());
+        let mut rels: Vec<Option<String>> = Vec::with_capacity(files.len());
         let mut ids: Vec<Option<FileIdentity>> = Vec::with_capacity(files.len());
         let mut how: Vec<How> = Vec::with_capacity(files.len());
         for (file, real) in &files {
             let rel = rel_key(&base, file);
             let id = FileIdentity::of(real);
-            let h = match (id, cached.get(&rel)) {
+            let real_bytes = real.as_os_str().as_encoded_bytes();
+            let h = match (id, rel.as_ref().and_then(|r| cached.get(r))) {
                 (Some(id), Some(rec)) if rec.identity == Some(id) && !rec.racy => How::Served,
                 (Some(id), _)
-                    if placed.is_some_and(|p| {
-                        p.files.get(real.as_os_str().as_encoded_bytes()) == Some(&id)
-                    }) =>
+                    if rel.is_some()
+                        && placed.is_some_and(|(p, nested)| {
+                            p.files.get(real_bytes) == Some(&id)
+                                && !nested.iter().any(|n| real_bytes.starts_with(n))
+                        }) =>
                 {
                     How::Placed
                 }
@@ -965,7 +984,10 @@ impl Scanner {
         };
         // A placed file the entry's record does not know is read.
         for (h, rel) in how.iter_mut().zip(&rels) {
-            if matches!(h, How::Placed) && !store.as_ref().is_some_and(|s| s.contains_key(rel)) {
+            let known = rel
+                .as_ref()
+                .is_some_and(|r| store.as_ref().is_some_and(|s| s.contains_key(r)));
+            if matches!(h, How::Placed) && !known {
                 *h = How::Read;
             }
         }
@@ -980,7 +1002,8 @@ impl Scanner {
                 todo.push((i, contents));
             }
         }
-        let reused = |rel: &str, sha: &Digest| -> Option<Vec<Vec<u8>>> {
+        let reused = |rel: Option<&String>, sha: &Digest| -> Option<Vec<Vec<u8>>> {
+            let rel = rel?;
             if let Some(rec) = cached.get(rel).filter(|r| &r.sha == sha) {
                 return Some(rec.classes.clone());
             }
@@ -994,7 +1017,7 @@ impl Scanner {
             .par_iter()
             .map(|(i, contents)| {
                 let sha = digest(contents);
-                match reused(&rels[*i], &sha) {
+                match reused(rels[*i].as_ref(), &sha) {
                     Some(classes) => {
                         stats.read.fetch_add(1, Ordering::Relaxed);
                         Ok((*i, sha, classes))
@@ -1018,16 +1041,21 @@ impl Scanner {
             .enumerate()
         {
             let (sha, classes, racy) = match h {
+                // Both only with a key (`rel`) and its record entry.
                 How::Served => {
                     stats.served.fetch_add(1, Ordering::Relaxed);
-                    let rec = &cached[&rel];
-                    (rec.sha, rec.classes.clone(), false)
+                    let (sha, classes) = rel
+                        .as_ref()
+                        .and_then(|r| cached.get(r))
+                        .map(|rec| (rec.sha, rec.classes.clone()))
+                        .unwrap_or_default();
+                    (sha, classes, false)
                 }
                 How::Placed => {
                     stats.from_store.fetch_add(1, Ordering::Relaxed);
-                    let (sha, classes) = store
+                    let (sha, classes) = rel
                         .as_ref()
-                        .and_then(|s| s.get(&rel))
+                        .and_then(|r| store.as_ref()?.get(r))
                         .cloned()
                         .unwrap_or_default();
                     (sha, classes, true)
@@ -1039,7 +1067,7 @@ impl Scanner {
                     (sha, classes, racy)
                 }
             };
-            if changed {
+            if let (true, Some(rel)) = (changed, rel) {
                 records.insert(
                     rel,
                     FileRecord {
@@ -1532,10 +1560,13 @@ mod cache_tests {
             dest
         };
         let a = copy("A");
-        let placed = Arc::new(PlacedPackage::record("acme/lib", &a, &entry).expect("placed"));
+        let placed = Arc::new(
+            PlacedPackage::record("acme/lib", &a, &entry, &[String::new()]).expect("placed"),
+        );
         let seed = |placed: Option<Arc<PlacedPackage>>| StoreSeed {
             record: CacheSlot::new(tmp.path(), &entry, Path::new("src")),
             placed,
+            nested: Vec::new(),
         };
         // A, placed by this run: the record is scanned from the entry, A's
         // copy is not read.
@@ -1595,7 +1626,8 @@ mod cache_tests {
         // A placement of ANOTHER package (nested install dirs) vouches for
         // nothing here.
         let c = copy("C");
-        let elsewhere = Arc::new(PlacedPackage::record("x/y", &a, &entry).expect("placed"));
+        let elsewhere =
+            Arc::new(PlacedPackage::record("x/y", &a, &entry, &[String::new()]).expect("placed"));
         let ctx = settled(&c);
         let slot_c = FileCacheSlot::new(
             tmp.path(),
@@ -1607,13 +1639,69 @@ mod cache_tests {
         assert_eq!(counts(&ctx), [0, 0, 2, 0, 0]);
     }
 
+    /// A package placed inside another's install directory: the outer
+    /// placement's walk may have seen the inner package's files, which are
+    /// not the outer entry's bytes.
+    #[test]
+    fn a_nested_package_is_not_vouched_for_by_the_outer_placement() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let outer_entry = tmp.path().join("store/outer");
+        write(
+            &outer_entry.join("sub/In.php"),
+            b"<?php\nclass FromOuter {}\n",
+        );
+        let dest = tmp.path().join("p/outer");
+        write(&dest.join("sub/In.php"), b"<?php\nclass FromInner {}\n");
+        let placed = Arc::new(
+            PlacedPackage::record("o/o", &dest, &outer_entry, &[String::new()]).expect("placed"),
+        );
+        let mut inner = vivacity_core::pathutil::canonicalize(dest.join("sub"))
+            .expect("canon")
+            .into_os_string()
+            .into_encoded_bytes();
+        inner.push(b'/');
+        let ctx = settled(&dest);
+        let slot = FileCacheSlot::new(
+            tmp.path(),
+            &dest,
+            ctx.clone(),
+            Some(StoreSeed {
+                record: CacheSlot::new(tmp.path(), &outer_entry, Path::new("")),
+                placed: Some(placed),
+                nested: vec![inner],
+            }),
+        );
+        assert_eq!(names(&scan(&dest, Some(&slot))), ["FromInner"]);
+        assert_eq!(counts(&ctx), [0, 0, 0, 1, 0]);
+    }
+
+    /// An entry removed and extracted again under the same name (another
+    /// archive at the same URL) is another directory: its record is not the
+    /// old one's.
+    #[test]
+    fn a_re_extracted_entry_does_not_reuse_the_old_record() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/acme/a/1.0.0-noref");
+        write(&entry.join("src/A.php"), b"<?php\nclass Old {}\n");
+        let old = CacheSlot::new(tmp.path(), &entry, Path::new("src"));
+        let ctx = CacheContext::new();
+        assert!(old.load_or_build(&ctx.stats).is_some());
+        std::fs::remove_dir_all(&entry).expect("rm");
+        write(&entry.join("src/A.php"), b"<?php\nclass New {}\n");
+        let new = CacheSlot::new(tmp.path(), &entry, Path::new("src"));
+        assert_ne!(old.file, new.file);
+        let record = new.load_or_build(&ctx.stats).expect("record");
+        assert_eq!(record["A.php"].1, vec![b"New".to_vec()]);
+    }
+
     #[test]
     fn an_entry_that_cannot_be_scanned_falls_back_to_the_copy() {
         let tmp = tempfile::tempdir().expect("tmp");
         let entry = tmp.path().join("store/gone");
         let a = tmp.path().join("A/src");
         write(&a.join("A.php"), b"<?php\nclass A {}\n");
-        let placed = PlacedPackage::record("acme/gone", &tmp.path().join("A"), &entry);
+        let placed =
+            PlacedPackage::record("acme/gone", &tmp.path().join("A"), &entry, &[String::new()]);
         let ctx = settled(&a);
         let slot = FileCacheSlot::new(
             tmp.path(),
@@ -1622,6 +1710,7 @@ mod cache_tests {
             Some(StoreSeed {
                 record: CacheSlot::new(tmp.path(), &entry, Path::new("src")),
                 placed: placed.map(Arc::new),
+                nested: Vec::new(),
             }),
         );
         assert_eq!(names(&scan(&a, Some(&slot))), ["A"]);
@@ -1658,7 +1747,7 @@ mod cache_tests {
         let pkg = tmp.path().join("pkg");
         write(&pkg.join("real/X.php"), b"<?php\nclass X {}\n");
         std::os::unix::fs::symlink(pkg.join("real"), pkg.join("link")).expect("ln");
-        let placed = PlacedPackage::record("a/b", &pkg, &entry).map(Arc::new);
+        let placed = PlacedPackage::record("a/b", &pkg, &entry, &[String::new()]).map(Arc::new);
         let ctx = settled(&pkg);
         let slot = FileCacheSlot::new(
             tmp.path(),
@@ -1667,6 +1756,7 @@ mod cache_tests {
             Some(StoreSeed {
                 record: CacheSlot::new(tmp.path(), &entry, Path::new("")),
                 placed,
+                nested: Vec::new(),
             }),
         );
         assert_eq!(names(&scan(&pkg, Some(&slot))), ["X"]);
@@ -1691,7 +1781,9 @@ mod cache_tests {
         );
         let src = tmp.path().join("p/src");
         write(&src.join("A.php"), b"<?php\nnamespace Acme;\nclass A {}\n");
-        let placed = PlacedPackage::record("acme/lib", &tmp.path().join("p"), &entry).map(Arc::new);
+        let placed =
+            PlacedPackage::record("acme/lib", &tmp.path().join("p"), &entry, &[String::new()])
+                .map(Arc::new);
         let ctx = settled(&src);
         let slot = FileCacheSlot::new(
             &tmp.path().join("cache"),
@@ -1700,6 +1792,7 @@ mod cache_tests {
             Some(StoreSeed {
                 record: CacheSlot::new(&tmp.path().join("cache"), &entry, Path::new("src")),
                 placed,
+                nested: Vec::new(),
             }),
         );
         let direct = scan(&src, None);

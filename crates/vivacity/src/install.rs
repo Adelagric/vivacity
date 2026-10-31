@@ -1337,10 +1337,25 @@ fn execute_operations(
         vivacity_core::fetch::composer_cache_dir(),
         auth,
     )?);
+    // The identities the dump that follows can use: none without a dump,
+    // or when scripts run between the placement and the dump (which then
+    // takes nothing from the placement).
+    let placement_identities = if args.no_autoloader || run.runner.is_some() {
+        vivacity_core::installer::PlacementIdentities::None
+    } else if effective_optimize(
+        &run.manifest,
+        args.optimize_autoloader,
+        args.classmap_authoritative,
+    ) {
+        vivacity_core::installer::PlacementIdentities::AllRules
+    } else {
+        vivacity_core::installer::PlacementIdentities::Classmap
+    };
     let opts = vivacity_core::installer::InstallOptions {
         with_dev: run.with_dev,
         offline: args.offline,
         plugins_enabled: !args.no_plugins,
+        placement_identities,
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().context("cannot start the async runtime")?;

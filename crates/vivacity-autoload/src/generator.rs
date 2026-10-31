@@ -365,9 +365,27 @@ pub fn plan(
                 .strip_prefix(&se.install)
                 .unwrap_or("")
                 .trim_start_matches('/');
+            // Packages placed inside this one (nested install paths).
+            let nested = se
+                .placed
+                .as_ref()
+                .map(|_| {
+                    store_entries
+                        .iter()
+                        .filter(|o| o.placed.is_some() && o.install.starts_with(&se.install_slash))
+                        .filter_map(|o| o.placed.as_ref())
+                        .map(|o| {
+                            let mut b = o.dest.as_os_str().as_encoded_bytes().to_vec();
+                            b.push(std::path::MAIN_SEPARATOR as u8);
+                            b
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             crate::classmap::StoreSeed {
                 record: crate::classmap::CacheSlot::new(&cfg.cache_root, &se.entry, Path::new(rel)),
                 placed: se.placed.clone(),
+                nested,
             }
         });
         Some(crate::classmap::FileCacheSlot::new(

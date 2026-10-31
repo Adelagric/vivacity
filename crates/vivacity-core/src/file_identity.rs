@@ -66,6 +66,13 @@ impl FileIdentity {
         i128::from(self.ctime.0) * 1_000_000_000 + i128::from(self.ctime.1)
     }
 
+    /// The later of the change and modification times: a file system whose
+    /// ctime does not move on a write still moves the mtime.
+    fn latest_ns(&self) -> i128 {
+        let mtime = i128::from(self.mtime.0) * 1_000_000_000 + i128::from(self.mtime.1);
+        self.ctime_ns().max(mtime)
+    }
+
     /// Fixed-size little-endian encoding (56 bytes), for the cache records.
     pub fn encode(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.dev.to_le_bytes());
@@ -104,9 +111,10 @@ const RACY_MARGIN_NS: i128 = 2_000_000_000;
 /// The reference time of each file system a scan reads, taken BEFORE the
 /// scan as the ctime of a probe file created on that file system — never
 /// the system clock, which can differ from the file system's (a Docker
-/// Desktop bind mount carries the host's clock). An identity whose ctime is
-/// within [`RACY_MARGIN_NS`] of that time (or later) is racy: a later run
-/// does not trust it alone. A device with no probe is racy throughout.
+/// Desktop bind mount carries the host's clock). An identity whose ctime (or
+/// mtime) is within [`RACY_MARGIN_NS`] of that time, or later, is racy: a
+/// later run does not trust it alone. A device with no probe is racy
+/// throughout.
 #[derive(Debug, Default)]
 pub struct Clock {
     /// device -> reference ctime in ns.
@@ -169,7 +177,7 @@ impl Clock {
     /// reference time to be trusted by a later run.
     pub fn is_racy(&self, id: &FileIdentity) -> bool {
         match self.now.get(&id.dev) {
-            Some(now) => id.ctime_ns() >= now - RACY_MARGIN_NS,
+            Some(now) => id.latest_ns() >= now - RACY_MARGIN_NS,
             None => true,
         }
     }
@@ -191,17 +199,46 @@ pub struct PlacedPackage {
 }
 
 impl PlacedPackage {
-    /// Walks `dest` (symbolic links not followed, dot entries skipped like
-    /// the class map walk) and takes the identity of every `.php`, `.inc`
-    /// and `.hh` file. `None` under Windows, or when `dest` cannot be
-    /// canonicalized.
-    pub fn record(name: &str, dest: &Path, entry: &Path) -> Option<PlacedPackage> {
+    /// Walks `roots` under `dest` (paths relative to it, files or
+    /// directories; `""` is `dest` itself) — symbolic links not followed,
+    /// dot entries skipped like the class map walk — and takes the identity
+    /// of every `.php`, `.inc` and `.hh` file. `None` under Windows, or when
+    /// `dest` cannot be canonicalized.
+    pub fn record(
+        name: &str,
+        dest: &Path,
+        entry: &Path,
+        roots: &[String],
+    ) -> Option<PlacedPackage> {
         if cfg!(not(unix)) {
             return None;
         }
         let dest = crate::pathutil::canonicalize(dest).ok()?;
         let mut files = HashMap::new();
-        let mut stack = vec![dest.clone()];
+        let php = |p: &Path| {
+            matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("php" | "inc" | "hh")
+            )
+        };
+        let take = |p: &Path, files: &mut HashMap<Vec<u8>, FileIdentity>| {
+            if let Some(id) = FileIdentity::of(p) {
+                files.insert(p.as_os_str().as_encoded_bytes().to_vec(), id);
+            }
+        };
+        let mut stack: Vec<PathBuf> = Vec::new();
+        for root in roots {
+            let path = if root.is_empty() {
+                dest.clone()
+            } else {
+                dest.join(root)
+            };
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() => stack.push(path),
+                Ok(m) if m.is_file() && php(&path) => take(&path, &mut files),
+                _ => {}
+            }
+        }
         while let Some(dir) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
@@ -214,15 +251,8 @@ impl PlacedPackage {
                 let path = e.path();
                 if ft.is_dir() {
                     stack.push(path);
-                } else if ft.is_file()
-                    && matches!(
-                        path.extension().and_then(|x| x.to_str()),
-                        Some("php" | "inc" | "hh")
-                    )
-                {
-                    if let Some(id) = FileIdentity::of(&path) {
-                        files.insert(path.as_os_str().as_encoded_bytes().to_vec(), id);
-                    }
+                } else if ft.is_file() && php(&path) {
+                    take(&path, &mut files);
                 }
             }
         }
@@ -232,6 +262,61 @@ impl PlacedPackage {
             entry: entry.to_path_buf(),
             files,
         })
+    }
+
+    /// The paths, relative to a package's install directory, that the
+    /// autoloader dump may scan for its `autoload` rules: the `classmap`
+    /// entries, and with `psr` the PSR-0/PSR-4 directories too (an
+    /// optimized dump). The whole directory (`""`) for anything this cannot
+    /// place exactly — a glob, a `..`, an absolute path, a `target-dir`.
+    pub fn autoload_roots(
+        autoload: &serde_json::Value,
+        target_dir: bool,
+        psr: bool,
+    ) -> Vec<String> {
+        let whole = || vec![String::new()];
+        if target_dir {
+            return whole();
+        }
+        let mut roots = Vec::new();
+        let mut add = |v: &serde_json::Value| -> bool {
+            let paths: Vec<&serde_json::Value> = match v {
+                serde_json::Value::Array(a) => a.iter().collect(),
+                other => vec![other],
+            };
+            for p in paths {
+                let Some(p) = p.as_str() else { return false };
+                let p = p.trim_start_matches("./").trim_end_matches('/');
+                if p.contains(['*', '?', '[', '\\'])
+                    || p.starts_with('/')
+                    || p.split('/').any(|c| c == "..")
+                {
+                    return false;
+                }
+                roots.push(p.trim_end_matches("/.").to_owned());
+            }
+            true
+        };
+        if let Some(cm) = autoload.get("classmap") {
+            if !add(cm) {
+                return whole();
+            }
+        }
+        if psr {
+            for key in ["psr-0", "psr-4"] {
+                if let Some(map) = autoload.get(key).and_then(serde_json::Value::as_object) {
+                    for v in map.values() {
+                        if !add(v) {
+                            return whole();
+                        }
+                    }
+                }
+            }
+        }
+        if roots.iter().any(|r| r.is_empty() || r == ".") {
+            return whole();
+        }
+        roots
     }
 }
 
@@ -302,12 +387,18 @@ mod tests {
         assert!(clock.is_racy(&fresh), "a file written just now is racy");
         let old = FileIdentity {
             ctime: (fresh.ctime.0 - 3, fresh.ctime.1),
+            mtime: (fresh.ctime.0 - 3, fresh.ctime.1),
             ..fresh
         };
         assert!(
             !clock.is_racy(&old),
             "three seconds before the probe: not racy"
         );
+        let rewritten = FileIdentity {
+            mtime: fresh.ctime,
+            ..old
+        };
+        assert!(clock.is_racy(&rewritten), "a recent mtime alone: racy");
         let elsewhere = FileIdentity {
             dev: fresh.dev.wrapping_add(1),
             ..old
@@ -331,12 +422,57 @@ mod tests {
         std::fs::write(dest.join("src/.hidden/B.php"), b"<?php").expect("w");
         std::fs::write(dest.join("README.md"), b"x").expect("w");
         std::os::unix::fs::symlink(dest.join("src/A.php"), dest.join("src/L.php")).expect("ln");
-        let p = PlacedPackage::record("a/b", &dest, Path::new("/store/e")).expect("placed");
+        let p = PlacedPackage::record("a/b", &dest, Path::new("/store/e"), &[String::new()])
+            .expect("placed");
         let canon = crate::pathutil::canonicalize(dest.join("src/A.php")).expect("canon");
         assert_eq!(p.files.len(), 1, "{:?}", p.files.keys());
         assert_eq!(
             p.files.get(canon.as_os_str().as_encoded_bytes()),
             FileIdentity::of(&canon).as_ref()
+        );
+        std::fs::create_dir_all(dest.join("lib")).expect("mkdir");
+        std::fs::write(dest.join("lib/C.php"), b"<?php").expect("w");
+        std::fs::write(dest.join("one.php"), b"<?php").expect("w");
+        let p = PlacedPackage::record(
+            "a/b",
+            &dest,
+            Path::new("/e"),
+            &["lib".into(), "one.php".into()],
+        )
+        .expect("placed");
+        assert_eq!(p.files.len(), 2, "only the roots: {:?}", p.files.keys());
+    }
+
+    #[test]
+    fn autoload_roots_follow_the_rules_or_take_everything() {
+        let roots = |v: serde_json::Value, psr: bool| PlacedPackage::autoload_roots(&v, false, psr);
+        let rules = serde_json::json!({
+            "psr-4": {"A\\": "src/", "B\\": ["lib", "./more/"]},
+            "psr-0": {"C_": "legacy/"},
+            "classmap": ["res/Map.php", "classes/"],
+            "files": ["helpers.php"]
+        });
+        assert_eq!(roots(rules.clone(), false), ["res/Map.php", "classes"]);
+        assert_eq!(
+            roots(rules, true),
+            ["res/Map.php", "classes", "legacy", "src", "lib", "more"]
+        );
+        assert_eq!(roots(serde_json::json!({"psr-4": {"A\\": ""}}), true), [""]);
+        assert_eq!(
+            roots(serde_json::json!({"psr-4": {"A\\": ""}}), false),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            roots(serde_json::json!({"classmap": ["src/*/x"]}), false),
+            [""]
+        );
+        assert_eq!(
+            roots(serde_json::json!({"classmap": ["../x"]}), false),
+            [""]
+        );
+        assert_eq!(
+            PlacedPackage::autoload_roots(&serde_json::json!({"psr-0": {"A": "src"}}), true, true),
+            [""]
         );
     }
 }

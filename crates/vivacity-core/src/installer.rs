@@ -23,6 +23,21 @@ pub struct InstallOptions {
     /// No `--no-plugins`: Flex, when installed and allowed, lays out
     /// `symfony-pack` packages as metapackages.
     pub plugins_enabled: bool,
+    /// Which files of a package laid out from the store get their identity
+    /// taken right after the placement, for the class map of the dump that
+    /// follows in the same run (`InstallReport::placed`).
+    pub placement_identities: PlacementIdentities,
+}
+
+/// What the dump after the install will scan in a placed package: nothing
+/// (no dump, or scripts run before it), its `classmap` rules (a dump
+/// without `-o`), or its PSR directories too (`-o`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlacementIdentities {
+    #[default]
+    None,
+    Classmap,
+    AllRules,
 }
 
 impl Default for InstallOptions {
@@ -32,6 +47,7 @@ impl Default for InstallOptions {
             offline: false,
             jobs: 16,
             plugins_enabled: true,
+            placement_identities: PlacementIdentities::None,
         }
     }
 }
@@ -691,14 +707,21 @@ pub async fn install(
                 crate::path_install::remove_path(&own)?;
             }
         }
-        let autoloaded = p
-            .raw
-            .get("autoload")
-            .and_then(Value::as_object)
-            .is_some_and(|a| !a.is_empty());
-        let identities = autoloaded
-            .then(|| crate::file_identity::PlacedPackage::record(p.name(), &dest, &src))
-            .flatten();
+        let identities = match (opts.placement_identities, p.raw.get("autoload")) {
+            (PlacementIdentities::None, _) | (_, None) => None,
+            (scope, Some(autoload)) => {
+                let roots = crate::file_identity::PlacedPackage::autoload_roots(
+                    autoload,
+                    p.target_dir().is_some(),
+                    scope == PlacementIdentities::AllRules,
+                );
+                (!roots.is_empty())
+                    .then(|| {
+                        crate::file_identity::PlacedPackage::record(p.name(), &dest, &src, &roots)
+                    })
+                    .flatten()
+            }
+        };
         Ok((true, identities))
     };
     let placed: Vec<Placed> = if crate::platform::parallel_io() {
