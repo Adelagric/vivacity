@@ -834,6 +834,20 @@ Windows (copie et `detach` typecheckés, jamais lancés ; coût de la copie
 avec Defender à mesurer, `bench-windows`) ; les bancs P0 rejoués avec le
 vrai code (critère « `copy` + 10 % ») ; les suites complètes (mainteneur).
 
+### P0 — Performance validation (macOS APFS)
+
+Benchmarks were run on an M4 Max using hyperfine, comparing vivacity 0.26.0 with the P0 isolation fix.
+The initial 15-run measurement showed no meaningful change in no-op installs, but suggested a regression of 8.6 ms in Sylius `dump-autoload -o` (110.2 → 118.8 ms).
+That regression could not be reproduced.
+
+* Internal dump timing: 75.0 ms (0.26.0) versus 73.1 ms (P0).
+* Exact reproduction of the original run12 protocol, in both execution orders: 109.1 versus 109.0 ms, then 109.1 versus 108.6 ms.
+* Four alternating series of 30 runs remained within ±2 ms in both directions.
+
+Conclusion: No reproducible `dump-autoload -o` performance regression was detected on macOS APFS. The initial difference remains unexplained; measurement noise is a plausible explanation, not a demonstrated cause.
+The P0 fix passed the 18 regression harnesses, including hard-link and copy-on-write isolation. The pre-fix binary failed the relevant isolation assertions, rather than a test setup guard.
+Corpus results matched the 0.26.0 baseline except for cypht, whose external Tiki dependency was unavailable during validation. That case is tracked separately as a network timeout and error-handling issue.
+
 ## Annexe A — le spike de mesure (non commité)
 
 Quatre fichiers, tout derrière des variables d'environnement ; retiré par
