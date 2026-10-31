@@ -4,7 +4,8 @@
 
 `composer install` and `composer update`, reimplemented in Rust. Given the
 same `composer.json` and `composer.lock`, it writes the same `vendor/` and
-the same lock file as Composer 2.10.3, byte for byte. No PHP is run.
+the same lock file as Composer 2.10.3, byte for byte. No PHP code of
+Composer or its plugins is run (a `php` is asked for the platform only).
 (Named `vivace` up to 0.5.0; see the changelog for why it moved.)
 
 ```
@@ -13,6 +14,7 @@ composer update        →  vivacity update        (also `update vendor/name [-w
 composer require       →  vivacity require
 composer remove        →  vivacity remove
 composer dump-autoload →  vivacity dump-autoload
+composer config --global cache-dir → vivacity config --global cache-dir  (that form only)
 ```
 
 Flags: `--no-dev`, `-o`, `-a`, `--no-autoloader`, `--no-install`,
@@ -227,7 +229,7 @@ line, `install`'s `Package operations`, and `--dry-run` on `update`,
 `require` and `remove` (resolution and listing, nothing written — the
 install phase lists its operations from the unwritten lock). The stderr
 of every `steps.sh` case is compared byte for byte from the first of
-those lines to the end (234 cases). A real `install` prints the same
+those lines to the end (239 cases). A real `install` prints the same
 `  - Installing … : Extracting archive` / `Symlinking from …` lines and
 `Generating autoload files`, plus one `vivacity:` summary line.
 
@@ -236,8 +238,9 @@ files, local or over HTTPS) and `path` (globs and braces, a package's own
 git repository as reference, the version guessed from its branch or the
 project's, symlinked or mirrored with Composer's exclusion rules — on
 Linux and macOS; on Windows a lock with a `path` package goes through the
-Composer fallback). Not yet: `vcs` repositories, `--minimal-changes`, the
-audit (`--no-audit` is the compared behaviour).
+Composer fallback). Other repository types (`vcs`, `package`, `artifact`…)
+and `--minimal-changes` go to Composer; the audit is not run (`--no-audit`
+is the compared behaviour).
 
 `require` reverts composer.json on SIGINT, SIGTERM and SIGHUP as
 Composer does (macOS and Linux; installed by the binary only, not by the
@@ -283,10 +286,12 @@ counts, the `Installs:` / `Updates:` / `Removals:` summaries, the detailed
 explanations, and the `> <event>: <class>-><method>` line Composer writes
 for each plugin listener it calls, in the plugins' activation order:
 symfony/runtime, pestphp/pest-plugin, php-http/discovery,
-composer/package-versions-deprecated, phpstan/extension-installer,
+drupol/composer-packages, composer/package-versions-deprecated,
+phpstan/extension-installer, infection/extension-installer,
 rector/extension-installer, codeception/c3, drupal/core-project-message,
-drupal/core-recipe-unpack and bamarni/composer-bin-plugin (with its two
-`Calling …` lines), each in the versions whose source was read;
+drupal/core-recipe-unpack, bamarni/composer-bin-plugin (with its two
+`Calling …` lines) and cakephp/plugin-installer, each in the versions
+whose source was read;
 composer/installers, roots/wordpress-core-installer,
 mnsami/composer-custom-directory-installer, ibexa/post-install and
 ergebnis/composer-normalize have no listener and add nothing.
@@ -308,8 +313,8 @@ removed from the pool before resolution (`config.policy`, the legacy
 refuses a lock that pins a flagged version. Advisories and list entries
 come from the same metadata files Composer reads, so the frozen snapshots
 carry them and the parity checks run with the policies on. Custom policy
-lists with sources and a repository `filter.api-url` are not supported
-(refused when reached).
+lists with sources and a repository `filter.api-url` are not ported
+(handed to Composer when reached).
 
 Before laying out a lock it did not just resolve, `install` solves it
 again, as `Installer::doInstall` does: every locked package fixed, the
@@ -334,7 +339,7 @@ Packagist search behind "Did you mean …".
 ## Plugins and scripts
 
 Scripts are never run by vivacity itself (see `--run-scripts` below).
-Thirty-three plugins are emulated and checked against the
+Thirty-four plugins are emulated and checked against the
 real ones: `symfony/runtime`, `composer/installers` (versions
 1.12.0 and 2.0.0–2.3.0, frameworks that only use the plugin's path table —
 WordPress and Drupal included; 1.12.0's PHP 8.4 deprecation lines
@@ -573,15 +578,16 @@ project already takes one for the box; staying silent would let `dump-autoload`
 write an autoloader where Composer writes nothing.
 
 *Accepted on `install` and `dump-autoload`.* An unknown `minimum-stability`, a
-`version` that is not a version, a repository with no `type` or an unknown one:
-Composer refuses all three through the schema, and `update` refuses the first
-two through its own ports. Reaching them on the other commands means loading
-the root package, i.e. guessing its version, i.e. running git on the install
-path — so they are left. Porting the schema itself means validating
+`version` that is not a version, a repository of an unknown type (one with
+no `type` goes to Composer): Composer refuses all three through the schema,
+and `update` refuses the first two through its own ports. Reaching them on
+the other commands means loading the root package, i.e. guessing its
+version, i.e. running git on the install path — so they are left. Porting the schema itself means validating
 `res/composer-schema.json`, which vivacity does not do.
 
-*Not refused at all.* `COMPOSER=<file>` is refused as unsupported rather than
-honoured, so a manifest named there is never validated — nor installed from.
+*Not refused at all.* `COMPOSER=<file>` hands the whole command to Composer
+before anything is read or written, so vivacity never validates a manifest
+named there.
 
 A hostile archive is the one family where vivacity **fails instead of handing
 over**. Everything else it cannot reproduce is detected before the first write,
@@ -615,8 +621,8 @@ a property no file content, mode or link target depends on and which the
 contract does not claim. `PharData` does not restore them either, so `tar` dists
 match the reference as they are.
 
-Not supported: `gitlab-token` auth, root version detection from
-hg/svn/fossil.
+Not supported: `gitlab-token` auth. Root version detection from
+hg/svn/fossil goes to Composer.
 
 ## Embedding
 
@@ -624,7 +630,7 @@ The `vivacity` crate is a library with a thin binary on top: another program
 can run any vivacity command in-process and get the binary's exit code.
 
 ```rust
-// Cargo.toml: vivacity = "0.5"
+// Cargo.toml: vivacity = "0.26"
 let code = vivacity::run(["vivacity", "install", "--working-dir", "/srv/app"]);
 ```
 

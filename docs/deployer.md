@@ -75,8 +75,8 @@ task('deploy:vendors', function () {
 });
 ```
 
-A lock vivacity does not lay out natively (an unported plugin, a `git`-only
-package, the Drupal scaffold…) goes to the `composer` on the host, with the
+A lock vivacity does not lay out natively (an unported plugin, the
+Drupal scaffold…) goes to the `composer` on the host, with the
 reason on stderr, before anything is written: the deploy still succeeds, at
 Composer's speed. `vivacity install --check-scope` on a checkout tells you
 in advance (no network, nothing written; exit 0 means native).

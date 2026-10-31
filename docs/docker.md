@@ -89,8 +89,8 @@ build argument before the `COPY`) instead.
 
 ## What to expect when vivacity hands over
 
-A lock vivacity does not lay out natively (an unported plugin, a `git`-only
-package, the Drupal scaffold…) goes to the `composer` in the image, with the
+A lock vivacity does not lay out natively (an unported plugin, the
+Drupal scaffold…) goes to the `composer` in the image, with the
 reason on stderr, before anything is written: the build still succeeds, at
 Composer's speed. `vivacity install --check-scope` (no network, nothing
 written) tells you in advance; exit 0 means native.

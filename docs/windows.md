@@ -58,8 +58,8 @@ what compiles, what runs, what was verified, what is deferred.
   the real Composer 2.10, and propagates its exit code; that run also
   confirmed Composer's cache at `%LOCALAPPDATA%/Composer`, the same location
   `fetch.rs` ports.
-- **Unit tests**: all `--lib` tests of the four crates pass on Windows
-  (112 as of this branch), and `cargo clippy --workspace --all-targets`
+- **Unit tests**: all `--lib` tests of the workspace pass on Windows
+  (`windows.yml`), and `cargo clippy --workspace --all-targets`
   with `-D warnings` is clean.
 - **A Windows CI leg** (`.github/workflows/windows.yml`, windows-latest):
   fmt (which also proves the LF checkout), clippy `-D warnings`, release
