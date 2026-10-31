@@ -31,18 +31,17 @@ Found on 2026-10-31 in 0.26.0. vivacity assumed that nothing edits
 things break when that assumption does:
 
 - **Projects are not isolated on file systems without copy-on-write.**
-  Fixed on the `vendor-isolation` branch, not yet on main; planned for
-  release in 0.26.1. In 0.26.0 and earlier, on Linux ext4 and overlayfs
-  (most CI runners and Docker images), on Windows when the cache and the
-  project share a volume, and on macOS outside APFS, the files in `vendor/`
-  are hard links to vivacity's store: a file edited in place in one project
-  is edited in the store, in every other project installed from that entry,
-  and in every project installed from it later. With 0.26.0, don't edit
-  files in `vendor/` in place on those file systems; if you did, delete
-  vivacity's store (`store/` under its cache directory, listed below) and
-  reinstall the projects that used it. With the fix, each project gets its
-  own copy of every file (a copy-on-write clone on APFS, btrfs and xfs, as
-  before; a plain copy elsewhere), and:
+  Fixed on main; planned for release in 0.26.1. In 0.26.0 and earlier, on
+  Linux ext4 and overlayfs (most CI runners and Docker images), on Windows
+  when the cache and the project share a volume, and on macOS outside APFS,
+  the files in `vendor/` are hard links to vivacity's store: a file edited in
+  place in one project is edited in the store, in every other project
+  installed from that entry, and in every project installed from it later.
+  With 0.26.0, don't edit files in `vendor/` in place on those file systems;
+  if you did, delete vivacity's store (`store/` under its cache directory,
+  listed below) and reinstall the projects that used it. With the fix, each
+  project gets its own copy of every file (a copy-on-write clone on APFS,
+  btrfs and xfs, as before; a plain copy elsewhere), and:
   - the store has a new layout (`store/v4`): no entry an earlier version
     wrote is served again, each is extracted afresh from its archive;
   - a project an earlier version installed is unlinked on the first install

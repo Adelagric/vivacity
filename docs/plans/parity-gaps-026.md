@@ -1077,8 +1077,8 @@ la décision revient au mainteneur.
     que Composer sur l'état courant du projet) ; revalidation à faire, P1 de
     docs/plans/vendor-isolation.md. L'autre face de la même hypothèse —
     vendor/ lié au store hors copie sur écriture, une écriture en place
-    atteignant le store et les autres projets — est corrigée sur la branche
-    `vendor-isolation`, prévue pour 0.26.1 (P0, même plan ;
+    atteignant le store et les autres projets — est corrigée sur main,
+    prévue pour 0.26.1 (P0, même plan ;
     `harness/vendor-isolation.sh`).
 52. **Chemin de projet avec `'`** (chemins absolus dans
     autoload_static.php), nom de paquet en majuscules comme clé
