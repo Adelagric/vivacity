@@ -34,6 +34,14 @@
 #                        depuis un store chaud sert ses paquets depuis
 #                        l'enregistrement du store
 #
+# Écritures du code natif entre la pose et le dump du même install : le dump
+# doit voir un fichier que l'install a réécrit ou modifié après sa pose.
+#   cm-pose-bindir       `bin-dir` sous le répertoire d'un paquet : la mise à
+#                        jour d'un paquet à `bin` supprime le fichier de
+#                        classe posé à la place du proxy et y écrit le proxy
+#   cm-pose-chmod        `bin` en `.php` porteur de classe dans une règle
+#                        `classmap` : le `chmod` de la cible après la pose
+#
 # Gardes : c'est vivacity qui installe et qui dumpe (`--no-fallback`, code 0,
 # sa ligne de résumé, ses lignes `trace:`, aucune ligne `delegating`).
 #
@@ -357,6 +365,82 @@ if setup cm-served; then
     cp "$B/vendor/composer/autoload_classmap.php" "$B.viv.php"
     compare "$B" "cm-served (B, install -o)" 'Acme\\Cm\\Str' 'Acme\\Cm\\Stx' install
   fi
+fi
+
+# --- Écritures entre la pose et le dump ------------------------------------------
+# Paquets de ces cas : acme/host (règle `classmap` bin/, un fichier de classe
+# bin/tool.php), acme/tooler (un `bin` bin/tool.php), en 1.0.0 et 1.0.1 ;
+# acme/binphp (un `bin` bin/Run.php porteur de classe, règle `classmap` bin/).
+mkdir -p "$WORK/artifacts-pose"
+php -r '
+foreach (["1.0.0", "1.0.1"] as $v) {
+  $z = new ZipArchive();
+  $z->open($argv[1] . "/acme-host-$v.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
+  $z->addFromString("acme-host/composer.json", json_encode(["name" => "acme/host", "version" => $v, "autoload" => ["classmap" => ["bin/", "lib/"]]], JSON_PRETTY_PRINT));
+  $z->addFromString("acme-host/bin/tool.php", "<?php\nclass Acme_Host_Tool\n{\n}\n");
+  $z->addFromString("acme-host/lib/Lib.php", "<?php\nclass Acme_Host_Lib\n{\n}\n");
+  $z->close();
+  $z = new ZipArchive();
+  $z->open($argv[1] . "/acme-tooler-$v.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
+  $z->addFromString("acme-tooler/composer.json", json_encode(["name" => "acme/tooler", "version" => $v, "bin" => ["bin/tool.php"]], JSON_PRETTY_PRINT));
+  $z->addFromString("acme-tooler/bin/tool.php", "<?php\necho \"tool\\n\";\n");
+  $z->close();
+}
+$z = new ZipArchive();
+$z->open($argv[1] . "/acme-binphp-1.0.0.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
+$z->addFromString("acme-binphp/composer.json", json_encode(["name" => "acme/binphp", "version" => "1.0.0", "bin" => ["bin/Run.php"], "autoload" => ["classmap" => ["bin/"]]], JSON_PRETTY_PRINT));
+$z->addFromString("acme-binphp/bin/Run.php", "<?php\nclass Acme_BinPhp_Run\n{\n}\n");
+$z->close();
+' "$WORK/artifacts-pose" || { echo "FAIL : fabrication des zips de pose"; exit 1; }
+# poselock <répertoire> <require (JSON)> [config (JSON)] : composer.json et
+# composer.lock résolus par Composer, sans rien poser.
+poselock() {
+  local cfg="${3:-}"
+  [ -n "$cfg" ] || cfg='{}'
+  mkdir -p "$1"
+  cat > "$1/composer.json" <<JSON
+{
+    "repositories": [{ "type": "artifact", "url": "$WORK/artifacts-pose" }],
+    "require": $2,
+    "config": $cfg
+}
+JSON
+  (cd "$1" && cenv COMPOSER_CACHE_DIR="$WORK/seedcache" \
+    composer update --no-install --no-scripts --no-interaction --no-audit --no-ansi >"$1.log" 2>&1) \
+    || { gfail "$(basename "$1") : Composer n'a pas résolu le lock"; sed -n '1,6p' "$1.log"; return 1; }
+}
+# useseed <seed> <projet> : composer.json et composer.lock du seed copiés.
+useseed() { mkdir -p "$2" && cp "$1/composer.json" "$1/composer.lock" "$2/"; }
+
+# --- cm-pose-bindir ------------------------------------------------------------------
+# `bin-dir` = vendor/acme/host/bin. Premier install : le proxy de acme/tooler
+# ne remplace pas bin/tool.php de acme/host (un fichier régulier). Second
+# install, les deux paquets mis à jour : acme/host est reposé, puis la mise à jour de acme/tooler retire ses anciens binaires — le fichier
+# posé de acme/host — et écrit son proxy au même chemin, avant le dump.
+D="$WORK/cm-pose-bindir"; CACHE="$D/cache"; A="$D/A"
+BINCFG='{"bin-dir": "vendor/acme/host/bin"}'
+if poselock "$D/seed1" '{"acme/host": "1.0.0", "acme/tooler": "1.0.0"}' "$BINCFG" \
+   && poselock "$D/seed2" '{"acme/host": "1.0.1", "acme/tooler": "1.0.1"}' "$BINCFG" \
+   && useseed "$D/seed1" "$A" && viv_install "$A" "$CACHE" -o; then
+  useseed "$D/seed2" "$A"
+  if viv_install "$A" "$CACHE" -o; then
+    if grep -q 'Acme_Host_Tool' "$A/vendor/acme/host/bin/tool.php"; then
+      gfail "cm-pose-bindir : le proxy n'a pas remplacé bin/tool.php"
+    fi
+    cp "$A/vendor/composer/autoload_classmap.php" "$A.viv.php"
+    compare "$A" "cm-pose-bindir (install -o)" 'Acme_Host_Lib' 'Acme_Host_Tool' install
+  fi
+fi
+
+# --- cm-pose-chmod -------------------------------------------------------------------
+# Le `chmod` de bin/Run.php (BinaryInstaller) suit sa pose : la classmap
+# du dump qui suit doit rester celle de Composer.
+D="$WORK/cm-pose-chmod"; CACHE="$D/cache"; A="$D/A"
+if poselock "$D/seed" '{"acme/binphp": "1.0.0"}' && useseed "$D/seed" "$A" \
+   && viv_install "$A" "$CACHE" -o; then
+  [ -x "$A/vendor/acme/binphp/bin/Run.php" ] || gfail "cm-pose-chmod : bin/Run.php n'est pas exécutable"
+  cp "$A/vendor/composer/autoload_classmap.php" "$A.viv.php"
+  compare "$A" "cm-pose-chmod (install -o)" 'Acme_BinPhp_Run' 'Acme_BinPhp_None' install
 fi
 
 echo
