@@ -58,6 +58,38 @@ byte-identical-output promise are the public API.
   formats changed (`classmap` v4, `classmap-files` r2): the first dump of
   each project scans again. README, "Editing vendor/";
   `harness/classmap-revalidate.sh`.
+- **Requests time out as Composer's do.** Up to 0.26.0 no request had a
+  connection or total timeout except the advisories API: a server that
+  accepted TCP and never finished the TLS handshake held `install` forever
+  in the lock verification (cypht's `composer.tiki.org`: 424 s of silence,
+  then exit 0 where Composer gave up after 40 s, warned and failed). Now
+  10 s to connect, TLS handshake included (`CURLOPT_CONNECTTIMEOUT`;
+  measured on the reqwest and rustls of the lock), and
+  `max(default_socket_timeout, 300)` s for a whole attempt, body included
+  (`CURLOPT_TIMEOUT`; php's setting asked only once an attempt has waited
+  300 s). A timed-out GET is retried like curl's error 28 (four attempts),
+  the advisories POST keeps its 10 s and single attempt, and a fatal
+  timeout prints Composer's `COMPOSER_DISABLE_NETWORK=1` hint.
+- **An archive answering 500, 502, 503 or 504 is asked for 16 times**, not 4:
+  Composer's `FileDownloader` starts three new rounds of `CurlDownloader`'s
+  four attempts, 500 ms apart.
+- **A repository's `packages.json` that is not JSON** is handled as Composer
+  handles it: with a cached copy, the "could not be fully loaded" warning
+  and the copy (vivacity failed); without one, Composer's message (`"<url>"
+  does not contain valid JSON`), exit 1, whatever `policy.ignore-unreachable`
+  says. A summary, package file or advisories response that is not JSON
+  fails with the same message.
+- **The malware list filter asks every repository for its `packages.json`
+  before any summary**, as `FilterListProviderSet` does: the repositories'
+  warnings come out in Composer's order, the unreachable ones are listed
+  first, and under `ignore-unreachable: false` none of the later
+  repositories' summaries is fetched before the failure. A batch of package
+  files where one request fails still writes the others to the cache.
+- **`install` no longer fetches the `includes` of a repository without
+  `metadata-url`** while verifying the lock: Composer only reads its
+  `packages.json` there, so an include that failed made vivacity warn
+  ("Filter list data could not be fetched…") or fail where Composer said
+  nothing.
 
 ### Added
 - **A report of the one-time unlinking pass**, in vivacity's cache

@@ -6322,6 +6322,74 @@ répertoires PSR avec `-o` ; tout le paquet pour un glob, un `..` ou un
 l'existant : le relevé est neuf, il est borné à son usage. Chiffres :
 rapport d'exécution au mainteneur, pas ici (consigne).
 
+## 2026-10-31 — Les délais réseau de Composer, et ses décisions après un échec
+
+Plan, audit et mesures : `docs/plans/net-timeouts.md`.
+
+**Le constat.** Aucune requête de vivacity n'avait de délai, sauf l'API des
+avis (10 s). Un serveur qui accepte TCP sans jamais terminer la
+négociation TLS (cypht, `composer.tiki.org`) bloquait `install` dans la
+vérification du lock, là où Composer abandonne au bout de 4 × 10 s, avertit
+et décide. Reproduit en local (un serveur php qui accepte et n'écrit
+jamais) : vivacity sur main tourne encore quand Composer a fini, pour
+`packages.json`, le résumé des listes et une archive.
+
+**L'erreur n'était pas avalée.** Sur 90a357f, une négociation bloquée qui
+finit en erreur (serveur qui ferme au bout de 5 s) donne l'avertissement
+« could not be fully loaded » et la suite de Composer. Le silence de cypht
+après 424 s veut dire que tiki a fini par répondre à vivacity, qui
+l'attendait encore ; Composer, lui, avait abandonné à 40 s. L'écart était
+le délai, pas le traitement de l'erreur.
+
+**Ce qui est reproduit, et comment.**
+- `CURLOPT_CONNECTTIMEOUT, 10` → `connect_timeout(10 s)` de reqwest.
+  Mesuré, pas supposé : avec reqwest 0.12.28, hyper-rustls 0.27.9, rustls
+  0.23.44 (ring, racines webpki-roots), le délai de connexion arrête une
+  négociation TLS sans ServerHello (`is_connect() && is_timeout()`), et ne
+  touche pas une requête http dont la connexion est établie
+  (`the_connect_timeout_covers_the_tls_handshake`). Non mesuré : la
+  résolution DNS, le build `rustls-tls-no-provider`, Windows.
+- `CURLOPT_TIMEOUT, max((int) ini_get("default_socket_timeout"), 300)` →
+  un `tokio::time::timeout` par tentative, corps compris, et non le
+  `timeout` de reqwest, qui ne se prolonge pas une fois la requête partie :
+  300 s, puis le reste si php dit plus. Le php interrogé est celui de la
+  sonde (`VIVACITY_PHP`, sinon `php` du PATH : celui que choisit le
+  `#!/usr/bin/env php` du `composer` que lancent le fallback et les
+  harnais), une fois par processus, et seulement après 300 s d'attente :
+  aucun processus de plus ailleurs. Écarté : ajouter la valeur à la sonde
+  de plateforme (elle tourne après le filtre, sur un autre état) ; une
+  constante de 300 s (un php.ini à 600 donnerait une autre issue que
+  Composer).
+- Une tentative dépassée est une erreur 28 : retentée pour un GET (quatre
+  tentatives), jamais pour le POST des avis, qui garde 10 s au total
+  (`http.timeout` de Composer remplace le total).
+- `FileDownloader` : trois nouveaux tours, à 500 ms, pour une archive en
+  500/502/503/504 seulement — la méta-analyse prévoyait aussi les erreurs
+  curl, le phar dit non : leur `TransportException` a le code 400 par
+  défaut, qui met `$retries` à 0 (mesuré : 4 connexions pour une archive
+  bloquée, 16 requêtes pour une archive en 500).
+
+**Décisions de Composer après un échec, alignées.** JSON invalide de
+`packages.json` (cache servi avec l'avertissement, sinon sortie 1 hors
+`ignore-unreachable`), message de `Response::decodeJson` à l'octet ; ordre
+de `FilterListProviderSet` (tous les `hasFilter` d'abord, un seul tampon
+d'avertissements pour tous les dépôts) ; lot de fichiers p2 réglé en
+entier ; includes d'un dépôt complet non demandés par la vérification ;
+indice `COMPOSER_DISABLE_NETWORK=1` d'une erreur 28 fatale. Aucune
+politique plus stricte ni plus permissive que celle de Composer n'a été
+ajoutée.
+
+**Le harnais.** `transport-exit.sh`, sections 6 et 7 : chaque côté a ses
+serveurs, les deux tournent en même temps (la section dure ≈ 45 s), le
+message de transport est remplacé à l'intérieur de sa ligne (la ligne, sa
+place et leur nombre restent comparés), les tentatives sont comptées des
+deux côtés. Les cas à 300 s (4 × 300 s, Composer ne descend pas sous
+300 s) ne tournent que sous `TRANSPORT_EXIT_SLOW=1` : une passation à
+Composer est impossible, la panne ne se voit qu'en attendant, après les
+premières lignes. Le harnais ne passe plus par `net-retry.sh` en CI : il
+est hors ligne, et ses cas impriment les erreurs que `net-retry.sh` prend
+pour une coupure.
+
 ## 2026-11-01 — Réutiliser au dump l'identité relevée à la pose : aucun gain, retiré (docs/plans/vendor-isolation.md, P1)
 
 Une optimisation expérimentale réutilisant l'identité des fichiers relevée

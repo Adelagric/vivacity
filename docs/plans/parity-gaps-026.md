@@ -901,7 +901,62 @@ la décision revient au mainteneur.
     ligne. Avant écriture : non (réponse du réseau). Coût : M (table des
     messages de curl par cause ; le nombre de tentatives de chaque côté,
     non mesuré). Corpus : non. Sans coût : oui (chemin d'erreur
-    seulement).
+    seulement). **Étendu le 2026-10-31** (docs/plans/net-timeouts.md) : un
+    délai dépassé (curl « Connection timed out after 10001 milliseconds »
+    contre « … error sending request for url (…): operation timed out »)
+    et un statut HTTP (`CurlDownloader::failResponse`, « The "<url>" file
+    could not be downloaded (HTTP/1.1 500 Internal Server Error) », suivi
+    du début du corps JSON quand il y en a un, contre « HTTP status server
+    error (500 …) for url (…) ») ; un 404 sur `packages.json` (« <url> not
+    found » contre le texte de `failResponse`) et sur l'API des avis
+    (« (HTTP/404) ») — décisions et codes identiques, lus et non mesurés
+    pour les 404. Le nombre de tentatives, lui, est mesuré identique dans
+    les sections 6 et 7 de `transport-exit.sh`. Le message d'un JSON
+    invalide n'en fait pas partie : il est identique à l'octet. Quand deux
+    fichiers d'un même lot échouent, Composer cite le premier rejet dans le
+    temps (`React\Promise\all`), vivacity le premier dans l'ordre du lot :
+    l'avertissement et l'erreur peuvent nommer un autre fichier (non
+    mesuré).
+55. **Archive servie par le store là où Composer la télécharge** (cypht,
+    2026-10-31) : une archive présente dans le store de vivacity n'est pas
+    téléchargée même quand le cache d'archives de Composer ne l'a pas.
+    Composer la demande, et si son serveur ne répond pas (curl 28 sur
+    `composer.tiki.org`, « Source fallback is disabled ») il sort en 100 ;
+    vivacity installe et sort en 0. Une issue plus permissive, hors
+    politique de sécurité ; reproduit en local le 2026-10-31 : une archive
+    servie en http, `vivacity install` (store chauffé), vendor/ et cache
+    d'archives retirés, le lock repointé vers le serveur muet en https —
+    Composer (cache vide) sort en 100, vivacity en 0 avec vendor/ posé.
+    Avant écriture : non (réponse du réseau). Décision au
+    mainteneur (télécharger quand le cache de Composer n'a pas l'archive
+    annule le store ; l'inventorier comme effet assumé du store).
+56. **Une archive en échec interrompt les autres téléchargements**
+    (`installer.rs`, `JoinSet` abandonné au premier `Err`) : Composer mène
+    tous les téléchargements à terme (`InstallationManager`, `Loop::wait`)
+    et met les réussis dans son cache d'archives. Effet sur le cache
+    d'archives seulement (le code et l'erreur sont ceux du premier échec) ;
+    repro : un lock à deux archives, l'une en 404 servie avant l'autre
+    lente. Non mesuré. S.
+57. **Magasin de certificats** : vivacity se fie aux racines compilées
+    (webpki-roots) et ne lit ni `config.cafile`, ni `config.capath`, ni
+    `SSL_CERT_FILE` / `SSL_CERT_DIR`, ni `openssl.cafile`, que Composer
+    (curl, `CaBundle`) lit : un serveur que Composer accepte peut être
+    refusé (ou l'inverse) ; et curl ne retente pas une erreur de
+    certificat (60) quand vivacity retente toute erreur de connexion.
+    C'est aussi pourquoi le cas « TLS terminé puis plus rien » n'a pas de
+    version https dans le harnais : il est exercé en http (même chemin
+    après la connexion). Avant écriture : non. M.
+58. **Attente de la vérification avant une passation tardive** (plugin de
+    fusion : `abandon_and_wait`) : vivacity attend la fin des requêtes du
+    filtre — jusqu'à 4 × 10 s sur un dépôt muet — puis Composer refait la
+    même attente. Durée seulement. S (annuler au lieu d'attendre).
+59. **Flex non audité** (index, recettes, `DistReader` passent par
+    `Fetcher`) : ils ont désormais les délais de Composer, mais leurs
+    décisions après un échec n'ont pas été comparées. M.
+60. **Repli sur la source après l'échec d'une archive** (`DownloadManager`
+    : « Failed to download … from dist », « Now trying to download from
+    source », ou « Source fallback is disabled ») : non comparé ici ; une
+    archive bloquée d'un paquet qui a une source est hors des cas. M.
 
 ### Résolution, `update`/`require`/`remove`
 
