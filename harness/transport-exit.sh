@@ -338,11 +338,13 @@ my $ms = int((time - $t0) * 1000);
 open my $f, '>', $rcfile or die;
 print $f ($timed_out ? 'timeout' : ($st >> 8)), " $ms\n";
 PERL
-# The router of section 4, plus FAIL_PATH (that path answers 500) and
-# BAD_JSON_PATH (that path answers 200 with a body that is not JSON).
+# The router of section 4, plus FAIL_PATH (that path answers 500),
+# BAD_JSON_PATH (that path answers 200 with a body that is not JSON) and
+# REQ_LOG (every request's path, one line each).
 cat > "$WORK/router7.php" <<'PHP'
 <?php
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if (getenv('REQ_LOG') !== false) { file_put_contents(getenv('REQ_LOG'), "$path\n", FILE_APPEND); }
 if (getenv('FAIL_PATH') !== false && $path === getenv('FAIL_PATH')) {
     file_put_contents(getenv('FAIL_LOG'), "500\n", FILE_APPEND); http_response_code(500); return true;
 }
@@ -382,12 +384,13 @@ servers() {
   local d="$1" g h
   mkdir -p "$d/reg"; tar -C "$d/reg" -xzf "$ROOT/fixtures/registry/solver-policies.tar.gz"
   fresh_port; g=$FRESH_PORT; fresh_port; h=$FRESH_PORT
-  : > "$d/fail.log"
-  OFFLINE_ROOT="$d/reg" FAIL_LOG="$d/fail.log" php -S "127.0.0.1:$g" "$WORK/router7.php" >/dev/null 2>&1 &
+  : > "$d/fail.log"; : > "$d/req.log"
+  OFFLINE_ROOT="$d/reg" FAIL_LOG="$d/fail.log" REQ_LOG="$d/req.log" php -S "127.0.0.1:$g" "$WORK/router7.php" >/dev/null 2>&1 &
   S6_PIDS+=($!)
   php "$WORK/hold.php" "$h" "$d/h.log" >/dev/null 2>&1 &
   S6_PIDS+=($!)
   for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$g/SNAPSHOT" && [ -f "$d/h.log" ] && break; sleep 0.1; done
+  : > "$d/req.log"
   echo "$g" > "$d/g"; echo "$h" > "$d/h"
 }
 # The packages.json of the snapshot: metadata on G; the summary and the
@@ -407,16 +410,17 @@ project() { # <dir> <repo-url> [jq edit]
   jq "${3:-.}" "$ROOT/fixtures/projects/solver-policies/composer.json" > "$d/p/composer.json"
 }
 # `launch <case> <limit s> <composer args> -- <vivacity args>` : both sides in
-# the background, each in its own directory.
+# the background, each in its own directory; S6_REF_PREFIX and S6_VIV_PREFIX
+# (arrays, `env VAR=value`) go before Composer's and vivacity's command.
 launch() {
   local name="$1" limit="$2"; shift 2
   local c=() v=(); while [ "$1" != "--" ]; do c+=("$1"); shift; done; shift; v=("$@")
   local d="$WORK/s6/$name"
   (cd "$d/ref/p" && COLUMNS=400 COMPOSER_HOME="$d/ref/home" COMPOSER_CACHE_DIR="$d/ref/cache" COMPOSER_ROOT_VERSION=dev-main COMPOSER_TESTS_ARE_RUNNING=1 \
-    perl "$WORK/timed.pl" "$limit" "$d/ref.out" "$d/ref.err" "$d/ref.rc" composer "${c[@]}" --no-interaction --no-ansi) &
+    perl "$WORK/timed.pl" "$limit" "$d/ref.out" "$d/ref.err" "$d/ref.rc" ${S6_REF_PREFIX[@]+"${S6_REF_PREFIX[@]}"} composer "${c[@]}" --no-interaction --no-ansi) &
   S6_JOBS+=($!)
   (cd "$d/viv/p" && COLUMNS=400 COMPOSER_HOME="$d/viv/home" COMPOSER_CACHE_DIR="$d/viv/cache" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$d/viv/store" \
-    perl "$WORK/timed.pl" "$limit" "$d/viv.out" "$d/viv.err" "$d/viv.rc" "$VIVACITY" "${v[@]}") &
+    perl "$WORK/timed.pl" "$limit" "$d/viv.out" "$d/viv.err" "$d/viv.rc" ${S6_VIV_PREFIX[@]+"${S6_VIV_PREFIX[@]}"} "$VIVACITY" "${v[@]}") &
   S6_JOBS+=($!)
 }
 # A side's output with its ports replaced, Composer's exception box turned
@@ -426,7 +430,8 @@ launch() {
 # point 54 of parity-gaps-026.md — replaced inside its line: the line
 # itself, its place and its count stay compared.
 normalize() { # <file> <side dir>
-  ports "$2" < "$1" > "$1.p"
+  # vivacity's own summary line (point 33) is not Composer's.
+  ports "$2" < "$1" | grep -vE '^vivacity: [0-9]+ installed, ' > "$1.p"
   if grep -q '^In [A-Za-z0-9_]*\.php line [0-9]*:$' "$1.p"; then
     { sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/q;p' "$1.p" | grep -v '^$'
       sed -n '/^In [A-Za-z0-9_]*\.php line [0-9]*:$/,/^$/p' "$1.p" | sed 's/^ *//; s/ *$//' | grep -v '^$' | grep -vE '^In [A-Za-z0-9_]*\.php line [0-9]*:$' | sed 's/^/Error: /'
@@ -437,23 +442,31 @@ normalize() { # <file> <side dir>
   rm -f "$1.p"
 }
 # A side's ports replaced by their names, in URLs (`127.0.0.1:<port>`) and in
-# the names of the repository caches (`127.0.0.1-<port>`).
+# the names of the repository caches (`127.0.0.1-<port>`); and the sha1s of
+# <dir>/sha by <SHA>.
 ports() { # <side dir> (stdin → stdout)
   local d="$1" script="" n p
   for n in g h g2; do
     [ -f "$d/$n" ] || continue
     p=$(cat "$d/$n"); script="$script s#127\.0\.0\.1[:-]$p([^0-9]|\$)#<$(echo "$n" | tr a-z A-Z)>\1#g;"
   done
+  # The files cache names an archive after the sha1 of its URL, which holds
+  # the side's port: <dir>/sha lists them (section 8).
+  if [ -f "$d/sha" ]; then
+    while read -r p; do script="$script s#$p#<SHA>#g;"; done < "$d/sha"
+  fi
   sed -E "$script"
 }
 # What a side left on disk: every file of the repository and archive caches
-# (contents hashed), vendor/, the lock. Ports replaced.
+# (contents hashed), vendor/ (its directories too: an empty vendor/ left
+# behind counts), the lock. Ports replaced.
 effects() { # <side dir>
   local d="$1"
   # Sorted after the ports are replaced: two repository caches named after
   # random ports would otherwise come in either order.
   ( cd "$d" && find cache/repo cache/files p/vendor -type f 2>/dev/null | while read -r f; do
       printf '%s %s\n' "$(printf '%s' "$f" | ports "$d")" "$(ports "$d" < "$f" | shasum | cut -c1-12)"; done | LC_ALL=C sort
+    find p/vendor -type d 2>/dev/null | ports "$d" | sed 's/^/dir /' | LC_ALL=C sort
     ports "$d" < p/composer.lock | shasum | cut -c1-12 )
 }
 # `judge <case> <min s> <max s> <motif Composer must print, or -> [compare stderr: yes|no]`
@@ -473,6 +486,9 @@ judge() {
   if ! diff -q "$d/ref.out.n" "$d/viv.out.n" >/dev/null; then echo "FAIL $name : stdout diffère"; diff "$d/ref.out.n" "$d/viv.out.n" | head -6; status=1; return; fi
   effects "$d/ref" > "$d/ref.fx"; effects "$d/viv" > "$d/viv.fx"
   if ! diff -q "$d/ref.fx" "$d/viv.fx" >/dev/null; then echo "FAIL $name : effets sur le disque différents"; diff "$d/ref.fx" "$d/viv.fx" | head -8; status=1; return; fi
+  if [ "${S6_COUNT_REQ:-0}" = 1 ] && [ "$(wc -l < "$d/ref/req.log")" != "$(wc -l < "$d/viv/req.log")" ]; then
+    echo "FAIL $name : requêtes à G $(wc -l < "$d/ref/req.log" | tr -d ' ') (composer) vs $(wc -l < "$d/viv/req.log" | tr -d ' ') (vivacity)"; status=1; return
+  fi
   if [ "$(wc -l < "$d/ref/h.log")" != "$(wc -l < "$d/viv/h.log")" ] || [ "$(wc -l < "$d/ref/fail.log")" != "$(wc -l < "$d/viv/fail.log")" ]; then
     echo "FAIL $name : tentatives $(wc -l < "$d/ref/h.log" | tr -d ' ')+$(wc -l < "$d/ref/fail.log" | tr -d ' ') (composer) vs $(wc -l < "$d/viv/h.log" | tr -d ' ')+$(wc -l < "$d/viv/fail.log" | tr -d ' ') (vivacity) — connexions à H + réponses 500 de G"
     status=1; return
@@ -491,6 +507,69 @@ VERIFY_VIV=(install --dry-run --no-fallback)
 S6_NAME=(); S6_LO=(); S6_HI=(); S6_WANT=(); S6_CMP=(); S6_JOBS=()
 # `expect <case> <min s> <max s> <motif Composer must print, or -> [yes|no]`
 expect() { S6_NAME+=("$1"); S6_LO+=("$2"); S6_HI+=("$3"); S6_WANT+=("$4"); S6_CMP+=("${5:-yes}"); }
+
+# Section 8's tools, used by `tls-dist-store` (6d) too. Two archives of one
+# package with the same files and different classes (a third for another
+# package), a lock of zip dists
+# with a fixed reference (the store keys an entry on it, not on the URL), a
+# project per side, and the store of a side filled by an install of its own.
+S8="$WORK/s8"; mkdir -p "$S8"
+mkzip() { # <out> <class>
+  python3 -I -c '
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("composer.json", "{\"name\": \"probe/desync\", \"autoload\": {\"classmap\": [\"src/\"]}}\n")
+    z.writestr("src/A.php", "<?php\nnamespace Probe;\nclass %s {}\n" % sys.argv[2])
+' "$1" "$2"
+}
+mkzip "$S8/a.zip" A; mkzip "$S8/b.zip" A2; mkzip "$S8/c.zip" C
+REF40=0123456789abcdef0123456789abcdef01234567
+# `s8_lock <name> <url> <shasum> [<name> <url> <shasum>]...` : the lock on stdout.
+s8_lock() {
+  local pkgs="[]"
+  while [ $# -gt 0 ]; do
+    pkgs=$(jq -c --arg n "$1" --arg u "$2" --arg s "$3" --arg r "$REF40" \
+      '. + [{"name": $n, "version": "1.0.0", "dist": {"type": "zip", "url": $u, "reference": $r, "shasum": $s}, "autoload": {"classmap": ["src/"]}, "type": "library"}]' <<<"$pkgs")
+    shift 3
+  done
+  jq -n --argjson p "$pkgs" '{"_readme": [], "content-hash": "0", "packages": $p, "packages-dev": [], "aliases": [], "minimum-stability": "stable", "stability-flags": {}, "prefer-stable": false, "prefer-lowest": false, "platform": {}, "platform-dev": {}, "plugin-api-version": "2.6.0"}'
+}
+# `s8_project <side dir> <name> <url> <shasum> [...]` : the project, its
+# COMPOSER_HOME, and the sha1 of each URL for `ports`.
+s8_project() {
+  local d="$1"; shift
+  mkdir -p "$d/home" "$d/p" "$d/cache" "$d/store"
+  printf '{"config": {"secure-http": false, "notify-on-install": false}}\n' > "$d/home/config.json"
+  local req="{}" a=("$@")
+  while [ $# -gt 0 ]; do
+    req=$(jq -c --arg n "$1" '. + {($n): "1.0.0"}' <<<"$req")
+    printf '%s' "$2" | shasum | cut -c1-40 >> "$d/sha"
+    shift 3
+  done
+  jq -n --argjson r "$req" '{"repositories": [{"packagist.org": false}], "require": $r, "config": {"notify-on-install": false}}' > "$d/p/composer.json"
+  s8_lock "${a[@]}" > "$d/p/composer.lock"
+}
+# `s8_cache_path <side dir> <name> <url>` : where the files cache keeps that dist.
+s8_cache_path() { echo "$1/cache/files/$2/$(printf '%s' "$3" | shasum | cut -c1-40).zip"; }
+# `viv_warm <side dir> [keep]` : vivacity installs the side's project (its
+# store and its files cache filled), then vendor/ goes, and the files cache
+# too unless `keep`; the request logs start again.
+viv_warm() {
+  local d="$1"
+  (cd "$d/p" && COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$d/store" \
+    "$VIVACITY" install --no-scripts --no-fallback -o >"$d/warm.log" 2>&1) || { echo "FAIL : la préparation de $d a échoué"; tail -3 "$d/warm.log"; status=1; }
+  rm -rf "${d:?}/p/vendor"
+  [ "${2:-}" = keep ] || rm -rf "${d:?}/cache/files"
+  : > "$d/req.log"; : > "$d/h.log"
+}
+# `ref_warm <side dir>` : the same for Composer (its files cache filled).
+ref_warm() {
+  local d="$1"
+  (cd "$d/p" && COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" COMPOSER_ROOT_VERSION=dev-main \
+    composer install --no-plugins --no-scripts --no-interaction -o >"$d/warm.log" 2>&1) || { echo "FAIL : la préparation de $d a échoué"; tail -3 "$d/warm.log"; status=1; }
+  rm -rf "${d:?}/p/vendor"
+  : > "$d/req.log"; : > "$d/h.log"
+}
 
 # 6a. packages.json bloqué en TLS, cache froid : `hasFilter` lève, la source
 # est ignorée sous `ignore-unreachable` (défaut), ou fatale (100).
@@ -539,10 +618,9 @@ launch tls-summary 70 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect tls-summa
 # `FileDownloader` ne rappelle pas `$download()` pour une erreur curl, dont
 # la `TransportException` a le code 400 par défaut (TransportException.php,
 # FileDownloader.php l. 262-266) ; il le fait pour un 500/502/503/504
-# (cas `dist-500`, section 7). Le texte d'un téléchargement qui échoue
-# diffère déjà (point 12 : vivacity n'imprime pas les lignes
-# « Downloading ») : code, stdout, effets, tentatives et durée comparés,
-# pas stderr.
+# (cas `dist-500`, section 7). Depuis le point 55, vivacity imprime les
+# lignes « Downloading » avant l'erreur d'un téléchargement, comme Composer :
+# stderr comparée aussi.
 s6_case tls-dist
 for side in ref viv; do
   d="$WORK/s6/tls-dist/$side"
@@ -551,7 +629,22 @@ for side in ref viv; do
   printf '{"repositories": [{"packagist.org": false}], "require": {"probe/stalled": "1.0.0"}, "config": {"notify-on-install": false}}\n' > "$d/p/composer.json"
   jq -n --arg url "https://127.0.0.1:$(cat "$d/h")/stalled.zip" '{"_readme": [], "content-hash": "0", "packages": [{"name": "probe/stalled", "version": "1.0.0", "dist": {"type": "zip", "url": $url, "shasum": ""}, "type": "library"}], "packages-dev": [], "aliases": [], "minimum-stability": "stable", "stability-flags": {}, "prefer-stable": false, "prefer-lowest": false, "platform": {}, "platform-dev": {}, "plugin-api-version": "2.6.0"}' > "$d/p/composer.lock"
 done
-launch tls-dist 70 install --no-plugins --no-scripts -- install --no-scripts --no-fallback; expect tls-dist 35 60 - no
+launch tls-dist 70 install --no-plugins --no-scripts -- install --no-scripts --no-fallback; expect tls-dist 35 60 "  - Downloading probe/stalled"
+# 6d'. Point 55 : la même archive bloquée, mais dans le store de vivacity
+# (rempli depuis G, puis le lock repointé vers H) et absente du cache de
+# fichiers de Composer : Composer la demande (FileDownloader.php l. 176-198),
+# 4 tentatives, 100 ; vivacity aussi, au lieu de poser le paquet depuis son
+# store et de sortir en 0. stderr comparée.
+s6_case tls-dist-store
+for side in ref viv; do
+  d="$WORK/s6/tls-dist-store/$side"; g=$(cat "$d/g"); h=$(cat "$d/h")
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$g/desync.zip" ""
+  [ "$side" = viv ] && viv_warm "$d"
+  s8_lock probe/desync "https://127.0.0.1:$h/desync.zip" "" > "$d/p/composer.lock"
+  printf '%s' "https://127.0.0.1:$h/desync.zip" | shasum | cut -c1-40 >> "$d/sha"
+done
+launch tls-dist-store 70 install --no-plugins --no-scripts -- install --no-scripts --no-fallback; expect tls-dist-store 35 60 "  - Downloading probe/desync"
 # 6e. L'API des avis bloquée (TLS, puis après connexion), sur `update` :
 # 10 s au total, un POST n'est pas retenté. `metadata: false` pour que le
 # POST parte, `--no-audit` (Composer audite `update`, vivacity non : point
@@ -600,6 +693,8 @@ S6_IDLE_H=1
 # 7a. Une archive en 500 : `FileDownloader` rappelle `$download()` trois
 # fois après 500 ms (la `TransportException` porte le code 500, l. 262-276),
 # et chaque appel refait les 4 tentatives de `CurlDownloader` : 16 requêtes.
+# stderr non comparée : chaque tour réimprime la ligne « Downloading »
+# (l. 192-194), vivacity l'imprime une fois (point 12).
 FAIL_PATH=/broken.zip s6_case dist-500
 for side in ref viv; do
   d="$WORK/s6/dist-500/$side"
@@ -695,5 +790,209 @@ wait "${S6_JOBS[@]}"
 for i in "${!S6_NAME[@]}"; do
   judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"
 done
+
+# 8. Point 55 (docs/plans/net-timeouts.md) : les deux caches désynchronisés.
+# Une archive que le store de vivacity a et que le cache de fichiers de
+# Composer n'a pas (ou pas avec la bonne somme) : Composer la télécharge
+# (FileDownloader.php l. 176-198) et l'écrit dans son cache ; vivacity fait
+# la même requête et en tire la même issue. Le témoin, deux caches chauds :
+# aucune requête, ni d'un côté ni de l'autre. Comptés : les requêtes que G
+# reçoit (REQ_LOG), de chaque côté.
+S6_NAME=(); S6_LO=(); S6_HI=(); S6_WANT=(); S6_CMP=(); S6_JOBS=()
+S6_IDLE_H=1; S6_COUNT_REQ=1
+INSTALL_REF=(install --no-plugins --no-scripts -o)
+INSTALL_VIV=(install --no-scripts --no-fallback -o)
+# `requests <case> <expected count, both sides>` : after `judge`.
+S8_REQ_NAME=(); S8_REQ_WANT=()
+requests() { S8_REQ_NAME+=("$1"); S8_REQ_WANT+=("$2"); }
+# 8a. Store chaud, cache froid, serveur qui répond.
+s6_case desync-fetch
+for side in ref viv; do
+  d="$WORK/s6/desync-fetch/$side"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$(cat "$d/g")/desync.zip" ""
+done
+viv_warm "$WORK/s6/desync-fetch/viv"
+launch desync-fetch 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-fetch 0 20 "  - Downloading probe/desync"; requests desync-fetch 1
+# 8b. Le store vient de l'archive A, le serveur sert B (mêmes fichiers,
+# une autre classe) : le paquet posé est B, l'entrée du store reste A.
+s6_case desync-other-bytes
+for side in ref viv; do
+  d="$WORK/s6/desync-other-bytes/$side"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$(cat "$d/g")/desync.zip" ""
+  [ "$side" = viv ] && viv_warm "$d"
+  cp "$S8/b.zip" "$d/reg/desync.zip"
+done
+launch desync-other-bytes 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-other-bytes 0 20 "  - Downloading probe/desync"; requests desync-other-bytes 1
+# 8c. Store chaud, cache froid, port fermé : 100 des deux côtés.
+s6_case refused-dist-store
+for side in ref viv; do
+  d="$WORK/s6/refused-dist-store/$side"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$(cat "$d/g")/desync.zip" ""
+  [ "$side" = viv ] && viv_warm "$d"
+  s8_lock probe/desync "http://127.0.0.1:$closed/desync.zip" "" > "$d/p/composer.lock"
+  printf '%s' "http://127.0.0.1:$closed/desync.zip" | shasum | cut -c1-40 >> "$d/sha"
+done
+launch refused-dist-store 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect refused-dist-store 0 20 "  - Downloading probe/desync"; requests refused-dist-store 0
+# 8d. Le témoin : cache de Composer chaud, store chaud. Aucune requête.
+s6_case desync-witness
+for side in ref viv; do
+  d="$WORK/s6/desync-witness/$side"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$(cat "$d/g")/desync.zip" ""
+done
+ref_warm "$WORK/s6/desync-witness/ref"; viv_warm "$WORK/s6/desync-witness/viv" keep
+launch desync-witness 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-witness 0 20 -; requests desync-witness 0
+# 8e. Hors ligne (`--offline` contre COMPOSER_DISABLE_NETWORK=1), store
+# chaud, cache froid : la ligne, puis « Network disabled, request
+# canceled » (HttpDownloader.php l. 328-338), 100.
+s6_case offline-dist-store
+for side in ref viv; do
+  d="$WORK/s6/offline-dist-store/$side"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "http://127.0.0.1:$(cat "$d/g")/desync.zip" ""
+done
+viv_warm "$WORK/s6/offline-dist-store/viv"
+S6_REF_PREFIX=(env COMPOSER_DISABLE_NETWORK=1)
+launch offline-dist-store 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}" --offline; expect offline-dist-store 0 20 "Network disabled, request canceled"; requests offline-dist-store 0
+S6_REF_PREFIX=()
+# 8f, 8g. Une archive sur un chemin local (comme l'écrit un dépôt
+# `artifact`), store chaud, cache froid : copiée par RemoteFilesystem, même
+# hors ligne, et écrite dans le cache.
+for variant in desync-local offline-local; do
+  s6_case "$variant"
+  for side in ref viv; do
+    d="$WORK/s6/$variant/$side"
+    s8_project "$d" probe/desync "$S8/a.zip" ""
+  done
+  viv_warm "$WORK/s6/$variant/viv"
+  if [ "$variant" = offline-local ]; then
+    S6_REF_PREFIX=(env COMPOSER_DISABLE_NETWORK=1)
+    launch "$variant" 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}" --offline
+    S6_REF_PREFIX=()
+  else
+    launch "$variant" 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"
+  fi
+  expect "$variant" 0 20 "  - Downloading probe/desync"; requests "$variant" 0
+done
+# 8h. `dist.shasum` posé, une autre archive en cache à la clé : Composer ne
+# la sert pas (l. 180), télécharge et l'écrase ; store chaud chez vivacity.
+s6_case desync-stale-sha
+a_sha=$(shasum < "$S8/a.zip" | cut -c1-40)
+for side in ref viv; do
+  d="$WORK/s6/desync-stale-sha/$side"; url="http://127.0.0.1:$(cat "$d/g")/desync.zip"
+  cp "$S8/a.zip" "$d/reg/desync.zip"
+  s8_project "$d" probe/desync "$url" "$a_sha"
+  [ "$side" = viv ] && viv_warm "$d"
+  f=$(s8_cache_path "$d" probe/desync "$url"); mkdir -p "$(dirname "$f")"; cp "$S8/b.zip" "$f"
+done
+launch desync-stale-sha 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-stale-sha 0 20 "  - Downloading probe/desync"; requests desync-stale-sha 1
+# 8i. Un lot mixte : probe/cached dans les deux caches, probe/desync dans le
+# store seul. Une requête de chaque côté, celle de probe/desync.
+s6_case desync-mixed
+for side in ref viv; do
+  d="$WORK/s6/desync-mixed/$side"; g=$(cat "$d/g")
+  cp "$S8/a.zip" "$d/reg/desync.zip"; cp "$S8/c.zip" "$d/reg/cached.zip"
+  s8_project "$d" probe/cached "http://127.0.0.1:$g/cached.zip" "" probe/desync "http://127.0.0.1:$g/desync.zip" ""
+  if [ "$side" = viv ]; then viv_warm "$d" keep; rm -f "$(s8_cache_path "$d" probe/desync "http://127.0.0.1:$g/desync.zip")"; fi
+  f=$(s8_cache_path "$d" probe/cached "http://127.0.0.1:$g/cached.zip"); mkdir -p "$(dirname "$f")"; cp "$S8/c.zip" "$f"
+done
+launch desync-mixed 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-mixed 0 20 "  - Downloading probe/desync"; requests desync-mixed 1
+# 8k. Pas de cache de fichiers : `COMPOSER_CACHE_DIR=/dev/null` (`Cache::isUsable`
+# refuse le chemin, sans un mot) et `cache-files-ttl: 0` (aucun cache,
+# Factory.php l. 506-510). Composer télécharge tout et n'écrit rien ; l'archive
+# déjà à la clé (ttl 0) n'est pas lue. Store chaud chez vivacity.
+for variant in devnull-cache ttl-zero; do
+  s6_case "$variant"
+  for side in ref viv; do
+    d="$WORK/s6/$variant/$side"; url="http://127.0.0.1:$(cat "$d/g")/desync.zip"
+    cp "$S8/a.zip" "$d/reg/desync.zip"
+    s8_project "$d" probe/desync "$url" ""
+    [ "$side" = viv ] && viv_warm "$d"
+    if [ "$variant" = ttl-zero ]; then
+      jq '.config["cache-files-ttl"] = 0' "$d/p/composer.json" > "$d/p/c.json" && mv "$d/p/c.json" "$d/p/composer.json"
+      f=$(s8_cache_path "$d" probe/desync "$url"); mkdir -p "$(dirname "$f")"; cp "$S8/a.zip" "$f"
+    fi
+  done
+  if [ "$variant" = devnull-cache ]; then
+    S6_REF_PREFIX=(env COMPOSER_CACHE_DIR=/dev/null); S6_VIV_PREFIX=(env COMPOSER_CACHE_DIR=/dev/null)
+  fi
+  launch "$variant" 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect "$variant" 0 20 "  - Downloading probe/desync"; requests "$variant" 1
+  S6_REF_PREFIX=(); S6_VIV_PREFIX=()
+done
+# 8l. Un cache en lecture seule (`COMPOSER_CACHE_READ_ONLY`) : Composer lit
+# ses caches sans jamais les écrire, vivacity écrit celui des dépôts —
+# rendu à Composer avant toute sortie (sous --no-fallback : code 3, la
+# raison seule, aucune requête).
+d="$WORK/s8/ro"; mkdir -p "$d"; cp "$S8/a.zip" "$d/a.zip"
+s8_project "$d" probe/desync "$d/a.zip" ""
+ro_code=0
+(cd "$d/p" && COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$d/store" COMPOSER_CACHE_READ_ONLY=1 \
+  "$VIVACITY" install --no-scripts --no-fallback >"$d/out" 2>"$d/err") || ro_code=$?
+if [ "$ro_code" != 3 ] || ! grep -q "read-only" "$d/err" || [ -e "$d/p/vendor" ]; then
+  echo "FAIL ro-cache : code $ro_code (3 attendu), vendor/ $([ -e "$d/p/vendor" ] && echo présent || echo absent)"; head -3 "$d/err"; status=1
+else
+  echo "OK   ro-cache : rendu à Composer avant toute sortie (code 3 sous --no-fallback)"
+fi
+judge_requests() {
+  local i name want d rq vq
+  for i in "${!S8_REQ_NAME[@]}"; do
+    name="${S8_REQ_NAME[$i]}"; want="${S8_REQ_WANT[$i]}"; d="$WORK/s6/$name"
+    rq=$(wc -l < "$d/ref/req.log" | tr -d ' '); vq=$(wc -l < "$d/viv/req.log" | tr -d ' ')
+    if [ "$rq" != "$want" ] || [ "$vq" != "$want" ]; then
+      echo "FAIL $name : $rq requête(s) chez Composer, $vq chez vivacity, $want attendue(s)"; status=1
+    fi
+  done
+  S8_REQ_NAME=(); S8_REQ_WANT=()
+}
+wait "${S6_JOBS[@]}"
+for i in "${!S6_NAME[@]}"; do
+  judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"
+done
+judge_requests
+if grep -q '^  - Downloading ' "$WORK/s6/desync-witness/ref.err"; then
+  echo "FAIL desync-witness : Composer télécharge (cas mal choisi)"; status=1
+fi
+# 8b, suite : l'entrée du store est toujours celle de l'archive A.
+entry_file=$(find "$WORK/s6/desync-other-bytes/viv/store" -path '*/probe/desync/*' -name A.php -not -path '*/.staging/*' | head -1)
+if [ -z "$entry_file" ] || ! grep -q 'class A {}' "$entry_file"; then
+  echo "FAIL desync-other-bytes : l'entrée du store n'est plus celle de l'archive A (${entry_file:-absente})"; status=1
+else
+  echo "OK   desync-other-bytes : l'entrée du store est restée celle de l'archive A"
+fi
+# 8j. Le même projet, aussitôt réinstallé sans rien changer (vendor/ en
+# place) : aucune requête, et la classmap reste celle de B.
+S6_NAME=(); S6_LO=(); S6_HI=(); S6_WANT=(); S6_CMP=(); S6_JOBS=()
+mkdir -p "$WORK/s6/desync-other-bytes-noop"
+for side in ref viv; do
+  ln -s "$WORK/s6/desync-other-bytes/$side" "$WORK/s6/desync-other-bytes-noop/$side"; : > "$WORK/s6/desync-other-bytes/$side/req.log"
+done
+launch desync-other-bytes-noop 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-other-bytes-noop 0 20 -; requests desync-other-bytes-noop 0
+wait "${S6_JOBS[@]}"
+for i in "${!S6_NAME[@]}"; do
+  judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"
+done
+judge_requests
+for f in "$WORK/s6/desync-other-bytes-noop/ref/p/vendor/composer/autoload_classmap.php" "$WORK/s6/desync-other-bytes-noop/viv/p/vendor/composer/autoload_classmap.php"; do
+  grep -q "Probe\\\\\\\\A2'" "$f" || { echo "FAIL desync-other-bytes-noop : la classmap de $f n'a pas Probe\\A2"; status=1; }
+done
+# 8m. vivacity seul : vendor/ retiré, le paquet reposé depuis son entrée
+# (cas normal, la copie n'est plus étrangère) — la marque s'efface. Pas une
+# comparaison avec Composer : point 55a de parity-gaps-026.md.
+d="$WORK/s6/desync-other-bytes/viv"; foreign_dir="$d/store/store/.foreign"
+if [ -z "$(find "$foreign_dir" -type f 2>/dev/null)" ]; then
+  echo "FAIL desync-other-bytes : aucune copie étrangère consignée"; status=1
+else
+  rm -rf "${d:?}/p/vendor"
+  (cd "$d/p" && COMPOSER_HOME="$d/home" COMPOSER_CACHE_DIR="$d/cache" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$d/store" \
+    "$VIVACITY" install --no-scripts --no-fallback -o >/dev/null 2>"$d/settle.err") || { echo "FAIL desync-settle : l'install a échoué"; status=1; }
+  if [ -n "$(find "$foreign_dir" -type f 2>/dev/null)" ]; then
+    echo "FAIL desync-settle : la copie reposée depuis l'entrée est encore consignée étrangère"; status=1
+  else
+    echo "OK   desync-settle : reposée depuis l'entrée, la copie n'est plus consignée étrangère"
+  fi
+fi
 
 exit $status
