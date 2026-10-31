@@ -15,6 +15,7 @@ pub mod composer_patcher;
 pub mod constraint;
 pub mod content_hash;
 pub mod custom_installers;
+pub mod detach_report;
 pub mod dirs;
 pub mod effect_plugins;
 pub mod error;

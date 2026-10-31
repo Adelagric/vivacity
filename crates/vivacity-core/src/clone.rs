@@ -207,19 +207,38 @@ fn clone_symlink_windows(from: &Path, target: &Path, to: &Path) -> Result<()> {
 /// writes into a package: a file that cannot be given its own inode is an
 /// error, so the patch never reaches a store entry.
 pub fn detach(dir: &Path) -> Result<()> {
-    walk_detach(dir, true).map(|_| ())
+    walk_detach(dir, true, &mut Vec::new()).map(|_| ())
 }
 
 /// [`detach`] for the one-time pass over a project an older version laid
 /// out (`installer::detach_once`), where an install Composer would complete
 /// must not fail: a file that cannot be given its own inode, or a directory
 /// that cannot be read, is left as it is, silently. Returns whether the walk
-/// went through without leaving anything behind.
-pub fn detach_all(dir: &Path) -> bool {
-    walk_detach(dir, false).unwrap_or(false)
+/// went through without leaving anything behind. Every file found linked is
+/// recorded in `seen`, with what it was before it was detached
+/// ([`LinkedFile`]): once it is, which names shared its inode can no longer
+/// be told.
+pub fn detach_all(dir: &Path, seen: &mut Vec<LinkedFile>) -> bool {
+    walk_detach(dir, false, seen).unwrap_or(false)
 }
 
-fn walk_detach(dir: &Path, strict: bool) -> Result<bool> {
+/// A file the one-time pass found sharing its inode, as it was then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedFile {
+    pub path: std::path::PathBuf,
+    /// Names the inode had (`None`: the system could not say; Windows only).
+    pub links: Option<u64>,
+    /// (device, inode) under Unix, (volume serial, file index) under
+    /// Windows: equal for two names of one file.
+    pub file_id: Option<(u64, u64)>,
+    /// The sha1 of the content it had (and kept), hashed while it was
+    /// copied; the reason when it could not be read.
+    pub current_sha1: std::result::Result<String, String>,
+    /// Whether it got an inode of its own, or why not.
+    pub detached: std::result::Result<(), String>,
+}
+
+fn walk_detach(dir: &Path, strict: bool, seen: &mut Vec<LinkedFile>) -> Result<bool> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -237,25 +256,55 @@ fn walk_detach(dir: &Path, strict: bool) -> Result<bool> {
             continue;
         };
         if meta.is_dir() {
-            complete &= walk_detach(&path, strict)?;
-        } else if meta.is_file() && links(&path, &meta) > 1 {
-            if let Err(e) = unshare(&path, &meta) {
-                if strict {
-                    return Err(Error::io(&path)(e));
-                }
-                complete = false;
-            }
+            complete &= walk_detach(&path, strict, seen)?;
+            continue;
         }
+        if !meta.is_file() {
+            continue;
+        }
+        let (links, file_id) = link_info(&path, &meta);
+        // A file the system cannot be asked about is taken as linked:
+        // copying it once costs a copy, leaving a link shared with the
+        // store costs the isolation.
+        if links.unwrap_or(2) <= 1 {
+            continue;
+        }
+        if strict {
+            unshare(&path, &meta, None).map_err(Error::io(&path))?;
+            continue;
+        }
+        let mut hasher = sha1::Sha1::default();
+        let made = unshare(&path, &meta, Some(&mut hasher));
+        let current_sha1 = match &made {
+            Ok(()) => Ok(hex::encode(sha1::Digest::finalize(hasher))),
+            // The copy stopped part way: the content is read on its own.
+            Err(_) => std::fs::read(&path)
+                .map(|bytes| hex::encode(<sha1::Sha1 as sha1::Digest>::digest(&bytes)))
+                .map_err(|e| e.to_string()),
+        };
+        complete &= made.is_ok();
+        seen.push(LinkedFile {
+            path,
+            links,
+            file_id,
+            current_sha1,
+            detached: made.map_err(|e| e.to_string()),
+        });
     }
     Ok(complete)
 }
 
 /// `path` replaced by a copy of itself: a temporary file beside it, then a
-/// rename over it. Never a stray file left in the directory.
-fn unshare(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
+/// rename over it. Never a stray file left in the directory. The bytes
+/// copied go through `hasher` when one is given.
+fn unshare(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    hasher: Option<&mut sha1::Sha1>,
+) -> std::io::Result<()> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = path.with_file_name(format!(".{name}.vivacity-detach"));
-    let made = copy_keeping(path, &tmp, meta).and_then(|()| std::fs::rename(&tmp, path));
+    let made = copy_keeping(path, &tmp, meta, hasher).and_then(|()| std::fs::rename(&tmp, path));
     if made.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -266,13 +315,21 @@ fn unshare(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
 /// untouched on a file it does not reinstall: the bytes, the permission
 /// bits, the modification time, and under Unix the owner (an install run
 /// as root must not hand a user's vendor/ over to root).
-fn copy_keeping(from: &Path, to: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
+fn copy_keeping(
+    from: &Path,
+    to: &Path,
+    meta: &std::fs::Metadata,
+    hasher: Option<&mut sha1::Sha1>,
+) -> std::io::Result<()> {
     let mut src = std::fs::File::open(from)?;
     let mut dst = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(to)?;
-    std::io::copy(&mut src, &mut dst)?;
+    match hasher {
+        None => std::io::copy(&mut src, &mut dst)?,
+        Some(hasher) => std::io::copy(&mut Hashing { src, hasher }, &mut dst)?,
+    };
     dst.set_modified(meta.modified()?)?;
     #[cfg(unix)]
     {
@@ -286,27 +343,44 @@ fn copy_keeping(from: &Path, to: &Path, meta: &std::fs::Metadata) -> std::io::Re
     dst.set_permissions(meta.permissions())
 }
 
-/// The number of names a regular file has.
-#[cfg(unix)]
-fn links(_path: &Path, meta: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.nlink()
+/// A reader that passes what it reads through a sha1.
+struct Hashing<'a, R> {
+    src: R,
+    hasher: &'a mut sha1::Sha1,
 }
 
-/// The number of names a regular file has: `GetFileInformationByHandle`
-/// through winapi-util (std's `number_of_links` is unstable). A file that
-/// cannot be opened or asked is taken as linked: copying it once costs a
-/// copy, leaving a link shared with the store costs the isolation.
+impl<R: std::io::Read> std::io::Read for Hashing<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.src.read(buf)?;
+        sha1::Digest::update(self.hasher, &buf[..n]);
+        Ok(n)
+    }
+}
+
+/// The number of names a regular file has, and its identity.
+#[cfg(unix)]
+fn link_info(_path: &Path, meta: &std::fs::Metadata) -> (Option<u64>, Option<(u64, u64)>) {
+    use std::os::unix::fs::MetadataExt as _;
+    (Some(meta.nlink()), Some((meta.dev(), meta.ino())))
+}
+
+/// The number of names a regular file has, and its identity:
+/// `GetFileInformationByHandle` through winapi-util (std's
+/// `number_of_links` is unstable).
 #[cfg(windows)]
-fn links(path: &Path, _meta: &std::fs::Metadata) -> u64 {
-    std::fs::File::open(path)
-        .and_then(|f| winapi_util::file::information(&f))
-        .map_or(2, |info| info.number_of_links())
+fn link_info(path: &Path, _meta: &std::fs::Metadata) -> (Option<u64>, Option<(u64, u64)>) {
+    match std::fs::File::open(path).and_then(|f| winapi_util::file::information(&f)) {
+        Ok(info) => (
+            Some(info.number_of_links()),
+            Some((info.volume_serial_number(), info.file_index())),
+        ),
+        Err(_) => (None, None),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn links(_path: &Path, _meta: &std::fs::Metadata) -> u64 {
-    1
+fn link_info(_path: &Path, _meta: &std::fs::Metadata) -> (Option<u64>, Option<(u64, u64)>) {
+    (Some(1), None)
 }
 
 /// A symbolic link the way `unzip` (Composer's extractor) leaves one: on
@@ -515,10 +589,33 @@ mod tests {
             .open(entry.join("Lib.php"))
             .and_then(|f| f.set_modified(long_ago))
             .expect("set mtime");
+        // A file of the project that was never linked is not recorded.
+        std::fs::write(project("a").join("Own.php"), b"own\n").expect("write");
+        let mut seen = Vec::new();
         assert!(
-            detach_all(&tmp.path().join("a/vendor")),
+            detach_all(&tmp.path().join("a/vendor"), &mut seen),
             "nothing left linked"
         );
+        // What each linked file was before it got its own inode: the names
+        // it had, its identity (the store entry's), the content it kept.
+        seen.sort_by(|a, b| a.path.cmp(&b.path));
+        let sha = |b: &[u8]| hex::encode(<sha1::Sha1 as sha1::Digest>::digest(b));
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].path, project("a").join("Lib.php"));
+        assert_eq!(seen[0].current_sha1, Ok(sha(b"original\n")));
+        assert_eq!(seen[1].current_sha1, Ok(sha(b"edited\n")));
+        for f in &seen {
+            assert_eq!(f.detached, Ok(()));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                let name = f.path.file_name().unwrap();
+                let old = std::fs::metadata(entry.join(name)).unwrap();
+                assert_eq!(f.links, Some(3));
+                assert_eq!(f.file_id, Some((old.dev(), old.ino())));
+            }
+        }
+        std::fs::remove_file(project("a").join("Own.php")).expect("rm");
         assert_eq!(
             std::fs::read(project("a").join("Lib.php")).unwrap(),
             b"original\n"
@@ -584,7 +681,7 @@ mod tests {
         let writable = std::fs::write(locked.join(".probe"), b"").is_ok();
         let _ = std::fs::remove_file(locked.join(".probe"));
         if !writable {
-            assert!(!detach_all(&tmp.path().join("vendor")));
+            assert!(!detach_all(&tmp.path().join("vendor"), &mut Vec::new()));
             assert!(detach(&tmp.path().join("vendor")).is_err());
             assert_eq!(std::fs::read(locked.join("f")).expect("read"), b"x");
             let names: Vec<_> = std::fs::read_dir(&locked).unwrap().collect();

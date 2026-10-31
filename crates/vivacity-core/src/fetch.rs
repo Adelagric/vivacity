@@ -994,6 +994,12 @@ impl Fetcher {
         })
     }
 
+    /// The directory Composer's caches live under, as this fetcher reads
+    /// them (`files/` holds the archives).
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
     /// Bytes of the dist: cache first (shasum re-checked), network otherwise
     /// (3 attempts, backoff), cache fed through temp+rename.
     pub async fn dist_bytes(

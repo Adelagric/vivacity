@@ -48,6 +48,11 @@ const LAYOUT: &str = "v4";
 /// (`installer::detach_once`).
 const DETACHED: &str = ".detached";
 
+/// Beside the markers, not under them (deleting `.detached/` to run the
+/// pass again keeps them): one directory per vendor directory, one JSON file
+/// per pass that found linked files (`detach_report`).
+const DETACH_REPORTS: &str = ".detached-reports";
+
 /// Where extractions happen, swept of orphans on the way in. Six hours is well
 /// past any install, and short enough that a killed process does not leave a
 /// tree there for a month: a parallel install's staging directory is minutes
@@ -117,12 +122,55 @@ impl Store {
         dist_bytes: &[u8],
         kind: DistKind,
     ) -> Result<PathBuf> {
+        self.ensure_made(name, version, dist_ref, dist_bytes, kind)
+            .map(|(path, _)| path)
+    }
+
+    /// [`Store::ensure`], and whether THIS call extracted the entry from
+    /// `dist_bytes` (false: it was there already, or a concurrent process
+    /// renamed its own first).
+    pub fn ensure_made(
+        &self,
+        name: &str,
+        version: &str,
+        dist_ref: Option<&str>,
+        dist_bytes: &[u8],
+        kind: DistKind,
+    ) -> Result<(PathBuf, bool)> {
         let final_path = self.entry_path(name, version, dist_ref);
         if final_path.is_dir() {
-            return Ok(final_path);
+            return Ok((final_path, false));
         }
         let parent = final_path.parent().unwrap_or(&self.root).to_path_buf();
         std::fs::create_dir_all(&parent).map_err(Error::io(&parent))?;
+        let tmp = self.extract_staged(name, version, dist_bytes, kind)?;
+        let tmp_path = tmp.keep();
+        match std::fs::rename(&tmp_path, &final_path) {
+            Ok(()) => Ok((final_path, true)),
+            Err(_) if final_path.is_dir() => {
+                // A concurrent process won the rename: its entry is complete.
+                let _ = std::fs::remove_dir_all(&tmp_path);
+                Ok((final_path, false))
+            }
+            Err(source) => {
+                let _ = std::fs::remove_dir_all(&tmp_path);
+                Err(Error::Io {
+                    path: final_path,
+                    source,
+                })
+            }
+        }
+    }
+
+    /// An extraction of `dist_bytes` in the staging directory, outside the
+    /// served layout; removed when the returned directory is dropped.
+    pub fn extract_staged(
+        &self,
+        name: &str,
+        version: &str,
+        dist_bytes: &[u8],
+        kind: DistKind,
+    ) -> Result<tempfile::TempDir> {
         let staging = self.root.join(STAGING);
         std::fs::create_dir_all(&staging).map_err(Error::io(&staging))?;
         self.sweep_staging();
@@ -143,22 +191,7 @@ impl Store {
             },
             other => other,
         })?;
-        let tmp_path = tmp.keep();
-        match std::fs::rename(&tmp_path, &final_path) {
-            Ok(()) => Ok(final_path),
-            Err(_) if final_path.is_dir() => {
-                // A concurrent process won the rename: its entry is complete.
-                let _ = std::fs::remove_dir_all(&tmp_path);
-                Ok(final_path)
-            }
-            Err(source) => {
-                let _ = std::fs::remove_dir_all(&tmp_path);
-                Err(Error::Io {
-                    path: final_path,
-                    source,
-                })
-            }
-        }
+        Ok(tmp)
     }
 
     pub fn contains(&self, name: &str, version: &str, dist_ref: Option<&str>) -> bool {
@@ -169,12 +202,27 @@ impl Store {
     /// older layout's entries: keyed by the canonical path of the directory
     /// and by this layout (a later bump runs the pass again).
     pub fn detached_marker(&self, vendor: &std::path::Path) -> PathBuf {
-        use sha1::Digest as _;
-        let canonical =
-            crate::pathutil::canonicalize(vendor).unwrap_or_else(|_| vendor.to_path_buf());
-        let key = hex::encode(sha1::Sha1::digest(canonical.to_string_lossy().as_bytes()));
-        self.root.join(DETACHED).join(LAYOUT).join(key)
+        self.root
+            .join(DETACHED)
+            .join(LAYOUT)
+            .join(vendor_key(vendor))
     }
+
+    /// Where the reports of `vendor`'s one-time pass go
+    /// (`detach_report`), one file per pass that found linked files.
+    pub fn detach_reports(&self, vendor: &std::path::Path) -> PathBuf {
+        self.root
+            .join(DETACH_REPORTS)
+            .join(LAYOUT)
+            .join(vendor_key(vendor))
+    }
+}
+
+/// The sha1 of the canonical path of a vendor directory.
+fn vendor_key(vendor: &std::path::Path) -> String {
+    use sha1::Digest as _;
+    let canonical = crate::pathutil::canonicalize(vendor).unwrap_or_else(|_| vendor.to_path_buf());
+    hex::encode(sha1::Sha1::digest(canonical.to_string_lossy().as_bytes()))
 }
 
 #[cfg(test)]

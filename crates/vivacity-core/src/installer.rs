@@ -426,6 +426,10 @@ pub async fn install(
     // is silent: it is an optimisation, not an obligation.
     let sem = Arc::new(tokio::sync::Semaphore::new(opts.jobs.max(1)));
     let mut tasks = tokio::task::JoinSet::new();
+    // The one-time detach pass still to run: the entries this run extracts
+    // are then noted (with their archive), for its report to read them
+    // instead of the archive a second time. Nothing is hashed here.
+    let detach_pending = !store.detached_marker(&vendor).exists();
     let warm_names: std::collections::BTreeSet<&str> = to_warm.iter().map(|p| p.name()).collect();
     for p in to_install.iter().chain(to_warm.iter()) {
         if matches!(p.dist_kind(), DistKind::Path | DistKind::Missing) {
@@ -451,6 +455,13 @@ pub async fn install(
                     .to_owned(),
         })?;
         let shasum = p.dist_shasum().map(str::to_owned);
+        let dist_type = match kind {
+            crate::store::DistKind::Zip => "zip",
+            crate::store::DistKind::Tar => "tar",
+        };
+        let cache_path = detach_pending.then(|| {
+            crate::fetch::dist_cache_path_of(fetcher.cache_root(), &name, &url, dist_type)
+        });
         let (store, fetcher, sem) = (store.clone(), fetcher.clone(), sem.clone());
         let offline = opts.offline || warm_only;
         tasks.spawn(async move {
@@ -458,35 +469,52 @@ pub async fn install(
                 url: url.clone(),
                 message: "semaphore closed".to_owned(),
             })?;
-            let dist_type = match kind {
-                crate::store::DistKind::Zip => "zip",
-                crate::store::DistKind::Tar => "tar",
-            };
             let fetched = fetcher
                 .dist_bytes_of(&name, &url, dist_type, shasum.as_deref(), offline)
                 .await;
             let (bytes, provenance) = match fetched {
                 Ok(v) => v,
                 // Warming: zip missing from the cache, do not insist.
-                Err(_) if warm_only => return Ok::<Option<Provenance>, Error>(None),
+                Err(_) if warm_only => return Ok::<_, Error>((None, None)),
                 Err(e) => return Err(e),
             };
             let store_name = name.clone();
             let version2 = version.clone();
             let dist_ref2 = dist_ref.clone();
-            tokio::task::spawn_blocking(move || {
-                store.ensure(&store_name, &version2, dist_ref2.as_deref(), &bytes, kind)
+            let extracted = tokio::task::spawn_blocking(move || {
+                let (entry, made) = store.ensure_made(
+                    &store_name,
+                    &version2,
+                    dist_ref2.as_deref(),
+                    &bytes,
+                    kind,
+                )?;
+                let archive = cache_path.filter(|_| made).map(|cache_path| {
+                    let archive = crate::detach_report::ArchiveId {
+                        url,
+                        cache_path,
+                        from_cache: provenance == Provenance::Cache,
+                        // `dist_bytes_of` checked the bytes against it.
+                        checked_shasum: shasum,
+                    };
+                    (store_name, (entry, archive))
+                });
+                Ok::<_, Error>(archive)
             })
             .await
             .map_err(|e| Error::Http {
                 url: name.clone(),
                 message: format!("extraction task interrupted: {e}"),
             })??;
-            Ok::<Option<Provenance>, Error>(Some(provenance))
+            Ok::<_, Error>((Some(provenance), extracted))
         });
     }
+    let mut extracted_here: BTreeMap<
+        String,
+        (std::path::PathBuf, crate::detach_report::ArchiveId),
+    > = BTreeMap::new();
     while let Some(joined) = tasks.join_next().await {
-        let provenance = match joined.map_err(|e| Error::Http {
+        let (provenance, extracted) = match joined.map_err(|e| Error::Http {
             url: "join".to_owned(),
             message: e.to_string(),
         })? {
@@ -518,6 +546,9 @@ pub async fn install(
             }
             Err(e) => return Err(e),
         };
+        if let Some((name, entry)) = extracted {
+            extracted_here.insert(name, entry);
+        }
         match provenance {
             Some(Provenance::Cache) => report.from_cache += 1,
             Some(Provenance::Network) => report.from_network += 1,
@@ -666,7 +697,14 @@ pub async fn install(
     // its store: the unchanged packages get their own, no-op included. After
     // the last hand-over point and the placement (a replaced package is a
     // fresh copy already).
-    detach_once(&store, layout, &previous);
+    detach_once(
+        &store,
+        layout,
+        &previous,
+        &wanted,
+        &extracted_here,
+        fetcher.cache_root(),
+    );
 
     // `BinaryInstaller::removeBinaries` runs `initializeBinDir` before
     // looking at the package's binaries: an update, a removal, or the
@@ -810,23 +848,57 @@ pub async fn install(
 /// next install tries again; a cleared cache runs it again, harmlessly. Not
 /// seen: links an older version makes again after the marker (a downgrade,
 /// an embedder of an older vivacity-core on the same cache directory).
-fn detach_once(store: &Store, layout: &Layout, previous: &BTreeMap<String, Installed>) {
+///
+/// A pass that found linked files leaves a report in the store
+/// ([`crate::detach_report`]): which files they were, and how each compared
+/// with its archive. Only the linked files are hashed; nothing is read or
+/// written when nothing was linked.
+fn detach_once(
+    store: &Store,
+    layout: &Layout,
+    previous: &BTreeMap<String, Installed>,
+    wanted: &[&LockPackage],
+    extracted_here: &BTreeMap<String, (std::path::PathBuf, crate::detach_report::ArchiveId)>,
+    composer_cache: &Path,
+) {
     let vendor = layout.vendor_dir();
     let marker = store.detached_marker(&vendor);
     if marker.exists() {
         return;
     }
-    let mut complete = crate::clone::detach_all(&vendor);
+    let mut seen = Vec::new();
+    let mut complete = crate::clone::detach_all(&vendor, &mut seen);
+    // The packages the walk covers: what a linked file is attributed to.
+    // A package placed at an ancestor of vendor/ is not walked (it would
+    // reach the project's own files) and owns nothing: a linked file under
+    // it, in vendor/, is reported as under no package.
+    let mut walked: Vec<(&str, std::path::PathBuf)> = Vec::new();
     for name in previous.keys() {
         let Some(dir) = layout.abs(name) else {
             continue;
         };
         let linked_source =
             std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink());
-        if dir.starts_with(&vendor) || vendor.starts_with(&dir) || linked_source {
+        if vendor.starts_with(&dir) || linked_source {
             continue;
         }
-        complete &= crate::clone::detach_all(&dir);
+        if !dir.starts_with(&vendor) {
+            complete &= crate::clone::detach_all(&dir, &mut seen);
+        }
+        walked.push((name, dir));
+    }
+    if !seen.is_empty() {
+        report_detached(
+            store,
+            &vendor,
+            &seen,
+            complete,
+            &walked,
+            previous,
+            wanted,
+            extracted_here,
+            composer_cache,
+        );
     }
     if !complete {
         return;
@@ -834,6 +906,124 @@ fn detach_once(store: &Store, layout: &Layout, previous: &BTreeMap<String, Insta
     if let Some(parent) = marker.parent() {
         // Not written: the walk runs again next time, nothing else.
         let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&marker, b""));
+    }
+}
+
+/// The report of a pass that found linked files (`detach_report`), and its
+/// one line under `VIVACITY_TRACE=1`. Never an error and never a line
+/// otherwise. A pass that detached nothing, in a project that has a report
+/// already, writes nothing new and reads no archive: a file still linked has
+/// lost nothing yet (the next pass that detaches it records it), and a file
+/// that can never be copied must not add a report to every install.
+#[allow(clippy::too_many_arguments)]
+fn report_detached(
+    store: &Store,
+    vendor: &Path,
+    seen: &[crate::clone::LinkedFile],
+    complete: bool,
+    walked: &[(&str, std::path::PathBuf)],
+    previous: &BTreeMap<String, Installed>,
+    wanted: &[&LockPackage],
+    extracted_here: &BTreeMap<String, (std::path::PathBuf, crate::detach_report::ArchiveId)>,
+    composer_cache: &Path,
+) {
+    use crate::detach_report::{Package, Reference};
+    let trace = std::env::var_os("VIVACITY_TRACE").is_some();
+    let dir = store.detach_reports(vendor);
+    if seen.iter().all(|f| f.detached.is_err()) && crate::detach_report::has_reports(&dir) {
+        if trace {
+            eprintln!(
+                "trace: detach report unchanged ({}): {} linked, none detached",
+                dir.display(),
+                seen.len()
+            );
+        }
+        return;
+    }
+    let packages: Vec<Package> = walked
+        .iter()
+        .filter_map(|(name, dir)| {
+            let installed = previous.get(*name)?;
+            // The lock's entry where there is one (what this run fetched
+            // and warmed from), installed.json's otherwise.
+            let own;
+            let p: &LockPackage = match wanted.iter().find(|p| p.name() == *name) {
+                Some(p) => p,
+                None => {
+                    own = LockPackage {
+                        raw: installed.raw.clone(),
+                    };
+                    &own
+                }
+            };
+            let reference = if installed_from_source(installed) {
+                Reference::Unavailable("installed from source: no archive".to_owned())
+            } else {
+                match p.dist_kind() {
+                    DistKind::Zip | DistKind::Tar => {
+                        let store_ref = p.store_reference();
+                        let entry = store.entry_path(p.name(), p.version(), store_ref.as_deref());
+                        match extracted_here.get(*name) {
+                            Some((made, archive)) if *made == entry => {
+                                Reference::ExtractedThisRun {
+                                    entry,
+                                    archive: archive.clone(),
+                                }
+                            }
+                            _ => {
+                                let (kind, ext) = if p.dist_kind() == DistKind::Tar {
+                                    (crate::store::DistKind::Tar, "tar")
+                                } else {
+                                    (crate::store::DistKind::Zip, "zip")
+                                };
+                                match p.dist_url_expanded() {
+                                    Some(url) => Reference::ComposerCache {
+                                        path: crate::fetch::dist_cache_path_of(
+                                            composer_cache,
+                                            p.name(),
+                                            &url,
+                                            ext,
+                                        ),
+                                        url,
+                                        kind,
+                                    },
+                                    None => Reference::Unavailable(
+                                        "the package has no dist url".to_owned(),
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    DistKind::Path => {
+                        Reference::Unavailable("a path package: no archive".to_owned())
+                    }
+                    DistKind::Missing => {
+                        Reference::Unavailable("the package has no dist".to_owned())
+                    }
+                    DistKind::Other => {
+                        Reference::Unavailable("a dist type vivacity does not extract".to_owned())
+                    }
+                }
+            };
+            Some(Package {
+                name: (*name).to_owned(),
+                version: p.version().to_owned(),
+                dist_reference: p.dist_reference().map(str::to_owned),
+                dist_shasum: p.dist_shasum().map(str::to_owned),
+                dir: dir.clone(),
+                reference,
+            })
+        })
+        .collect();
+    let now = std::time::SystemTime::now();
+    let (report, counts) =
+        crate::detach_report::observe(store, vendor, seen, &packages, complete, now);
+    let written = crate::detach_report::write(&dir, &report, now);
+    if trace {
+        match written {
+            Ok(path) => eprintln!("trace: detach report {}: {counts}", path.display()),
+            Err(why) => eprintln!("trace: detach report not written ({why}): {counts}"),
+        }
     }
 }
 

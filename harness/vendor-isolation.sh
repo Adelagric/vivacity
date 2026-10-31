@@ -21,7 +21,13 @@
 # l'écriture dans A ; `iso-upgrade-edited` : l'ancienne entrée éditée avant
 # la mise à jour — le contenu courant des projets est préservé (pas de
 # « réparation »), le nouveau store porte les octets de l'archive, un projet
-# installé ensuite aussi.
+# installé ensuite aussi. Dans les deux, le rapport de la passe unique
+# (`store/.detached-reports/v4/<clé>/*.json`) : les fichiers qui étaient
+# liés, chacun « identique » ou « différent » de l'archive (condensats
+# contre l'extraction À PART), l'identité de l'archive (son sha1) ; une
+# ligne sous VIVACITY_TRACE=1, rien sans. `iso-upgrade-nocache` : l'archive
+# retirée du cache de Composer avant la mise à jour — fichiers déliés quand
+# même, rapport « non comparé » avec la raison.
 #
 # Gardes :
 #   - c'est vivacity qui installe : `--no-fallback`, code 0, sa ligne de
@@ -77,6 +83,12 @@ else
   sha() { shasum -a 256 | cut -d' ' -f1; }
 fi
 sha_of() { sha < "$1"; }
+# Le rapport de la passe unique note des sha1.
+if command -v sha1sum >/dev/null; then
+  sha1() { sha1sum | cut -d' ' -f1; }
+else
+  sha1() { shasum -a 1 | cut -d' ' -f1; }
+fi
 
 fails=0; guards=0
 ok() { echo "OK   $*"; }
@@ -176,6 +188,13 @@ SHA_ARCHIVE=$(sha_of "$WORK/extract/acme-iso/$REL")
 SHA_NEW=$(printf '%s' "$NEW" | sha)
 SHA_NEW_LONG=$(printf '%s' "$NEW_LONG" | sha)
 SHA_EDIT=$(printf '%s' "$EDIT" | sha)
+SHA1_EDIT=$(printf '%s' "$EDIT" | sha1)
+SHA1_ZIP=$(sha1 < "$WORK/artifacts/acme-iso-1.0.0.zip")
+# Les fichiers du paquet et leur sha1 dans l'extraction à part (référence du
+# rapport), une ligne « chemin sha1 » par fichier, triées.
+EXPECTED_FILES=$(cd "$WORK/extract/acme-iso" && find . -type f | sed 's|^\./||' | sort | while read -r f; do echo "$f $(sha1 < "$f")"; done)
+SHA1_REL=$(printf '%s\n' "$EXPECTED_FILES" | awk -v r="$REL" '$1 == r { print $2 }')
+[ "$(printf '%s\n' "$EXPECTED_FILES" | grep -c .)" = 4 ] && [ -n "$SHA1_REL" ] || { echo "FAIL : extraction à part incomplète"; exit 1; }
 [ "$SHA_ARCHIVE" = "$(printf '%s' "$ORIG" | sha)" ] || { echo "FAIL : l'extraction ne rend pas le contenu écrit"; exit 1; }
 
 cat > "$WORK/seed/composer.json" <<JSON
@@ -204,11 +223,14 @@ info "archive : $SHA_ARCHIVE ; modes de Composer : $(echo "$MODES_COMPOSER" | tr
 
 # --- Briques ----------------------------------------------------------------
 # viv <bin> <projet> <cache vivacity> <cache composer> <bras> : install depuis le lock.
+# VIV_TRACE=1 : sous VIVACITY_TRACE=1 (sinon la variable est retirée).
 viv() {
   local bin="$1" dir="$2" cache="$3" ccache="$4" arm="$5" code
-  local nocache=(-u VIVACITY_NO_CLASSMAP_CACHE)
-  [ "$arm" = off ] && nocache=(VIVACITY_NO_CLASSMAP_CACHE=1)
-  (cd "$dir" && env "${nocache[@]}" COMPOSER_HOME="$WORK/home" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$cache" COMPOSER_CACHE_DIR="$ccache" \
+  # `env` : les `-u` avant toute affectation.
+  local unset=() set=()
+  if [ "$arm" = off ]; then set+=(VIVACITY_NO_CLASSMAP_CACHE=1); else unset+=(-u VIVACITY_NO_CLASSMAP_CACHE); fi
+  if [ "${VIV_TRACE:-}" = 1 ]; then set+=(VIVACITY_TRACE=1); else unset+=(-u VIVACITY_TRACE); fi
+  (cd "$dir" && env ${unset[@]+"${unset[@]}"} ${set[@]+"${set[@]}"} COMPOSER_HOME="$WORK/home" COMPOSER_ROOT_VERSION=dev-main VIVACITY_CACHE_DIR="$cache" COMPOSER_CACHE_DIR="$ccache" \
     "$bin" install --no-scripts --no-fallback --no-interaction --no-ansi --optimize-autoloader \
     >"$dir.out" 2>"$dir.err")
   code=$?
@@ -281,6 +303,69 @@ run_order() {
   info "$tag : nlink A=$(nlink_of "$fa") B=$(nlink_of "$fb") store=$(nlink_of "$sf")"
 }
 
+# --- Le rapport de la passe unique -----------------------------------------
+# report_rows <cache vivacity> <projet> : les rapports dont `vendor_dir` est
+# le vendor/ du projet (chemin réel), puis, du dernier, des lignes à
+# tabulations : `counts`, `meta`, `ref`, et une `file` par fichier.
+report_rows() {
+  php -r '
+$want = realpath($argv[2]);
+$all = glob($argv[1] . "/store/.detached-reports/v4/*/*.json") ?: [];
+sort($all);
+$mine = [];
+foreach ($all as $f) {
+    $r = json_decode(file_get_contents($f), true);
+    if (is_array($r) && ($r["vendor_dir"] ?? null) === $want) { $mine[] = $r; }
+}
+echo "reports\t", count($mine), "\n";
+if (!$mine) { exit(0); }
+$r = end($mine);
+$c = $r["counts"];
+echo "counts\t", implode(" ", [$c["linked"], $c["detached"], $c["detach_failed"], $c["identical"], $c["different"], $c["not_compared"]]), "\n";
+echo "meta\t", json_encode($r["pass_complete"]), " ", isset($r["observed_at"]) ? "at" : "-", " ", $r["vivacity_version"] ?? "-", "\n";
+foreach ($r["packages"] as $p) {
+    $ref = $p["reference"];
+    echo "ref\t", $p["name"] ?? "-", "\t", $ref["source"] ?? "-", "\t", $ref["archive_sha1"] ?? "-", "\t", $p["not_compared"] ?? "-", "\n";
+    foreach ($p["files"] as $f) {
+        $cmp = $f["comparison"];
+        echo "file\t", $p["name"] ?? "-", "\t", $f["path"], "\t", $f["detachment"]["status"], "\t", $f["current_sha1"] ?? "-", "\t", $cmp["status"], "\t", $cmp["expected_sha1"] ?? "-", "\t", $cmp["reason"] ?? "-", "\n";
+    }
+}
+' "$1" "$2/vendor"
+}
+
+# check_report <cache> <projet> <libellé> <source attendue> <sha1 de src/Iso.php attendu | nocache>
+# Le rapport du projet : un seul, les quatre fichiers du paquet déliés, chacun
+# comparé à l'extraction à part ; src/Iso.php « différent » si son sha1
+# courant n'est pas celui de l'archive. `nocache` : rien de comparé, la raison.
+check_report() {
+  local cache="$1" proj="$2" tag="$3" source="$4" iso="$5" rows n files want bad=""
+  rows=$(report_rows "$cache" "$proj")
+  n=$(printf '%s\n' "$rows" | awk -F'\t' '$1 == "reports" { print $2 }')
+  if [ "$n" != 1 ]; then fail "$tag : un rapport attendu pour $(basename "$proj"), trouvé ${n:-aucun}"; return; fi
+  files=$(printf '%s\n' "$rows" | awk -F'\t' '$1 == "file" && $2 == "acme/iso" { print $3, $4, $5, $6, $7, $8 }' | sort)
+  if [ "$iso" = nocache ]; then
+    want=$(printf '%s\n' "$EXPECTED_FILES" | while read -r f h; do echo "$f detached $h not_compared -"; done)
+    files=$(printf '%s\n' "$files" | awk '{ print $1, $2, $3, $4, $5 }')
+    printf '%s\n' "$rows" | awk -F'\t' '$1 == "ref" && $2 == "acme/iso" && $3 == "-" && index($5, "no archive in Composer") == 1 { found = 1 } END { exit !found }' \
+      || bad="$bad raison absente ou autre ($(printf '%s\n' "$rows" | awk -F'\t' '$1 == "ref" { print $5 }'));"
+  else
+    want=$(printf '%s\n' "$EXPECTED_FILES" | while read -r f h; do
+      if [ "$f" = "$REL" ] && [ "$iso" != "$h" ]; then echo "$f detached $iso different $h -"
+      else echo "$f detached $h identical $h -"; fi
+    done)
+    printf '%s\n' "$rows" | awk -F'\t' '$1 == "ref" && $2 == "acme/iso" { print $3 "|" $4 }' | grep -qxF "$source|$SHA1_ZIP" \
+      || bad="$bad référence ($(printf '%s\n' "$rows" | awk -F'\t' '$1 == "ref" { print $3 "|" $4 "|" $5 }')) au lieu de $source|$SHA1_ZIP;"
+  fi
+  [ "$files" = "$(printf '%s\n' "$want" | sort)" ] || bad="$bad fichiers : $(printf '%s' "$files" | tr '\n' ';') attendu $(printf '%s' "$want" | sort | tr '\n' ';');"
+  printf '%s\n' "$rows" | awk -F'\t' '$1 == "meta" && $2 ~ /^true at / { found = 1 } END { exit !found }' || bad="$bad passe non complète ou sans date;"
+  if [ -z "$bad" ]; then
+    if [ "$iso" = nocache ]; then ok "$tag : rapport de $(basename "$proj") (4 déliés, non comparés : archive absente)"
+    elif [ "$iso" = "$SHA1_REL" ]; then ok "$tag : rapport de $(basename "$proj") (4 déliés, 4 identiques, archive $source)"
+    else ok "$tag : rapport de $(basename "$proj") (4 déliés, $REL différent = octets édités, 3 identiques)"; fi
+  else fail "$tag : rapport de $(basename "$proj") :$bad"; fi
+}
+
 # --- iso-upgrade --------------------------------------------------------------
 # Les projets A et B posés comme avant le correctif : liens durs vers une
 # entrée d'ancien format, dans le cache que le nouveau binaire va lire.
@@ -303,7 +388,7 @@ old_layout() {
 }
 
 run_upgrade() {
-  local edited="$1" arm="$2" tag d cache ccache A B C fa fb old new before ino
+  local edited="$1" arm="$2" tag d cache ccache A B C fa fb old new before iso1 ino n
   tag="iso-upgrade$([ "$edited" = 1 ] && echo -edited) (cache $arm)"
   d="$WORK/upgrade$edited-$arm"; cache="$d/viv-cache"; ccache="$d/composer-cache"
   A="$d/A"; B="$d/B"; C="$d/C"
@@ -317,17 +402,34 @@ run_upgrade() {
       ok "$tag : état d'avant le correctif posé (A, B et l'ancienne entrée liés)"
     else gfail "$tag : A, B et l'ancienne entrée ne sont pas liés : l'état d'avant n'est pas reproduit"; return; fi
   fi
-  before="$SHA_ARCHIVE"
+  before="$SHA_ARCHIVE"; iso1="$SHA1_REL"
   if [ "$edited" = 1 ]; then
-    write_in_place "$old" "$EDIT"; before="$SHA_EDIT"
+    write_in_place "$old" "$EDIT"; before="$SHA_EDIT"; iso1="$SHA1_EDIT"
     [ "$(sha_of "$fa")" = "$SHA_EDIT" ] && [ "$(sha_of "$fb")" = "$SHA_EDIT" ] \
       || { gfail "$tag : l'édition de l'ancienne entrée n'a pas atteint A et B"; return; }
   fi
-  # Le nouveau binaire : un install sans opération dans A et dans B.
-  viv "$VIVACITY" "$A" "$cache" "$ccache" "$arm" || return
+  # Le nouveau binaire : un install sans opération dans A (sous
+  # VIVACITY_TRACE=1) et dans B (sans).
+  VIV_TRACE=1 viv "$VIVACITY" "$A" "$cache" "$ccache" "$arm" || return
   viv "$VIVACITY" "$B" "$cache" "$ccache" "$arm" || return
   grep -q '^vivacity: 0 installed, 1 unchanged' "$A.err" || gfail "$tag : l'install de A n'était pas sans opération"
   grep -q '^vivacity: 0 installed, 1 unchanged' "$B.err" || gfail "$tag : l'install de B n'était pas sans opération"
+  if [ "$FS" = cow ] && [ -n "$OLD_BIN" ]; then
+    # Le binaire d'avant a cloné : rien de lié, aucun rapport.
+    [ "$(report_rows "$cache" "$A" | awk -F'\t' '$1 == "reports" { print $2 }')" = 0 ] \
+      && ok "$tag : rien de lié, aucun rapport" || fail "$tag : un rapport sans fichier lié"
+  else
+    # A : l'entrée que ce run a extraite de l'archive ; B, après : l'archive
+    # du cache de Composer (l'entrée existait déjà).
+    check_report "$cache" "$A" "$tag" "store entry extracted by this run from the archive" "$iso1"
+    check_report "$cache" "$B" "$tag" "archive in Composer's files cache, extracted aside for this report" "$iso1"
+    if [ "$(grep -c '^trace: detach report ' "$A.err")" = 1 ] \
+       && grep -q "^trace: detach report .*\.json: 4 linked (4 detached, 0 failed); " "$A.err"; then
+      ok "$tag : une ligne sous VIVACITY_TRACE=1 (chemin et comptes)"
+    else fail "$tag : ligne de trace du rapport absente ou autre ($(grep 'detach' "$A.err" | head -2))"; fi
+  fi
+  if grep -qiE 'detach|^trace:' "$B.err" "$B.out"; then fail "$tag : la passe écrit sur la sortie sans VIVACITY_TRACE ($(grep -hiE 'detach|^trace:' "$B.err" "$B.out" | head -1))"
+  else ok "$tag : rien sur la sortie sans VIVACITY_TRACE"; fi
   check_bytes "$fa" "$before" "$tag : A garde son contenu courant après la mise à jour"
   check_bytes "$fb" "$before" "$tag : B garde son contenu courant après la mise à jour"
   new=$(store_files "$cache" | grep -vxF "$old")
@@ -345,6 +447,42 @@ run_upgrade() {
   viv "$VIVACITY" "$C" "$cache" "$ccache" "$arm" || return
   check_bytes "$C/vendor/acme/iso/$REL" "$SHA_ARCHIVE" "$tag : C installé après"
   check_modes "$C" "$tag : C"
+  # Projet marqué : un nouvel install ne refait ni passe ni rapport.
+  viv "$VIVACITY" "$A" "$cache" "$ccache" "$arm" || return
+  if [ "$FS" = link ] || [ -z "$OLD_BIN" ]; then
+    n=$(report_rows "$cache" "$A" | awk -F'\t' '$1 == "reports" { print $2 }')
+    [ "$n" = 1 ] && ok "$tag : projet marqué, pas de second rapport" || fail "$tag : $n rapport(s) pour A après un install de plus, 1 attendu"
+  fi
+}
+
+# iso-upgrade-nocache : l'archive retirée du cache de fichiers de Composer
+# avant la mise à jour. La passe délie quand même, garde le contenu, et le
+# rapport dit « non comparé » avec la raison ; rien n'est téléchargé.
+run_upgrade_nocache() {
+  local arm="$1" tag="iso-upgrade-nocache (cache $1)" d cache ccache A B fa fb old ino
+  d="$WORK/upgrade-nocache-$arm"; cache="$d/viv-cache"; ccache="$d/composer-cache"
+  A="$d/A"; B="$d/B"
+  newproj "$A"; newproj "$B"
+  old_layout "$d" "$cache" "$ccache" "$arm" || return
+  fa="$A/vendor/acme/iso/$REL"; fb="$B/vendor/acme/iso/$REL"
+  old=$(store_files "$cache")
+  if [ "$(ino_of "$fa")" != "$(ino_of "$old")" ]; then
+    [ "$FS" = cow ] && [ -n "$OLD_BIN" ] && { info "$tag : rien de lié par le binaire d'avant sur ce FS, cas sans objet"; return; }
+    gfail "$tag : A et l'ancienne entrée ne sont pas liés : l'état d'avant n'est pas reproduit"; return
+  fi
+  [ -d "$ccache/files" ] || { gfail "$tag : pas de cache de fichiers de Composer à retirer"; return; }
+  rm -rf "$ccache/files"
+  viv "$VIVACITY" "$A" "$cache" "$ccache" "$arm" || return
+  grep -q '^vivacity: 0 installed, 1 unchanged' "$A.err" || gfail "$tag : l'install de A n'était pas sans opération"
+  grep -q 'from network' "$A.err" && ! grep -q ', 0 from network' "$A.err" && fail "$tag : un téléchargement ($(grep -o '([^)]*network' "$A.err"))"
+  [ -d "$ccache/files" ] && fail "$tag : l'archive est revenue dans le cache de Composer"
+  check_report "$cache" "$A" "$tag" - nocache
+  check_bytes "$fa" "$SHA_ARCHIVE" "$tag : A garde son contenu"
+  ino=$(ino_of "$fa")
+  write_in_place "$fa" "$NEW"
+  check_a "$fa" "$ino" "$tag"
+  check_bytes "$fb" "$SHA_ARCHIVE" "$tag : B après l'écriture dans A (A délié)"
+  check_bytes "$old" "$SHA_ARCHIVE" "$tag : ancienne entrée après l'écriture dans A"
 }
 
 for arm in on off; do
@@ -352,6 +490,7 @@ for arm in on off; do
   run_order after "$arm"
   run_upgrade 0 "$arm"
   run_upgrade 1 "$arm"
+  run_upgrade_nocache "$arm"
 done
 
 echo "---"
