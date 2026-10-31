@@ -4,18 +4,32 @@ The most valuable contribution is a `composer.lock` that vivacity gets wrong.
 The second most valuable is a `composer.lock` that vivacity refuses (falls back
 to Composer) where you think it shouldn't have to.
 
-## Report a lock that breaks (5 minutes)
+## Report a lock that breaks
 
-1. On a project of yours, in two copies of the same checkout:
+1. Install Composer 2.10.3 and vivacity (a prebuilt binary, see the README:
+   no Rust toolchain needed).
+2. On a project of yours, install with each tool **in the same directory**,
+   one after the other. Some plugins write absolute paths into vendor/
+   (phpstan's and rector's extension installers, in `GeneratedConfig.php`),
+   so two copies side by side differ by their directory name alone.
+   Composer runs with its plugins active, as vivacity emulates them, and
+   without scripts, which vivacity never runs:
    ```bash
-   composer install --no-plugins --no-scripts   # copy A
-   vivacity install                               # copy B
-   diff -r A/vendor B/vendor
+   cd your-project
+   rm -rf vendor && composer install --no-scripts
+   mv vendor /tmp/vendor-composer
+   vivacity install
+   diff -r /tmp/vendor-composer vendor
    ```
-2. If there is any difference, or if vivacity printed
-   `this lock is outside what vivacity handles natively`, open an issue with
-   the **lock parity** template: `composer.json`, `composer.lock`, vivacity's
+3. If `diff -r` reports a difference, or if vivacity handed the install to
+   Composer where you think it shouldn't have, open an issue with the
+   **lock parity** template: `composer.json`, `composer.lock`, vivacity's
    output, OS. Private packages: redact URLs/tokens, keep the structure.
+   A hand-over is printed on stderr before anything is written:
+   `vivacity: this lock is outside what vivacity handles natively:`, one
+   line per reason, then ``vivacity: delegating to `composer install …`…``,
+   and Composer does the install (`--no-fallback` stops there instead,
+   exit code 3).
 
 That is enough: the differential harness (`harness/diff-vendor.sh`) turns a
 lock into a permanent regression test. Your bug becomes everyone's test.
@@ -38,14 +52,6 @@ the roadmap below.
 
 ## Bigger pieces, roughly in order of impact
 
-- **git-only packages** — a lock entry with a `source` and no `dist`
-  (`GitDownloader`: mirror clone under `cache/vcs`, checkout into vendor
-  with its `.git/`). Three packages in the corpus (ampache, friendica,
-  kovah-linkace). The parity contract needs a decision first: a `.git/`
-  directory is not byte-deterministic (packs, dated reflogs). `path`
-  repositories (0.9) hold the pieces a port reuses: the git-like version
-  guesser (`root_version::guess_version`), the reference dump. `tar`
-  dists (asset-packagist) are done (plan v0.17).
 - **Plugins at resolution time** — `update` / `require` / `remove` hand
   the command to Composer when an installed, allowed plugin changes the
   resolution (`scope::resolution_issues`, plan v0.16 A); `symfony/flex`'s
@@ -53,8 +59,9 @@ the roadmap below.
   (`vivacity-resolver::flex_filter`, `vivacity::flex`, plan v0.16 B).
   `wikimedia/composer-merge-plugin`'s merged root (links, stability
   flags, aliases, references) enters the pool (plan v0.16 C;
-  `UpdateOptions.merged`). Next: Flex with install (recipes,
-  `symfony.lock`) as its own plan; a merged `repositories` section. The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
+  `UpdateOptions.merged`). Flex's recipes at `update` are
+  reproduced for the configurators `flex_recipes.rs` names, any other
+  hands the command over. Next: a merged `repositories` section. The emulated plugins (`pest_plugin.rs`, `phpcs_installer.rs`,
   `extension_installers.rs`, `merge_plugin.rs`) are the pattern: vendor
   the writer under `docs/reference/plugins/`, prove it on a fixture and
   the corpus entries.
@@ -97,10 +104,6 @@ the roadmap below.
   Doing it exactly means converting a DOS timestamp as `unzip` does, local
   wall-clock with the DST rules of that date, hence a timezone database; the
   cheap approximations (current offset, UTC) are wrong for half the year.
-- **The root-version warning** — `Composer could not detect the root package
-  (<name>) version, defaulting to '1.0.0'`, printed once as the first line
-  when the manifest has no `version`, has a name, and its `type` is not
-  `project`. Measured, not yet printed.
 - **Plugins to emulate natively** — every install-time plugin proven harmless
   (or reproduced exactly, like `symfony/runtime` and `composer/installers`)
   moves a whole ecosystem off the fallback path. See `scope.rs` for the
