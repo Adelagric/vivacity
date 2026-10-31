@@ -14,8 +14,10 @@
 # référence de justesse) et à celui de `composer dump-autoload -o` sur le
 # même état du projet ; il vérifie aussi la classe attendue (garde : l'édition
 # a bien eu lieu, Composer la voit). Avant l'édition, le projet est laissé
-# « reposé » (plus de deux secondes après la pose) puis redumpé : le cache
-# servirait tout, l'édition seule doit le faire relire.
+# « reposé » (plus de deux secondes après la pose) puis redumpé deux fois ;
+# le second dump est servi entièrement par le cache (compteurs de
+# VIVACITY_TRACE=1, garde) : l'édition seule doit le faire relire, et le dump
+# qui suit relit au moins un fichier (garde).
 #
 #   cm-same-size-mtime   classe renommée dans vendor/, même taille, `touch -r`
 #   cm-edit              classe renommée, taille et mtime changés
@@ -23,6 +25,8 @@
 #   cm-removed           fichier de classe supprimé
 #   cm-root-same-size    source du projet renommée, même taille, `touch -r`
 #   cm-revert            édition puis retour au contenu d'origine
+#   cm-single-file       règle `classmap` qui nomme un fichier : classe
+#                        renommée, même taille, `touch -r`
 #   cm-cross-project     A posé sans -o, édité, `dump-autoload -o` ; B posé
 #                        ensuite depuis le même store : classmap d'origine
 #   cm-served            sans changement, le dump est servi par le cache
@@ -42,6 +46,7 @@ BASE="${VIVACITY_HARNESS_DIR:-/tmp/vivacity-harness}/classmap-revalidate"
 [ -x "$VIVACITY" ] || { echo "binaire absent : cargo build --release"; exit 1; }
 command -v composer >/dev/null || { echo "composer requis"; exit 1; }
 command -v php >/dev/null || { echo "php requis (fabrication du zip)"; exit 1; }
+command -v jq >/dev/null || { echo "jq requis"; exit 1; }
 case "$(uname -s)" in Darwin|Linux) ;; *) echo "SKIP : harnais Unix (touch -r, écriture en place)"; exit 0 ;; esac
 # Plus que la fenêtre « racy » de vivacity (2 s) : un fichier posé avant est
 # servi sur son identité seule.
@@ -83,6 +88,11 @@ class Acme_Cm_Legacy
 {
 }
 '
+SINGLE='<?php
+class Acme_Cm_Single
+{
+}
+'
 COMMENT='<?php
 namespace App;
 
@@ -94,18 +104,19 @@ mkdir -p "$WORK/artifacts" "$WORK/seed/src"
 php -r '
 $z = new ZipArchive();
 $z->open($argv[1] . "/acme-cm-1.0.0.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
-$z->addFromString("acme-cm/composer.json", json_encode(["name" => "acme/cm", "version" => "1.0.0", "autoload" => ["psr-4" => ["Acme\\Cm\\" => "src/"], "classmap" => ["lib/"]]], JSON_PRETTY_PRINT));
+$z->addFromString("acme-cm/composer.json", json_encode(["name" => "acme/cm", "version" => "1.0.0", "autoload" => ["psr-4" => ["Acme\\Cm\\" => "src/"], "classmap" => ["lib/", "Single.php"]]], JSON_PRETTY_PRINT));
 $z->addFromString("acme-cm/src/Str.php", $argv[2]);
 $z->addFromString("acme-cm/src/Other.php", $argv[3]);
 $z->addFromString("acme-cm/src/Sub/Deep.php", $argv[4]);
 $z->addFromString("acme-cm/lib/Legacy.php", $argv[5]);
+$z->addFromString("acme-cm/Single.php", $argv[6]);
 $z->close();
 $z = new ZipArchive();
 $z->open($argv[1] . "/acme-noref-1.0.0.zip", ZipArchive::CREATE | ZipArchive::OVERWRITE);
 $z->addFromString("acme-noref/composer.json", json_encode(["name" => "acme/noref", "version" => "1.0.0", "autoload" => ["psr-4" => ["Acme\\NoRef\\" => "src/"]]], JSON_PRETTY_PRINT));
 $z->addFromString("acme-noref/src/NoRef.php", "<?php\nnamespace Acme\\NoRef;\n\nclass NoRef\n{\n}\n");
 $z->close();
-' "$WORK/artifacts" "$STR" "$OTHER" "$DEEP" "$LEGACY" || { echo "FAIL : fabrication des zips"; exit 1; }
+' "$WORK/artifacts" "$STR" "$OTHER" "$DEEP" "$LEGACY" "$SINGLE" || { echo "FAIL : fabrication des zips"; exit 1; }
 cat > "$WORK/seed/composer.json" <<JSON
 {
     "repositories": [{ "type": "artifact", "url": "$WORK/artifacts" }],
@@ -162,6 +173,9 @@ viv_dump() {
 # `trace:   classmap cache …`, vide si le binaire n'en imprime pas.
 counters() { grep -o 'classmap cache .*' "$1" | tail -1; }
 counter() { counters "$1" | grep -o "[0-9]* $2" | cut -d' ' -f1; }
+# Fichiers scannés par un dump -o du projet témoin : src/ (3), lib/ (1),
+# Single.php, acme/noref (1), les sources du projet (1).
+NFILES=7
 
 # compare <projet> <libellé> <classe attendue> <classe absente> [dump|install]
 # Après viv_dump (ou un install -o) : la classmap du cache est comparée à
@@ -198,14 +212,30 @@ compare() {
 # Écriture en place (même inode), même taille : `1<>` ne tronque pas.
 write_same_size() { printf '%s' "$2" 1<>"$1"; }
 
-# setup <cas> : A posé avec -o, laissé reposer, redumpé (le cache est chaud
-# et l'état « reposé » enregistré). Pose D, CACHE, A.
+# setup <cas> : A posé avec -o, laissé reposer, redumpé (l'état « reposé »
+# enregistré), puis redumpé encore : ce dump doit être servi entièrement par
+# le cache (garde, quand le binaire imprime ses compteurs). Pose D, CACHE, A.
 setup() {
   D="$WORK/$1"; CACHE="$D/cache"; A="$D/A"
   newproj "$A"
   viv_install "$A" "$CACHE" -o || return 1
   sleep "$SETTLE"
   viv_dump "$A" "$CACHE" || return 1
+  viv_dump "$A" "$CACHE" || return 1
+  if [ -n "$(counters "$A.dump.err")" ] && { [ "$(counter "$A.dump.err" served)" != "$NFILES" ] \
+       || [ "$(counter "$A.dump.err" read)" != 0 ] || [ "$(counter "$A.dump.err" scanned)" != 0 ]; }; then
+    gfail "$1 : avant l'édition, le cache ne sert pas tout ($(counters "$A.dump.err"))"
+  fi
+}
+# after_edit <libellé> : le dump qui suit l'édition ne sert plus tout du
+# cache (il relit un fichier, ou il en sert un de moins : une suppression).
+after_edit() {
+  local c; c=$(counters "$A.dump.err")
+  [ -z "$c" ] && return 0
+  if [ $(( $(counter "$A.dump.err" read) + $(counter "$A.dump.err" scanned) )) -lt 1 ] \
+     && [ "$(counter "$A.dump.err" served)" = "$NFILES" ]; then
+    gfail "$1 : le dump après l'édition a tout servi du cache ($c)"
+  fi
 }
 
 PKG=vendor/acme/cm
@@ -218,6 +248,7 @@ if setup cm-same-size-mtime; then
   touch -r "$D/Str.orig" "$f"
   [ "$(wc -c < "$f")" = "$(wc -c < "$D/Str.orig")" ] || gfail "cm-same-size-mtime : la taille a changé"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-same-size-mtime" 'Acme\\Cm\\Other' 'Acme\\Cm\\Str'
+  after_edit "cm-same-size-mtime"
 fi
 
 # --- cm-edit ------------------------------------------------------------------------
@@ -225,21 +256,25 @@ if setup cm-edit; then
   # Dans lib/ (règle `classmap`, sans filtre PSR) : le nouveau nom entre.
   printf '%s' "${LEGACY/class Acme_Cm_Legacy/class Acme_Cm_LegacyRenamed}" > "$A/$PKG/lib/Legacy.php"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-edit" 'Acme_Cm_LegacyRenamed' 'Acme_Cm_Legacy'
+  after_edit "cm-edit"
   # Dans src/ (PSR-4) : la classe renommée sort de la classmap.
   printf '%s' "${STR/class Str/class StrRenamedLonger}" > "$A/$PKG/src/Str.php"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-edit (psr-4)" 'Acme\\Cm\\Other' 'Acme\\Cm\\Str'
+  after_edit "cm-edit (psr-4)"
 fi
 
 # --- cm-added ------------------------------------------------------------------------
 if setup cm-added; then
   printf '%s' "${OTHER/class Other/class Added}" > "$A/$PKG/src/Added.php"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-added" 'Acme\\Cm\\Added' 'Acme\\Cm\\Nothing'
+  after_edit "cm-added"
 fi
 
 # --- cm-removed ----------------------------------------------------------------------
 if setup cm-removed; then
   rm "$A/$PKG/src/Other.php"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-removed" 'Acme\\Cm\\Str' 'Acme\\Cm\\Other'
+  after_edit "cm-removed"
 fi
 
 # --- cm-root-same-size ---------------------------------------------------------------
@@ -249,6 +284,7 @@ if setup cm-root-same-size; then
   write_same_size "$f" "${COMMENT/class Comment/class Commenx}"
   touch -r "$D/Comment.orig" "$f"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-root-same-size" 'Acme\\Cm\\Str' 'App\\Comment'
+  after_edit "cm-root-same-size"
 fi
 
 # --- cm-revert -------------------------------------------------------------------------
@@ -258,9 +294,21 @@ if setup cm-revert; then
   write_same_size "$f" "${STR/class Str/class Stx}"
   touch -r "$D/Str.orig" "$f"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-revert (édité)" 'Acme\\Cm\\Other' 'Acme\\Cm\\Str'
+  after_edit "cm-revert (édité)"
   write_same_size "$f" "$STR"
   touch -r "$D/Str.orig" "$f"
   viv_dump "$A" "$CACHE" && compare "$A" "cm-revert (rétabli)" 'Acme\\Cm\\Str' 'Acme\\Cm\\Stx'
+  after_edit "cm-revert (rétabli)"
+fi
+
+# --- cm-single-file ---------------------------------------------------------------------
+if setup cm-single-file; then
+  f="$A/$PKG/Single.php"
+  cp -p "$f" "$D/Single.orig"
+  write_same_size "$f" "${SINGLE/Acme_Cm_Single/Acme_Cm_Singlx}"
+  touch -r "$D/Single.orig" "$f"
+  viv_dump "$A" "$CACHE" && compare "$A" "cm-single-file" 'Acme_Cm_Singlx' 'Acme_Cm_Single'
+  after_edit "cm-single-file"
 fi
 
 # --- cm-cross-project --------------------------------------------------------------------
@@ -293,17 +341,17 @@ if setup cm-served; then
   viv_dump "$A" "$CACHE"
   c=$(counters "$A.dump.err")
   if [ -z "$c" ]; then fail "cm-served : pas de compteurs du cache de classmap dans la trace"
-  elif [ "$(counter "$A.dump.err" served)" = 6 ] && [ "$(counter "$A.dump.err" read)" = 0 ] \
+  elif [ "$(counter "$A.dump.err" served)" = "$NFILES" ] && [ "$(counter "$A.dump.err" read)" = 0 ] \
        && [ "$(counter "$A.dump.err" scanned)" = 0 ]; then
     ok "cm-served : dump sans changement servi par le cache ($c)"
   else fail "cm-served : le cache ne sert pas tout ($c)"; fi
   B="$D/B"; newproj "$B"
   if viv_install "$B" "$CACHE" -o; then
     c=$(counters "$B.install.err")
-    # Les 5 fichiers des paquets depuis le store (acme/noref compris : sans
+    # Les 6 fichiers des paquets depuis le store (acme/noref compris : sans
     # référence de dist, le store le nomme quand même) ; Comment.php (sources
     # du projet, jamais vues dans ce chemin) scanné.
-    if [ "$(counter "$B.install.err" 'from store')" = 5 ] && [ "$(counter "$B.install.err" scanned)" = 1 ]; then
+    if [ "$(counter "$B.install.err" 'from store')" = $((NFILES - 1)) ] && [ "$(counter "$B.install.err" scanned)" = 1 ]; then
       ok "cm-served : projet neuf servi par l'enregistrement du store ($c)"
     else fail "cm-served : projet neuf, compteurs inattendus (${c:-aucun})"; fi
     cp "$B/vendor/composer/autoload_classmap.php" "$B.viv.php"

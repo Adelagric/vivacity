@@ -154,6 +154,9 @@ jobs:
       # vivacity <= 0.26.0 hard-linked; macOS: an HFS+ disk image (hdiutil).
       - name: vendor/ isolation (a write in place in one project reaches neither the store nor another project)
         run: harness/vendor-isolation.sh
+      # No network either: an artifact package installed from a lock.
+      - name: Class map revalidated on the current vendor/ and sources (edits, adds, removals, touch -r, another project's edits)
+        run: harness/classmap-revalidate.sh
       - name: The comparator's own tolerances (anchored, not substrings)
         run: harness/net-retry.sh harness/compare-selftest.sh
       - name: net-retry.sh on scripted failures and the captured GitHub refusal (no retry, cause named)
