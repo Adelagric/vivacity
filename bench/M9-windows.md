@@ -136,27 +136,71 @@ Windows), 11 425 pour Symfony, 40 584 pour Sylius. Le no-op Composer de
 Laravel a varié de 825 à 1 794 ms entre deux passages : deux runs sur une
 machine partagée, une indication.
 
-## Résultats Windows — à remplir depuis le run N
+## Résultats Windows — run 41190108069 (vivacity 0.26.0, f1faa45, 2026-10-31)
 
-Lancer : `gh workflow run bench-windows.yml --ref <branche> -f runs=5 -f fixtures=laravel`
-(ajouter `symfony sylius` si le temps le permet). Recopier ici, pour chaque
-disposition, le tableau des temps, le tableau des manifestes et le bloc
-des conditions du résumé du job, avec le numéro du run et le commit.
+Composer 2.10.3, PHP 8.4.27, hyperfine 2.0.0, une chauffe et au moins 5
+runs par scénario. Runner `windows-latest` : Windows Server 2025
+Datacenter (build 26100), AMD EPYC 7763, 2 cœurs / 4 threads.
+**Defender : temps réel désactivé** (`RealTimeProtectionEnabled` faux,
+exclusions `C:\` et `D:\`) : l'image GitHub ne mesure pas le régime du
+poste de Luther. Temps en ms : médiane (σ, min–max).
 
-### `split` (projet sur D:, caches sur C:) — run _à remplir_
+### `split` (projet sur D:, caches sur C:)
 
-_à remplir_
+| fixture (paquets) | scénario | Composer | vivacity | Composer / vivacity |
+|---|---|---|---|---|
+| laravel (109) | noop | 4 485 (14, 4 464–4 497) | 207 (18, 197–254) | 21,7× |
+| laravel (109) | fresh | 10 984 (105, 10 783–11 066) | 4 457 (317, 4 200–4 958) | 2,5× |
+| laravel (109) | dump-o | 4 405 (6, 4 396–4 413) | 143 (8, 136–161) | 30,8× |
+| symfony (153) | noop | 3 165 (87, 3 074–3 265) | 185 (5, 179–199) | 17,1× |
+| symfony (153) | fresh | 11 522 (141, 11 398–11 749) | 5 311 (17, 5 284–5 324) | 2,2× |
+| symfony (153) | dump-o | 5 136 (27, 5 128–5 194) | 183 (5, 181–195) | 28,1× |
+| sylius (276) | noop | 3 130 (71, 3 109–3 279) | 323 (8, 319–342) | 9,7× |
+| sylius (276) | fresh | 27 549 (197, 27 237–27 707) | 19 320 (88, 19 270–19 460) | 1,4× |
+| sylius (276) | dump-o | 12 160 (54, 12 113–12 255) | 391 (4, 383–394) | 31,1× |
 
-### `same` (tout sur C:) — run _à remplir_
+### `same` (tout sur C:)
 
-_à remplir_
+| fixture (paquets) | scénario | Composer | vivacity | Composer / vivacity |
+|---|---|---|---|---|
+| laravel (109) | noop | 5 080 (138, 4 886–5 225) | 227 (8, 217–248) | 22,4× |
+| laravel (109) | fresh | 16 811 (6 613, 16 223–28 864) | 8 965 (689, 7 958–9 872) | 1,9× |
+| laravel (109) | dump-o | 4 875 (45, 4 850–4 965) | 152 (2, 149–157) | 32,1× |
+| symfony (153) | noop | 3 259 (14, 3 241–3 273) | 208 (6, 199–221) | 15,7× |
+| symfony (153) | fresh | 18 082 (261, 17 912–18 580) | 13 779 (692, 12 952–14 805) | 1,3× |
+| symfony (153) | dump-o | 5 716 (180, 5 696–6 114) | 210 (3, 205–215) | 27,2× |
+| sylius (276) | noop | 3 317 (25, 3 301–3 361) | 387 (11, 372–405) | 8,6× |
+| sylius (276) | fresh | 59 506 (1 254, 57 757–61 008) | 51 776 (1 448, 49 815–53 748) | 1,1× |
+| sylius (276) | dump-o | 16 117 (99, 16 072–16 324) | 472 (7, 462–481) | 34,1× |
 
-### Lecture — _à écrire avec les chiffres_
+Arbres identiques, Composer contre vivacity, aux trois étapes (install,
+`dump-autoload -o`, état laissé par hyperfine) dans les deux
+dispositions : 8 852 entrées pour Laravel, 11 434 pour Symfony, 40 601
+pour Sylius. Aucune ligne `delegating to` côté vivacity.
 
-À dire au minimum : l'état de Defender relevé ; le rapport par scénario
-face à celui de Luther (7,7× / 9,2× / 17×) ; l'écart `split` / `same`
-sur `fresh` (copie contre lien dur) ; le nombre d'entrées de `vendor/`
-contre les 8 853 de Luther.
+Un passage antérieur (run 40938579978, 9b69185, 2026-10-29, Intel Xeon
+Platinum 8573C) donnait les mêmes ordres de grandeur : noop 8,8× à
+22,2×, `dump-o` 24,5× à 37,2×, fresh 1,0× à 2,6×.
+
+### Lecture
+
+- **noop et `dump-autoload -o`** : 8,6× à 22× et 27× à 34×, au niveau ou
+  au-dessus des 9,2× et 17× de Luther, sans la requête des listes de
+  blocage (`--no-blocking`) que contenait son no-op.
+- **Install, `vendor/` supprimé** : 1,4× à 2,5× en `split`, 1,1× à 1,9×
+  en `same`, contre 7,7× chez Luther. Sur ce runner, l'écriture de 9 000
+  à 40 000 fichiers domine les deux outils ; vivacity n'est jamais plus
+  lent, mais sur Sylius en `same` l'écart tombe à 1,1× (1,0× le 29/10).
+- **C: est le disque lent du runner** : Composer y perd autant que
+  vivacity (Laravel `fresh` : 11,0 s sur D:, 16,8 s sur C:). L'écart
+  `split` / `same` mêle donc deux effets, copie contre lien dur et D:
+  contre C: ; seul `same` sur D: (piste ci-dessous) les séparerait.
+- **8 852 entrées contre 8 853 chez Luther** pour Laravel : 8 845 sous
+  macOS plus les 7 proxies `.bat` de Composer font 8 852 ; la 8 853e de
+  son `vendor/` n'est pas expliquée.
+- Ce runner n'est pas le poste de Luther (2 cœurs contre 16, Defender
+  coupé, autre disque) : les secondes ne se comparent pas, les rapports
+  d'un même run, oui.
 
 ## Pistes ouvertes
 

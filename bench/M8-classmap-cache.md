@@ -158,3 +158,44 @@ les enregistrements évitent est court (0,16 s Laravel `-o`, 0,45 s Sylius
 `-o` — le scan parallèle de `parallel_io`), bien plus que sur le runner
 macOS (1,5 s et 7,0 s) ou Windows (1,1 s et 3,6 s). Ce n'est pas le gain
 d'install, que seules les colonnes de temps diraient.
+
+## Le run trois OS repris sur 0.26.0 (run 41190109881, f1faa45, 2026-10-31)
+
+Même workflow, après la correction de la lecture du JSON d'hyperfine
+2.0 : les colonnes de temps sont remplies. hyperfine 10 runs + 1 de
+chauffe par bras. Temps en ms : médiane (σ, min–max) ; gain = différence
+des médianes.
+
+| OS (runner) | fixture | autoloader | zips seuls | zips + classmap | gain | `dump scan` | servis | `classmap/` | restauration |
+|---|---|---|---|---|---|---|---|---|---|
+| ubuntu, 4 cœurs | laravel | normal | 506 (8, 494–520) | 491 (19, 464–533) | 15 | 45 → 1 | 32/32 | 248 Ko | 3 ms |
+| ubuntu | laravel | `-o` | 752 (53, 738–887) | 489 (19, 460–518) | 263 | 255 → 4 | 117/117 | 980 Ko | 6 ms |
+| ubuntu | sylius | normal | 2 133 (56, 2 041–2 192) | 2 085 (65, 1 959–2 189) | 48 | 45 → 1 | 34/34 | 240 Ko | 3 ms |
+| ubuntu | sylius | `-o` | 2 952 (57, 2 820–3 017) | 2 198 (70, 2 078–2 296) | 754 | 751 → 14 | 301/301 | 2 948 Ko | 14 ms |
+| macOS arm64, 3 cœurs | laravel | normal | 1 341 (328, 1 087–1 973) | 942 (97, 892–1 143) | 399 | 215 → 6 | 32/32 | 244 Ko | 9 ms |
+| macOS | laravel | `-o` | 1 952 (143, 1 771–2 163) | 1 112 (314, 877–1 894) | 840 | 1 347 → 19 | 117/117 | 968 Ko | 17 ms |
+| macOS | sylius | normal | 4 418 (732, 3 856–5 846) | 3 982 (129, 3 746–4 245) | 436 | 185 → 5 | 34/34 | 236 Ko | 10 ms |
+| macOS | sylius | `-o` | 10 656 (3 309, 7 470–19 168) | 5 969 (1 190, 4 640–8 926) | 4 687 | 6 899 → 118 | 301/301 | 2 924 Ko | 47 ms |
+| Windows, 4 cœurs | laravel | normal | 6 736 (382, 6 121–7 148) | 6 442 (374, 5 841–6 864) | 294 | 104 → 3 | 32/32 | 204 Ko | 34 ms |
+| Windows | laravel | `-o` | 7 632 (418, 7 050–8 623) | 8 193 (5 095, 5 966–22 502) | −561 | 1 075 → 17 | 117/117 | 873 Ko | 61 ms |
+| Windows | sylius | normal | 35 603 (2 006, 34 399–40 257) | 34 865 (3 176, 32 814–43 822) | 738 | 688 → 4 | 34/34 | 186 Ko | 36 ms |
+| Windows | sylius | `-o` | 37 404 (2 119, 36 040–43 615) | 34 623 (924, 33 917–36 234) | 2 781 | 1 928 → 54 | 301/301 | 2 793 Ko | 143 ms |
+
+Lecture.
+
+- **Linux, là où tournent la plupart des CI** : le gain reste sous la
+  seconde, 0,26 s (Laravel `-o`) et 0,75 s (Sylius `-o`), hors du bruit
+  (σ ≤ 70 ms), comme au passage du 2026-10-29 (run 40938584277 : 0,28 s
+  et 0,78 s) ; sans `-o`, 15 à 48 ms.
+- **macOS** : 0,84 s et 4,7 s avec `-o`, portés par le scan (1,3 s →
+  0,02 s ; 6,9 s → 0,1 s), mais avec de larges écarts (σ jusqu'à 3,3 s) ;
+  le passage du 2026-10-29 donnait 2,6 s et 6,7 s. L'ordre de grandeur
+  tient, pas le chiffre.
+- **Windows** : 2,8 s sur Sylius `-o` ; le −0,56 s de Laravel `-o` est
+  du bruit (σ 5,1 s, max 22,5 s) ; sans `-o`, dans le bruit. Le
+  2026-10-29 donnait 4,6 s et 14,5 s, avec des écarts-types de 2 à 20 s.
+  Le seul chiffre stable est le scan évité (1,1 s et 1,9 s).
+- **Le verdict ne change pas** : l'action reste sans enregistrements,
+  pour la raison de correction ci-dessus. Le point 4 de « Ce qu'il
+  faudrait » a sa réponse : le gain est petit sous Linux, réel mais
+  instable avec `-o` sous macOS et Windows.
