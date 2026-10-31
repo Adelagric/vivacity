@@ -1072,7 +1072,14 @@ la décision revient au mainteneur.
 50. **`target-dir` racine avec `psr-0` racine** : la closure
     `targetDirLoader` jamais générée. Avant écriture : oui. S–M. Corpus :
     non (aucun manifeste du corpus n'a `target-dir`). Sans coût : oui.
-51. **Le cache de classmap suppose vendor/ immuable** : contrat assumé.
+51. **Le cache de classmap suppose vendor/ immuable** : contrat assumé
+    jusqu'au 2026-10-31, rejeté depuis par le mainteneur (même comportement
+    que Composer sur l'état courant du projet) ; revalidation à faire, P1 de
+    docs/plans/vendor-isolation.md. L'autre face de la même hypothèse —
+    vendor/ lié au store hors copie sur écriture, une écriture en place
+    atteignant le store et les autres projets — est corrigée sur la branche
+    `vendor-isolation`, prévue pour 0.26.1 (P0, même plan ;
+    `harness/vendor-isolation.sh`).
 52. **Chemin de projet avec `'`** (chemins absolus dans
     autoload_static.php), nom de paquet en majuscules comme clé
     d'installed.php, paquet aliasé du dépôt local qui remplace en

@@ -4,8 +4,9 @@ Deployer's `deploy:vendors` task runs
 `{{bin/composer}} {{composer_action}} {{composer_options}}` in every new
 release directory. Each deploy therefore installs into an empty `vendor/` on
 a server that already holds the previous releases: once vivacity's store is
-warm, a release's `vendor/` is laid out by hardlinking (or reflinking) files
-from the store instead of extracting archives.
+warm, a release's `vendor/` is laid out by copying (or cloning, on a
+copy-on-write filesystem) files from the store instead of extracting
+archives.
 
 | warm install into an empty `vendor/`, Laravel 13 skeleton, 77 packages | Composer | vivacity |
 |---|---|---|
@@ -54,10 +55,11 @@ set('composer_options', '--prefer-dist --no-progress --no-interaction --no-dev -
 - **`composer_version`** only steers Deployer's own lookup of Composer; it
   has no effect once `bin/composer` is set.
 - **The store** is `~/.cache/vivacity` (`VIVACITY_CACHE_DIR` to change it).
-  Hardlinks need the store and the releases on the same filesystem; across
-  filesystems vivacity copies (same result, smaller gain), so keep the
-  deploy user's home and `deploy_path` on one volume, or point
-  `VIVACITY_CACHE_DIR` next to `deploy_path`.
+  Copy-on-write clones (APFS, btrfs, xfs) need the store and the releases
+  on the same filesystem; across filesystems vivacity copies (same result,
+  smaller gain), so keep the deploy user's home and `deploy_path` on one
+  volume, or point `VIVACITY_CACHE_DIR` next to `deploy_path`. Each release
+  holds its own copy of `vendor/`, as with Composer.
 
 ## What `bin/composer` covers
 

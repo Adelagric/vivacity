@@ -6,6 +6,35 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+### Fixed
+- **Files vivacity lays out are no longer shared with the store or with other
+  projects, on every file system.** A project an earlier version installed is
+  unlinked once (below); a file that pass cannot copy stays linked until a
+  later install copies it. Up to 0.26.0, where the file system has no
+  copy-on-write (Linux ext4 and overlayfs, Windows with the cache and the
+  project on one volume, macOS outside APFS), `vendor/` was laid out by hard
+  links to vivacity's store, so a file written in place in one project (a
+  shell redirection, `file_put_contents`, an editor) changed the store entry,
+  every project installed from it, and every project installed from it later.
+  Composer never shares a file between projects. vivacity now copies each file
+  there (APFS clones, btrfs and xfs reflinks, unchanged); a project gets its
+  own copy of `vendor/`, which takes the disk space Composer's does (README,
+  "Known issue"). `harness/vendor-isolation.sh`, added to the CI parity job on
+  Linux (ext4) and macOS (an HFS+ image), writes in place into one project and
+  checks the other project and the store against a separate extraction of the
+  archive, in both orders, with the class map cache on and off.
+- **The store has a new layout (`store/v4`)**: an entry an earlier version
+  wrote may have been modified through a link, so none is served again;
+  each is extracted afresh from its archive (`dist.shasum` checked when the
+  lock has one). The old trees stay on disk until removed.
+- **A project an earlier version installed is unlinked once**, on the first
+  install this version runs in it itself, a no-op install included: every
+  file of `vendor/` (and of packages installed outside it) that still shares
+  its inode gets a copy of its own with its current content, mode and
+  modification time — an edit already made through a link is kept, never
+  reset to the archive's. Nothing is printed and nothing fails: a file the
+  pass cannot copy stays as it was and the next install tries again.
+
 ## [0.26.0] — 2026-10-31
 
 ### Added

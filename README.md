@@ -26,31 +26,60 @@ and `config.lock` are read from `composer.json` the way Composer reads them.
 
 ## Known issue: a file edited in place in vendor/
 
-Found on 2026-10-31, reproduced, not fixed yet in 0.26.0. vivacity assumes
-that nothing edits `vendor/` after it installs it. Composer assumes nothing
-of the kind, and two things break when that assumption does:
+Found on 2026-10-31 in 0.26.0. vivacity assumed that nothing edits
+`vendor/` after it installs it. Composer assumes nothing of the kind, and two
+things break when that assumption does:
 
-- **Projects are not isolated on file systems without copy-on-write.** On
-  Linux ext4 and overlayfs (most CI runners and Docker images), on Windows
-  when the cache and the project share a volume, and on macOS outside APFS,
-  the files in `vendor/` are hard links to vivacity's store. A file edited
-  in place in one project is edited in the store, in every other project
-  installed from that entry, and in every project installed from it later.
-  APFS (`clonefile`) and btrfs or xfs (reflinks) copy on write and are not
-  affected.
+- **Projects are not isolated on file systems without copy-on-write.**
+  Fixed on the `vendor-isolation` branch, not yet on main; planned for
+  release in 0.26.1. In 0.26.0 and earlier, on Linux ext4 and overlayfs
+  (most CI runners and Docker images), on Windows when the cache and the
+  project share a volume, and on macOS outside APFS, the files in `vendor/`
+  are hard links to vivacity's store: a file edited in place in one project
+  is edited in the store, in every other project installed from that entry,
+  and in every project installed from it later. With 0.26.0, don't edit
+  files in `vendor/` in place on those file systems; if you did, delete
+  vivacity's store (`store/` under its cache directory, listed below) and
+  reinstall the projects that used it. With the fix, each project gets its
+  own copy of every file (a copy-on-write clone on APFS, btrfs and xfs, as
+  before; a plain copy elsewhere), and:
+  - the store has a new layout (`store/v4`): no entry an earlier version
+    wrote is served again, each is extracted afresh from its archive;
+  - a project an earlier version installed is unlinked on the first install
+    the fixed version runs in it itself (a no-op install included; not one it
+    hands to Composer): each file still linked gets its own copy **with the
+    content it has now**, its mode and its modification time. Nothing already
+    altered is repaired: an edit that already went through a link is kept, not
+    reset to the archive's — vivacity cannot tell which project made it. To
+    get the archive's files back in such a project, delete its `vendor/` and
+    install again. A file the pass cannot copy (a read-only directory) stays
+    linked, silently, and the next install tries again. Links an earlier
+    version makes again afterwards (going back to 0.26.0 on the same cache)
+    are not looked for: delete `store/.detached/` under the cache directory to
+    run the pass again.
+
+  **Disk space.** With the fix, on those file systems each project holds a
+  full copy of its `vendor/`, as it does with Composer, on top of the store's
+  copy of each package. On APFS, btrfs and xfs the copies share their blocks
+  with the store until a file is written. The trees of the old layout
+  (`store/v3` and earlier, under vivacity's cache directory:
+  `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
+  `%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) are no longer
+  read by the fixed version; delete them to get their space back.
 - **The class map of a store package is not revalidated.** It is cached per
-  store entry. After a class is renamed, added or removed in a `vendor/`
-  file, `vivacity dump-autoload` (and the autoloader dump that ends
-  `install`, `update`, `require` and `remove`) can keep the old class where
-  Composer rescans the file. `VIVACITY_NO_CLASSMAP_CACHE=1` turns that cache
-  off; it does nothing for the first point, a store an edit reached stays
-  modified.
+  store entry and shared by every project installed from that entry. After
+  a class is renamed, added or removed in a `vendor/` file, `vivacity
+  dump-autoload` (and the autoloader dump that ends `install`, `update`,
+  `require` and `remove`) can keep the old class where Composer rescans the
+  file, and a dump in the edited project can write a class map that the
+  other projects installed from the same entry then get.
+  `VIVACITY_NO_CLASSMAP_CACHE=1` turns that cache off. The fix above does
+  not change this point.
 
-Until it is fixed: don't edit files in `vendor/` in place on the file
-systems above. If you did, delete vivacity's store (`store/` under its cache
-directory: `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
-`%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) and reinstall
-the projects that used it.
+Until the second point is fixed: after editing a file in `vendor/`, dump the
+autoloader with `VIVACITY_NO_CLASSMAP_CACHE=1`; if a dump already ran with
+the cache after the edit, delete `classmap/` and `classmap-files/` under
+vivacity's cache directory.
 
 ## Install
 
@@ -207,9 +236,10 @@ numbers, on his machine and an older vivacity; they are not reproduced here.
 Warm `install` is bound by writing tens of thousands of small files and
 rescanning class maps, not by PHP. vivacity extracts each package once into a
 content-addressed store, clones it into `vendor/` (`clonefile` on APFS,
-hardlinks elsewhere), and caches the class map per store entry. Measured
-numbers and the scripts that produce them are in [bench/](bench/); the
-short version is that a no-op install takes tens of milliseconds, a warm
+reflinks on btrfs and xfs, a plain copy elsewhere), and caches the class map
+per store entry. Measured numbers and the scripts that produce them are in
+[bench/](bench/); the short version is that a no-op install takes tens of
+milliseconds, a warm
 reinstall of Sylius under a second, and `update --no-install` on Sylius
 about a third of Composer's time. Cold network installs are not faster.
 Online, a no-op install is mostly one request: like Composer 2.10,

@@ -4,8 +4,9 @@
 `composer install` in every new release directory, before
 `deploy:updated`. Each deploy therefore installs into an empty `vendor/` on
 a server that already holds the previous releases: once vivacity's store is
-warm, a release's `vendor/` is laid out by hardlinking (or reflinking) files
-from the store instead of extracting archives.
+warm, a release's `vendor/` is laid out by copying (or cloning, on a
+copy-on-write filesystem) files from the store instead of extracting
+archives.
 
 | warm install into an empty `vendor/`, Linux | Composer | vivacity |
 |---|---|---|
@@ -14,8 +15,11 @@ from the store instead of extracting archives.
 | Sylius | 3 522 ms | 659 ms |
 
 From [bench/M6-linux-ci.md](../bench/M6-linux-ci.md), 2026-09-10 (method,
-machine and the other scenarios there). A deploy adds SSH and your other tasks around
-it: measure yours.
+machine and the other scenarios there), when vivacity still laid `vendor/`
+out by hard links on Linux; with the `vendor/` isolation fix (planned for
+0.26.1) it copies there, which costs more on large projects — not
+re-measured yet. A deploy adds SSH and your other tasks around it: measure
+yours.
 
 ## Setup
 
@@ -49,10 +53,11 @@ set :composer_install_flags, '--no-dev --prefer-dist --no-interaction --quiet --
   dealerdirect's PHP_CodeSniffer installer…), which then gains nothing. The
   default flags above do not pass it.
 - **The store** is `~/.cache/vivacity` (`VIVACITY_CACHE_DIR` to change it).
-  Hardlinks need the store and the releases on the same filesystem; across
-  filesystems vivacity copies (same result, smaller gain), so keep the
-  deploy user's home and `deploy_to` on one volume, or point
-  `VIVACITY_CACHE_DIR` next to `deploy_to`.
+  Copy-on-write clones (APFS, btrfs, xfs) need the store and the releases
+  on the same filesystem; across filesystems vivacity copies (same result,
+  smaller gain), so keep the deploy user's home and `deploy_to` on one
+  volume, or point `VIVACITY_CACHE_DIR` next to `deploy_to`. Each release
+  holds its own copy of `vendor/`, as with Composer.
 
 ## What the mapping covers
 

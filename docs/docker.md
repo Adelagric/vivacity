@@ -50,12 +50,13 @@ RUN vivacity dump-autoload --optimize --no-dev --run-scripts
 Why these choices:
 
 - **The store lives and dies inside the `RUN`.** vivacity lays packages out
-  by hardlinking (or reflinking) them from its store; in the same layer that
-  costs nothing, and removing the store at the end of the `RUN` leaves the
-  files in `vendor/` and nothing extra in the image. Putting the store on a
-  cache mount instead would place it on another filesystem: vivacity then
-  copies the files (same result, slower), and the gain shrinks to skipping
-  the extraction.
+  by copying (or reflinking) them from its store; removing the store at the
+  end of the `RUN` leaves the files in `vendor/` and nothing extra in the
+  image. Putting the store on a cache mount instead would place it on
+  another filesystem, where vivacity copies too; it would spare the
+  extraction on the next build. Up to 0.26.0 the same-layer store was
+  hard-linked and cost nothing; with the `vendor/` isolation fix (planned
+  for 0.26.1) it is copied there, a trade-off not re-measured yet.
 - **Only Composer's files cache is mounted**, at `COMPOSER_CACHE_DIR`. It is
   the cache both tools read, and the one `bench/M7-ci-cache.md` found worth
   keeping between builds.

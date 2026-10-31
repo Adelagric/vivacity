@@ -1,8 +1,9 @@
 # Isolation de vendor/ et revalidation de la classmap — plan
 
 > Niveau 2 : contrat de sortie publique (vendor/ identique à Composer
-> 2.10.3) et isolation entre projets. Ce passage couvre cadrage, mesure,
-> plan et méta-analyse ; **rien n'est implémenté**. Les mesures viennent
+> 2.10.3) et isolation entre projets. Le premier passage a couvert cadrage,
+> mesure, plan et méta-analyse ; **P0 est implémenté depuis** (section
+> « Exécution de P0 »), P1 ne l'est pas. Les mesures viennent
 > d'un spike activé par variables d'environnement, retiré de l'arbre après
 > la mesure et jamais commité (annexe A). Ses chiffres exploratoires ne sont
 > pas publiés ; les performances sous Linux restent à mesurer sur le correctif
@@ -688,6 +689,74 @@ harnais permanent `harness/vendor-isolation.sh` câblé dans `ci.yml` —
    (`install`, comme `harness/artifact-repo.sh`) et affirme dans chaque cas
    l'absence de passation (`--no-fallback`, code 0, la ligne de résumé de
    vivacity, aucune ligne `delegating`).
+
+## Exécution de P0 (2026-10-31)
+
+**Fait.**
+- `clone.rs` : plus de `hard_link` ; clonefile (macOS) → FICLONE (Linux) →
+  `std::fs::copy` ; le repli Windows des liens symboliques copie aussi.
+  `detach` (déplacé depuis `composer_patcher.rs`, réexporté) en deux formes :
+  stricte avant `patch` (erreur), indulgente pour la passe unique
+  (`detach_all` : laisse un fichier qu'elle ne peut pas copier et le dit).
+  La copie de déliaison garde octets, mode, mtime et (Unix) propriétaire.
+  Nombre de liens sous Windows : `winapi-util =0.1.11` (DECISIONS).
+- `store.rs` : `LAYOUT` `v4` ; marqueur `store/.detached/v4/<sha1 du chemin
+  canonique de vendor/>`.
+- `installer.rs` : `detach_once` après le placement (après le dernier point
+  de passation à Composer), sur vendor/ et les paquets posés hors de
+  vendor/ (ni liens symboliques ni ancêtres de vendor/) ; jamais d'erreur ni
+  de ligne ; marqueur écrit seulement si rien n'est resté lié.
+- `harness/vendor-isolation.sh` + pas dans le job `parity` de `ci.yml`.
+- Tests unitaires (`clone.rs`) : isolation du parcours de copie par une
+  écriture en place, inconditionnelle (rouge avec le lien dur remis) ;
+  `detach` garde le contenu courant, le mode et la mtime ; répertoire en
+  lecture seule (forme indulgente : rien de cassé, `false` ; stricte :
+  erreur).
+
+**Vu rouge puis vert** (harnais, 73 contrôles `OK` au vert) :
+
+| où | binaire de main 9fa38b6 (`ISO_PHASE=red`) | correctif |
+|---|---|---|
+| macOS, image HFS+ | 24 échecs sur le critère, 0 garde | 0 / 0 |
+| macOS, APFS (`ISO_FS=cow`) | `iso-before`/`after` verts (clonefile), `iso-upgrade*` rouges | 0 / 0 |
+| Linux (conteneur `vivacity-linux`), volume ext4 | 24 / 0 | 0 / 0 ; et 0 / 0 avec `VIVACITY_OLD_BIN` = main (état d'avant posé par le vrai binaire) |
+| Linux, racine overlayfs | 24 / 0 | 0 / 0 ; idem |
+
+Mutants du correctif (macOS HFS+), chacun attrapé par les cas attendus et
+eux seuls : lien dur remis (`iso-before`/`after` : B et store) ; passe
+retirée (`iso-upgrade*` : B et ancienne entrée après l'écriture) ; `LAYOUT`
+resté `v3` (pas de nouvelle entrée ; `iso-upgrade-edited` : C reçoit
+l'entrée éditée) ; copie qui perd les modes (modes de A, B, C).
+
+**Revue indépendante (sous-agent frais, sur le diff) et suites.**
+
+| # | constat | suite |
+|---|---|---|
+| 1 | la passe faisait échouer un install no-op que Composer mène à bout (répertoire en lecture seule, disque plein, fichier verrouillé sous Windows) | **pris** : forme indulgente, ni erreur ni ligne, marqueur non écrit, nouvel essai au prochain install |
+| 2 | des liens refaits par un binaire antérieur après le marqueur ne sont pas vus | **noté** : README, DECISIONS, HANDOVER ; le parcours de P1 les verra (étape 1.4) ; `store/.detached/` à effacer pour rejouer |
+| 3 | erreurs de lecture avalées puis marqueur écrit | **pris** : un répertoire illisible ou une entrée sans métadonnées rend la passe incomplète |
+| 4 | contrôle de mode du harnais imperdable (0644 = défaut de l'umask) | **pris** : `src/Iso.php` en 0640, modes des quatre fichiers comparés à Composer pour A, B, C ; mutant « modes perdus » rouge |
+| 5 | harnais : chemin exercé non dit, no-op de B non vérifié, écriture de même taille seulement | **pris** : ligne d'info clone/copie, no-op de B, `iso-after` réécrit par `>` (autre taille, même inode) |
+| 6 | une passation après la passe ne laisse plus le projet « tel qu'il était » (inode, mtime, propriétaire sous `sudo`) | **pris** : passe déplacée après le placement ; mtime et propriétaire gardés |
+| 7 | docs : « premier install » vrai seulement en natif ; commentaire de `phpcs_installer.rs` ; en-tête du plan | **pris** |
+| 8 | `fixtures/work` (lien symbolique) apparaît non suivi | **noté** : jamais ajouté (ajouts nommés) ; `.gitignore` ne le couvre pas, hors de ce chantier |
+| 9 | copies inutiles au premier `update` | **pris** par le déplacement (6) |
+
+**Point de décision ouvert : signaler les fichiers liés qui diffèrent de
+l'archive** (attribution impossible). Rien n'est imprimé aujourd'hui.
+Options, sans toucher stdout ni stderr : (a) une ligne sous
+`VIVACITY_TRACE=1` (déjà hors parité) ; (b) un fichier dans le cache de
+vivacity, par projet (`store/.detached/v4/<clé>.json` : chemins, condensat
+courant, condensat de l'archive), lisible après coup ; (c) les deux ; (d)
+une sous-commande ou option de diagnostic (`vivacity doctor`), plus tard.
+Toutes demandent de lire l'archive pendant la passe (cache de zips de
+Composer, condensat par fichier) : un coût unique par projet, à mesurer.
+
+**Reste à faire avant la release** : le job `parity` sur les runners (le
+pas n'a pas encore tourné ; `hdiutil` sur `macos-latest` à confirmer) ;
+Windows (copie et `detach` typecheckés, jamais lancés ; coût de la copie
+avec Defender à mesurer, `bench-windows`) ; les bancs P0 rejoués avec le
+vrai code (critère « `copy` + 10 % ») ; les suites complètes (mainteneur).
 
 ## Annexe A — le spike de mesure (non commité)
 

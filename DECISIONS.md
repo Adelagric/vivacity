@@ -6024,3 +6024,96 @@ par l'appelant et envoyés au groupe). Témoin vert des deux côtés :
 `nohup-require` (le mode de `require` passe outre, comme Composer). Le
 signal de terminal non relayé (Linux) n'est pas exercé ici (macOS, sans
 terminal dans le banc).
+
+## 2026-10-31 — Isolation de vendor/ : des copies, plus de lien dur ; store `v4` ; migration sans réparation (docs/plans/vendor-isolation.md, P0)
+
+**Le défaut.** Hors copie sur écriture (ext4, overlayfs, NTFS sur un même
+volume, macOS hors APFS), `clone.rs` posait vendor/ par liens durs depuis le
+store (modèle de pnpm, DECISIONS 2026-09-09). Une écriture en place dans
+vendor/ d'un projet (redirection du shell, `file_put_contents`, un éditeur
+qui réécrit le même inode) changeait l'entrée du store, les autres projets
+posés depuis elle, et ceux posés ensuite. Composer ne partage jamais un
+fichier entre deux projets. Reproduit sur une image HFS+ avec le binaire de
+main (9fa38b6) : `harness/vendor-isolation.sh`, `ISO_PHASE=red`.
+
+**Pourquoi des copies.** Seule option du plan qui isole par construction
+(tableau « Options P0 ») : un store en lecture seule casse la parité des modes
+et ne retient ni root ni `:w!` ; vérifier le store avant chaque clone ne
+protège pas B à l'instant où A écrit ; détecter après coup ne protège pas ;
+copier seulement les fichiers « éditables » n'a pas de critère ; extraire
+chaque projet depuis l'archive coûte plus que copier. clonefile (APFS) et
+FICLONE (btrfs, xfs) restent premiers : ils isolent et ne coûtent rien. Le
+coût de la copie (ext4, overlayfs) n'est pas publié : la mesure de cadrage
+portait sur un spike, elle sera refaite sur le vrai code sous Linux (une
+validation sous APFS ne dit rien de Linux) ; le mainteneur a tranché « la
+justesse avant la vitesse » et accepte l'espace disque d'une copie par projet
+(Q4, écrit dans le README). Le repli Windows des liens symboliques copie
+aussi.
+`composer_patcher::detach` devient `clone::detach` (partagé) ;
+`write_if_changed` des extension-installers garde son écriture par
+renommage, en ceinture.
+
+**Pourquoi un nouveau format de store (`LAYOUT` `v4`, Q3).** Une entrée
+écrite par une version antérieure a pu être modifiée à travers un lien : on
+ne sait pas lesquelles. Aucune n'est plus servie ; chaque entrée est
+extraite de nouveau depuis son archive (cache de zips de Composer ou dist,
+`dist.shasum` vérifié quand le lock en porte un — souvent vide pour les
+dists GitHub). Alternative écartée : vérifier chaque entrée contre son
+archive une fois (lit tout le store et exige l'archive, pour le même
+résultat). Coût : une extraction froide par entrée, une fois ; les arbres
+`v3` restent sur disque jusqu'au vidage, comme aux bumps précédents.
+
+**Migration, pas réparation.** Un no-op ne repose rien : un projet posé
+avant le correctif garderait ses liens avec l'ancien store et avec les
+autres projets. Une passe unique par projet (`installer::detach_once`, au
+premier install du nouveau binaire, no-op compris ; un marqueur
+`store/.detached/v4/<sha1 du chemin canonique de vendor/>`) donne à chaque
+fichier régulier encore lié de vendor/ — et des paquets posés hors de
+vendor/, sauf liens symboliques et ancêtres de vendor/ — sa propre copie,
+**avec son contenu courant** et son mode. Le contenu n'est jamais remis à
+celui de l'archive : un fichier lié qui diffère de l'archive ne s'attribue
+pas (correctif délibéré dans ce projet, ou propagé depuis un autre), et le
+« réparer » détruirait peut-être un correctif voulu. Le nouveau store ne se
+construit que depuis l'archive, jamais depuis une ancienne entrée. Le
+signalement de ces fichiers ambigus sans toucher stdout ni stderr (parité)
+est une décision du mainteneur en attente ; rien n'est imprimé. Cette
+question a été tranchée plus tard le même jour : voir l'entrée suivante.
+La passe tourne après le placement (les paquets remplacés sont déjà des
+copies neuves, et aucune passation à Composer ne peut plus suivre) ; la
+copie garde octets, mode, date de modification et, sous Unix, propriétaire
+(un install lancé en root ne donne pas le vendor/ d'un utilisateur à root) :
+Composer ne touche pas un fichier qu'il ne réinstalle pas, seuls l'inode et
+le ctime changent. Elle n'échoue jamais et n'imprime rien (parité : un
+install que Composer mène à bout aboutit) : un fichier qu'elle ne peut pas
+copier (répertoire en lecture seule livré par une archive, fichier
+illisible) reste tel quel, le marqueur n'est pas écrit et le prochain
+install recommence. `composer_patcher` garde la forme stricte (`detach`) :
+avant `patch`, un fichier qu'on ne peut pas délier est une erreur. Cas
+limite assumé : un projet re-posé par un binaire antérieur APRÈS la passe
+(retour arrière, ou un embarqueur d'un vivacity-core ≤ 0.26.0 sur le même
+cache) garde ses nouveaux liens jusqu'à l'effacement de
+`store/.detached/` ; le parcours de P1 (étape 2) les verra.
+
+**Windows.** Le nombre de liens d'un fichier n'est pas dans la std stable
+(`number_of_links` instable) : `winapi-util =0.1.11` en dépendance directe
+de vivacity-core sous `cfg(windows)` — déjà dans le graphe par walkdir et
+same-file, wrapper sûr de `GetFileInformationByHandle`, aucun `unsafe` de
+notre côté. Un fichier qu'on ne peut pas interroger est traité comme lié
+(une copie de trop plutôt qu'un lien gardé). Le coût de la copie sous
+Windows (Defender en temps réel) n'est pas mesuré : à faire sur le runner
+avant de livrer (Q2).
+
+**La preuve.** `harness/vendor-isolation.sh` (permanent, dans le job
+`parity` de la CI) : critère sur des propriétés observables seulement —
+A accepte l'écriture en place (octets, même inode, mode de Composer), B et
+le store gardent les octets d'une extraction à part de l'archive — dans les
+deux ordres, cache de classmap actif et coupé, plus `iso-upgrade` et
+`iso-upgrade-edited` (ancienne entrée éditée avant la mise à jour : les
+projets gardent leurs octets, le nouveau store et un projet posé ensuite
+portent l'archive). Les mêmes contrôles passent sur un FS à copie sur
+écriture (`ISO_FS=cow`) ; la sonde « un clone échoue » ne sert qu'à la
+phase rouge. Chaque cas exerce vivacity : `--no-fallback`, code 0, sa ligne
+de résumé, aucune ligne `delegating`. Vu rouge avec le binaire de main sur
+HFS+ (24 échecs sur le critère, gardes tenues), puis trois mutants du
+correctif (sans passe, sans bump, lien dur remis), chacun attrapé par les
+cas attendus.
