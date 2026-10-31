@@ -35,6 +35,22 @@ byte-identical-output promise are the public API.
   reset to the archive's. Nothing is printed and nothing fails: a file the
   pass cannot copy stays as it was and the next install tries again.
 
+### Added
+- **A report of the one-time unlinking pass**, in vivacity's cache
+  (`store/.detached-reports/v4/<key>/<time>-<pid>.json`, one file per pass
+  that found linked files; nothing printed, `VIVACITY_TRACE=1` prints its
+  path and counts). Once a file is unlinked, which files shared it cannot be
+  told any more; the report keeps, per file, its package, dist reference and
+  path, the inode it shared and its number of names, the sha1 of the content
+  it kept, whether it was unlinked, and how it compares with the same file in
+  the package's archive (`identical`, `different` — which may be a deliberate
+  local patch — or `not_compared` with the reason), naming the archive used
+  and its sha1. The reference is the archive this run extracted into the new
+  store, or the one in Composer's files cache; never the old store, never a
+  download. It records a past observation (time, vivacity version): it does
+  not prove the absence of links after a downgrade, and clearing the cache
+  loses it. Only the linked files are hashed.
+
 ## [0.26.0] — 2026-10-31
 
 ### Added

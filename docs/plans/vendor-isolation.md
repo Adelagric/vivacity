@@ -752,6 +752,82 @@ une sous-commande ou option de diagnostic (`vivacity doctor`), plus tard.
 Toutes demandent de lire l'archive pendant la passe (cache de zips de
 Composer, condensat par fichier) : un coût unique par projet, à mesurer.
 
+### Rapport de la passe unique — décision du mainteneur : (c), légère
+
+**Plan.**
+1. `clone.rs` : `detach_all(dir, &mut Vec<LinkedFile>)` relève chaque
+   fichier régulier à `nlink > 1` AVANT de le délier : chemin, nombre de
+   liens, (Unix) périphérique et inode, sha1 du contenu courant (une lecture
+   de ce fichier seulement), puis l'issue de la déliaison (faite / échec et
+   raison). `detach` strict inchangé (pas de relevé, pas de condensat).
+2. ~~`extract.rs` : lecture groupée des entrées d'une archive~~ (abandonné
+   après la méta-analyse, ci-dessous : extraction à part par le store).
+3. Nouveau module `detach_report.rs` : rattache chaque fichier relevé au
+   paquet dont le répertoire le contient (le plus long préfixe), et compare
+   au fichier de même chemin relatif dans l'archive du cache de fichiers de
+   Composer (`fetch::dist_cache_path_of`, même URL que l'install) — après la
+   méta-analyse : d'abord l'entrée `v4` que ce run a extraite — : archive
+   lue une fois par paquet ayant des fichiers liés, son sha1 noté, refusée
+   comme référence si `dist.shasum` est non vide et diffère. Jamais l'ancien
+   store (`v3`), ni une entrée `v4` antérieure au run, jamais de réseau. Issues séparées : déliaison
+   faite / échec (raison) ; comparaison identique / différente /
+   impossible (raison : pas d'archive dans le cache, archive illisible,
+   shasum faux, fichier absent de l'archive, paquet sans archive, contenu
+   courant illisible, fichier hors de tout paquet).
+4. `installer.rs` `detach_once` : collecte, puis, si au moins un fichier
+   était lié, écrit `store/.detached/v4/<clé>.json` (temp + rename) en
+   AJOUTANT une observation à celles déjà là (une passe incomplète refaite
+   ne trouve plus les fichiers déjà déliés : réécrire perdrait
+   l'information ; après la méta-analyse : un fichier par passe dans
+   `store/.detached-reports/v4/<clé>/`) ; une ligne sous `VIVACITY_TRACE=1` (chemin, comptes, ou
+   l'échec d'écriture) ; rien d'autre, jamais d'erreur.
+5. Tests unitaires (identique, différent, archive absente, shasum faux,
+   ajout d'une observation) ; harnais : `iso-upgrade*` vérifient le
+   rapport, nouveau cas `iso-upgrade-nocache` (archive retirée du cache de
+   Composer : « non comparé », fichiers déliés quand même).
+6. Docs : README, HANDOVER, CHANGELOG, DECISIONS, ce plan.
+
+**Hors champ** : une entrée `v4` comme référence (rien n'y dit de quelle
+archive elle vient) ; le chemin local d'une dist `artifact` (le cache de
+Composer seul, pour une seule règle) ; `vivacity doctor`.
+
+**Méta-analyse (sous-agent frais, plan et code), et ce qu'elle a changé.**
+Treize constats ; pris : (1, 2) relire l'archive que ce run vient
+d'extraire coûte une seconde décompression de tout le projet sur ext4 →
+l'entrée `v4` que CET appel de `Store::ensure_made` a extraite devient la
+référence (provenance établie : l'archive, son URL, son chemin dans le cache
+de Composer) ; seule une entrée déjà présente avant le run reste exclue ;
+(5, 6) la lecture par entrée d'archive ne reproduisait ni les liens d'un
+tar, ni le renommage Windows → l'archive du cache de Composer est extraite à
+part par l'extraction du store (`Store::extract_staged`) au lieu d'un
+lecteur groupé (l'étape 2 du plan, `extract.rs`, est abandonnée) ; (3, 4)
+un fichier unique enrichi par ajout se perd en course et grossit à chaque
+install tant qu'un fichier reste illisible → un fichier par passe, jamais
+réécrit, et une passe qui ne délie rien n'écrit rien si un rapport existe ;
+(7) effacer `store/.detached/` pour rejouer la passe effacerait les
+rapports → `store/.detached-reports/` ; (8) la racine du cache de Composer
+est celle du `Fetcher`, l'URL celle du lock ; (9) l'attribution exclut les
+paquets que le parcours exclut ; (10) le condensat courant est pris pendant
+la copie ; (11) fichiers triés, regroupés par paquet ; (12, 13) notés
+(README, DECISIONS), le rapport ne passe jamais par `dist_bytes_of`.
+
+**Exécution (2026-10-31).** `clone.rs` (`LinkedFile`, condensat pendant la
+copie par un lecteur qui hache), `store.rs` (`ensure_made`,
+`extract_staged`, `detach_reports`), `fetch.rs` (`Fetcher::cache_root`),
+`detach_report.rs` (nouveau), `installer.rs` (`detach_once`,
+`report_detached`). Revue indépendante (sous-agent frais, sur le diff) :
+la première version hachait chaque archive extraite tant que la passe du
+projet restait à faire, même sans fichier lié (premier install d'un projet
+neuf, APFS) → plus rien n'est haché dans les tâches de téléchargement :
+`dist.shasum` quand le lock en porte un (la récupération a vérifié les
+octets), sinon le fichier du cache de Composer, lu seulement pour un paquet
+qui a des fichiers liés ; nom de fichier à la nanoseconde ; contrôle de
+sortie du harnais étendu aux lignes `trace:`. Harnais vu rouge avec le
+binaire de la branche sans ce code (18 échecs sur le critère, 0 garde, sur
+image HFS+ comme sur APFS), vert avec (`ISO_FS=link` et `cow`) ; deux
+mutants attrapés : l'ancien store pris pour référence (`iso-upgrade-edited`,
+A), une ligne imprimée hors trace (tous les `iso-upgrade*`).
+
 **Reste à faire avant la release** : le job `parity` sur les runners (le
 pas n'a pas encore tourné ; `hdiutil` sur `macos-latest` à confirmer) ;
 Windows (copie et `detach` typecheckés, jamais lancés ; coût de la copie

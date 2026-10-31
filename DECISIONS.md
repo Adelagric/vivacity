@@ -6117,3 +6117,95 @@ de résumé, aucune ligne `delegating`. Vu rouge avec le binaire de main sur
 HFS+ (24 échecs sur le critère, gardes tenues), puis trois mutants du
 correctif (sans passe, sans bump, lien dur remis), chacun attrapé par les
 cas attendus.
+
+## 2026-10-31 — Rapport de la passe de déliaison unique (option (c) légère du mainteneur ; docs/plans/vendor-isolation.md, P0)
+
+**Pourquoi un rapport.** La passe unique donne à chaque fichier encore lié
+de vendor/ son propre inode et garde son contenu courant, sans rien
+imprimer. Une fois le fichier délié, quels noms partageaient son inode ne
+se dit plus : c'est la seule information que la migration détruit. Un
+fichier lié qui diffère de son archive ne s'attribue pas (correctif voulu
+dans ce projet, ou écriture venue d'un autre projet par le lien) ; le
+signaler sur stdout ou stderr casserait la parité avec Composer. Décision
+du mainteneur : un fichier JSON par projet dans le cache de vivacity, et une
+ligne sous `VIVACITY_TRACE=1` (déjà hors parité), rien d'autre.
+
+**Où, et pourquoi pas à côté du marqueur.** `store/.detached-reports/v4/
+<sha1 du chemin canonique de vendor/>/<UTC>-<pid>.json`, un fichier par
+passe qui a trouvé des fichiers liés. Pas `store/.detached/v4/<clé>.json` :
+le README dit d'effacer `store/.detached/` pour rejouer la passe, ce qui
+effacerait aussi les rapports. Un fichier par passe, écrit par temp +
+renommage et jamais réécrit : une passe incomplète refaite ne retrouve plus
+les fichiers déjà déliés, un rapport réécrit perdrait leur trace, et deux
+processus sur le même projet ne peuvent pas s'écraser. Une passe qui ne
+délie rien (tous les fichiers liés échouent encore) et dont le projet a déjà
+un rapport n'écrit rien et ne lit aucune archive : pas un fichier de plus à
+chaque install tant qu'un fichier reste illisible. Un fichier encore lié
+n'a encore rien perdu ; la passe qui finira par le délier l'enregistrera.
+Nom à la nanoseconde (et pid) : deux passes d'un même processus (un
+embarqueur) ne se remplacent pas.
+
+**Les champs.** Par observation : `format` (1), `what` (ce que c'est, et
+que c'est une observation passée), `observed_at` (UTC), `vivacity_version`,
+`vendor_dir` (canonique), `pass_complete`, les comptes. Par paquet : nom,
+version, `dist_reference`, chemin d'installation, la référence (source,
+URL et chemin de l'archive dans le cache de Composer, sha1 de l'archive,
+`dist.shasum` et l'accord des deux ; l'entrée du store pour une entrée
+extraite par ce run) ou la raison de l'absence de référence. Par fichier :
+chemin relatif au paquet, nombre de noms et identité de l'inode (périphérique
+et inode sous Unix, numéro de série du volume et index sous Windows), sha1
+du contenu courant (calculé pendant la copie de déliaison, donc celui des
+octets gardés), déliaison (`detached` / `failed` et la raison), comparaison
+(`identical` / `different` avec le sha1 attendu, `not_compared` et la
+raison). Les deux issues sont séparées : une migration entièrement faite
+peut avoir une comparaison incomplète. sha1 parce que `sha1` et `hex` sont
+déjà des dépendances de vivacity-core (aucune dépendance ajoutée) et que
+c'est le condensat de `dist.shasum`.
+
+**Jamais l'ancien store comme référence.** Une entrée `v3` (ou antérieure)
+est exactement ce qu'une écriture à travers un lien a pu modifier : la
+prendre pour référence ferait passer pour « identique » un fichier
+contaminé. La référence est l'archive : l'entrée `v4` que CE run vient
+d'extraire de l'archive (provenance établie : les octets lus, leur sha1
+calculé sur place, `Store::ensure_made` dit que cet appel a fait
+l'extraction), sinon l'archive du cache de fichiers de Composer, extraite à
+part dans le répertoire de staging du store par la même extraction que le
+store (même retrait de la racine, mêmes liens symboliques, mêmes noms
+renommés sous Windows), et refusée si `dist.shasum` n'est pas vide et
+diffère. Une entrée `v4` déjà présente avant le run n'est pas prise : rien
+n'y dit de quelle archive elle vient. Le chemin local d'une dist `artifact`
+n'est pas lu non plus : une seule règle, le cache de Composer.
+
+**Pourquoi aucun téléchargement.** La passe tourne pendant un install qui
+peut être hors ligne, et elle ne doit ni échouer ni écrire une ligne ; un
+téléchargement ajouterait une erreur réseau possible, un délai, et des
+archives dans le cache de Composer (qui changeraient ses lignes
+`Downloading` après une passation). Pas d'archive dans le cache : « non
+comparé », avec la raison ; la déliaison est faite quand même.
+
+**Coût.** Seuls les fichiers liés sont lus pour un condensat, pendant la
+copie qui les délie (une lecture, pas deux). Rien de lié (APFS, btrfs, xfs ;
+projet déjà marqué) : rien de lu, aucun rapport. L'archive n'est pas relue
+pour un paquet dont ce run vient d'extraire l'entrée (cas du premier projet
+mis à jour : l'entrée `v4` vient d'être chauffée) ; les tâches de
+téléchargement ne hachent rien : le sha1 de l'archive est `dist.shasum`
+quand le lock en porte un (la récupération a vérifié les octets contre
+lui), sinon celui du fichier du cache de Composer, lu seulement pour un
+paquet qui a des fichiers liés (une lecture sans décompression ; noté
+« lu à l'écriture du rapport » dans `archive_sha1_from`). Une première
+version hachait chaque archive extraite tant que la passe restait à faire,
+même sans fichier lié (premier install d'un projet neuf, APFS) : retirée
+après la revue. Pour un paquet dont l'entrée `v4` existait (le
+deuxième projet sur le même cache), l'archive du cache de Composer est lue
+et extraite une fois, à part : coût d'une extraction froide, une fois par
+projet, non mesuré sur un gros projet.
+
+**Ce que le rapport ne dit pas** : il décrit une observation passée.
+`different` ne veut pas dire « corrompu » : ce peut être un correctif voulu,
+dans ce projet ou dans un autre qui partageait le fichier. Sa présence ne
+prouve pas l'absence de liens aujourd'hui (un binaire ≤ 0.26.0 a pu relier le
+projet après la passe), et vider le cache de vivacity le perd. Des fichiers à
+plusieurs noms que vivacity n'a pas faits (`cp -al`, `rsync --link-dest`) y
+figurent aussi : « lié » ne veut pas dire « lié au store ». Un paquet mis à
+jour ou retiré dans le même run n'y figure pas : il a été remplacé avant la
+passe.

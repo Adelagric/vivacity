@@ -57,6 +57,14 @@ things break when that assumption does:
     version makes again afterwards (going back to 0.26.0 on the same cache)
     are not looked for: delete `store/.detached/` under the cache directory to
     run the pass again.
+  - when the pass finds linked files, it writes a report under vivacity's
+    cache directory (`store/.detached-reports/v4/`) and prints nothing;
+    `VIVACITY_TRACE=1` prints its path. For each linked file, the report
+    records the inode it shared and how its content compares with the
+    package's archive, never with the old store, which an edit may have
+    reached. A `different` file may be a deliberate patch, and the report
+    is one past observation, not proof of the current state: details in
+    [DECISIONS.md](DECISIONS.md) (2026-10-31, the detach report).
 
   **Disk space.** With the fix, on those file systems each project holds a
   full copy of its `vendor/`, as it does with Composer, on top of the store's
