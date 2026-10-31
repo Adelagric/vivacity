@@ -315,14 +315,15 @@ aucune requête (donnée du lock).
 | archive (`FileDownloader`, `CurlDownloader`) | TLS bloquée / muet | curl 28, 4 tentatives (code 400 : pas de nouveau tour) | pas de source : exception, 100, indice `COMPOSER_DISABLE_NETWORK=1` | attend indéfiniment | 100, indice ; lignes « Downloading » absentes (point 12) | `tls-dist`, `http-dist` (lent) |
 | idem | 404 | une tentative | 100 | identique | inchangé | `d404` (section 1) |
 | idem | 500/502/503/504 | 4 tours de 4 tentatives, 500 ms entre les tours | 100 | 4 tentatives | 16 | `dist-500` |
-| idem | archive dans le store de vivacity, absente du cache de Composer | Composer la télécharge | échec du téléchargement → 100 | installée depuis le store, 0 (**plus permissif**) | inchangé | point 55, repro dans `parity-gaps-026.md` |
+| idem | archive dans le store de vivacity, absente du cache de Composer | Composer la télécharge | échec du téléchargement → 100 | installée depuis le store, 0 (**plus permissif**) | téléchargée comme chez Composer, 100 (point 55, plus bas) | `tls-dist-store`, `refused-dist-store`, section 8 |
 | notifications (`notifyInstalls`, POST 6 s / 3 s) | toute erreur | avalée (`catch` vide) | rien | aucune requête (point 17) | inchangé | — |
 | API des avis (`update`, POST, 10 s, une tentative) | TLS bloquée / muet | curl 28 après 10 s | `ignore-unreachable.update` vrai : « Security advisory data could not be fetched… », sinon 100 | identique (10 s depuis longtemps) | inchangé | `https-advisory`, `http-advisory` (témoins) |
 | idem | JSON invalide | `ParsingException` | sortie 1 | autre message | identique à l'octet | lu ; message par `invalid_json` |
 
 Écarts ouverts (repros dans `parity-gaps-026.md`, points 54-60) : texte des
 messages de transport ; archive servie par le store (cypht, issue plus
-permissive, décision au mainteneur) ; autres téléchargements interrompus au
+permissive — fermé ensuite, option (b) du mainteneur : section « Point 55 »
+plus bas) ; autres téléchargements interrompus au
 premier échec ; magasin de certificats ; attente avant une passation
 tardive ; Flex non audité ; repli sur la source non comparé.
 
@@ -387,3 +388,283 @@ par le test unitaire (valeur injectée) ; pas de bout en bout avec un php.ini
   premier dans le temps, vivacity le premier du lot.
 - Fichiers de documentation non commités au moment de la revue : commités
   ensuite.
+
+## Point 55 — parité stricte des téléchargements (option b du mainteneur)
+
+### Cadrage
+
+**Problème.** Caches désynchronisés : une archive absente du cache de
+fichiers de Composer, présente dans le store de vivacity. Les deux
+impriment `  - Downloading …` ; Composer télécharge (succès : l'archive dans
+son cache ; échec réseau : 100), vivacity pose le paquet depuis son store,
+sans requête, et sort en 0 (cypht, `composer.tiki.org` injoignable).
+
+**Décision du mainteneur.** Quand Composer téléchargerait une archive,
+vivacity fait la même requête (mêmes tentatives et délais), même si son
+store a le paquet, et en tire la même issue : code, sortie, effets sur le
+cache de fichiers de Composer. **Restriction** : seulement quand Composer ne
+servirait pas l'archive depuis son cache ; le cas normal (cache de Composer
+chaud) reste sans requête, le store sert comme aujourd'hui.
+
+**Non-objectifs.** Le cas normal où le cache de Composer et le store
+divergent en contenu (pas de hachage de plus sur le chemin chaud). Les
+miroirs (point 16), `updateDistReference` (point 14, clé sur l'URL brute),
+le repli sur la source (point 60), les autres téléchargements interrompus
+au premier échec (point 56), le texte des messages de transport (point 54).
+
+**Critères de succès observables.** Les cas de la section 8 de
+`harness/transport-exit.sh` (plus `tls-dist-store` en section 6) rouges sur
+la branche avant le point 55, verts après ; le témoin `desync-witness` (deux
+caches chauds, aucune requête de part et d'autre) vert avant et après ;
+sections 1-7, `download-lines.sh`, `diff-vendor.sh`, `vendor-isolation.sh`
+(link, cow), `secure-http.sh` verts.
+
+### Le prédicat de Composer (lu dans le phar)
+
+`FileDownloader::download` (`src/Composer/Downloader/FileDownloader.php`)
+l. 176-198 : l'archive est copiée du cache **ssi**
+`$this->cache !== null && ($checksum === null || $checksum === '' ||
+$checksum === $this->cache->sha1($cacheKey)) && $this->cache->copyTo($cacheKey, $fileName)` ;
+sinon la ligne `Downloading` (l. 192-194) et `addCopy` (l. 196). Clé
+(l. 129-133, 148) : `<getName()>/sha1(<URL traitée>).<type>`, URL traitée
+= `processUrl` (l. 481-492 : `updateDistReference`) de la première URL de
+`getDistUrls` (miroirs préférés en tête).
+
+- **Archive absente** : `copyTo` rend faux (`Cache.php` l. 213-233) →
+  téléchargement.
+- **Cache nul** : `Factory::createDownloadManager` (`Factory.php`
+  l. 506-510) ne crée le cache que si `cache-files-ttl > 0`
+  (`Config.php` l. 458-463 : à défaut, `cache-ttl`) → téléchargement de
+  tout, rien d'écrit.
+- **Cache désactivé** : `Cache::isUsable` (`Cache.php` l. 82-85 : un
+  segment `$null`, `nul`, `NUL`, `/dev/null`) → désactivé sans message ;
+  répertoire non créable ou non inscriptible (l. 90-108) → l'avertissement
+  « Cannot create cache directory … Proceeding without cache », désactivé →
+  téléchargement de tout.
+- **Lecture seule** (`cache-read-only`, `COMPOSER_CACHE_READ_ONLY`,
+  `Config.php` l. 400-412 ; `Factory.php` l. 509) : lu comme d'habitude
+  (`isEnabled` ne teste pas l'écriture, l. 95-101), jamais écrit
+  (`$accept`, l. 239-242 ; `copyFrom`, l. 192).
+- **Ramasse-miettes** : au constructeur (`FileDownloader.php` l. 106-109),
+  `gcIsNecessary` (`Cache.php` l. 238-254) tire `!random_int(0, 50)` : une
+  fois sur 51, `gc` (l. 304-332) efface les archives dont le **mtime** a
+  plus de `cache-files-ttl` (défaut `cache-ttl`, 6 mois) — `copyTo` ne
+  touche que l'atime (l. 219) — puis les moins récemment lues au-delà de
+  `cache-files-maxsize`. Tirage aléatoire : non reproductible.
+- **`COMPOSER_DISABLE_NETWORK`** (`HttpDownloader.php` l. 73, 328-338) :
+  le prédicat ne change pas ; la ligne `Downloading` s'imprime, puis
+  `startJob` rejette la requête (`TransportException` « Network disabled,
+  request canceled: <url> », statut 499 → `FileDownloader` l. 272-275 : ni
+  nouvelle tentative ni autre URL) → 100. Seuls les jobs curl passent par
+  `startJob` : un chemin local ou `file://` (`RemoteFilesystem`, l. 236-264,
+  résolu dans le constructeur de la promesse) est copié même hors ligne.
+- **Dist `file://` ou chemin local** : même `FileDownloader`, même cache,
+  même prédicat ; la copie passe par `RemoteFilesystem` puis `$accept`
+  l'écrit dans le cache. **Dist `path`** : `PathDownloader::download`
+  (l. 42-…) ne lit ni n'écrit le cache, aucune ligne.
+- **Somme de contrôle** : avec un `dist.shasum` non vide, une archive en
+  cache dont le sha1 diffère n'est pas servie → téléchargement ; le fichier
+  périmé n'est **pas** effacé avant (écrasé par `copyFrom` au succès,
+  laissé en place à l'échec : `$reject` ne nettoie que `lastCacheWrites`).
+  L'archive téléchargée est écrite en cache **avant** sa vérification
+  (l. 239-242 puis 213-215).
+
+### Plan
+
+1. **Cas rouges** (`harness/transport-exit.sh`) : section 8 neuve (rapide)
+   et `tls-dist-store` en section 6 (dans le lot parallèle, sans durée de
+   plus). Chaque côté son serveur ; journal des requêtes de l'archive
+   (`router7.php` : `REQ_LOG`) ; le sha1 de l'URL de chaque côté remplacé
+   par `<SHA>` dans les effets (les ports diffèrent), comme les ports. Cas :
+   `desync-fetch` (store chaud, cache froid, serveur qui répond : une
+   requête de chaque côté, archive en cache, projet identique),
+   `desync-other-bytes` (le store vient de l'archive A, le serveur sert B :
+   vendor/ de B des deux côtés), `refused-dist-store` (port fermé) et
+   `tls-dist-store` (muet en TLS) : 100, même sortie hors texte de
+   transport, mêmes effets (vendor/ compris, répertoires vides inclus) ;
+   `desync-witness` (deux caches chauds : zéro requête, vert avant et
+   après) ; `offline-dist-store` (`--offline` contre
+   `COMPOSER_DISABLE_NETWORK=1`, store chaud, cache froid) ;
+   `desync-local` et `offline-local` (dist sur un chemin local, cache froid,
+   store chaud : l'archive écrite en cache) ; `desync-stale-sha`
+   (`dist.shasum` posé, une autre archive en cache à la clé : Composer
+   télécharge et l'écrase).
+2. **Le prédicat, un seul** (`vivacity-core/src/fetch.rs`) :
+   `composer_downloads(cache_root, name, url, type, shasum)` = archive
+   absente du cache, ou `shasum` non vide différent du sha1 du fichier.
+   `download_lines` (install.rs) l'évalue une fois par paquet de la
+   transaction, imprime la ligne et rend l'ensemble des noms ;
+   `InstallOptions::downloads` le passe à l'installeur (à défaut,
+   l'installeur l'évalue lui-même avec la même fonction) ; le
+   téléchargement suit cet ensemble, pas un second test du cache.
+3. **Les cas du cache que vivacity ne reproduit pas, rendus avant toute
+   sortie** (`cache_dir_hand_over_with`, `project_cache_config`, et
+   l'`auth.json` du projet) : `cache-read-only`, `cache-files-ttl`,
+   `cache-ttl` posés dans une couche, `COMPOSER_CACHE_READ_ONLY` posé, un
+   répertoire `files/` inutilisable (`Cache::isUsable`) ou ni inscriptible
+   ni créable. Présence suffit (comme `cache-files-dir` aujourd'hui) :
+   prudent, aucune conversion PHP à reproduire.
+4. **L'installeur** (`installer.rs`) : un paquet de l'ensemble est
+   téléchargé même s'il est dans le store ; hors ligne, `Error::Transport`
+   « Network disabled, request canceled: <url assainie> » sauf chemin local
+   (lu même hors ligne) ; le fichier périmé n'est plus effacé avant le
+   téléchargement. **Sort de l'archive** : l'entrée du store est réutilisée
+   seulement si un fichier de provenance (`<store>/.archives/<layout>/…`,
+   le sha1 de l'archive dont l'entrée a été extraite, écrit par le seul
+   processus qui a renommé l'entrée) égale le sha1 de l'archive
+   téléchargée. Sinon : extraction de l'archive téléchargée en zone de
+   préparation, vendor/<paquet> posé depuis elle, **l'entrée du store
+   inchangée** (une entrée est immuable : le cache de classmap la clé par
+   son chemin, d'autres projets en ont des copies), et une marque « copie
+   étrangère » (`<store>/.foreign/<layout>/<clé de vendor>/<nom>`) que le
+   dump lit (`mutable_copies` : pas d'enregistrement de store pour cette
+   copie) et que la prochaine pose depuis le store efface.
+5. **Échec du téléchargement** : les lignes `Downloading` (et leurs
+   avertissements `secure-http`) imprimées avant l'erreur, comme Composer ;
+   un vendor/ créé par le run retiré (Composer : `cleanup`,
+   `FileDownloader.php` l. 316-343).
+6. Docs : point 55 fermé, point 14 mis à jour (ce qui reste), DECISIONS,
+   CHANGELOG, HANDOVER, ce plan.
+
+### Critères de vert
+
+Cas neufs rouges sur la branche avant le point 55 (nommés), verts après ;
+`desync-witness` vert des deux côtés ; `transport-exit.sh` (sans les cas
+lents), `download-lines.sh`, `diff-vendor.sh`, `vendor-isolation.sh` (link,
+cow), `secure-http.sh` verts ; `cargo test` des crates touchées ; clippy `-D
+warnings` hôte et `x86_64-pc-windows-gnu`.
+
+### Risques
+
+- Un projet dont le cache de Composer est vidé (CI sans cache Composer mais
+  avec le store de vivacity) télécharge de nouveau toutes ses archives :
+  c'est le coût voulu, le comportement de Composer.
+- Hors ligne, store chaud et cache froid : échec là où vivacity
+  réussissait (voulu).
+- La marque de copie étrangère est un état de plus ; perdue (store effacé),
+  le dump retombe sur l'hypothèse d'aujourd'hui (copie = entrée), P1.
+
+### Méta-analyse (sous-agent frais, plan et code, 2026-10-31)
+
+14 failles (1 bloquante, 7 majeures, 6 mineures), vérifiées dans le code
+avant d'être retenues :
+
+- **1 (bloquante, retenue)** — la ligne vient des opérations, le
+  téléchargement de `to_install` (filtré par le chemin d'installation) : un
+  paquet peut avoir sa ligne sans requête. **Changé** : l'ensemble calculé
+  par `download_lines` est la seule vérité ; l'installeur télécharge chacun
+  de ses membres, posé ou non (une archive sans chemin d'installation est
+  téléchargée et mise en cache, comme chez Composer). Un miroir préféré en
+  tête change la clé et l'URL de Composer (point 16) : consigné, pas rendu
+  (voir « Exécution »).
+- **2 (majeure, retenue en partie)** — le hachage d'une archive en cache
+  dont le lock porte un `shasum`, sur une install à vendor/ vide : c'est le
+  prédicat de Composer (`hash_file`, l. 180), qui fait ce travail lui
+  aussi ; gardé, limité aux paquets de la transaction qui ont un `shasum`
+  (aucun sur Packagist), et l'archive vérifiée n'est pas relue ni rehachée
+  ensuite.
+- **3 (majeure, retenue)** — `COMPOSER_CACHE_DIR=/dev/null` (idiome Docker)
+  marche en natif aujourd'hui ; un rendu à la présence le casserait.
+  **Changé** : cache nul (`cache-files-ttl`/`cache-ttl` entiers ≤ 0) et
+  cache inutilisable (`isUsable`) en natif : tout se télécharge, rien ne
+  s'écrit. Rendus : lecture seule effective (sémantique de `Config::get`,
+  l'env `!== 'false' && (bool)`), une valeur non entière des durées, une
+  clé dans `auth.json`/`COMPOSER_AUTH`, un répertoire `files/` ni
+  inscriptible ni créable (`access(2)` sur l'ancêtre existant).
+- **4 (majeure, rejetée ici)** — `COMPOSER_DISABLE_NETWORK` posé par
+  l'utilisateur sans `--offline` : écart connu et laissé le 2026-10-16
+  (DECISIONS), hors de ce point ; consigné de nouveau. `sanitize_url`
+  passe dans vivacity-core (le message hors ligne l'assainit).
+- **5 (majeure, retenue en partie)** — la marque de copie étrangère se perd
+  si vendor/ est déplacé : écrite avant la pose (un arrêt la laisse
+  prudente) ; la perte retombe sur l'hypothèse d'aujourd'hui (P1).
+- **6 (majeure, retenue)** — le fichier de provenance ne sert à rien pour
+  les entrées d'avant (aucune n'en a) et ne guérit jamais. **Changé** : pas
+  de fichier de provenance ; dans le seul cas désynchronisé, l'archive
+  téléchargée est extraite et comparée à l'entrée (chemins, types,
+  contenus, cibles des liens, modes) : identique, l'entrée sert ;
+  différente, copie étrangère. L'install suivante à vendor/ vidé sert
+  l'entrée (cas normal, cache de Composer chaud : la restriction) —
+  consigné avec sa repro, pas un cas du harnais.
+- **7 (majeure, consignée)** — `ArchiveDownloader` l. 86-100 retire
+  l'archive du cache quand l'extraction échoue : écart existant (déjà vrai
+  sur un store froid), consigné, non corrigé.
+- **8 (majeure, retenue en partie)** — les deux lignes « Failed to
+  download … from dist » / « Source fallback is disabled » d'un paquet qui a
+  une source : point 60, hors 0.26.1 par décision du mainteneur ; les
+  lignes `Downloading` seulement pour une erreur de téléchargement ; le
+  retrait sur l'échec suit `cleanup` (vendor/ s'il est vide, pas ses
+  parents) ; les lots de plugins installés avant l'échec : consigné.
+- **9 (mineure, consignée)** — Composer crée `files/` vide même si le
+  téléchargement échoue.
+- **10 (mineure, retenue)** — l'archive téléchargée est écrite en cache
+  avant la vérification de sa somme, comme `$accept` puis l. 213-215.
+- **11, 12 (mineures, retenues)** — cas `-o` avec deux archives aux mêmes
+  fichiers et à classes différentes, entrée du store vérifiée inchangée,
+  lot mixte, comptes de requêtes exacts (≥ 1 chez Composer dans les cas
+  rouges, 0 des deux côtés dans le témoin), journal remis à zéro après la
+  préparation, ligne `vivacity:` retirée, compteurs du résumé. `update` /
+  `require` non ajoutés (même installeur) : non vérifiés.
+- **13 (mineure, retenue)** — deux changements de plus, listés dans
+  DECISIONS : le message hors ligne et les lignes `Downloading` avant une
+  erreur.
+- **14 (mineure, rejetée)** — sondes paresseuses : un cache en lecture
+  seule change aussi le cache des dépôts (vivacity l'écrit) ; le rendu au
+  démarrage est le seul sûr.
+
+### Exécution (2026-10-31)
+
+**Rouges sur la branche avant le point 55** (binaire de la tête de départ,
+mêmes cas) : `tls-dist-store` (vivacity 0 contre 100), `desync-fetch`
+(aucune requête, archive absente du cache de Composer), `desync-other-bytes`
+(vendor/ de l'archive A contre B) et `desync-other-bytes-noop` (la classmap
+de A), `refused-dist-store` et `offline-dist-store` (0 contre 100),
+`desync-local` et `offline-local` (archive non écrite dans le cache),
+`desync-stale-sha` (ni ligne ni requête), `desync-mixed`, `devnull-cache`
+(aucune requête), `ttl-zero` (ni ligne ni requête), `ro-cache` (natif au
+lieu de rendu), `desync-settle` (ajouté après la revue : aucune marque) ;
+`tls-dist` et `dist-500` aussi, par le vendor/ vide que vivacity laissait
+(les effets listent désormais les répertoires de vendor/). Le témoin
+`desync-witness` (deux caches chauds : aucune requête) est vert sur la
+branche avant le point 55. Après : tous verts, et les sections 1 à 7 ;
+`tls-dist` compare désormais stderr.
+
+**Vu rouge en chemin** : `vendor-isolation.sh` (`iso-upgrade-nocache`) a
+attrapé une régression du premier jet — un paquet inchangé dont l'entrée
+manque lisait son archive locale (le contrôle hors ligne déplacé après la
+lecture locale) et l'écrivait dans le cache de Composer. Le réchauffement ne
+prend plus que la copie du cache (`Fetcher::cached_dist_bytes`).
+
+**Vérifié que la marque de copie étrangère porte** : dans le projet de
+`desync-other-bytes`, la marque retirée, `dump-autoload -o` sert
+l'enregistrement de l'entrée (`Probe\A`) ; remise, `Probe\A2`.
+
+**Écarté en route** : rendre à Composer une dist à miroir préféré (méta,
+faille 1) — `secure-http.sh` (`dist-mirrors`) attend ce cas natif, décision
+du 2026-10-30 ; la clé du miroir reste le point 16.
+
+### Revue indépendante (sous-agent frais, diff seul) et ce qui a changé
+
+- **Rejeté ici, déjà consigné** : un téléchargement qui échoue interrompt
+  les autres, là où `Loop::wait` les mène à terme et les met en cache —
+  point 56, hors 0.26.1 par décision du mainteneur ; le comportement est
+  celui d'avant (le `JoinSet` abandonné au retour).
+- **Corrigé** : un paquet que l'installeur juge inchangé mais que Composer
+  télécharge (transaction et identité en désaccord) était lancé deux fois,
+  en réchauffement : il est téléchargé, plus réchauffé.
+- **Corrigé** : le lecteur d'archives de Flex (`DistReader`) suit l'état du
+  cache de fichiers (sans cache : rien lu, rien écrit).
+- **Corrigé** : la marque de copie étrangère qui ne peut pas s'écrire fait
+  échouer la pose (une copie non consignée servirait au dump les
+  enregistrements de l'entrée) ; écrite juste avant la pose, après les
+  clones git (une passation de leur part ne la laisse plus derrière).
+- **Corrigé** : un fichier (ou un lien mort) à la place de `files/` rend la
+  commande à Composer (`mkdir` y échoue) ; `sanitize_username` ne coupe plus
+  un caractère multioctet (panique possible, code déplacé de
+  vivacity-resolver).
+- **Corrigé (harnais)** : seule la ligne de résumé `vivacity: N installed,`
+  est retirée par `normalize`, plus toute ligne `vivacity:` ; un cas
+  `desync-settle` vérifie que la marque s'efface quand la copie est reposée
+  depuis son entrée.
+- **Consigné** : le hachage des archives à `dist.shasum` se fait en série
+  dans `download_lines` (comme Composer), avant le téléchargement parallèle.

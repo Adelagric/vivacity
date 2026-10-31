@@ -6334,12 +6334,15 @@ et décide. Reproduit en local (un serveur php qui accepte et n'écrit
 jamais) : vivacity sur main tourne encore quand Composer a fini, pour
 `packages.json`, le résumé des listes et une archive.
 
-**L'erreur n'était pas avalée.** Sur 90a357f, une négociation bloquée qui
-finit en erreur (serveur qui ferme au bout de 5 s) donne l'avertissement
-« could not be fully loaded » et la suite de Composer. Le silence de cypht
-après 424 s veut dire que tiki a fini par répondre à vivacity, qui
-l'attendait encore ; Composer, lui, avait abandonné à 40 s. L'écart était
-le délai, pas le traitement de l'erreur.
+**L'erreur n'était pas avalée.** L'hypothèse de départ — une erreur de la
+vérification de sécurité (liste de blocage) avalée en silence — n'est
+**pas** confirmée : le défaut était un délai absent, et l'erreur, quand elle
+arrivait, était signalée comme Composer la signale. Sur main, une
+négociation bloquée qui finit en erreur (serveur qui ferme au bout de 5 s)
+donne l'avertissement « could not be fully loaded » et la suite de Composer.
+Le silence de cypht après 424 s veut dire que tiki a fini par répondre à
+vivacity, qui l'attendait encore ; Composer, lui, avait abandonné à 40 s.
+L'écart était le délai, pas le traitement de l'erreur.
 
 **Ce qui est reproduit, et comment.**
 - `CURLOPT_CONNECTTIMEOUT, 10` → `connect_timeout(10 s)` de reqwest.
@@ -6389,6 +6392,135 @@ Composer est impossible, la panne ne se voit qu'en attendant, après les
 premières lignes. Le harnais ne passe plus par `net-retry.sh` en CI : il
 est hors ligne, et ses cas impriment les erreurs que `net-retry.sh` prend
 pour une coupure.
+
+## 2026-10-31 — Point 55 : quand Composer télécharge une archive, vivacity la télécharge (option (b) du mainteneur)
+
+Plan, méta-analyse et exécution : `docs/plans/net-timeouts.md`, section
+« Point 55 ». Statut : fixed on the `net-timeouts` branch, not yet on main;
+planned for release in 0.26.1.
+
+**Le constat.** Les deux caches désynchronisés — une archive absente du cache
+de fichiers de Composer, présente dans le store de vivacity : les deux
+écrivent `  - Downloading …`, puis Composer télécharge (succès : l'archive
+dans son cache ; échec réseau : 100) et vivacity posait le paquet depuis son
+store, sans requête, et sortait en 0 (cypht, `composer.tiki.org`
+injoignable).
+
+**La décision du mainteneur : parité stricte, restreinte aux caches
+désynchronisés.** Quand Composer téléchargerait l'archive, vivacity fait la
+même requête (mêmes tentatives, mêmes délais) et en tire la même issue :
+code, sortie, archive écrite là où Composer l'écrit. Quand Composer la
+copierait de son cache (le cas normal), rien ne change : aucune requête, le
+store sert.
+
+**Le prédicat, lu dans le phar** (`FileDownloader::download`,
+FileDownloader.php l. 176-198) : l'archive vient du cache **ssi** le cache
+existe, qu'un fichier est à la clé (`<nom>/sha1(<URL>).<type>`, l. 129-148)
+et, quand le lock porte un `dist.shasum`, que son sha1 lui est égal
+(`Cache::sha1`, `copyTo`, Cache.php l. 213-233, 356-366). Sinon la ligne et
+la requête. `fetch::composer_downloads` l'écrit une fois ; `download_lines`
+l'évalue une fois par paquet de la transaction, imprime la ligne et rend les
+noms, que l'installeur télécharge — tous, posés ou non, store ou pas : il
+n'y a pas de second test du cache.
+
+Les états du cache, d'après `Factory::createDownloadManager` (Factory.php
+l. 504-510), `Config::get` (Config.php l. 400-412, 428-463) et `Cache`
+(l. 50-108) :
+- pas de cache (`cache-files-ttl`, à défaut `cache-ttl`, entier ≤ 0) ou un
+  cache que `Cache::isUsable` refuse (un segment `$null`, `nul`, `NUL`,
+  `/dev/null` : `COMPOSER_CACHE_DIR=/dev/null`, l'idiome Docker) : **natif**,
+  tout est téléchargé, rien n'est lu ni écrit dans `files/` (le lecteur
+  d'archives de Flex compris) ;
+- **rendu à Composer avant toute sortie** : un cache en lecture seule
+  (`COMPOSER_CACHE_READ_ONLY` selon `!== 'false' && (bool)`, ou
+  `cache-read-only` vrai — Composer n'écrit alors aucun cache, vivacity
+  écrit celui des dépôts), une durée qui n'est pas un entier, une de ces clés
+  dans une couche que vivacity ne lit pas (auth.json global ou du projet,
+  `COMPOSER_AUTH`), un `files/` ni inscriptible ni créable (Composer avertit
+  « Cannot create cache directory … » et continue sans cache) ;
+- **ramasse-miettes** (`FileDownloader` l. 106-109, `Cache::gcIsNecessary`
+  l. 238-254) : une exécution sur 51, tirée au hasard, Composer efface avant
+  de télécharger les archives dont le mtime dépasse la durée, puis les moins
+  récemment lues au-delà de `cache-files-maxsize`. Non reproductible :
+  vivacity répond pour les 50 autres ;
+- **hors ligne** (`--offline`, que le fallback traduit en
+  `COMPOSER_DISABLE_NETWORK=1`) : le prédicat ne change pas, la ligne
+  s'imprime, puis `HttpDownloader::startJob` (l. 328-338) refuse — « Network
+  disabled, request canceled: <url> » (l'URL assainie, `Url::sanitize`), sans
+  avertissement `secure-http` (curl ne démarre pas), 100 ;
+- **dist sur un chemin local ou `file://`** : même cache, même prédicat ;
+  copiée par `RemoteFilesystem` (l. 236-264), que `COMPOSER_DISABLE_NETWORK`
+  n'arrête pas, puis écrite dans le cache. Dist `path` : ni cache, ni ligne ;
+- **somme de contrôle** : une copie qui ne correspond pas n'est pas servie ;
+  elle n'est pas effacée avant (écrasée au succès, laissée à l'échec), et
+  l'archive téléchargée est écrite dans le cache **avant** d'être vérifiée
+  (`$accept` l. 239-242, puis l. 213-215) — reproduit.
+
+**Le sort de l'archive téléchargée.** Composer extrait l'archive qu'il vient
+de télécharger. Dans le seul cas désynchronisé où le store a déjà l'entrée,
+vivacity extrait l'archive téléchargée à part et la compare à l'entrée
+(chemins, types, octets de chaque fichier, cibles des liens, modes, racines
+comprises) : **même arbre**, la copie de l'entrée est celle de l'archive,
+l'entrée sert ; **un autre arbre**, vendor/<paquet> est posé depuis
+l'extraction de l'archive téléchargée, et l'entrée du store **reste ce
+qu'elle était**. Une entrée est immuable : le cache de classmap clé ses
+enregistrements par son chemin, et d'autres projets en ont des copies qui
+correspondent à son contenu. La copie posée est consignée « étrangère »
+(`<store>/.foreign/v4/<clé de vendor>`, écrite avant la pose, réglée
+après) : le dump la traite comme une copie modifiable (pas d'enregistrement
+de store pour elle), jusqu'à ce qu'une pose depuis l'entrée l'efface.
+Écartés : remplacer l'entrée à son chemin (les enregistrements de classmap
+du chemin deviennent faux, et les copies des autres projets ne
+correspondent plus à l'entrée) ; un fichier de provenance (le sha1 de
+l'archive d'où vient l'entrée) — aucune entrée d'avant n'en a, il ne
+guérirait jamais ; réutiliser l'entrée sans comparer (le paquet posé ne
+serait pas celui de l'archive téléchargée).
+
+**Le coût.** Une requête seulement quand Composer en ferait une, donc quand
+les caches sont désynchronisés ; dans ce cas seulement, l'extraction de
+l'archive et sa comparaison avec l'entrée. Sur le chemin commun : le hachage
+d'une archive en cache pour les paquets de la transaction dont le lock porte
+un `dist.shasum` (le travail de Composer, `hash_file`, aucun sur
+Packagist), la lecture des couches de configuration déjà en mémoire, un
+`stat` et un `access(2)` du répertoire `files/`, et à chaque dump un `open`
+du fichier des copies étrangères (absent le plus souvent). Un CI qui garde le
+store de vivacity sans garder le cache de Composer télécharge de nouveau ses
+archives : c'est voulu, c'est ce que fait Composer.
+
+**Deux changements de plus, dans le même chemin.** Une installation dont un
+téléchargement échoue imprime ses lignes `Downloading` (et leurs
+avertissements `secure-http`) avant l'erreur, comme la boucle
+d'enregistrement de Composer, et retire un vendor/ resté vide (`cleanup`,
+FileDownloader.php l. 316-343) ; le message hors ligne d'une archive est
+celui de Composer (le « missing cache … in offline mode » laissé le
+2026-10-16 disparaît). Un paquet inchangé dont le store n'a pas l'entrée ne
+la prend plus que dans le cache de Composer : aucune requête, aucune
+lecture locale, rien écrit (le harnais d'isolation l'a vu rouge).
+
+**Ce qui reste, consigné** (`parity-gaps-026.md`) : l'install suivante à
+vendor/ vidé sert l'entrée du store quand le cache de Composer a désormais
+l'autre archive (cas normal, la restriction) ; la clé d'un miroir préféré
+(point 16) et `updateDistReference` (point 14) ; les deux lignes « Failed
+to download … from dist » / « Source fallback is disabled » d'un paquet qui
+a une source (point 60, hors 0.26.1) ; l'archive retirée du cache quand
+son extraction échoue (`ArchiveDownloader` l. 86-100) ; les lots de plugins
+que Composer installe avant un téléchargement qui échoue ; la ligne
+`Downloading` que Composer réimprime à chaque tour d'une archive en 5xx ;
+`COMPOSER_DISABLE_NETWORK` posé sans `--offline` (laissé le 2026-10-16) ;
+le `files/` vide que Composer crée même quand le téléchargement échoue.
+
+**Le harnais.** `transport-exit.sh`, section 8 (et `tls-dist-store` en
+section 6) : chaque côté ses serveurs, les requêtes de l'archive comptées de
+chaque côté, le sha1 de l'URL remplacé dans les noms du cache, vendor/
+comparé répertoires compris. Rouges sur la branche avant le point 55 :
+`tls-dist-store`, `desync-fetch`, `desync-other-bytes` (et sa suite sans
+opération, avec `-o` : la classmap de l'archive B), `refused-dist-store`,
+`offline-dist-store`, `desync-local`, `offline-local`, `desync-stale-sha`,
+`desync-mixed`, `devnull-cache`, `ttl-zero`, `ro-cache`, `desync-settle` (la
+marque de copie étrangère effacée par une pose depuis l'entrée) ; `tls-dist`
+et `dist-500` aussi, par le vendor/ vide qu'ils laissaient. Le témoin
+`desync-witness` (deux caches chauds : zéro requête de part et d'autre) est
+vert avant comme après.
 
 ## 2026-11-01 — Réutiliser au dump l'identité relevée à la pose : aucun gain, retiré (docs/plans/vendor-isolation.md, P1)
 

@@ -814,17 +814,25 @@ la décision revient au mainteneur.
     Avant écriture : en partie. S. Corpus : non. Sans coût : oui.
 12. **Texte des erreurs réseau** (curl contre reqwest, musl compris) et
     **encadré** des exceptions (`Error: …` contre la boîte de Symfony
-    Console, normalisé par `transport-exit.sh` et d'autres) ; une
-    installation qui échoue au téléchargement n'imprime pas les lignes
-    « Downloading » (imprimées après la transaction). Avant écriture :
-    non. M. Corpus : non. Sans coût : en partie.
+    Console, normalisé par `transport-exit.sh` et d'autres). Une
+    installation dont un téléchargement échoue imprime ses lignes
+    « Downloading » avant l'erreur depuis le 2026-10-31 (point 55) ; restent
+    sans elles une extraction qui échoue (Composer a imprimé les lignes, puis
+    « Installing … : Extracting archive »), et une archive en 5xx, dont
+    Composer réimprime la ligne à chaque nouveau tour (FileDownloader.php
+    l. 277-281 rappelle `$download()`, l. 192-194 ; cas `dist-500`, stderr
+    non comparée). Avant écriture : non. M. Corpus : non. Sans coût : en
+    partie.
 13. **Dépôt injoignable sous `ignore-unreachable: false`** : sortie 1 notée
     contre 100 (HANDOVER:208) — peut-être périmé, non revérifié ici.
-14. **Lignes « Downloading »** : archive en cache au sha1 périmé (Composer
-    l'annonce), `cache-files-ttl: 0` et `cache-read-only` inconnus, cache
-    non inscriptible (« Cannot create cache directory »), clé de cache sur
-    l'URL brute. Avant écriture : la config oui, le sha1 non. S. Corpus :
-    non (aucun ne pose ces clés). Sans coût : oui pour la config.
+14. **Lignes « Downloading »** : archive en cache au sha1 périmé,
+    `cache-files-ttl: 0`, `cache-read-only`, cache non inscriptible —
+    **fermés le 2026-10-31 avec le point 55** (le prédicat de Composer,
+    natif ou rendu avant toute sortie). Reste : la clé de cache sur l'URL
+    telle que le lock l'écrit, là où Composer prend celle de
+    `updateDistReference` (`FileDownloader::processUrl`, l. 481-492 : une
+    URL GitHub, GitLab ou Bitbucket réécrite avec la référence — la même
+    pour les locks de Packagist). Avant écriture : oui. S. Corpus : non.
 15. **Dist local lu une fois** (Composer : trois tentatives) et message
     d'un dist local absent. Avant écriture : non. S. Corpus : non.
 16. **Miroirs de dist** (`dist.mirrors` du lock) : vivacity télécharge
@@ -918,18 +926,46 @@ la décision revient au mainteneur.
     l'avertissement et l'erreur peuvent nommer un autre fichier (non
     mesuré).
 55. **Archive servie par le store là où Composer la télécharge** (cypht,
-    2026-10-31) : une archive présente dans le store de vivacity n'est pas
-    téléchargée même quand le cache d'archives de Composer ne l'a pas.
-    Composer la demande, et si son serveur ne répond pas (curl 28 sur
-    `composer.tiki.org`, « Source fallback is disabled ») il sort en 100 ;
-    vivacity installe et sort en 0. Une issue plus permissive, hors
-    politique de sécurité ; reproduit en local le 2026-10-31 : une archive
-    servie en http, `vivacity install` (store chauffé), vendor/ et cache
-    d'archives retirés, le lock repointé vers le serveur muet en https —
-    Composer (cache vide) sort en 100, vivacity en 0 avec vendor/ posé.
-    Avant écriture : non (réponse du réseau). Décision au
-    mainteneur (télécharger quand le cache de Composer n'a pas l'archive
-    annule le store ; l'inventorier comme effet assumé du store).
+    2026-10-31) — **fermé le 2026-10-31** (fixed on the `net-timeouts`
+    branch, not yet on main; planned for release in 0.26.1). Décision du
+    mainteneur, option (b) : quand Composer téléchargerait l'archive
+    (`FileDownloader::download` l. 176-198 : absente de son cache, une copie
+    dont le sha1 ne correspond pas au `dist.shasum`, ou pas de cache du
+    tout), vivacity fait la même requête même si son store a le paquet, et en
+    tire la même issue (code, sortie, archive écrite dans le cache de
+    Composer) ; le cas normal (cache de Composer chaud) reste sans requête.
+    Un seul prédicat (`fetch::composer_downloads`) pour la ligne et la
+    requête. L'archive téléchargée est extraite et comparée à l'entrée :
+    même arbre, l'entrée sert ; un autre, le paquet est posé depuis
+    l'archive, l'entrée reste intacte et la copie est consignée étrangère
+    pour le dump. Lecture seule, durée non entière, `files/` ni inscriptible
+    ni créable : rendus à Composer avant toute sortie ; pas de cache
+    (`cache-files-ttl` 0, `/dev/null`) : natif. DECISIONS 2026-10-31 ;
+    `transport-exit.sh`, section 8 et `tls-dist-store`. Reste, consigné :
+55a. **Après une copie étrangère, l'install suivante à vendor/ vidé sert
+    l'entrée du store** quand le cache de Composer a désormais l'autre
+    archive : Composer extrait celle de son cache, vivacity pose l'entrée
+    (cas normal, sans requête : la restriction du mainteneur ; même chose
+    quand Composer a rempli son cache lui-même). Repro : le cas
+    `desync-other-bytes` de `transport-exit.sh`, puis vendor/ retiré des
+    deux côtés et `install` : `Probe\A` chez vivacity, `Probe\A2` chez
+    Composer. Avant écriture : non (il faudrait hacher l'archive en cache
+    sur le chemin commun). S.
+55b. **Une extraction qui échoue retire l'archive du cache de Composer**
+    (`ArchiveDownloader::install` l. 86-100, `clearLastCacheWrite`, pour
+    une archive téléchargée comme pour une copie du cache) ; vivacity la
+    laisse. Repro : un `.zip` qui n'est pas un zip servi par `php -S`,
+    cache froid des deux côtés : `cache/files/` en a une copie chez
+    vivacity seulement. Non mesuré. S.
+55c. **Lots de plugins** : Composer installe les paquets `composer-plugin`
+    et `composer-installer` en lots à part, avant les autres
+    (`InstallationManager` l. 200-210, 286-300) ; un téléchargement d'un
+    lot suivant qui échoue laisse les premiers installés chez lui, rien
+    chez vivacity (tout est posé à la fin). Non mesuré. M.
+55d. **`files/` vide** : Composer crée le répertoire du cache de fichiers
+    (`Cache::isEnabled`, `mkdir`) dès qu'une archive passe par
+    `FileDownloader`, même si le téléchargement échoue ; vivacity ne le
+    crée qu'en y écrivant. Effet sur le cache seulement. S.
 56. **Une archive en échec interrompt les autres téléchargements**
     (`installer.rs`, `JoinSet` abandonné au premier `Err`) : Composer mène
     tous les téléchargements à terme (`InstallationManager`, `Loop::wait`)

@@ -85,6 +85,31 @@ byte-identical-output promise are the public API.
   first, and under `ignore-unreachable: false` none of the later
   repositories' summaries is fetched before the failure. A batch of package
   files where one request fails still writes the others to the cache.
+- **An archive Composer would download is downloaded, even when vivacity's
+  store holds the package.** When Composer's files cache does not serve an
+  archive (absent, a copy whose sha1 is not the lock's `dist.shasum`, or no
+  files cache at all), Composer prints `  - Downloading …` and fetches it;
+  vivacity printed the same line, then laid the package out from its store
+  without a request and exited 0 — even when the server was unreachable,
+  where Composer exits 100 (cypht's `composer.tiki.org`). vivacity now makes
+  the same request, with Composer's attempts and timeouts, writes the archive
+  where Composer caches it, and fails as Composer fails. One predicate
+  decides the line and the request (`FileDownloader::download`). When
+  Composer's cache serves the archive, nothing changes: no request, the store
+  serves. The package laid out is the downloaded archive's: if its tree
+  differs from the store entry's, the copy comes from the archive and the
+  entry stays as it is (other projects hold copies of it). Offline, the
+  error is Composer's (`Network disabled, request canceled: <url>`), a local
+  or `file://` dist is still read, and a run without a files cache
+  (`COMPOSER_CACHE_DIR=/dev/null`, `cache-files-ttl: 0`) downloads every
+  archive and writes none. A read-only cache, a lifetime that is not an
+  integer, or a files cache directory that can be neither written nor
+  created hand the command to Composer before any output.
+- **A failed download prints its `  - Downloading` lines** before the error,
+  as Composer does, and an empty `vendor/` it left behind is removed.
+- **A downloaded archive whose checksum does not match is written to
+  Composer's files cache before the error**, and a stale copy is no longer
+  deleted before the download, as in Composer.
 - **`install` no longer fetches the `includes` of a repository without
   `metadata-url`** while verifying the lock: Composer only reads its
   `packages.json` there, so an include that failed made vivacity warn
