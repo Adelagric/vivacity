@@ -21,7 +21,7 @@ use crate::policy_config::{
     IgnoreMap, PolicyConfig,
 };
 use crate::pool::{Pool, Repository, Request};
-use crate::repository::{AdvisoriesByName, Advisory, ComposerRepository, FilterEntry};
+use crate::repository::{AdvisoriesByName, Advisory, ComposerRepository, FilterEntry, RepoError};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -336,21 +336,6 @@ pub fn filter_list_filter(
     block_scope: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Pool, FilterError> {
-    // A custom list with no source and no repository advertising it is
-    // inert in Composer; otherwise it requires a provider that is not
-    // ported.
-    if !policy.custom_lists.is_empty() {
-        for repo in composer_repos(repositories) {
-            if let Ok(lists) = repo.get_filter_lists() {
-                if let Some(l) = lists.iter().find(|l| policy.custom_lists.contains(l)) {
-                    return Err(FilterError(
-                        format!("custom policy list \"{l}\" is not supported by vivacity yet"),
-                        crate::repository::RepoErrorKind::Unsupported,
-                    ));
-                }
-            }
-        }
-    }
     let check_locked_against_install = block_scope == "update";
     let configured: Vec<String> = if policy.malware_blocks(block_scope) {
         vec!["malware".to_owned()]
@@ -369,8 +354,47 @@ pub fn filter_list_filter(
             union.push(l.clone());
         }
     }
+    if union.is_empty() && policy.custom_lists.is_empty() {
+        return Ok(pool);
+    }
+    // `FilterListProviderSet::__construct` (FilterListProviderSet.php
+    // l. 47-58): `hasFilter()` on every repository first — each
+    // packages.json read before any summary, so the repositories' warnings
+    // come in that order — its TransportException kept aside, any other
+    // exception thrown at once. Read once per repository: the custom-list
+    // check below reads the same answers.
+    let repos = composer_repos(repositories);
+    let mut providers: Vec<(&ComposerRepository, Vec<String>)> = Vec::new();
+    let mut unreachable_first: Vec<RepoError> = Vec::new();
+    let mut fatal: Option<RepoError> = None;
+    for repo in &repos {
+        match repo.get_filter_lists() {
+            Ok(lists) => providers.push((repo, lists)),
+            Err(e) if e.is_transport() => unreachable_first.push(e),
+            Err(e) => {
+                fatal = Some(e);
+                break;
+            }
+        }
+    }
+    // A custom list with no source and no repository advertising it is
+    // inert in Composer; otherwise it requires a provider that is not
+    // ported.
+    if !policy.custom_lists.is_empty() {
+        for (_, lists) in &providers {
+            if let Some(l) = lists.iter().find(|l| policy.custom_lists.contains(l)) {
+                return Err(FilterError(
+                    format!("custom policy list \"{l}\" is not supported by vivacity yet"),
+                    crate::repository::RepoErrorKind::Unsupported,
+                ));
+            }
+        }
+    }
     if union.is_empty() {
         return Ok(pool);
+    }
+    if let Some(e) = fatal {
+        return Err(FilterError::from(e));
     }
     let mut ignore_unreachable = policy.ignore_unreachable.for_block_scope(block_scope);
     if check_locked_against_install {
@@ -386,21 +410,18 @@ pub fn filter_list_filter(
         })
         .collect();
     let map = constraints_by_name(&filterable, arena);
-    // `FilterListProviderSet::getMatchingFilterLists`.
-    let mut by_list: Vec<(String, Vec<FilterEntry>)> = Vec::new();
+    // `getFilterListEntriesForConstraints` (l. 150-158): the repositories
+    // `hasFilter()` could not reach come first, thrown (the first one) or
+    // listed; then each provider's `getFilter()`.
     let mut unreachable = Vec::new();
-    for repo in composer_repos(repositories) {
-        // `FilterListProviderSet`: `hasFilter()` (packages.json) and
-        // `getFilter()` alike only surface their TransportException under
-        // `ignore-unreachable`.
-        let provider_lists = match repo.get_filter_lists() {
-            Ok(l) => l,
-            Err(e) if e.is_transport() && ignore_unreachable => {
-                unreachable.push(e.0);
-                continue;
-            }
-            Err(e) => return Err(FilterError::from(e)),
-        };
+    for e in unreachable_first {
+        if !ignore_unreachable {
+            return Err(FilterError::from(e));
+        }
+        unreachable.push(e.0);
+    }
+    let mut by_list: Vec<(String, Vec<FilterEntry>)> = Vec::new();
+    for (repo, provider_lists) in providers {
         let relevant: Vec<String> = union
             .iter()
             .filter(|l| provider_lists.contains(l))

@@ -1929,6 +1929,10 @@ pub fn verify_install(
         // Only `composer` repositories carry lists; the other types (which
         // `install` otherwise accepts) are left aside here.
         let mut repositories: Vec<Repository> = Vec::new();
+        // One buffer for every repository: their warnings in the order
+        // they were written (a later repository's packages.json can degrade
+        // before an earlier one's summary).
+        let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let prepended: Vec<RepoConfig> = input
             .prepended_repositories
             .iter()
@@ -1951,7 +1955,7 @@ pub fn verify_install(
                 true,
             )?;
             if let Repository::Composer(r) = &mut opened {
-                r.hold_output();
+                r.hold_output_in(held.clone());
             }
             repositories.push(opened);
         }
@@ -1975,22 +1979,12 @@ pub fn verify_install(
             // fails): kept with the error.
             Err(e) => {
                 let mut e = SessionError::from(e);
-                let mut preface = Vec::new();
-                for repo in &repositories {
-                    if let Repository::Composer(r) = repo {
-                        preface.extend(r.take_held());
-                    }
-                }
-                e.preface = preface.into_boxed_slice();
+                e.preface = std::mem::take(&mut *held.borrow_mut()).into_boxed_slice();
                 return Err(e);
             }
         };
         // What the repositories wrote while loading came first.
-        for repo in &repositories {
-            if let Repository::Composer(r) = repo {
-                warnings.extend(r.take_held());
-            }
-        }
+        warnings.extend(std::mem::take(&mut *held.borrow_mut()));
         warnings.extend(filter_warnings);
         let removed: BTreeSet<usize> = before
             .into_iter()

@@ -478,8 +478,10 @@ pub struct ComposerRepository {
     /// `hold_output`: the warnings this repository writes while it loads,
     /// kept for the caller instead of printed — a repository working on a
     /// thread of its own would otherwise write them at whatever point the
-    /// main thread has reached.
-    held: Option<std::cell::RefCell<Vec<String>>>,
+    /// main thread has reached. Shared between the repositories of one
+    /// filter, so that the lines come out in the order Composer writes
+    /// them, not grouped by repository.
+    held: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
     /// `filter` option of the repository definition: `None` = `false` (no
     /// list), otherwise the disabled lists.
     pub user_filter: Option<Vec<String>>,
@@ -1193,7 +1195,14 @@ impl ComposerRepository {
     /// From now on, keep the warnings written while loading
     /// (`take_held`) instead of printing them.
     pub fn hold_output(&mut self) {
-        self.held = Some(std::cell::RefCell::new(Vec::new()));
+        self.held = Some(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    }
+
+    /// [`hold_output`](Self::hold_output) into a buffer other repositories
+    /// write to as well: [`take_held`](Self::take_held) on any of them takes
+    /// every line, in the order they were written.
+    pub fn hold_output_in(&mut self, sink: std::rc::Rc<std::cell::RefCell<Vec<String>>>) {
+        self.held = Some(sink);
     }
 
     /// The warnings kept since `hold_output`, in the order they were written.
@@ -3131,6 +3140,23 @@ mod degraded_tests {
         assert!(r.take_held().is_empty());
     }
 
+    #[test]
+    fn repositories_holding_into_one_buffer_keep_the_order_of_writing() {
+        let sink = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut a = ComposerRepository::open("https://a.example.org", Box::new(FileTransport))
+            .expect("open");
+        let mut b = ComposerRepository::open("https://b.example.org", Box::new(FileTransport))
+            .expect("open");
+        a.hold_output_in(sink.clone());
+        b.hold_output_in(sink.clone());
+        b.write_line("b first".to_owned());
+        a.write_line("a second".to_owned());
+        assert_eq!(
+            a.take_held(),
+            vec!["b first".to_owned(), "a second".to_owned()]
+        );
+        assert!(b.take_held().is_empty());
+    }
 }
 
 #[cfg(test)]

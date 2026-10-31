@@ -33,7 +33,7 @@
 #
 # Section 7, ce que Composer décide après un échec qui n'est pas un délai :
 # archive en 500 (16 requêtes), JSON invalide (avec et sans cache, le
-# résumé).
+# résumé), ordre de deux dépôts dans le filtre.
 #
 # Usage : harness/transport-exit.sh
 set -uo pipefail
@@ -631,6 +631,30 @@ for side in ref viv; do
   project "$d" "http://127.0.0.1:$g"
 done
 launch json-summary 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect json-summary 0 20 "does not contain valid JSON"
+# 7d. Deux dépôts, dans l'ordre de Composer : `FilterListProviderSet` lit le
+# packages.json de **tous** les dépôts (`hasFilter`) avant le premier
+# `getFilter` (FilterListProviderSet.php l. 47-58, 150-158). A : packages.json
+# servi, résumé sur un port fermé ; B : packages.json en 500, cache vieux.
+# Chez Composer, l'avertissement de B (première passe) précède celui de A
+# (seconde passe), puis la liste des sources ignorées.
+s6_case order-a
+FAIL_PATH=/packages.json s6_case order-b
+for side in ref viv; do
+  a="$WORK/s6/order-a/$side"; b="$WORK/s6/order-b/$side"; d="$WORK/s6/order-two-repos/$side"
+  mkdir -p "$d"; cp "$a/g" "$a/h" "$d/"; : > "$d/fail.log"; : > "$d/h.log"
+  packages_json "$a" "http://127.0.0.1:$closed/summary.json" null true > "$a/reg/packages.json"
+  gb=$(cat "$b/g")
+  packages_json "$b" "http://127.0.0.1:$gb/summary.json" null true > "$b/reg/packages.json"
+  project "$d" "http://127.0.0.1:$(cat "$a/g")"
+  jq --arg b "http://127.0.0.1:$gb" '.repositories = {"a": .repositories.snap, "b": {"type": "composer", "url": $b}, "packagist.org": false}' "$d/home/config.json" > "$d/home/c.json" && mv "$d/home/c.json" "$d/home/config.json"
+  mkdir -p "$d/cache/repo/http---127.0.0.1-$gb"
+  cp "$b/reg/packages.json" "$d/cache/repo/http---127.0.0.1-$gb/packages.json"
+  touch -t 202601010000 "$d/cache/repo/http---127.0.0.1-$gb/packages.json"
+  # The failures of B's server are this case's.
+  ln -sf "$b/fail.log" "$d/fail.log"
+  echo "$gb" > "$d/g2"
+done
+launch order-two-repos 30 "${VERIFY_REF[@]}" -- "${VERIFY_VIV[@]}"; expect order-two-repos 0 20 "Filter list data could not be fetched"
 wait "${S6_JOBS[@]}"
 for i in "${!S6_NAME[@]}"; do
   judge "${S6_NAME[$i]}" "${S6_LO[$i]}" "${S6_HI[$i]}" "${S6_WANT[$i]}" "${S6_CMP[$i]}"
