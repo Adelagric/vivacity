@@ -287,41 +287,93 @@ chaque fichier — dépendance `windows-sys` directe (déjà transitive en
 
 ### Étape 0 — cas rouges d'abord (aucun changement de code produit)
 
-Nouveau `harness/vendor-isolation.sh` (`VIVACITY_HARNESS_DIR` à part,
-Composer 2.10.3 comme oracle sur le même état de projet, jamais
-`VIVACITY_NO_CLASSMAP_CACHE`) :
+Tous les harnais tournent avec un `VIVACITY_HARNESS_DIR` à part et
+Composer 2.10.3 comme oracle sur le même état de projet.
 
-- `iso-hardlink` : sous macOS, une image HFS+ montée (`hdiutil create
-  -fs HFS+`, store et projets dessus, image détruite à la fin) ; sous
-  Linux, le volume du conteneur. Projets A et B installés depuis le même
-  store ; écriture **en place**, externe à vivacity, dans un fichier de
-  vendor/ de A (`printf … 1<> fichier` ou `dd conv=notrunc`, inode
-  vérifié inchangé). **Critère obligatoire du mainteneur** : le contenu du
-  store lui-même est vérifié, pas seulement les classmaps — condensat
-  (`shasum -a 256` de chaque fichier, liste triée) de l'entrée de store
-  touchée et du fichier correspondant de B **avant et après** l'écriture
-  dans A, égaux ; l'entrée de store égale aussi à l'archive extraite à
-  part. Attendus en plus : B identique à Composer, un projet C installé
-  ensuite identique à Composer, `nlink` = 1 sur tout fichier de vendor/.
-  Ce cas se lance avec **et sans** `VIVACITY_NO_CLASSMAP_CACHE=1` : couper
-  le cache ne fait rien contre la contamination par lien dur (il ne touche
-  que le scan), il doit être rouge dans les deux bras avant P0.
-- `iso-hardlink-then-install` (**obligatoire, mainteneur**) : l'autre
-  ordre. A installé seul, écriture en place externe dans un fichier de
-  vendor/ de A, **puis** B installé depuis le même store. Attendus : le
-  fichier de B égal au condensat près au fichier du dist d'origine
-  (archive extraite à part, ou condensat relevé dans le store avant
-  l'écriture), l'entrée de store intacte (condensat avant/après), B
-  identique à Composer. Ce cas attrape un install neuf qui hériterait
-  d'une entrée de store contaminée, ce que le premier ordre (B déjà posé)
-  ne voit pas. Les deux ordres sont rouges sur main avant P0, dans les
-  deux bras (cache de classmap actif et coupé).
+#### Harnais permanent de P0 : `harness/vendor-isolation.sh`
+
+Protocole final du mainteneur (remplace les deux notes précédentes). Le
+harnais reste dans le dépôt comme garde de régression, lancé par la CI,
+indépendant des bancs de performance.
+
+**Critère.** A accepte l'écriture en place, B garde les octets
+d'origine, le store garde les octets d'origine — **dans les deux
+ordres** :
+
+- `iso-before` : A et B installés, puis écriture en place externe dans
+  un fichier de vendor/ de A ;
+- `iso-after` : A installé, écriture en place dans A, **puis** B
+  installé depuis le même store — attrape un install neuf qui hériterait
+  d'une entrée contaminée, ce que le premier ordre ne voit pas.
+
+« Octets d'origine » : condensat (sha256) égal à celui du fichier dans le
+dist, relevé sur une extraction à part de l'archive (pas dans le store,
+qui est ce qu'on teste). L'écriture est faite par le shell, hors de
+vivacity, réellement en place (`printf … 1<> fichier` ou `dd
+conv=notrunc`), même taille ou non.
+
+**Garde 1 — l'écriture a vraiment eu lieu dans A.** Après l'écriture, le
+fichier de A porte les nouveaux octets (condensat égal à celui du
+contenu écrit), son inode n'a pas changé (preuve que l'écriture était en
+place), et son mode est celui que Composer pose (comparé au même fichier
+d'une install de Composer : vendor/ reste inscriptible). Un correctif
+qui bloquerait ou détournerait l'écriture (store en lecture seule,
+fichier non inscriptible, renommage) fait échouer le cas : ce n'est pas
+une isolation, c'est une divergence.
+
+**Garde 2 — A et B partagent vraiment un store, sur un FS où vivacity
+lierait.**
+- Même `VIVACITY_CACHE_DIR` pour A et B ; l'entrée de store du paquet
+  existe avant l'install de B ; l'install de B la lit : la ligne de
+  résumé (`N from store, 0 from cache, 0 from network`, sans `-q`) le
+  dit, ou `VIVACITY_TRACE`.
+- Le FS est un FS sans copie sur écriture : image HFS+ montée sous macOS
+  (`hdiutil create -fs HFS+ -size 64m`, store, cache de Composer et
+  projets dessus, détachée à la fin), ext4 sous Linux (les runners
+  `ubuntu-latest` de GitHub le sont : le cas tourne en CI là). Sonde au
+  démarrage, permanente (store et projets sur le même FS) : un `ln`
+  entre le store et un projet réussit, et un clone de sonde échoue —
+  `cp --reflink=always` sous Linux ; sous macOS `cp -c` (que `cp` refuse
+  bien hors APFS, à vérifier au premier run, sinon un petit appel
+  `clonefile` via `python3 -c` ou `perl`) — sinon le
+  harnais **échoue** (« ce FS isole déjà, le cas ne prouverait rien »)
+  au lieu de passer.
+- Avant le correctif (phase rouge : `VIVACITY_BIN` = binaire de main et
+  `ISO_PHASE=red`) : le harnais affirme
+  qu'au départ le fichier de A et celui du store partagent un inode
+  (`stat` : même `dev:ino`, `nlink` ≥ 2) — un montage accidentellement
+  isolé (APFS clonefile, copie) est détecté au lieu de passer. Cette
+  affirmation est le témoin de la phase rouge : avec `VIVACITY_BIN` =
+  binaire de main, `iso-before` et `iso-after` doivent échouer **sur le
+  critère** (octets de B / du store changés), garde 2 tenue ; avec le
+  correctif, ils passent, garde 2 tenue par la sonde de FS et la ligne
+  « from store », et le harnais affirme alors `nlink` = 1.
+
+**Cas.** Un paquet minuscule servi hors ligne par un dépôt `artifact`
+(un zip fabriqué par le harnais, comme `harness/artifact-repo.sh`) : pas
+de réseau, quelques secondes par cas. Chaque ordre est joué deux fois,
+cache de classmap actif puis `VIVACITY_NO_CLASSMAP_CACHE=1` :
+couper le cache ne change rien à la contamination par lien dur, les deux
+bras doivent être rouges avant P0.
+
+**CI.** Un pas dans le job `parity` de `.github/workflows/ci.yml`
+(matrice `ubuntu-latest`, `macos-latest`) : `harness/vendor-isolation.sh`,
+sans `net-retry.sh` puisqu'il ne touche pas le réseau. Sous ubuntu, le
+répertoire du runner (ext4) ; sous macOS, l'image HFS+ (création et
+montage : quelques secondes, à confirmer au premier run ; si `hdiutil`
+n'est pas disponible ou trop lent sur le runner, le cas macOS reste
+local et l'ubuntu porte la garde).
+
+#### Autres cas (P0 complémentaires, puis P1)
+
 - `iso-upgrade` (méta-analyse, point 1) : A et B installés par le binaire
   de main (liens durs), passage au nouveau binaire, install **no-op** dans
   A et B, puis l'écriture en place dans A : mêmes vérifications (store et
   fichier de B par condensat avant/après).
-- `iso-cow` : le même scénario sur APFS / reflink — vert aujourd'hui, il
-  garde le chemin clonefile.
+- `iso-cow` : les deux ordres sur APFS (et btrfs/xfs si un runner en
+  offre) — vert aujourd'hui, il garde le chemin clonefile/reflink. Mode
+  à part du harnais (`ISO_FS=cow`), où la sonde exige au contraire la
+  copie sur écriture ; jamais confondu avec le cas obligatoire.
 - `iso-stale-store` : une entrée `v3` modifiée à la main (simule un store
   contaminé par une version antérieure) ; après le changement, un install
   pose le contenu de l'archive (via le bump de `LAYOUT`).
@@ -343,8 +395,8 @@ Composer 2.10.3 comme oracle sur le même état de projet, jamais
   seul inode ; entrée « racy » non servie (horloges injectées).
 
 Chaque cas est vu **rouge** sur main avant toute correction (les quatre
-`cm-*` reproduits ici le sont déjà à la main sur APFS ; `iso-hardlink`
-l'est chez le mainteneur sur HFS+), puis vert.
+`cm-*` reproduits ici le sont déjà à la main sur APFS ; l'ordre
+`iso-before` l'est chez le mainteneur sur HFS+), puis vert.
 
 **P0 et P1 se corrigent et se vérifient séparément.** Les cas `iso-*` ne
 regardent que les octets (store, fichiers des projets) ; les cas `cm-*`
@@ -458,7 +510,8 @@ défait aucun lien dur.
 
 ### Ordre des fichiers
 
-`harness/vendor-isolation.sh`, `harness/root-scan.sh` (cas `cm-root-same-size`)
+`harness/vendor-isolation.sh` + son pas dans `.github/workflows/ci.yml`,
+`harness/root-scan.sh` (cas `cm-root-same-size`)
 → `crates/vivacity-core/src/clone.rs` (+ test, `detach` partagé) →
 `crates/vivacity-core/src/composer_patcher.rs` → `crates/vivacity-core/src/store.rs`
 → `crates/vivacity-core/src/installer.rs` (passe de déliaison, manifeste
@@ -470,14 +523,17 @@ amorçage, `store_reference`) → `crates/vivacity/src/install.rs` →
 
 ### Critères de vert
 
-- **Obligatoire (mainteneur)** : `iso-hardlink`,
-  `iso-hardlink-then-install` et `iso-upgrade` verts — deux projets sur
-  le même store, écriture en place externe dans un fichier de vendor/ de
-  l'un, **dans les deux ordres** (B posé avant l'écriture, B installé
-  après), et **le contenu de l'entrée de store et le fichier de B égaux
-  au dist d'origine au condensat près** (avant/après l'écriture), pas
-  seulement des classmaps identiques. P0 est déclaré corrigé sur ce
-  critère seul, indépendamment de P1.
+- **Obligatoire (mainteneur)** : `harness/vendor-isolation.sh` vert, les
+  deux ordres (`iso-before`, `iso-after`) et les deux bras du cache — A
+  porte les nouveaux octets avec le mode de Composer, B et l'entrée de
+  store gardent les octets du dist au condensat près ; gardes 1 et 2
+  tenues (écriture réelle et en place dans A ; store partagé, lu par
+  l'install de B, sur un FS sans copie sur écriture vérifié par sonde) ;
+  vu rouge avec le binaire de main **sur le critère**, garde d'inode
+  partagé tenue. Câblé dans le job `parity` de `ci.yml` (ubuntu, ext4 ;
+  macOS sur image HFS+ si le coût le permet) et vert là. P0 est déclaré
+  corrigé sur ce critère seul, indépendamment de P1 ; `iso-upgrade` vert
+  en plus.
 - Tous les cas `iso-*` et `cm-*` verts sur macOS (APFS + image HFS+) et
   Linux (conteneur, ext4 et overlayfs), vus rouges avant ; et sur le
   runner Windows (méta-analyse, point 6) — `cm-same-size-mtime` n'y
@@ -555,10 +611,13 @@ Ajout du mainteneur après la méta-analyse : le critère obligatoire de P0
 (contenu du store vérifié au condensat avant/après une écriture externe
 en place, sur deux projets partageant le store) et la séparation
 explicite P0/P1 (`VIVACITY_NO_CLASSMAP_CACHE` ne fait rien contre la
-contamination par lien dur) ; puis le second ordre obligatoire
-(`iso-hardlink-then-install` : écriture dans A **avant** l'install de B,
-B doit recevoir le contenu du dist d'origine) — étape 0 et critères de
-vert.
+contamination par lien dur) ; puis le protocole final de P0, qui
+remplace les deux notes : les deux ordres (`iso-before`, `iso-after`),
+octets de A, de B et du store contre le dist, garde « l'écriture a eu
+lieu, mode de Composer » et garde « store partagé, lu, sur un FS qui
+lierait » (sonde de FS, inode partagé vu avec le binaire de main), en
+harnais permanent `harness/vendor-isolation.sh` câblé dans `ci.yml` —
+étape 0 et critères de vert.
 
 ## Questions ouvertes pour le mainteneur
 
