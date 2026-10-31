@@ -43,7 +43,8 @@ of the kind, and two things break when that assumption does:
   file, `vivacity dump-autoload` (and the autoloader dump that ends
   `install`, `update`, `require` and `remove`) can keep the old class where
   Composer rescans the file. `VIVACITY_NO_CLASSMAP_CACHE=1` turns that cache
-  off.
+  off; it does nothing for the first point, a store an edit reached stays
+  modified.
 
 Until it is fixed: don't edit files in `vendor/` in place on the file
 systems above. If you did, delete vivacity's store (`store/` under its cache
