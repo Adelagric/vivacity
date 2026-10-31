@@ -60,8 +60,8 @@ pub struct DumpOptions {
     /// `--apcu-autoloader[-prefix]` / `config.apcu-autoloader`: Some(prefix)
     /// when the APCu cache is enabled.
     pub apcu_prefix: Option<String>,
-    /// Store root + cache root: enables the per-store-entry classmap cache
-    /// (None = full scan every time).
+    /// Store root + cache root: enables the classmap cache (None = full
+    /// scan every time).
     pub classmap_cache: Option<ClassmapCacheConfig>,
     /// `$localRepo->getDevPackageNames()` at dump time, for `!dev_mode`:
     /// `parseAutoloads($packageMap, $root, $devPackageNames ?: true)` —
@@ -78,16 +78,16 @@ pub struct DumpOptions {
 pub struct ClassmapCacheConfig {
     pub store_root: PathBuf,
     pub cache_root: PathBuf,
-    /// Before serving a store entry's record, check each file it lists
-    /// still exists under vendor/, not only each directory: a plugin that
-    /// deletes single files there (liborm85/composer-vendor-cleaner) is or
-    /// was configured.
-    pub verify_files: bool,
-    /// Packages whose copy under vendor/ gains files after the install
+    /// Packages whose copy under vendor/ changes after the install
     /// (drupol/composer-packages generates its classes into `build/` at
-    /// `POST_AUTOLOAD_DUMP`): never mapped to their store entry — the
-    /// per-file cache serves them, as it serves the project's own sources.
+    /// `POST_AUTOLOAD_DUMP`; mlocati/composer-patcher patches them): never
+    /// mapped to their store entry — their own records serve them, as they
+    /// serve the project's sources.
     pub mutable_copies: Vec<String>,
+    /// The packages this run laid out from the store, with the identity of
+    /// their files right after the placement (empty for `dump-autoload`, or
+    /// when scripts ran in between).
+    pub placed: Vec<std::sync::Arc<vivacity_core::file_identity::PlacedPackage>>,
 }
 
 #[derive(Debug, Default)]
@@ -289,14 +289,16 @@ pub fn plan(
         });
     }
 
-    // Classmap cache: absolute install path -> store entry.
-    // The store entry's `is_dir` stat is done once here (instead of once per
-    // scanned directory), and the `/` suffix is precomputed to avoid one
-    // `format!` per comparison in the prefix lookup.
+    // Classmap cache: absolute install path -> store entry, and the
+    // placement this run made of it, if any. The store entry's `is_dir` stat
+    // is done once here (instead of once per scanned directory), and the `/`
+    // suffix is precomputed to avoid one `format!` per comparison in the
+    // prefix lookup.
     struct StoreEntry {
         install: String,
         install_slash: String,
         entry: PathBuf,
+        placed: Option<std::sync::Arc<vivacity_core::file_identity::PlacedPackage>>,
     }
     let store_entries: Vec<StoreEntry> = match &opts.classmap_cache {
         Some(cfg) => {
@@ -312,10 +314,25 @@ pub fn plan(
                     if cfg.mutable_copies.iter().any(|n| n == p.name()) {
                         return None;
                     }
+                    // The placement names the entry the installer copied
+                    // and the directory it copied it to (a `target-dir`
+                    // included); otherwise the entry is found by the name
+                    // the installer gives it (`store_reference`: a dist
+                    // without a reference is named by its URL).
+                    if let Some(placed) = cfg.placed.iter().find(|pp| pp.name == p.name()) {
+                        let install = normalize_path(&placed.dest.to_string_lossy());
+                        return Some(StoreEntry {
+                            install_slash: format!("{install}/"),
+                            install,
+                            entry: placed.entry.clone(),
+                            placed: Some(placed.clone()),
+                        });
+                    }
                     let install = install_abs(p.name())?;
-                    let entry = store.entry_path(p.name(), p.version(), p.dist_reference());
-                    // Absent/non-directory entry: no cache for this package
-                    // (same as the old `if !entry.is_dir() { return None }`).
+                    let entry =
+                        store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
+                    // Absent/non-directory entry: no store record for this
+                    // package.
                     if !entry.is_dir() {
                         return None;
                     }
@@ -323,37 +340,42 @@ pub fn plan(
                         install_slash: format!("{install}/"),
                         install,
                         entry,
+                        placed: None,
                     })
                 })
                 .collect()
         }
         None => Vec::new(),
     };
-    // A directory under a store entry is immutable: one record for the
-    // whole directory. Anything else (the project's own sources, a `path`
-    // package, a vendor/ that Composer wrote) can change between two
-    // installs: one record per file, keyed on mtime and size.
-    let cache_slot = |abs: &str| -> Option<ScanSlot> {
+    // Every scanned directory has a record of its own, per project and per
+    // file, revalidated on every dump (vendor/ included: a copy can be
+    // edited, cleaned or added to). A directory under a package installed
+    // from the store may also take classes from the entry's record — for
+    // files whose bytes are the entry's (`FileCacheSlot`). Several packages
+    // can nest: the longest install path wins.
+    let cache_ctx = std::sync::Arc::new(crate::classmap::CacheContext::new());
+    let cache_slot = |abs: &str| -> Option<crate::classmap::FileCacheSlot> {
         let cfg = opts.classmap_cache.as_ref()?;
         let se = store_entries
             .iter()
-            .find(|se| abs == se.install || abs.starts_with(&se.install_slash));
-        match se {
-            Some(se) => {
-                let rel = abs
-                    .strip_prefix(&se.install)
-                    .unwrap_or("")
-                    .trim_start_matches('/');
-                let mut slot =
-                    crate::classmap::CacheSlot::new(&cfg.cache_root, &se.entry, Path::new(rel));
-                slot.verify_files = cfg.verify_files;
-                Some(ScanSlot::Store(slot))
+            .filter(|se| abs == se.install || abs.starts_with(&se.install_slash))
+            .max_by_key(|se| se.install.len());
+        let seed = se.map(|se| {
+            let rel = abs
+                .strip_prefix(&se.install)
+                .unwrap_or("")
+                .trim_start_matches('/');
+            crate::classmap::StoreSeed {
+                record: crate::classmap::CacheSlot::new(&cfg.cache_root, &se.entry, Path::new(rel)),
+                placed: se.placed.clone(),
             }
-            None => Some(ScanSlot::Files(crate::classmap::FileCacheSlot::new(
-                &cfg.cache_root,
-                Path::new(abs),
-            ))),
-        }
+        });
+        Some(crate::classmap::FileCacheSlot::new(
+            &cfg.cache_root,
+            Path::new(abs),
+            cache_ctx.clone(),
+            seed,
+        ))
     };
 
     let autoloads = parse_autoloads(
@@ -389,24 +411,12 @@ pub fn plan(
     // "first one wins") is replayed SEQUENTIALLY in that same order: the
     // classmap and the bytes of autoload_classmap.php therefore do not
     // depend on the parallelism.
-    enum ScanSlot {
-        Store(crate::classmap::CacheSlot),
-        Files(crate::classmap::FileCacheSlot),
-    }
-    impl ScanSlot {
-        fn as_cache(&self) -> crate::classmap::ScanCache<'_> {
-            match self {
-                ScanSlot::Store(c) => crate::classmap::ScanCache::Store(c),
-                ScanSlot::Files(f) => crate::classmap::ScanCache::Files(f),
-            }
-        }
-    }
     struct ScanJob {
         path: PathBuf,
         excl: Option<pcre2::bytes::Regex>,
         ty: AutoloadType,
         ns: String,
-        slot: Option<ScanSlot>,
+        slot: Option<crate::classmap::FileCacheSlot>,
     }
     let mut jobs: Vec<ScanJob> = Vec::new();
     for dir in &autoloads.classmap {
@@ -461,15 +471,26 @@ pub fn plan(
         }
     }
 
+    // The racy window's reference time, before any scan: one probe per file
+    // system the scans read, in vivacity's cache when it is on that file
+    // system, else in vendor/composer/ (an unnamed file, nothing left).
+    if let Some(cfg) = &opts.classmap_cache {
+        let _ = std::fs::create_dir_all(&cfg.cache_root);
+        let roots: Vec<&Path> = jobs.iter().map(|j| j.path.as_path()).collect();
+        cache_ctx.set_clock(crate::classmap::Clock::probe(
+            &roots,
+            &[cfg.cache_root.as_path(), target_dir.as_path()],
+        ));
+    }
     trace("jobs", t0);
     let mut scanner = Scanner::new()?;
     {
         use rayon::prelude::*;
         // The pure phase only touches `path`/`slot` (Send + Sync), never the
         // exclusion regex — no Sync requirement on pcre2::Regex.
-        let inputs: Vec<(&Path, Option<crate::classmap::ScanCache<'_>>)> = jobs
+        let inputs: Vec<(&Path, Option<&crate::classmap::FileCacheSlot>)> = jobs
             .iter()
-            .map(|j| (j.path.as_path(), j.slot.as_ref().map(ScanSlot::as_cache)))
+            .map(|j| (j.path.as_path(), j.slot.as_ref()))
             .collect();
         // Directories in parallel means READS in parallel. That pays where
         // I/O latency dominates (ext4/WSL2: sylius cold scan 1.03 s -> 0.48 s)
@@ -493,6 +514,9 @@ pub fn plan(
                     .collect()
             };
         trace("scan", t0);
+        if opts.classmap_cache.is_some() && std::env::var_os("VIVACITY_TRACE").is_some() {
+            eprintln!("trace:   classmap cache  {}", cache_ctx.summary());
+        }
         for (j, sf) in jobs.iter().zip(scans) {
             scanner.merge_scanned(sf?, &j.path, j.excl.as_ref(), j.ty, &j.ns)?;
         }

@@ -56,6 +56,10 @@ pub struct InstallReport {
     /// Lines Composer prints on stderr during the operations and vivacity
     /// reproduces (`Skipped installation of bin …`).
     pub messages: Vec<String>,
+    /// The packages laid out from the store by this run, with the identity
+    /// of their PHP files right after the placement (Unix; the class map
+    /// cache serves them from the entry's record while it holds).
+    pub placed: Vec<std::sync::Arc<crate::file_identity::PlacedPackage>>,
 }
 
 /// Installed identity of a package: version + dist reference.
@@ -640,10 +644,14 @@ pub async fn install(
     // contends: 607 ms -> 635 ms on an M4 Max). Each package stays atomic
     // (remove-before-clone); only the inter-package order changes, which
     // affects nothing but mtimes. `VIVACITY_PARALLEL_IO=0|1` overrides.
-    let place = |p: &&LockPackage| -> Result<bool> {
+    // Each placement returns whether it placed, and — for a copy of a store
+    // entry with autoload rules — the identity of its PHP files right after,
+    // once nothing else of the placement touches them.
+    type Placed = (bool, Option<crate::file_identity::PlacedPackage>);
+    let place = |p: &&LockPackage| -> Result<Placed> {
         let (Some(pkg_root), Some(dest)) = (layout.package_root(p.name()), layout.abs(p.name()))
         else {
-            return Ok(false);
+            return Ok((false, None));
         };
         if p.dist_kind() == DistKind::Path {
             let url = p.dist_url().unwrap_or_default();
@@ -655,7 +663,7 @@ pub async fn install(
                 crate::path_install::remove_path(&pkg_root)?;
             }
             crate::path_install::install(project_dir, &dest, url, p.raw.get("transport-options"))?;
-            return Ok(true);
+            return Ok((true, None));
         }
         // Always start again from an empty package root (target-dir included).
         if std::fs::symlink_metadata(&pkg_root).is_ok() {
@@ -666,7 +674,7 @@ pub async fn install(
                 std::fs::create_dir_all(parent).map_err(Error::io(parent))?;
             }
             std::fs::rename(staged, &dest).map_err(Error::io(&dest))?;
-            return Ok(true);
+            return Ok((true, None));
         }
         let src = store.entry_path(p.name(), p.version(), p.store_reference().as_deref());
         crate::clone::clone_tree(&src, &dest)?;
@@ -683,16 +691,28 @@ pub async fn install(
                 crate::path_install::remove_path(&own)?;
             }
         }
-        Ok(true)
+        let autoloaded = p
+            .raw
+            .get("autoload")
+            .and_then(Value::as_object)
+            .is_some_and(|a| !a.is_empty());
+        let identities = autoloaded
+            .then(|| crate::file_identity::PlacedPackage::record(p.name(), &dest, &src))
+            .flatten();
+        Ok((true, identities))
     };
-    let placed: Vec<bool> = if crate::platform::parallel_io() {
+    let placed: Vec<Placed> = if crate::platform::parallel_io() {
         use rayon::prelude::*;
         to_install.par_iter().map(place).collect::<Result<_>>()?
     } else {
         to_install.iter().map(place).collect::<Result<_>>()?
     };
-    let installed: usize = placed.into_iter().filter(|placed| *placed).count();
+    let installed: usize = placed.iter().filter(|(placed, _)| *placed).count();
     report.installed += installed;
+    report.placed = placed
+        .into_iter()
+        .filter_map(|(_, identities)| identities.map(std::sync::Arc::new))
+        .collect();
     // A project laid out by an older version may still share inodes with
     // its store: the unchanged packages get their own, no-op included. After
     // the last hand-over point and the placement (a replaced package is a

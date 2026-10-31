@@ -1048,6 +1048,8 @@ fn plan_autoload_early(
                             .iter()
                             .map(|p| p.name().to_owned())
                             .collect(),
+                        // A no-op: nothing placed.
+                        Vec::new(),
                     )
                 })
             })
@@ -1496,6 +1498,15 @@ fn dump_autoloader(
                 .iter()
                 .map(|p| p.name().to_owned())
                 .collect(),
+            // What this run placed, as it was right after the placement —
+            // unless scripts ran since (`pre-autoload-dump`, the package
+            // events): a file they rewrote in place within the timestamp
+            // granularity would keep its identity.
+            if run.runner.is_some() {
+                Vec::new()
+            } else {
+                report.placed.clone()
+            },
         )?,
     };
     let dumped = planned.finish(&run.project, &run.manifest, layout)?;

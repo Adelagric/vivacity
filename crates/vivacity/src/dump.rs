@@ -19,6 +19,7 @@ pub(crate) fn dump_autoload_plan(
     apcu: (bool, Option<&str>),
     plugins_enabled: bool,
     dev_package_names: Vec<String>,
+    placed: Vec<std::sync::Arc<vivacity_core::file_identity::PlacedPackage>>,
 ) -> anyhow::Result<PlannedDump> {
     let platform_check = match manifest.get("config").and_then(|c| c.get("platform-check")) {
         Some(serde_json::Value::Bool(false)) => vivacity_autoload::PlatformCheckMode::Off,
@@ -59,23 +60,6 @@ pub(crate) fn dump_autoload_plan(
             Some(vivacity_autoload::ClassmapCacheConfig {
                 store_root: vivacity_core::platform::cache_dir().join("store"),
                 cache_root: vivacity_core::platform::cache_dir(),
-                // liborm85/composer-vendor-cleaner can delete single files
-                // inside autoloaded directories: configured, locked or still
-                // installed, every file of a record is checked.
-                verify_files: manifest
-                    .get("extra")
-                    .is_some_and(|e| e.get("dev-files").is_some())
-                    || lock
-                        .packages
-                        .iter()
-                        .chain(lock.packages_dev.iter())
-                        .any(|p| p.name() == vivacity_core::effect_plugins::VENDOR_CLEANER)
-                    || vivacity_core::layout::installed_packages_of(project, manifest)
-                        .iter()
-                        .any(|p| {
-                            p.get("name").and_then(serde_json::Value::as_str)
-                                == Some(vivacity_core::effect_plugins::VENDOR_CLEANER)
-                        }),
                 // Its generated classes stay under vendor/ whether the
                 // plugin runs or not (`--no-plugins`, refused, removed);
                 // and the copies mlocati/composer-patcher patches (or did:
@@ -90,6 +74,7 @@ pub(crate) fn dump_autoload_plan(
                         &vivacity_core::layout::installed_packages_of(project, manifest),
                     ))
                     .collect(),
+                placed,
             })
         },
     };
@@ -166,6 +151,7 @@ pub(crate) fn dump_autoload(
         apcu,
         plugins_enabled,
         dev_package_names,
+        Vec::new(),
     )?
     .finish(project, manifest, layout)
 }

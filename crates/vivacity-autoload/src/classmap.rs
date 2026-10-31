@@ -19,8 +19,11 @@
 
 use crate::pathutil::normalize_path;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+pub use vivacity_core::file_identity::{Clock, FileIdentity, PlacedPackage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClassMapError {
@@ -369,21 +372,59 @@ fn find_all(todo: &[(PathBuf, PathBuf, Vec<u8>)]) -> Result<Vec<Vec<Vec<u8>>>, C
 /// cache encoding) changes, to invalidate existing caches.
 /// v2: length-prefixed binary encoding (replaces the JSON+base64).
 /// v3: entries in readdir order (was sorted by name).
-const CACHE_FORMAT: &str = "v3";
+/// v4: the sha1 of each file's content; a store entry's record is scanned
+/// from the entry's own directory only, never from a copy under vendor/.
+const CACHE_FORMAT: &str = "v4";
 
-/// Cache location for the scan of a store entry's directory:
-/// key = entry (name/version/ref) + relative subdirectory + format version.
+/// sha1 of a file's content: what lets a record's classes be reused for a
+/// file whose identity changed but whose bytes did not. A class depends on
+/// the content only (`find_classes` takes no path; the path filters run in
+/// `merge_scanned`), so equal digests give equal classes.
+type Digest = [u8; 20];
+
+fn digest(bytes: &[u8]) -> Digest {
+    use sha1::{Digest as _, Sha1};
+    Sha1::digest(bytes).into()
+}
+
+/// Relative path of `file` under `base` (the scanned directory, or the
+/// parent of a scanned file), as the records key it.
+fn rel_key(base: &Path, file: &Path) -> String {
+    file.strip_prefix(base)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The directory relative paths are taken from: the path itself, or the
+/// parent of a single file (a `classmap` entry naming a file).
+fn base_of(path: &Path) -> PathBuf {
+    if path.is_file() {
+        path.parent().map(Path::to_path_buf).unwrap_or_default()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// One file of a store entry's record: (content digest, raw classes).
+type StoreRecord = HashMap<String, (Digest, Vec<Vec<u8>>)>;
+
+/// The record of a directory of a store entry, shared by every project that
+/// uses the entry: key = entry (name/version/ref) + relative subdirectory +
+/// format version. It is only ever written from a scan of the entry's own
+/// directory (`build`), never from a copy under vendor/ — a copy can have
+/// been edited, cleaned or added to — and a project's scan only takes from
+/// it the classes of a file whose bytes are the entry's: placed by this run
+/// and untouched since (same identity), or with the same digest.
 pub struct CacheSlot {
     file: PathBuf,
-    /// The store entry's own copy of the scanned directory.
+    /// The store entry's own copy of the scanned directory (or file).
     entry_dir: PathBuf,
-    /// Check every listed file (not only their directories) before serving.
-    pub verify_files: bool,
 }
 
 impl CacheSlot {
     pub fn new(cache_root: &Path, store_entry: &Path, rel_subdir: &Path) -> CacheSlot {
-        use sha1::{Digest, Sha1};
+        use sha1::{Digest as _, Sha1};
         let mut h = Sha1::new();
         h.update(CACHE_FORMAT.as_bytes());
         h.update(b"\0");
@@ -394,73 +435,37 @@ impl CacheSlot {
         CacheSlot {
             file: cache_root.join("classmap").join(format!("{key}.bin")),
             entry_dir: store_entry.join(rel_subdir),
-            verify_files: false,
         }
     }
 
-    /// Whether the files a record lists are all still under `base`, when
-    /// `verify_files` asks (a cleaner that deletes files there is or was
-    /// configured). Otherwise the copy is trusted, as before: a check of
-    /// every directory of every record cost 8 % of a no-op install of
-    /// invoiceninja (`-o`, 72 430 classes), measured.
-    fn still_present(&self, base: &Path, entries: &[(PathBuf, Vec<Vec<u8>>)]) -> bool {
-        !self.verify_files
-            || entries
-                .iter()
-                .all(|(rel, _)| std::fs::symlink_metadata(base.join(rel)).is_ok())
-    }
-
-    /// Whether a scan of `base` (a copy of the store entry under vendor/)
-    /// saw exactly the files of the store entry itself: only then may it be
-    /// recorded for the entry — a copy a plugin has cleaned (or anything
-    /// else changed the file set of) would otherwise give every project that
-    /// uses the entry a record without the deleted files.
-    fn matches_entry(&self, base: &Path, files: &[(PathBuf, PathBuf, Vec<Vec<u8>>)]) -> bool {
-        let Ok((entry_files, _)) = Scanner::collect_files(&self.entry_dir) else {
-            return false;
-        };
-        let mut scanned: Vec<PathBuf> = files
-            .iter()
-            .filter_map(|(f, _, _)| f.strip_prefix(base).ok().map(Path::to_path_buf))
-            .collect();
-        let mut entry: Vec<PathBuf> = entry_files
-            .iter()
-            .filter_map(|(f, _)| f.strip_prefix(&self.entry_dir).ok().map(Path::to_path_buf))
-            .collect();
-        scanned.sort();
-        entry.sort();
-        scanned.len() == files.len() && scanned == entry
-    }
-
-    /// Entries (relative path, raw classes) in walk order.
+    /// Records by relative path.
     ///
     /// Length-prefixed binary format (little-endian):
     ///   u32 file_count
-    ///   [ u32 rel_len, rel(utf-8 bytes),
+    ///   [ u32 rel_len, rel(utf-8 bytes), sha1 (20 bytes),
     ///     u32 class_count, [ u32 class_len, class(raw bytes) ]* ]*
     /// Class names are raw bytes (see the module header): no base64, no
-    /// lossy round-trip — the bytes are written and read back as-is. The
-    /// relative paths come from `to_string_lossy` (like the JSON version
-    /// this replaces), so they are identical to what was written.
-    fn load(&self) -> Option<Vec<(PathBuf, Vec<Vec<u8>>)>> {
+    /// lossy round-trip. The relative paths come from `to_string_lossy`, the
+    /// same function that keys the lookups.
+    fn load(&self) -> Option<StoreRecord> {
         let bytes = std::fs::read(&self.file).ok()?;
         let mut r = ByteReader::new(&bytes);
         let n = r.u32()? as usize;
         // The counts come from the (possibly corrupt) file: clamp the
         // pre-allocations to what the remaining bytes could actually encode
-        // (a file entry is ≥ 8 bytes, a class entry ≥ 4), so a garbage
+        // (a file entry is ≥ 28 bytes, a class entry ≥ 4), so a garbage
         // count is caught by the truncation checks below instead of asking
         // the allocator for gigabytes. Exact for every well-formed file.
-        let mut out = Vec::with_capacity(n.min(r.remaining() / 8));
+        let mut out = HashMap::with_capacity(n.min(r.remaining() / 28));
         for _ in 0..n {
-            let rel = r.slice()?;
-            let rel = String::from_utf8(rel.to_vec()).ok()?;
+            let rel = String::from_utf8(r.slice()?.to_vec()).ok()?;
+            let sha: Digest = r.fixed(20)?.try_into().ok()?;
             let nc = r.u32()? as usize;
             let mut classes = Vec::with_capacity(nc.min(r.remaining() / 4));
             for _ in 0..nc {
                 classes.push(r.slice()?.to_vec());
             }
-            out.push((PathBuf::from(rel), classes));
+            out.insert(rel, (sha, classes));
         }
         if !r.is_empty() {
             return None; // trailing bytes: corrupt file, rescan
@@ -468,70 +473,170 @@ impl CacheSlot {
         Some(out)
     }
 
-    fn store(&self, base: &Path, files: &[(PathBuf, PathBuf, Vec<Vec<u8>>)]) {
+    /// The record, scanned from the entry's own directory when there is none
+    /// yet (and written). `None` — and nothing written — when the entry
+    /// cannot be scanned whole (gone, unreadable) or holds a symbolic link
+    /// (its target may differ between the store and a copy).
+    fn load_or_build(&self, stats: &CacheStats) -> Option<StoreRecord> {
+        if let Some(r) = self.load() {
+            return Some(r);
+        }
+        let (files, saw_symlink) = Scanner::collect_files(&self.entry_dir).ok()?;
+        if saw_symlink {
+            return None;
+        }
+        let base = base_of(&self.entry_dir);
+        let mut todo: Vec<(PathBuf, PathBuf, Vec<u8>)> = Vec::with_capacity(files.len());
+        for (file, real) in files {
+            let contents = std::fs::read(&file).ok()?;
+            todo.push((file, real, contents));
+        }
+        let found = find_all(&todo).ok()?;
+        stats.store_scanned.fetch_add(todo.len(), Ordering::Relaxed);
+        let record: StoreRecord = todo
+            .iter()
+            .zip(found)
+            .map(|((file, _, contents), classes)| {
+                (rel_key(&base, file), (digest(contents), classes))
+            })
+            .collect();
+        self.store(&record);
+        Some(record)
+    }
+
+    fn store(&self, record: &StoreRecord) {
+        let sorted: BTreeMap<&String, &(Digest, Vec<Vec<u8>>)> = record.iter().collect();
         let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(&(files.len() as u32).to_le_bytes());
-        for (file, _, classes) in files {
-            let Ok(rel) = file.strip_prefix(base) else {
-                return; // outside the base: do not cache
-            };
-            let rel = rel.to_string_lossy();
+        buf.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+        for (rel, (sha, classes)) in sorted {
             push_slice(&mut buf, rel.as_bytes());
+            buf.extend_from_slice(sha);
             buf.extend_from_slice(&(classes.len() as u32).to_le_bytes());
             for c in classes {
                 push_slice(&mut buf, c);
             }
         }
-        if let Some(parent) = self.file.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return;
-            }
-        }
-        // A unique temporary name: the same slot can be written by two
-        // directories scanned in parallel (or by two processes); each
-        // writer renames its own complete file over the slot.
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tmp = self.file.with_extension(format!(
-            "{}.{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        if std::fs::write(&tmp, &buf).is_ok() && std::fs::rename(&tmp, &self.file).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        write_atomically(&self.file, &buf);
     }
 }
 
-/// Which cache a scan may use.
-#[derive(Clone, Copy)]
-pub enum ScanCache<'a> {
-    /// An immutable store entry: one record for the whole directory.
-    Store(&'a CacheSlot),
-    /// A directory that can change (the project's own sources, a `path`
-    /// package, a vendor/ written by Composer): one record per file, keyed
-    /// on its mtime and size; the directory is still listed on every scan.
-    Files(&'a FileCacheSlot),
+/// Writes `bytes` to `file` through a unique temporary name: the same slot
+/// can be written by two directories scanned in parallel (or by two
+/// processes); each writer renames its own complete file over the slot.
+fn write_atomically(file: &Path, bytes: &[u8]) {
+    if let Some(parent) = file.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = file.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, file).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// What one dump's scans share: the reference time of the file systems they
+/// read (set once, before the scans), and counters for `VIVACITY_TRACE`.
+#[derive(Default)]
+pub struct CacheContext {
+    clock: std::sync::OnceLock<Clock>,
+    stats: CacheStats,
+}
+
+#[derive(Default)]
+struct CacheStats {
+    /// Served on the identity recorded for this project, nothing read.
+    served: AtomicUsize,
+    /// Placed by this run and untouched since: the store record's classes,
+    /// nothing read under vendor/.
+    from_store: AtomicUsize,
+    /// Read and hashed; the classes of a record with the same digest.
+    read: AtomicUsize,
+    /// Read, and the class detection run.
+    scanned: AtomicUsize,
+    /// Files of store entries scanned to build their records.
+    store_scanned: AtomicUsize,
+}
+
+impl CacheContext {
+    pub fn new() -> CacheContext {
+        CacheContext::default()
+    }
+
+    /// The reference time, probed before any scan (later calls are ignored).
+    pub fn set_clock(&self, clock: Clock) {
+        let _ = self.clock.set(clock);
+    }
+
+    /// Whether `id` must not be trusted alone by a later run. Without a
+    /// clock, every identity is.
+    fn is_racy(&self, id: &FileIdentity) -> bool {
+        self.clock.get().is_none_or(|c| c.is_racy(id))
+    }
+
+    /// One line for `VIVACITY_TRACE`.
+    pub fn summary(&self) -> String {
+        let s = &self.stats;
+        let n = |a: &AtomicUsize| a.load(Ordering::Relaxed);
+        format!(
+            "{} served, {} from store, {} read, {} scanned; {} store files scanned",
+            n(&s.served),
+            n(&s.from_store),
+            n(&s.read),
+            n(&s.scanned),
+            n(&s.store_scanned)
+        )
+    }
+}
+
+/// Where a project's directory may take classes from a store entry: the
+/// entry's record for that directory, and — when this run laid the package
+/// out — the identities of its files right after the placement.
+pub struct StoreSeed {
+    pub record: CacheSlot,
+    pub placed: Option<Arc<PlacedPackage>>,
 }
 
 /// Version of the per-file cache encoding; bump with `CACHE_FORMAT`.
-const FILE_CACHE_FORMAT: &str = "r1";
+/// r2: identity (dev, inode, size, mtime, ctime), racy flag and content
+/// digest per file (was mtime and size).
+const FILE_CACHE_FORMAT: &str = "r2";
 
-/// Cache location for the per-file scan of a mutable directory (or file):
-/// key = canonical path + format version. Reading and detection are skipped
-/// for a file whose (mtime ns, size) are unchanged; a file added, removed or
-/// rewritten is seen — `collect_files` lists the directory every time.
-/// Residual risk, documented: a file rewritten within the same mtime tick
-/// with the same size is served from the cache.
+/// Cache location for the per-file scan of a directory (or file) of ONE
+/// project — its own sources, a `path` package, vendor/: key = canonical
+/// path + format version. The directory is listed on every scan (a file
+/// added or removed is seen); a file is served without being read only
+/// when its identity ([`FileIdentity`]) is the one recorded and was not
+/// racy then. A changed identity means a read and a digest; the class
+/// detection runs only for content no record knows.
 pub struct FileCacheSlot {
     file: PathBuf,
+    ctx: Arc<CacheContext>,
+    seed: Option<StoreSeed>,
 }
 
-/// One cached file: (mtime ns, size, raw classes).
-type FileRecord = (u64, u64, Vec<Vec<u8>>);
+/// One cached file of a project.
+struct FileRecord {
+    identity: Option<FileIdentity>,
+    /// Taken within the racy window: re-read on the next scan.
+    racy: bool,
+    sha: Digest,
+    classes: Vec<Vec<u8>>,
+}
 
 impl FileCacheSlot {
-    pub fn new(cache_root: &Path, path: &Path) -> FileCacheSlot {
-        use sha1::{Digest, Sha1};
+    pub fn new(
+        cache_root: &Path,
+        path: &Path,
+        ctx: Arc<CacheContext>,
+        seed: Option<StoreSeed>,
+    ) -> FileCacheSlot {
+        use sha1::{Digest as _, Sha1};
         let canonical =
             vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mut h = Sha1::new();
@@ -543,41 +648,48 @@ impl FileCacheSlot {
         let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         FileCacheSlot {
             file: cache_root.join("classmap-files").join(format!("{key}.bin")),
+            ctx,
+            seed,
         }
-    }
-
-    /// (mtime ns, size) of a file, None when it cannot be stat'ed.
-    fn identity(path: &Path) -> Option<(u64, u64)> {
-        let meta = std::fs::metadata(path).ok()?;
-        let mtime = meta
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_nanos();
-        Some((u64::try_from(mtime).ok()?, meta.len()))
     }
 
     /// Records by relative path.
     ///
     ///   u32 file_count
-    ///   [ u32 rel_len, rel, u64 mtime_ns, u64 size,
+    ///   [ u32 rel_len, rel, u8 flags (1: identity follows, 2: racy),
+    ///     identity (56 bytes, when flagged), sha1 (20 bytes),
     ///     u32 class_count, [ u32 class_len, class ]* ]*
-    fn load(&self) -> Option<BTreeMap<String, FileRecord>> {
+    fn load(&self) -> Option<HashMap<String, FileRecord>> {
         let bytes = std::fs::read(&self.file).ok()?;
         let mut r = ByteReader::new(&bytes);
         let n = r.u32()? as usize;
-        let mut out = BTreeMap::new();
+        let mut out = HashMap::with_capacity(n.min(r.remaining() / 29));
         for _ in 0..n {
             let rel = String::from_utf8(r.slice()?.to_vec()).ok()?;
-            let mtime = r.u64()?;
-            let size = r.u64()?;
+            let flags = r.fixed(1)?[0];
+            if flags & !3 != 0 {
+                return None;
+            }
+            let identity = if flags & 1 != 0 {
+                Some(FileIdentity::decode(r.fixed(FileIdentity::ENCODED_LEN)?)?)
+            } else {
+                None
+            };
+            let sha: Digest = r.fixed(20)?.try_into().ok()?;
             let nc = r.u32()? as usize;
             let mut classes = Vec::with_capacity(nc.min(r.remaining() / 4));
             for _ in 0..nc {
                 classes.push(r.slice()?.to_vec());
             }
-            out.insert(rel, (mtime, size, classes));
+            out.insert(
+                rel,
+                FileRecord {
+                    identity,
+                    racy: flags & 2 != 0,
+                    sha,
+                    classes,
+                },
+            );
         }
         if !r.is_empty() {
             return None;
@@ -588,29 +700,20 @@ impl FileCacheSlot {
     fn store(&self, records: &BTreeMap<String, FileRecord>) {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
-        for (rel, (mtime, size, classes)) in records {
+        for (rel, rec) in records {
             push_slice(&mut buf, rel.as_bytes());
-            buf.extend_from_slice(&mtime.to_le_bytes());
-            buf.extend_from_slice(&size.to_le_bytes());
-            buf.extend_from_slice(&(classes.len() as u32).to_le_bytes());
-            for c in classes {
+            let flags = u8::from(rec.identity.is_some()) | (u8::from(rec.racy) << 1);
+            buf.push(flags);
+            if let Some(id) = &rec.identity {
+                id.encode(&mut buf);
+            }
+            buf.extend_from_slice(&rec.sha);
+            buf.extend_from_slice(&(rec.classes.len() as u32).to_le_bytes());
+            for c in &rec.classes {
                 push_slice(&mut buf, c);
             }
         }
-        if let Some(parent) = self.file.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return;
-            }
-        }
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let tmp = self.file.with_extension(format!(
-            "{}.{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        if std::fs::write(&tmp, &buf).is_ok() && std::fs::rename(&tmp, &self.file).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        write_atomically(&self.file, &buf);
     }
 }
 
@@ -636,10 +739,12 @@ impl<'a> ByteReader<'a> {
         self.pos = end;
         Some(u32::from_le_bytes(raw.try_into().ok()?))
     }
-    fn u64(&mut self) -> Option<u64> {
-        let b = self.bytes.get(self.pos..self.pos + 8)?;
-        self.pos += 8;
-        Some(u64::from_le_bytes(b.try_into().ok()?))
+    /// The next `n` bytes as they are.
+    fn fixed(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let out = self.bytes.get(self.pos..end)?;
+        self.pos = end;
+        Some(out)
     }
 
     fn slice(&mut self) -> Option<&'a [u8]> {
@@ -747,8 +852,8 @@ impl Scanner {
         self.scan_path_cached(path, excluded, autoload_type, namespace, None)
     }
 
-    /// `scan_path` with, for a (immutable) store entry directory, a cache of
-    /// raw classes per file: reading and detection are skipped, everything
+    /// `scan_path` through a project's per-file cache: reading and detection
+    /// are skipped for what the cache can vouch for (`scan_only`), everything
     /// else (exclusions, deduplication, PSR filter, ambiguities) is replayed
     /// identically.
     pub fn scan_path_cached(
@@ -757,7 +862,7 @@ impl Scanner {
         excluded: Option<&pcre2::bytes::Regex>,
         autoload_type: AutoloadType,
         namespace: &str,
-        cache: Option<ScanCache<'_>>,
+        cache: Option<&FileCacheSlot>,
     ) -> Result<(), ClassMapError> {
         let scanned_files = Scanner::scan_only(path, cache)?;
         self.merge_scanned(scanned_files, path, excluded, autoload_type, namespace)
@@ -770,112 +875,180 @@ impl Scanner {
     /// parallel and then merged sequentially in order.
     pub fn scan_only(
         path: &Path,
-        cache: Option<ScanCache<'_>>,
+        cache: Option<&FileCacheSlot>,
     ) -> Result<ScannedFiles, ClassMapError> {
-        let (cache, files_cache) = match cache {
-            Some(ScanCache::Store(c)) => (Some(c), None),
-            Some(ScanCache::Files(f)) => (None, Some(f)),
-            None => (None, None),
-        };
-        if let Some(f) = files_cache {
-            return Scanner::scan_only_files_cached(path, f);
+        if let Some(slot) = cache {
+            return Scanner::scan_only_files_cached(path, slot);
         }
-        // (path, real path, raw classes) in walk order.
-        let mut scanned_files: ScannedFiles = Vec::new();
-
-        // A store entry is immutable, its copy under vendor/ is not: a
-        // plugin may have deleted files there since (liborm85/
-        // composer-vendor-cleaner removes test directories inside the
-        // autoloaded ones, docs/plans/plugins-round2.md). With such a
-        // plugin in sight, a record whose files are not all still there is
-        // not served: the directory is scanned as it is.
-        let cached = cache
-            .and_then(|c| c.load().map(|e| (c, e)))
-            .filter(|(c, entries)| c.still_present(path, entries))
-            .map(|(_, e)| e);
-        if let Some(entries) = cached {
-            let base_real =
-                vivacity_core::pathutil::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            for (rel, classes) in entries {
-                scanned_files.push((path.join(&rel), base_real.join(&rel), classes));
-            }
-        } else {
-            let (files, saw_symlink) = Scanner::collect_files(path)?;
-            // Sequential reads (parallel reading is slower on APFS),
-            // parallel detection on the CPU.
-            let mut todo: Vec<(PathBuf, PathBuf, Vec<u8>)> = Vec::new();
-            for (file, real) in files {
-                let contents =
-                    std::fs::read(&file).map_err(|_| ClassMapError::Read(file.clone()))?;
-                todo.push((file, real, contents));
-            }
-            let found = find_all(&todo)?;
-            for ((file, real, _), classes) in todo.into_iter().zip(found) {
-                scanned_files.push((file, real, classes));
-            }
-            if let Some(c) = cache {
-                if !saw_symlink && c.matches_entry(path, &scanned_files) {
-                    c.store(path, &scanned_files);
-                }
-            }
+        let (files, _) = Scanner::collect_files(path)?;
+        // Sequential reads (parallel reading is slower on APFS), parallel
+        // detection on the CPU.
+        let mut todo: Vec<(PathBuf, PathBuf, Vec<u8>)> = Vec::new();
+        for (file, real) in files {
+            let contents = std::fs::read(&file).map_err(|_| ClassMapError::Read(file.clone()))?;
+            todo.push((file, real, contents));
         }
-        Ok(scanned_files)
+        let found = find_all(&todo)?;
+        Ok(todo
+            .into_iter()
+            .zip(found)
+            .map(|((file, real, _), classes)| (file, real, classes))
+            .collect())
     }
 
-    /// `scan_only` for a directory that can change: the directory is listed
-    /// (walk order, as always), each file's (mtime ns, size) is compared to
-    /// the cache, only the changed and new files are read and scanned, and
-    /// the cache is rewritten when anything differed. Symlinks inside: the
-    /// result is not cached (as for a store entry).
+    /// `scan_only` through a project's per-file cache. The directory is
+    /// listed (walk order, as always) and each file's identity taken; per
+    /// file, in this order:
+    /// 1. its identity is the one this project's record holds, and was not
+    ///    racy then: the record's classes, nothing read;
+    /// 2. this run laid its package out from a store entry and its identity
+    ///    is still the one taken right after the placement: the entry
+    ///    record's classes, nothing read under vendor/ (the record is
+    ///    scanned from the entry's own directory when it has none yet);
+    /// 3. otherwise it is read and hashed: the classes of this project's
+    ///    record or of the store entry's for the same digest, else the class
+    ///    detection.
+    ///
+    /// The record is rewritten when anything differed; a case-2 entry is
+    /// written racy (the next scan reads it once: its bytes were never read
+    /// here). A tree with a symbolic link inside is not recorded, and takes
+    /// nothing from a placement (a link's target may lie elsewhere).
     fn scan_only_files_cached(
         path: &Path,
         slot: &FileCacheSlot,
     ) -> Result<ScannedFiles, ClassMapError> {
+        enum How {
+            Served,
+            Placed,
+            Read,
+        }
         let (files, saw_symlink) = Scanner::collect_files(path)?;
         let cached = slot.load().unwrap_or_default();
-        let base: PathBuf = if path.is_file() {
-            path.parent().map(Path::to_path_buf).unwrap_or_default()
-        } else {
-            path.to_path_buf()
-        };
-        let rel_of = |file: &Path| -> String {
-            file.strip_prefix(&base)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .into_owned()
-        };
-        let mut hits: Vec<Option<Vec<Vec<u8>>>> = Vec::with_capacity(files.len());
-        let mut identities: Vec<Option<(u64, u64)>> = Vec::with_capacity(files.len());
-        let mut todo: Vec<(PathBuf, PathBuf, Vec<u8>)> = Vec::new();
+        let base = base_of(path);
+        let placed = slot
+            .seed
+            .as_ref()
+            .and_then(|s| s.placed.as_ref())
+            .filter(|_| !saw_symlink);
+        let stats = &slot.ctx.stats;
+
+        let mut rels: Vec<String> = Vec::with_capacity(files.len());
+        let mut ids: Vec<Option<FileIdentity>> = Vec::with_capacity(files.len());
+        let mut how: Vec<How> = Vec::with_capacity(files.len());
         for (file, real) in &files {
-            let id = FileCacheSlot::identity(real);
-            let hit = id.and_then(|(mtime, size)| {
-                let (m, sz, classes) = cached.get(&rel_of(file))?;
-                (*m == mtime && *sz == size).then(|| classes.clone())
-            });
-            if hit.is_none() {
+            let rel = rel_key(&base, file);
+            let id = FileIdentity::of(real);
+            let h = match (id, cached.get(&rel)) {
+                (Some(id), Some(rec)) if rec.identity == Some(id) && !rec.racy => How::Served,
+                (Some(id), _)
+                    if placed.is_some_and(|p| {
+                        p.files.get(real.as_os_str().as_encoded_bytes()) == Some(&id)
+                    }) =>
+                {
+                    How::Placed
+                }
+                _ => How::Read,
+            };
+            rels.push(rel);
+            ids.push(id);
+            how.push(h);
+        }
+
+        // The store entry's record: built (scanned from the entry) only for
+        // a placement this run made; otherwise read when it exists.
+        let any_placed = how.iter().any(|h| matches!(h, How::Placed));
+        let any_read = how.iter().any(|h| matches!(h, How::Read));
+        let store: Option<StoreRecord> = match &slot.seed {
+            Some(seed) if any_placed => seed.record.load_or_build(stats),
+            Some(seed) if any_read => seed.record.load(),
+            _ => None,
+        };
+        // A placed file the entry's record does not know is read.
+        for (h, rel) in how.iter_mut().zip(&rels) {
+            if matches!(h, How::Placed) && !store.as_ref().is_some_and(|s| s.contains_key(rel)) {
+                *h = How::Read;
+            }
+        }
+
+        // Sequential reads (parallel reading is slower on APFS); digests and
+        // detection in parallel on the CPU.
+        let mut todo: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (i, ((file, _), h)) in files.iter().zip(&how).enumerate() {
+            if matches!(h, How::Read) {
                 let contents =
                     std::fs::read(file).map_err(|_| ClassMapError::Read(file.clone()))?;
-                todo.push((file.clone(), real.clone(), contents));
+                todo.push((i, contents));
             }
-            identities.push(id);
-            hits.push(hit);
         }
-        let found = find_all(&todo)?;
-        let mut found = found.into_iter();
+        let reused = |rel: &str, sha: &Digest| -> Option<Vec<Vec<u8>>> {
+            if let Some(rec) = cached.get(rel).filter(|r| &r.sha == sha) {
+                return Some(rec.classes.clone());
+            }
+            store
+                .as_ref()?
+                .get(rel)
+                .filter(|(s, _)| s == sha)
+                .map(|(_, c)| c.clone())
+        };
+        let read: Vec<(usize, Digest, Vec<Vec<u8>>)> = todo
+            .par_iter()
+            .map(|(i, contents)| {
+                let sha = digest(contents);
+                match reused(&rels[*i], &sha) {
+                    Some(classes) => {
+                        stats.read.fetch_add(1, Ordering::Relaxed);
+                        Ok((*i, sha, classes))
+                    }
+                    None => {
+                        stats.scanned.fetch_add(1, Ordering::Relaxed);
+                        find_one(contents).map(|c| (*i, sha, c))
+                    }
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let mut read = read.into_iter();
+
+        let changed = files.len() != cached.len() || how.iter().any(|h| !matches!(h, How::Served));
         let mut scanned_files: ScannedFiles = Vec::with_capacity(files.len());
         let mut records: BTreeMap<String, FileRecord> = BTreeMap::new();
-        let mut changed = files.len() != cached.len();
-        for ((file, real), (hit, id)) in files.into_iter().zip(hits.into_iter().zip(identities)) {
-            let classes = match hit {
-                Some(c) => c,
-                None => {
-                    changed = true;
-                    found.next().unwrap_or_default()
+        for (i, (((file, real), h), (rel, id))) in files
+            .into_iter()
+            .zip(how)
+            .zip(rels.into_iter().zip(ids))
+            .enumerate()
+        {
+            let (sha, classes, racy) = match h {
+                How::Served => {
+                    stats.served.fetch_add(1, Ordering::Relaxed);
+                    let rec = &cached[&rel];
+                    (rec.sha, rec.classes.clone(), false)
+                }
+                How::Placed => {
+                    stats.from_store.fetch_add(1, Ordering::Relaxed);
+                    let (sha, classes) = store
+                        .as_ref()
+                        .and_then(|s| s.get(&rel))
+                        .cloned()
+                        .unwrap_or_default();
+                    (sha, classes, true)
+                }
+                How::Read => {
+                    let (j, sha, classes) = read.next().unwrap_or_default();
+                    debug_assert_eq!(i, j, "reads come back in walk order");
+                    let racy = id.as_ref().is_none_or(|id| slot.ctx.is_racy(id));
+                    (sha, classes, racy)
                 }
             };
-            if let Some((mtime, size)) = id {
-                records.insert(rel_of(&file), (mtime, size, classes.clone()));
+            if changed {
+                records.insert(
+                    rel,
+                    FileRecord {
+                        identity: id,
+                        racy,
+                        sha,
+                        classes: classes.clone(),
+                    },
+                );
             }
             scanned_files.push((file, real, classes));
         }
@@ -1183,7 +1356,7 @@ final class Last implements Qux {}
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod cache_tests {
     use super::*;
 
@@ -1192,51 +1365,268 @@ mod cache_tests {
         std::fs::write(p, content).expect("write");
     }
 
+    /// A context whose clock puts every file written so far well outside
+    /// the racy window (their identities are trusted on the next scan).
+    fn settled(dir: &Path) -> Arc<CacheContext> {
+        let ctx = CacheContext::new();
+        let id = FileIdentity::of(dir).expect("id");
+        ctx.set_clock(Clock::at(id.dev, (id.ctime.0 + 60, 0)));
+        Arc::new(ctx)
+    }
+
+    fn counts(ctx: &CacheContext) -> [usize; 5] {
+        let s = &ctx.stats;
+        [
+            &s.served,
+            &s.from_store,
+            &s.read,
+            &s.scanned,
+            &s.store_scanned,
+        ]
+        .map(|a| a.swap(0, Ordering::Relaxed))
+    }
+
+    type Classes = (BTreeMap<Vec<u8>, String>, BTreeMap<Vec<u8>, Vec<String>>);
+
+    fn scan(dir: &Path, slot: Option<&FileCacheSlot>) -> Classes {
+        let mut s = Scanner::new().expect("scanner");
+        s.scan_path_cached(dir, None, AutoloadType::ClassMap, "", slot)
+            .expect("scan");
+        (s.class_map.map, s.class_map.ambiguous)
+    }
+
+    fn names(c: &Classes) -> Vec<String> {
+        c.0.keys()
+            .map(|k| String::from_utf8_lossy(k).into_owned())
+            .collect()
+    }
+
+    /// Same bytes, mtime put back: only the ctime moves (`touch -r`).
+    fn rewrite_keeping_mtime(p: &Path, content: &[u8]) {
+        let mtime = std::fs::metadata(p)
+            .expect("meta")
+            .modified()
+            .expect("mtime");
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(p, content).expect("write");
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .and_then(|h| h.set_modified(mtime))
+            .expect("touch -r");
+    }
+
     /// A scan served from the cache must produce exactly the same classmap
     /// (classes, paths, ambiguities) as a direct scan, including for non-UTF-8
     /// names and files without any class.
     #[test]
     fn cached_scan_equals_direct_scan() {
         let tmp = tempfile::tempdir().expect("tmp");
-        let pkg = tmp.path().join("store/acme/lib/1.0.0-abc");
+        let src = tmp.path().join("p/src");
+        write(&src.join("A.php"), b"<?php\nnamespace Acme;\nclass A {}\n");
         write(
-            &pkg.join("src/A.php"),
-            b"<?php\nnamespace Acme;\nclass A {}\n",
-        );
-        write(
-            &pkg.join("src/Sub/B.php"),
+            &src.join("Sub/B.php"),
             b"<?php\nnamespace Acme\\Sub;\nclass B {}\ninterface I {}\n",
         );
-        write(&pkg.join("src/raw.php"), b"<?php\nclass \x7f {}\n");
-        write(&pkg.join("src/nothing.php"), b"<?php\n// rien\n");
+        write(&src.join("raw.php"), b"<?php\nclass \x7f {}\n");
+        write(&src.join("nothing.php"), b"<?php\n// rien\n");
         write(
-            &pkg.join("src/dup.php"),
+            &src.join("dup.php"),
             b"<?php\nnamespace Acme;\nclass A {}\n",
         );
-        let cache_root = tmp.path().join("cache");
-        let slot = CacheSlot::new(&cache_root, &pkg, Path::new("src"));
-
-        let run = |slot: Option<&CacheSlot>| {
-            let mut s = Scanner::new().expect("scanner");
-            s.scan_path_cached(
-                &pkg.join("src"),
-                None,
-                AutoloadType::ClassMap,
-                "",
-                slot.map(ScanCache::Store),
-            )
-            .expect("scan");
-            (s.class_map.map, s.class_map.ambiguous)
-        };
-        let direct = run(None);
-        let first = run(Some(&slot)); // fills the cache
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(&tmp.path().join("cache"), &src, ctx.clone(), None);
+        let direct = scan(&src, None);
+        let first = scan(&src, Some(&slot));
         assert!(slot.file.is_file(), "cache not written");
-        let cached = run(Some(&slot)); // served from the cache
+        assert_eq!(counts(&ctx), [0, 0, 0, 5, 0]);
+        let cached = scan(&src, Some(&slot));
+        assert_eq!(counts(&ctx), [5, 0, 0, 0, 0], "served, nothing read");
         assert_eq!(direct, first);
         assert_eq!(direct, cached);
         assert_eq!(direct.0.len(), 4);
         assert!(direct.0.contains_key(&vec![0x7fu8]));
         assert_eq!(direct.1.len(), 1, "the Acme\\A ambiguity must be replayed");
+    }
+
+    #[test]
+    fn a_changed_identity_is_read_and_a_changed_content_rescanned() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        let a = src.join("A.php");
+        write(&a, b"<?php\nclass Str {}\n");
+        write(&src.join("B.php"), b"<?php\nclass B {}\n");
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx.clone(), None);
+        scan(&src, Some(&slot));
+        counts(&ctx);
+        // ctime alone: read and hashed, the record's classes, no detection.
+        rewrite_keeping_mtime(&a, b"<?php\nclass Str {}\n");
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx.clone(), None);
+        assert_eq!(names(&scan(&src, Some(&slot))), ["B", "Str"]);
+        assert_eq!(counts(&ctx), [1, 0, 1, 0, 0]);
+        // Same size, mtime restored, another class: detected.
+        rewrite_keeping_mtime(&a, b"<?php\nclass Stx {}\n");
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx.clone(), None);
+        assert_eq!(names(&scan(&src, Some(&slot))), ["B", "Stx"]);
+        assert_eq!(counts(&ctx), [1, 0, 0, 1, 0]);
+        assert_eq!(scan(&src, Some(&slot)), scan(&src, None));
+        // Back to the original content: the digest no record holds now.
+        rewrite_keeping_mtime(&a, b"<?php\nclass Str {}\n");
+        assert_eq!(names(&scan(&src, Some(&slot))), ["B", "Str"]);
+    }
+
+    #[test]
+    fn a_racy_entry_is_not_served() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        write(&src.join("A.php"), b"<?php\nclass A {}\n");
+        // The reference time is the probe's, taken now: A was written within
+        // the window.
+        let ctx = Arc::new(CacheContext::new());
+        ctx.set_clock(Clock::probe(&[&src], &[tmp.path()]));
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx.clone(), None);
+        scan(&src, Some(&slot));
+        scan(&src, Some(&slot));
+        assert_eq!(counts(&ctx), [0, 0, 1, 1, 0], "re-read, never served");
+        // Without a clock, nothing is trusted either.
+        let ctx = Arc::new(CacheContext::new());
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx.clone(), None);
+        scan(&src, Some(&slot));
+        scan(&src, Some(&slot));
+        assert_eq!(counts(&ctx), [0, 0, 2, 0, 0]);
+    }
+
+    #[test]
+    fn added_and_removed_files_are_seen() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        write(&src.join("A.php"), b"<?php\nclass A {}\n");
+        write(&src.join("tests/B.php"), b"<?php\nclass B {}\n");
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(tmp.path(), &src, ctx, None);
+        scan(&src, Some(&slot));
+        write(&src.join("C.php"), b"<?php\nclass C {}\n");
+        std::fs::remove_file(src.join("tests/B.php")).expect("rm");
+        assert_eq!(names(&scan(&src, Some(&slot))), ["A", "C"]);
+        assert_eq!(scan(&src, Some(&slot)), scan(&src, None));
+    }
+
+    /// The store entry's record comes from the entry's own directory; a
+    /// copy placed by this run and untouched takes it without being read;
+    /// an edited copy is read, rescanned, and changes neither the record nor
+    /// what another project gets from it.
+    #[test]
+    fn the_store_record_comes_from_the_entry_and_serves_only_its_bytes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/acme/lib/1.0.0-abc");
+        write(&entry.join("src/Str.php"), b"<?php\nclass Str {}\n");
+        write(&entry.join("src/Other.php"), b"<?php\nclass Other {}\n");
+        let copy = |to: &str| {
+            let dest = tmp.path().join(to).join("vendor/acme/lib");
+            for f in ["src/Str.php", "src/Other.php"] {
+                write(&dest.join(f), &std::fs::read(entry.join(f)).expect("r"));
+            }
+            dest
+        };
+        let a = copy("A");
+        let placed = Arc::new(PlacedPackage::record("acme/lib", &a, &entry).expect("placed"));
+        let seed = |placed: Option<Arc<PlacedPackage>>| StoreSeed {
+            record: CacheSlot::new(tmp.path(), &entry, Path::new("src")),
+            placed,
+        };
+        // A, placed by this run: the record is scanned from the entry, A's
+        // copy is not read.
+        let ctx = settled(&a);
+        let slot_a = FileCacheSlot::new(
+            tmp.path(),
+            &a.join("src"),
+            ctx.clone(),
+            Some(seed(Some(placed.clone()))),
+        );
+        assert_eq!(
+            names(&scan(&a.join("src"), Some(&slot_a))),
+            ["Other", "Str"]
+        );
+        assert_eq!(counts(&ctx), [0, 2, 0, 0, 2]);
+        // Placement entries are written racy: the next run (no placement in
+        // hand) reads them once, then serves them.
+        let slot_a = FileCacheSlot::new(tmp.path(), &a.join("src"), ctx.clone(), Some(seed(None)));
+        assert_eq!(
+            names(&scan(&a.join("src"), Some(&slot_a))),
+            ["Other", "Str"]
+        );
+        assert_eq!(counts(&ctx), [0, 0, 2, 0, 0]);
+        scan(&a.join("src"), Some(&slot_a));
+        assert_eq!(counts(&ctx), [2, 0, 0, 0, 0]);
+        // A's copy edited in place, same size and mtime: rescanned, even
+        // with the placement still in hand.
+        rewrite_keeping_mtime(&a.join("src/Str.php"), b"<?php\nclass Stx {}\n");
+        let ctx = settled(&a);
+        let slot_a = FileCacheSlot::new(
+            tmp.path(),
+            &a.join("src"),
+            ctx.clone(),
+            Some(seed(Some(placed.clone()))),
+        );
+        assert_eq!(
+            names(&scan(&a.join("src"), Some(&slot_a))),
+            ["Other", "Stx"]
+        );
+        assert_eq!(counts(&ctx), [1, 0, 0, 1, 0]);
+        let record = seed(None).record.load().expect("record");
+        assert_eq!(
+            record["Str.php"].1,
+            vec![b"Str".to_vec()],
+            "the record is the entry's"
+        );
+        // B, a copy no placement vouches for: read, the entry's classes by
+        // digest; its classmap is its own.
+        let b = copy("B");
+        let ctx = settled(&b);
+        let slot_b = FileCacheSlot::new(tmp.path(), &b.join("src"), ctx.clone(), Some(seed(None)));
+        assert_eq!(
+            names(&scan(&b.join("src"), Some(&slot_b))),
+            ["Other", "Str"]
+        );
+        assert_eq!(counts(&ctx), [0, 0, 2, 0, 0]);
+        // A placement of ANOTHER package (nested install dirs) vouches for
+        // nothing here.
+        let c = copy("C");
+        let elsewhere = Arc::new(PlacedPackage::record("x/y", &a, &entry).expect("placed"));
+        let ctx = settled(&c);
+        let slot_c = FileCacheSlot::new(
+            tmp.path(),
+            &c.join("src"),
+            ctx.clone(),
+            Some(seed(Some(elsewhere))),
+        );
+        scan(&c.join("src"), Some(&slot_c));
+        assert_eq!(counts(&ctx), [0, 0, 2, 0, 0]);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_scanned_falls_back_to_the_copy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/gone");
+        let a = tmp.path().join("A/src");
+        write(&a.join("A.php"), b"<?php\nclass A {}\n");
+        let placed = PlacedPackage::record("acme/gone", &tmp.path().join("A"), &entry);
+        let ctx = settled(&a);
+        let slot = FileCacheSlot::new(
+            tmp.path(),
+            &a,
+            ctx.clone(),
+            Some(StoreSeed {
+                record: CacheSlot::new(tmp.path(), &entry, Path::new("src")),
+                placed: placed.map(Arc::new),
+            }),
+        );
+        assert_eq!(names(&scan(&a, Some(&slot))), ["A"]);
+        assert_eq!(counts(&ctx), [0, 0, 0, 1, 0]);
+        assert!(!tmp.path().join("classmap").exists(), "no store record");
     }
 
     #[test]
@@ -1261,81 +1651,30 @@ mod cache_tests {
     }
 
     #[test]
-    fn a_cleaned_copy_neither_feeds_nor_reads_the_store_record() {
+    fn symlinked_tree_is_not_recorded_nor_taken_from_a_placement() {
         let tmp = tempfile::tempdir().expect("tmp");
-        let entry = tmp.path().join("store/pkg");
-        write(&entry.join("A.php"), b"<?php\nclass A {}\n");
-        write(&entry.join("tests/B.php"), b"<?php\nclass B {}\n");
-        let cleaned = tmp.path().join("cleaned");
-        write(&cleaned.join("A.php"), b"<?php\nclass A {}\n");
-        let pristine = tmp.path().join("pristine");
-        write(&pristine.join("A.php"), b"<?php\nclass A {}\n");
-        write(&pristine.join("tests/B.php"), b"<?php\nclass B {}\n");
-        let mut slot = CacheSlot::new(tmp.path(), &entry, Path::new(""));
-        slot.verify_files = true;
-        let classes = |dir: &Path| {
-            let mut s = Scanner::new().expect("scanner");
-            s.scan_path_cached(
-                dir,
-                None,
-                AutoloadType::ClassMap,
-                "",
-                Some(ScanCache::Store(&slot)),
-            )
-            .expect("scan");
-            s.class_map.map.len()
-        };
-        // A cleaned copy is scanned as it is, and not recorded.
-        assert_eq!(classes(&cleaned), 1);
-        assert!(
-            !slot.file.exists(),
-            "a cleaned copy must not feed the record"
-        );
-        // A pristine copy is recorded; the cleaned one does not read it.
-        assert_eq!(classes(&pristine), 2);
-        assert!(slot.file.is_file());
-        assert_eq!(classes(&cleaned), 1);
-        assert_eq!(classes(&pristine), 2);
-        // A single file gone from a directory still there: seen only when
-        // every file is checked.
-        std::fs::remove_file(pristine.join("tests/B.php")).expect("rm");
-        write(&pristine.join("tests/C.txt"), b"x");
-        let mut full = CacheSlot::new(tmp.path(), &entry, Path::new(""));
-        full.verify_files = true;
-        let mut s = Scanner::new().expect("scanner");
-        s.scan_path_cached(
-            &pristine,
-            None,
-            AutoloadType::ClassMap,
-            "",
-            Some(ScanCache::Store(&full)),
-        )
-        .expect("scan");
-        assert_eq!(s.class_map.map.len(), 1);
-    }
-
-    #[test]
-    fn symlinked_tree_is_not_cached() {
-        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/e");
+        write(&entry.join("real/X.php"), b"<?php\nclass X {}\n");
         let pkg = tmp.path().join("pkg");
         write(&pkg.join("real/X.php"), b"<?php\nclass X {}\n");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(pkg.join("real"), pkg.join("link")).expect("ln");
-        let slot = CacheSlot::new(tmp.path(), &pkg, Path::new(""));
-        let mut s = Scanner::new().expect("scanner");
-        s.scan_path_cached(
+        let placed = PlacedPackage::record("a/b", &pkg, &entry).map(Arc::new);
+        let ctx = settled(&pkg);
+        let slot = FileCacheSlot::new(
+            tmp.path(),
             &pkg,
-            None,
-            AutoloadType::ClassMap,
-            "",
-            Some(ScanCache::Store(&slot)),
-        )
-        .expect("scan");
-        #[cfg(unix)]
+            ctx.clone(),
+            Some(StoreSeed {
+                record: CacheSlot::new(tmp.path(), &entry, Path::new("")),
+                placed,
+            }),
+        );
+        assert_eq!(names(&scan(&pkg, Some(&slot))), ["X"]);
         assert!(
             !slot.file.exists(),
-            "a tree with a symlink must not be cached"
+            "a tree with a symlink must not be recorded"
         );
+        assert_eq!(counts(&ctx)[1], 0, "nothing taken from the placement");
     }
 
     /// A corrupt cache file — truncated, trailing garbage, or a garbage
@@ -1345,47 +1684,55 @@ mod cache_tests {
     #[test]
     fn corrupt_cache_is_rescanned() {
         let tmp = tempfile::tempdir().expect("tmp");
-        let pkg = tmp.path().join("store/acme/lib/1.0.0-abc");
+        let entry = tmp.path().join("store/acme/lib/1.0.0-abc");
         write(
-            &pkg.join("src/A.php"),
+            &entry.join("src/A.php"),
             b"<?php\nnamespace Acme;\nclass A {}\n",
         );
-        let slot = CacheSlot::new(&tmp.path().join("cache"), &pkg, Path::new("src"));
-
-        let run = |slot: Option<&CacheSlot>| {
-            let mut s = Scanner::new().expect("scanner");
-            s.scan_path_cached(
-                &pkg.join("src"),
-                None,
-                AutoloadType::ClassMap,
-                "",
-                slot.map(ScanCache::Store),
-            )
-            .expect("scan");
-            (s.class_map.map, s.class_map.ambiguous)
-        };
-        let direct = run(None);
-        run(Some(&slot)); // fills the cache
-        let valid = std::fs::read(&slot.file).expect("cache bytes");
-        assert!(slot.load().is_some(), "sanity: the valid cache loads");
-
-        // count=1, rel="a", then an absurd class count (and no class bytes).
-        let mut huge_class_count = Vec::new();
-        huge_class_count.extend_from_slice(&1u32.to_le_bytes());
-        huge_class_count.extend_from_slice(&1u32.to_le_bytes());
-        huge_class_count.push(b'a');
-        huge_class_count.extend_from_slice(&u32::MAX.to_le_bytes());
-        let corruptions: Vec<Vec<u8>> = vec![
-            valid[..valid.len() - 1].to_vec(),        // truncated
-            [valid.clone(), vec![0u8]].concat(),      // trailing bytes
-            vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01], // absurd file count
-            huge_class_count,
-            Vec::new(), // empty file
-        ];
-        for (i, bad) in corruptions.iter().enumerate() {
-            write(&slot.file, bad);
-            assert!(slot.load().is_none(), "corruption #{i} must not load");
-            assert_eq!(run(Some(&slot)), direct, "corruption #{i} must rescan");
+        let src = tmp.path().join("p/src");
+        write(&src.join("A.php"), b"<?php\nnamespace Acme;\nclass A {}\n");
+        let placed = PlacedPackage::record("acme/lib", &tmp.path().join("p"), &entry).map(Arc::new);
+        let ctx = settled(&src);
+        let slot = FileCacheSlot::new(
+            &tmp.path().join("cache"),
+            &src,
+            ctx,
+            Some(StoreSeed {
+                record: CacheSlot::new(&tmp.path().join("cache"), &entry, Path::new("src")),
+                placed,
+            }),
+        );
+        let direct = scan(&src, None);
+        scan(&src, Some(&slot)); // fills both records
+        let store_file = slot.seed.as_ref().expect("seed").record.file.clone();
+        for file in [slot.file.clone(), store_file] {
+            let valid = std::fs::read(&file).expect("cache bytes");
+            // count=1, rel="a", then an absurd class count (and no class bytes).
+            let mut huge_class_count = Vec::new();
+            huge_class_count.extend_from_slice(&1u32.to_le_bytes());
+            huge_class_count.extend_from_slice(&1u32.to_le_bytes());
+            huge_class_count.push(b'a');
+            huge_class_count.extend_from_slice(&u32::MAX.to_le_bytes());
+            let corruptions: Vec<Vec<u8>> = vec![
+                valid[..valid.len() - 1].to_vec(),        // truncated
+                [valid.clone(), vec![0u8]].concat(),      // trailing bytes
+                vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01], // absurd file count
+                huge_class_count,
+                Vec::new(), // empty file
+            ];
+            for (i, bad) in corruptions.iter().enumerate() {
+                write(&file, bad);
+                assert!(
+                    slot.load().is_none() || file != slot.file,
+                    "corruption #{i}"
+                );
+                assert_eq!(
+                    scan(&src, Some(&slot)),
+                    direct,
+                    "corruption #{i} must rescan"
+                );
+            }
+            write(&file, &valid);
         }
     }
 }
