@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-10-31
+
 ### Added
 - **Static musl builds for Linux** (`x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-musl`): vivacity runs on Alpine (the official
