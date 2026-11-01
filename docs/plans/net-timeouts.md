@@ -700,7 +700,11 @@ sorties des deux outils. Rouges avant ce correctif (le message), verts après.
 
 **Reste, consigné** : `Url::sanitize` ne masque ni un autre paramètre
 d'URL (`private_token=`, une signature) ni un nom court sans mot de passe
-(`http://<jeton>@hôte`) ; vivacity non plus, par parité (à arbitrer). Et
-l'échec de transport d'une archive (`Error::Http`, « HTTP failure for
-<url> », point 54) imprime l'URL sans l'assainir : le mot de passe y
-apparaît, là où Composer écrit `user:***@` — hors de ce cas, non corrigé.
+(`http://<jeton>@hôte`) ; `sanitize_url` non plus, par parité, dans les
+sorties soumises au contrat Composer. **Corrigé le 2026-11-01** : l'échec de
+transport d'une archive (`Error::Http`, « HTTP failure for <url> », point
+54) imprimait l'URL sans l'assainir, mot de passe compris ; ce diagnostic
+propre à vivacity, comme le rapport de déliaison, passe désormais par
+`fetch::mask_url_secrets`, qui masque aussi ce que Composer laisse (règle,
+formes couvertes et limites : DECISIONS.md, 2026-11-01, « Identifiants dans
+les diagnostics de vivacity »).

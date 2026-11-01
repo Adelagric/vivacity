@@ -6538,3 +6538,72 @@ l'optimisation. Le coût de P1 est accepté pour 0.26.1 ; il ne vient pas
 principalement du second `stat` que l'essai évitait. Son origine (profil par
 phase de l'install, fenêtre de deux secondes) est un sujet de 0.27 ; le
 hachage des fichiers fraîchement posés n'y est qu'une hypothèse.
+
+## 2026-11-01 — Identifiants dans les diagnostics de vivacity : la confidentialité d'abord (docs/plans/net-timeouts.md)
+
+**La règle, fixée par le mainteneur.** Une sortie soumise au contrat
+Composer reproduit la sienne, avec son masquage : `fetch::sanitize_url`,
+port exact de `Url::sanitize` du phar 2.10.3, inchangé. Un rapport interne
+ou un diagnostic propre à vivacity (aucune sortie de Composer à reproduire à
+l'octet) privilégie la confidentialité : y masquer davantage que Composer
+est voulu. La parité avec `Url::sanitize` n'est pas une garantie de
+confidentialité : Composer ne masque ni `private_token=` ni
+`private-token=` en paramètre, ni un nom court sans mot de passe
+(`http://<jeton>@hôte`), et garde le nom devant `:***@`.
+
+**La fonction.** `fetch::mask_url_secrets`, à côté de `sanitize_url`, sur
+un texte qui est une URL ou en contient (le message de reqwest répète
+l'URL de la requête dans « for url (…) ») :
+- l'userinfo, nom et mot de passe ou nom seul, devient `***` : après
+  chaque `://`, et en tête de tout texte comme chez `Url::sanitize` (un
+  chemin local comme `C:\Users\a@b\x.zip` aussi), ce qui précède le
+  dernier `@` avant le premier `/`, `?`, `#` ou blanc ; après un `://`,
+  quand l'URL jusqu'au blanc suivant ne se lit pas et porte un `@` plus
+  loin, jusqu'à ce dernier `@` (un mot de passe avec un `/`, `?` ou `#`
+  brut : `http://u:pa/ss@hôte`, dont l'erreur « builder error » affichait
+  l'URL entière) ;
+- la valeur de chaque paramètre `access_token`, `private_token` et
+  `private-token` qui suit un `?` ou un `&`, nom en toute casse, devient
+  `***`, jusqu'au `&`, `#` ou blanc suivant.
+Le schéma, l'hôte, le port, le chemin, les autres paramètres et le
+fragment restent lisibles : `http://***@127.0.0.1:<port>/x.zip?private_token=***&a=1`
+(d'une URL qui ne se lit pas et porte un `@` plus loin, ce qui suit ce `@`
+seulement). Rien d'autre n'est couvert : un userinfo ni après `://` ni en
+tête du texte ; un `/`, `?` ou `#` brut dans un userinfo dont l'URL se lit
+quand même — un nom seul (`http://to/ken@hôte` se lit hôte `to`) ou un mot
+de passe dont le début se lit comme un port (`http://u:12/ab@hôte`) ; la
+partie d'une valeur après un blanc brut (que `Url::sanitize` masque) ; un
+nom de paramètre encodé en pourcentage ou après un `;` ; un secret dans le
+fragment, le chemin ou un autre paramètre (une signature) ; ce qui dérive
+de l'URL (la clé du cache de fichiers est son sha1, comme chez Composer).
+
+**Les deux chemins corrigés, et seulement eux.**
+- `Error::Http` (« HTTP failure for <url>: <message> ») : son affichage
+  passe les deux champs par la fonction, quel que soit l'endroit qui
+  construit l'erreur. Ce texte n'est comparé à l'octet à Composer nulle
+  part : Composer écrit là les mots de curl (point 54), et
+  `harness/transport-exit.sh` le remplace par `<transport>` ou l'écarte ; le
+  même texte, repris dans « could not be fully loaded (…) » et dans la liste
+  des sources ignorées sous `policy.ignore-unreachable`, n'y est pas comparé
+  non plus. Les mots du délai dépassé, que lit l'indice hors ligne de
+  Composer, restent intacts.
+- Le rapport de déliaison de P0 (`store/.detached-reports/v4/…`, champs
+  `archive_url` des deux sortes de référence). Les rapports écrits avant ce
+  correctif gardent l'URL brute : ils ne sont ni réécrits ni effacés.
+
+**Les formes vérifiées par les tests, et seulement elles** : `user:secret@`,
+le nom seul `jeton@`, `?private_token=…`, `?private-token=…`,
+`?access_token=…`, et un mot de passe avec un `/`, `?` ou `#` brut (les
+trois en test unitaire, le `?` aussi par le binaire) ; chaque secret absent
+et l'URL masquée présente, hôte, port et chemin lisibles. Pour `Error::Http`, sur la stderr brute du binaire
+(`crates/vivacity/tests/http_error_secrets.rs` : `install --no-fallback`
+d'un lock dont l'archive répond 404, une connexion refusée, et un mot de
+passe avec un `?` brut ; code 100) ; pour le rapport, dans le fichier JSON
+écrit puis relu (`detach_report::tests::the_written_report_holds_no_credentials`).
+Rouges avant ce correctif, verts après ; les tests unitaires de la fonction
+fixent aussi les limites ci-dessus (`http://to/ken@hôte` laissé tel quel).
+
+**Vu en passant, non corrigé** : l'avertissement de `secure-http`
+(« Accessing <hôte> over http… », une ligne de la forme de Composer) nomme
+l'hôte tel que vivacity lit l'URL : le nom d'utilisateur, quand un mot de
+passe porte un `?` brut (test ci-dessus).
