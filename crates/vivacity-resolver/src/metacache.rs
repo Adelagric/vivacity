@@ -146,4 +146,33 @@ mod tests {
             r#"{"packages":{"a\/b":[]},"minified":"composer\/2.0","last-modified":"x"}"#
         );
     }
+
+    /// The repository's cache directory is Composer's where the old
+    /// `sanitize_url` printed something else: a second set of credentials,
+    /// the `private-token` name (`NON_SECRET_CREDENTIALS`), a short `gha_`
+    /// name (`GITHUB_TOKEN_REGEX`). Each value printed by the 2.10.3 phar:
+    /// `cache-repo-dir` + `/` + `Preg::replace('{[^a-z0-9.]}i', '-',
+    /// Url::sanitize($url))` (ComposerRepository.php:206).
+    #[test]
+    fn repository_cache_dir_is_composers() {
+        let wrong = [
+            (
+                "https://a:b@repo.test/r?next=https://c:d@other.test/p",
+                "https---a-----repo.test-r-next-https---c-----other.test-p",
+            ),
+            (
+                "https://private-token:abc123@gitlab.test/api/v4/group/7",
+                "https---private-token-----gitlab.test-api-v4-group-7",
+            ),
+            ("https://gha_abc@repo.test/c", "https---gha----repo.test-c"),
+        ]
+        .into_iter()
+        .filter_map(|(url, dir)| {
+            let got = MetadataCache::new(Path::new("/c/repo"), url).root;
+            let want = Path::new("/c/repo").join(dir);
+            (got != want).then(|| format!("{url}: {} instead of {}", got.display(), want.display()))
+        })
+        .collect::<Vec<_>>();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
 }
