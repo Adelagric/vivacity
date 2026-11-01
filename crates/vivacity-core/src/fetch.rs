@@ -1029,6 +1029,100 @@ fn sanitize_username(user: &str) -> String {
     user.to_owned()
 }
 
+/// Credentials masked in a text that is, or holds, URLs — for vivacity's own
+/// diagnostics and reports only. A line Composer writes takes
+/// [`sanitize_url`] instead: Composer's masking, which leaves some secrets
+/// out (`private_token=`, a short name without a password); here,
+/// confidentiality comes first.
+///
+/// Masked, and nothing else:
+/// - userinfo, a name and a password or a name alone, replaced by `***`:
+///   after each `://`, and at the start of the text (as `Url::sanitize`), what
+///   precedes the last `@` before the first `/`, `?`, `#` or blank — so a
+///   password holding an `@` goes whole;
+/// - the value of each `access_token`, `private_token` and `private-token`
+///   parameter that follows a `?` or a `&`, name in any case, replaced by
+///   `***`: up to the next `&`, `#` or blank (in reqwest's `for url (…)`,
+///   the closing parenthesis goes with it).
+///
+/// Kept, so that the failure can still be diagnosed: scheme, host, port,
+/// path, the other parameters, the fragment.
+///
+/// Not covered: userinfo that is neither after `://` nor at the start of
+/// the text (`//user@host` inside a sentence), a `/`, `?` or `#` left raw in
+/// a password (such a URL does not parse, so it is never fetched), the part
+/// of a value after a raw blank (`Url::sanitize` masks it), a parameter
+/// name percent-encoded or after a `;`, a secret in the fragment, the path
+/// or any other parameter (a signature), and what is derived from the URL
+/// (the files cache key is its sha1, as Composer's).
+pub fn mask_url_secrets(text: &str) -> String {
+    mask_secret_params(&mask_userinfo(text))
+}
+
+/// Where an authority ends, for [`mask_userinfo`].
+fn ends_authority(c: char) -> bool {
+    matches!(c, '/' | '?' | '#') || c.is_whitespace()
+}
+
+/// The userinfo half of [`mask_url_secrets`].
+fn mask_userinfo(text: &str) -> String {
+    // The start of each authority: the text's own, and after each `://`.
+    let starts = std::iter::once(0).chain(text.match_indices("://").map(|(i, _)| i + 3));
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for start in starts {
+        if start < last {
+            continue;
+        }
+        let rest = &text[start..];
+        let authority = &rest[..rest.find(ends_authority).unwrap_or(rest.len())];
+        if let Some(at) = authority.rfind('@') {
+            out.push_str(&text[last..start]);
+            out.push_str("***");
+            last = start + at;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// The parameter half of [`mask_url_secrets`].
+fn mask_secret_params(text: &str) -> String {
+    const SECRET: [&str; 3] = ["access_token", "private_token", "private-token"];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        // `?` and `&` are ASCII: never inside a character, so every index
+        // compared here is a character boundary.
+        if matches!(bytes[i], b'?' | b'&') {
+            let name = SECRET.iter().find(|name| {
+                let end = i + 1 + name.len();
+                text.get(i + 1..end)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                    && bytes.get(end) == Some(&b'=')
+            });
+            if let Some(name) = name {
+                let value = i + 1 + name.len() + 1;
+                let len = text[value..]
+                    .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
+                    .unwrap_or(text.len() - value);
+                if len > 0 {
+                    out.push_str(&text[last..value]);
+                    out.push_str("***");
+                    last = value + len;
+                }
+                i = value + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 /// A pattern compiled once.
 fn compiled(
     cell: &'static std::sync::OnceLock<pcre2::bytes::Regex>,
@@ -2036,6 +2130,107 @@ mod tests {
         ] {
             assert_eq!(sanitize_url(url), want, "{url}");
         }
+    }
+
+    /// The diagnostics' masking: every userinfo (a name alone too) and the
+    /// values of `access_token`, `private_token` and `private-token` (name
+    /// in any case) go; scheme, host, port, path, the other parameters and
+    /// the fragment stay, so the failure can still be diagnosed.
+    #[test]
+    fn mask_url_secrets_masks_credentials_and_keeps_the_rest() {
+        for (text, want) in [
+            // Userinfo: name and password, name alone, an `@` in the
+            // password, an empty name, an uppercase scheme, every URL of
+            // the text.
+            (
+                "http://user:secret@127.0.0.1:8080/x.zip",
+                "http://***@127.0.0.1:8080/x.zip",
+            ),
+            ("https://tok@host/x.zip", "https://***@host/x.zip"),
+            ("https://u:p@ss@host:1/x", "https://***@host:1/x"),
+            ("https://:pw@host/x", "https://***@host/x"),
+            ("HTTPS://User:Pw@Host/x", "HTTPS://***@Host/x"),
+            ("ssh://git@github.com/a/b.git", "ssh://***@github.com/a/b.git"),
+            (
+                "https://a:b@host/?r=https://c:d@x/y",
+                "https://***@host/?r=https://***@x/y",
+            ),
+            // At the start of the text without a scheme, as `Url::sanitize`.
+            ("user:pw@host/x.zip", "***@host/x.zip"),
+            ("git@github.com:a/b.git", "***@github.com:a/b.git"),
+            // The three parameters, name in any case, every occurrence,
+            // the others and the fragment kept.
+            (
+                "http://127.0.0.1:8080/x.zip?private_token=abc&a=1",
+                "http://127.0.0.1:8080/x.zip?private_token=***&a=1",
+            ),
+            (
+                "https://host/x.zip?a=1&private-token=abc",
+                "https://host/x.zip?a=1&private-token=***",
+            ),
+            (
+                "https://host/x.zip?access_token=abc#frag",
+                "https://host/x.zip?access_token=***#frag",
+            ),
+            (
+                "https://host/x?Private_Token=a&ACCESS_TOKEN=b&Private-Token=c",
+                "https://host/x?Private_Token=***&ACCESS_TOKEN=***&Private-Token=***",
+            ),
+            (
+                "https://host/x?access_token=a&access_token=b",
+                "https://host/x?access_token=***&access_token=***",
+            ),
+            (
+                "http://u:p@127.0.0.1:1/x.zip?private_token=t&a=1",
+                "http://***@127.0.0.1:1/x.zip?private_token=***&a=1",
+            ),
+            // reqwest's text: the URL in parentheses, the value up to the
+            // next blank (the closing parenthesis goes with it).
+            (
+                "HTTP status client error (404 Not Found) for url (http://127.0.0.1:1/x.zip?private_token=abc)",
+                "HTTP status client error (404 Not Found) for url (http://127.0.0.1:1/x.zip?private_token=***",
+            ),
+            (
+                "failed after 4 attempts: error sending request for url (http://h/x?access_token=abc&a=1): operation timed out",
+                "failed after 4 attempts: error sending request for url (http://h/x?access_token=***&a=1): operation timed out",
+            ),
+            // Nothing to mask: left as it is.
+            ("https://host/a@b", "https://host/a@b"),
+            ("https://host/x?token=abc", "https://host/x?token=abc"),
+            ("https://host/x?my_access_token=abc", "https://host/x?my_access_token=abc"),
+            ("https://host/x?access_token=", "https://host/x?access_token="),
+            ("/local/path/a.zip", "/local/path/a.zip"),
+            ("file:///srv/a@b/x.zip", "file:///srv/a@b/x.zip"),
+            ("acme/widget", "acme/widget"),
+            ("semaphore closed", "semaphore closed"),
+            ("ààà://é@ü/ö?access_token=ä", "ààà://***@ü/ö?access_token=***"),
+        ] {
+            assert_eq!(mask_url_secrets(text), want, "{text}");
+            // Masking twice changes nothing.
+            assert_eq!(mask_url_secrets(want), want, "{want}");
+        }
+    }
+
+    /// A timeout keeps the words `lib.rs` looks for to print Composer's
+    /// offline hint, whatever the URL carried.
+    #[test]
+    fn mask_url_secrets_keeps_the_timeout_words() {
+        let message =
+            format!("error sending request for url (http://h/x?private_token=abc): {TIMED_OUT}");
+        assert!(mask_url_secrets(&message).contains(TIMED_OUT));
+    }
+
+    /// `Error::Http`'s text, url and message both masked.
+    #[test]
+    fn an_http_error_shows_no_credentials() {
+        let e = Error::Http {
+            url: "http://user:secret@127.0.0.1:1/x.zip?private-token=t1&a=1".to_owned(),
+            message: "HTTP status client error (404 Not Found) for url (http://127.0.0.1:1/x.zip?private-token=t1&a=1)".to_owned(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "HTTP failure for http://***@127.0.0.1:1/x.zip?private-token=***&a=1: HTTP status client error (404 Not Found) for url (http://127.0.0.1:1/x.zip?private-token=***&a=1)"
+        );
     }
 
     /// `RemoteFilesystem` reads a local dist even with the network disabled;

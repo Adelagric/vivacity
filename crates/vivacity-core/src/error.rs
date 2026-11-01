@@ -43,7 +43,15 @@ pub enum Error {
         reason: String,
     },
 
-    #[error("HTTP failure for {url}: {message}")]
+    /// A diagnostic of vivacity's (Composer writes curl's words, not
+    /// these): both fields are shown through
+    /// [`mask_url_secrets`](crate::fetch::mask_url_secrets), whatever built
+    /// the error — reqwest's message names the request URL again.
+    #[error(
+        "HTTP failure for {}: {}",
+        crate::fetch::mask_url_secrets(.url),
+        crate::fetch::mask_url_secrets(.message)
+    )]
     Http { url: String, message: String },
 
     /// A dist whose sha1 is not the lock's `dist.shasum`: `FileDownloader`'s
