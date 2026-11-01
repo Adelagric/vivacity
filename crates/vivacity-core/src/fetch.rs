@@ -955,9 +955,10 @@ fn files_cache_with(
     Ok(FilesCache::Enabled)
 }
 
-/// `Url::sanitize` (Url.php l. 130-148): an `access_token` query value
-/// masked, a password replaced by `***`, a user name that looks like a
-/// token shortened (`Url::sanitizeUsername`).
+/// `Url::sanitize` (Url.php l. 130-148): every `access_token` query value
+/// masked, every password replaced by `***`, a user name that looks like a
+/// token shortened (`Url::sanitizeUsername`). Nothing else: another query
+/// parameter, or a short user name without a password, stays as it is.
 pub fn sanitize_url(url: &str) -> String {
     static TOKEN: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
     static CREDS: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
@@ -979,39 +980,43 @@ pub fn sanitize_url(url: &str) -> String {
         r"(?:(?P<prefix>[a-z0-9][a-z0-9+.-]*://)|\A)(?P<user>[^:/\s?#]*)(?::(?P<password>[^\s/?#]+))?@",
         true,
     );
-    match creds.captures(url.as_bytes()) {
-        Ok(Some(caps)) => {
-            let whole = caps.get(0).map(|m| (m.start(), m.end())).unwrap_or((0, 0));
-            let prefix = caps.get(1).map(|m| &url[m.start()..m.end()]).unwrap_or("");
-            let user = caps.get(2).map(|m| &url[m.start()..m.end()]).unwrap_or("");
-            let user = sanitize_username(user);
-            let replacement = if caps.get(3).is_some_and(|m| m.end() > m.start()) {
-                format!("{prefix}{user}:***@")
-            } else {
-                format!("{prefix}{user}@")
-            };
-            format!("{}{}{}", &url[..whole.0], replacement, &url[whole.1..])
-        }
-        _ => url,
+    // `Preg::replaceCallback`: every match, not only the first.
+    let mut out = String::with_capacity(url.len());
+    let mut last = 0;
+    for caps in creds.captures_iter(url.as_bytes()).flatten() {
+        let Some(whole) = caps.get(0) else { continue };
+        let group = |i: usize| caps.get(i).map(|m| &url[m.start()..m.end()]).unwrap_or("");
+        let user = sanitize_username(group(2));
+        out.push_str(&url[last..whole.start()]);
+        out.push_str(group(1));
+        out.push_str(&user);
+        out.push_str(if group(3).is_empty() { "@" } else { ":***@" });
+        last = whole.end();
     }
+    out.push_str(&url[last..]);
+    out
 }
 
-/// `Url::sanitizeUsername`.
+/// `Url::sanitizeUsername`: `Url::NON_SECRET_CREDENTIALS` kept, a name
+/// matching `GitHub::GITHUB_TOKEN_REGEX` or of 12 bytes or more cut to its
+/// first three.
 fn sanitize_username(user: &str) -> String {
     const NON_SECRET: &[&str] = &[
-        "gitlab-ci-token",
+        "private-token",
         "x-token-auth",
         "oauth2",
+        "gitlab-ci-token",
         "x-oauth-basic",
-        "git",
-        "user",
-        "token",
     ];
     static GH: std::sync::OnceLock<pcre2::bytes::Regex> = std::sync::OnceLock::new();
     if NON_SECRET.contains(&user) {
         return user.to_owned();
     }
-    let gh = compiled(&GH, r"^(?:ghp|gho|ghu|ghs|ghr|github_pat)_", false);
+    let gh = compiled(
+        &GH,
+        r"^([a-f0-9]{12,}|gh[a-z]_[a-zA-Z0-9_.-]+|github_pat_[a-zA-Z0-9_]+)$",
+        false,
+    );
     if gh.is_match(user.as_bytes()).unwrap_or(false) || user.len() >= 12 {
         // `substr($user, 0, 3)` counts bytes; cut at a character boundary
         // at or before the third one (PHP would split the character).
@@ -1969,6 +1974,71 @@ mod tests {
             sanitize_url("https://u:p@host/x.zip?access_token=t&a=1"),
             "https://u:***@host/x.zip?access_token=***&a=1"
         );
+    }
+
+    /// `Url::sanitize` of Composer 2.10.3, each expected value printed by
+    /// the phar itself (`Composer\Util\Url::sanitize`): every set of
+    /// credentials masked, not only the first; the names Composer keeps
+    /// (`NON_SECRET_CREDENTIALS`); `GitHub::GITHUB_TOKEN_REGEX` matched on
+    /// the whole name.
+    #[test]
+    fn sanitize_url_is_composers() {
+        for (url, want) in [
+            (
+                "http://user:secret@127.0.0.1:8080/desync.zip",
+                "http://user:***@127.0.0.1:8080/desync.zip",
+            ),
+            (
+                "https://private-token:abc@gitlab.com/x.zip",
+                "https://private-token:***@gitlab.com/x.zip",
+            ),
+            ("https://gha_abc@host/x.zip", "https://gha***@host/x.zip"),
+            (
+                "https://github_pat_@host/x.zip",
+                "https://github_pat_@host/x.zip",
+            ),
+            ("https://ghp_a~@host/x.zip", "https://ghp_a~@host/x.zip"),
+            ("https://ghp_short@h/x", "https://ghp***@h/x"),
+            (
+                "https://a:b@host/?r=https://c:d@x/y",
+                "https://a:***@host/?r=https://c:***@x/y",
+            ),
+            (
+                "https://user:p@ss@host/x.zip",
+                "https://user:***@host/x.zip",
+            ),
+            ("https://tok@host/x.zip", "https://tok@host/x.zip"),
+            (
+                "https://x-token-auth:sekret@bitbucket.org/x.zip",
+                "https://x-token-auth:***@bitbucket.org/x.zip",
+            ),
+            (
+                "https://oauth2:sekret@gitlab.com/x.zip",
+                "https://oauth2:***@gitlab.com/x.zip",
+            ),
+            (
+                "https://host/x.zip?private_token=abc",
+                "https://host/x.zip?private_token=abc",
+            ),
+            ("/local/path/a.zip", "/local/path/a.zip"),
+            ("user:pw@host/x.zip", "user:***@host/x.zip"),
+            ("HTTPS://User:Pw@Host/x", "HTTPS://User:***@Host/x"),
+            ("https://abcdef0123456789@host/x", "https://abc***@host/x"),
+            ("https://u:@host/x", "https://u:@host/x"),
+            ("https://:pw@host/x", "https://:***@host/x"),
+            ("git@github.com:a/b.git", "git@github.com:a/b.git"),
+            ("https://host/a@b", "https://host/a@b"),
+            (
+                "https://host/x?access_token=a&access_token=b",
+                "https://host/x?access_token=***&access_token=***",
+            ),
+            (
+                "https://u:p@h/x?q=1&access_token=zz#frag",
+                "https://u:***@h/x?q=1&access_token=***",
+            ),
+        ] {
+            assert_eq!(sanitize_url(url), want, "{url}");
+        }
     }
 
     /// `RemoteFilesystem` reads a local dist even with the network disabled;
