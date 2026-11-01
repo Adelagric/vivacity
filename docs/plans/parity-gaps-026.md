@@ -926,8 +926,8 @@ la décision revient au mainteneur.
     l'avertissement et l'erreur peuvent nommer un autre fichier (non
     mesuré).
 55. **Archive servie par le store là où Composer la télécharge** (cypht,
-    2026-10-31) — **fermé le 2026-10-31** (fixed on the `net-timeouts`
-    branch, not yet on main; planned for release in 0.26.1). Décision du
+    2026-10-31) — **fermé le 2026-10-31** (fixed on main; planned for
+    release in 0.26.1). Décision du
     mainteneur, option (b) : quand Composer téléchargerait l'archive
     (`FileDownloader::download` l. 176-198 : absente de son cache, une copie
     dont le sha1 ne correspond pas au `dist.shasum`, ou pas de cache du

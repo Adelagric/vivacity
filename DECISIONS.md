@@ -6396,8 +6396,7 @@ pour une coupure.
 ## 2026-10-31 — Point 55 : quand Composer télécharge une archive, vivacity la télécharge (option (b) du mainteneur)
 
 Plan, méta-analyse et exécution : `docs/plans/net-timeouts.md`, section
-« Point 55 ». Statut : fixed on the `net-timeouts` branch, not yet on main;
-planned for release in 0.26.1.
+« Point 55 ». Statut : fixed on main; planned for release in 0.26.1.
 
 **Le constat.** Les deux caches désynchronisés — une archive absente du cache
 de fichiers de Composer, présente dans le store de vivacity : les deux
