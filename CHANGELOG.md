@@ -6,6 +6,8 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.26.1] — 2026-11-02
+
 ### Fixed
 - **Files vivacity lays out are no longer shared with the store or with other
   projects, on every file system.** A project an earlier version installed is

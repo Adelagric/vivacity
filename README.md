@@ -150,7 +150,7 @@ it.
 GitHub Actions:
 
 ```yaml
-- uses: Adelagric/vivacity@v0.26.0
+- uses: Adelagric/vivacity@v0.26.1
 - run: vivacity install
 ```
 
