@@ -55,8 +55,8 @@ Why these choices:
   image. Putting the store on a cache mount instead would place it on
   another filesystem, where vivacity copies too; it would spare the
   extraction on the next build. Up to 0.26.0 the same-layer store was
-  hard-linked and cost nothing; with the `vendor/` isolation fix (planned
-  for 0.26.1) it is copied there, a trade-off not re-measured yet.
+  hard-linked and cost nothing; with the `vendor/` isolation fix
+  (0.26.1) it is copied there, a trade-off not re-measured yet.
 - **Only Composer's files cache is mounted**, at `COMPOSER_CACHE_DIR`. It is
   the cache both tools read, and the one `bench/M7-ci-cache.md` found worth
   keeping between builds.

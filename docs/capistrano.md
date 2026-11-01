@@ -16,8 +16,8 @@ archives.
 
 From [bench/M6-linux-ci.md](../bench/M6-linux-ci.md), 2026-09-10 (method,
 machine and the other scenarios there), when vivacity still laid `vendor/`
-out by hard links on Linux; with the `vendor/` isolation fix (planned for
-0.26.1) it copies there, which costs more on large projects — not
+out by hard links on Linux; with the `vendor/` isolation fix
+(0.26.1) it copies there, which costs more on large projects — not
 re-measured yet. A deploy adds SSH and your other tasks around it: measure
 yours.
 

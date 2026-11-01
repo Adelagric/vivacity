@@ -31,7 +31,7 @@ Found on 2026-10-31 in 0.26.0. vivacity assumed that nothing edits
 things break when that assumption does:
 
 - **Projects are not isolated on file systems without copy-on-write.**
-  Fixed on main; planned for release in 0.26.1. In 0.26.0 and earlier, on
+  Fixed in 0.26.1. In 0.26.0 and earlier, on
   Linux ext4 and overlayfs (most CI runners and Docker images), on Windows
   when the cache and the project share a volume, and on macOS outside APFS,
   the files in `vendor/` are hard links to vivacity's store: a file edited in
@@ -73,8 +73,8 @@ things break when that assumption does:
   `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
   `%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) are no longer
   read by the fixed version; delete them to get their space back.
-- **The class map cache does not look at `vendor/` again.** Fixed on main;
-  planned for release in 0.26.1. In 0.26.0 and earlier it keeps one record per
+- **The class map cache does not look at `vendor/` again.** Fixed in
+  0.26.1. In 0.26.0 and earlier it keeps one record per
   store entry and serves it without reading `vendor/`: a class renamed, a file
   added or removed there keeps the old class map in `dump-autoload` (and in
   the dump that ends `install`, `update`, `require` and `remove`), and a

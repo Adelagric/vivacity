@@ -926,8 +926,7 @@ la décision revient au mainteneur.
     l'avertissement et l'erreur peuvent nommer un autre fichier (non
     mesuré).
 55. **Archive servie par le store là où Composer la télécharge** (cypht,
-    2026-10-31) — **fermé le 2026-10-31** (fixed on main; planned for
-    release in 0.26.1). Décision du
+    2026-10-31) — **fermé le 2026-10-31** (fixed in 0.26.1). Décision du
     mainteneur, option (b) : quand Composer téléchargerait l'archive
     (`FileDownloader::download` l. 176-198 : absente de son cache, une copie
     dont le sha1 ne correspond pas au `dist.shasum`, ou pas de cache du
@@ -1185,12 +1184,12 @@ la décision revient au mainteneur.
     non (aucun manifeste du corpus n'a `target-dir`). Sans coût : oui.
 51. **Le cache de classmap suppose vendor/ immuable** : contrat assumé
     jusqu'au 2026-10-31, rejeté depuis par le mainteneur (même comportement
-    que Composer sur l'état courant du projet) ; corrigé sur main, prévu pour
+    que Composer sur l'état courant du projet) ; corrigé dans
     0.26.1 (P1 de docs/plans/vendor-isolation.md ;
     `harness/classmap-revalidate.sh`). L'autre face de la même hypothèse —
     vendor/ lié au store hors copie sur écriture, une écriture en place
-    atteignant le store et les autres projets — est corrigée sur main,
-    prévue pour 0.26.1 (P0, même plan ;
+    atteignant le store et les autres projets — est corrigée dans
+    0.26.1 (P0, même plan ;
     `harness/vendor-isolation.sh`).
 52. **Chemin de projet avec `'`** (chemins absolus dans
     autoload_static.php), nom de paquet en majuscules comme clé
