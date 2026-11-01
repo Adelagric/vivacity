@@ -16,6 +16,9 @@
 //! comparison never decides the detachment: a file is detached whether or
 //! not its archive can be read.
 //!
+//! The archive's URL is written through `fetch::mask_url_secrets`: the
+//! report is not a Composer output, and its file outlives the run.
+//!
 //! The expected content comes from the archive only, never from an entry of
 //! an older store layout (the one that may have been written through a
 //! link), and never from the network:
@@ -264,7 +267,7 @@ fn resolve(store: &Store, p: &Package) -> (Resolved, Option<tempfile::TempDir>) 
             let identity = json!({
                 "source": "store entry extracted by this run from the archive",
                 "entry": entry.to_string_lossy(),
-                "archive_url": archive.url,
+                "archive_url": crate::fetch::mask_url_secrets(&archive.url),
                 "archive_cache_path": archive.cache_path.to_string_lossy(),
                 "archive_obtained": if archive.from_cache { "read from Composer's files cache" } else { "fetched by this run" },
                 "archive_sha1": sha1,
@@ -322,7 +325,7 @@ fn resolve(store: &Store, p: &Package) -> (Resolved, Option<tempfile::TempDir>) 
             };
             let identity = json!({
                 "source": "archive in Composer's files cache, extracted aside for this report",
-                "archive_url": url,
+                "archive_url": crate::fetch::mask_url_secrets(url),
                 "archive_cache_path": path.to_string_lossy(),
                 "archive_sha1": sha1,
                 "archive_sha1_from": "the bytes extracted",
@@ -764,6 +767,109 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("19700101T000000.000000000Z-"));
+    }
+
+    /// The report is read by a person, in vivacity's cache: the archive's
+    /// URL is written without the credentials it carries, for both kinds
+    /// of reference, and the file actually written holds none of them.
+    /// What diagnoses the archive (scheme, host, port, path, the other
+    /// parameters) stays.
+    #[test]
+    fn the_written_report_holds_no_credentials() {
+        let cases = [
+            (
+                "https://viv-user-7f3a:s3cr3t-pw-91c2@dl.example.org:8443/lib.zip",
+                &["viv-user-7f3a", "s3cr3t-pw-91c2"][..],
+                "https://***@dl.example.org:8443/lib.zip",
+            ),
+            (
+                "https://tok-only-5d8e@dl.example.org/lib.zip",
+                &["tok-only-5d8e"],
+                "https://***@dl.example.org/lib.zip",
+            ),
+            (
+                "https://dl.example.org/lib.zip?private_token=pt-secret-1a2b&a=1",
+                &["pt-secret-1a2b"],
+                "https://dl.example.org/lib.zip?private_token=***&a=1",
+            ),
+            (
+                "https://dl.example.org/lib.zip?private-token=ph-secret-3c4d&a=1",
+                &["ph-secret-3c4d"],
+                "https://dl.example.org/lib.zip?private-token=***&a=1",
+            ),
+            (
+                "https://dl.example.org/lib.zip?access_token=at-secret-5e6f&a=1",
+                &["at-secret-5e6f"],
+                "https://dl.example.org/lib.zip?access_token=***&a=1",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (url, secrets, masked) in cases {
+            let s = setup();
+            let bytes = std::fs::read(&s.archive).unwrap();
+            let (entry, _) = s
+                .store
+                .ensure_made("acme/lib", "1.0.0", Some("abcdef"), &bytes, DistKind::Zip)
+                .expect("extract");
+            let dir = s.vendor.join("acme/lib");
+            let this_run = package(
+                &s,
+                Reference::ExtractedThisRun {
+                    entry,
+                    archive: ArchiveId {
+                        url: url.to_owned(),
+                        cache_path: s.archive.clone(),
+                        from_cache: false,
+                        checked_shasum: None,
+                    },
+                },
+                None,
+            );
+            let mut from_cache = package(
+                &s,
+                Reference::ComposerCache {
+                    url: url.to_owned(),
+                    path: s.archive.clone(),
+                    kind: DistKind::Zip,
+                },
+                None,
+            );
+            from_cache.name = "acme/other".to_owned();
+            from_cache.dir = s.vendor.join("acme/other");
+            let files = vec![
+                linked(dir.join("src/A.php"), b"original a\n"),
+                linked(s.vendor.join("acme/other/src/A.php"), b"original a\n"),
+            ];
+            let now = std::time::SystemTime::now();
+            let (report, _) = observe(
+                &s.store,
+                &s.vendor,
+                &files,
+                &[this_run, from_cache],
+                true,
+                now,
+            );
+            let reports = s._tmp.path().join("reports");
+            let written = write(&reports, &report, now).expect("write");
+            let text = std::fs::read_to_string(&written).expect("read the report");
+            let mut wrong = Vec::new();
+            for secret in secrets {
+                if text.contains(secret) {
+                    wrong.push(format!("`{secret}` written"));
+                }
+            }
+            let v: Value = serde_json::from_str(&text).expect("json");
+            for (i, source) in [(0, "this run"), (1, "Composer's cache")] {
+                let got = &v["packages"][i]["reference"]["archive_url"];
+                if got != masked {
+                    wrong.push(format!("{source}: archive_url {got}, not {masked}"));
+                }
+            }
+            if !wrong.is_empty() {
+                failures.push(format!("{url}: {}", wrong.join("; ")));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
