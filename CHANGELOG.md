@@ -109,7 +109,23 @@ byte-identical-output promise are the public API.
   as Composer does, and an empty `vendor/` it left behind is removed.
 - **A downloaded archive whose checksum does not match is written to
   Composer's files cache before the error**, and a stale copy is no longer
-  deleted before the download, as in Composer.
+  deleted before the download, as in Composer. The checksum verification
+  error message matches Composer's wording, with the download URL
+  sanitized according to Composer's `Url::sanitize`: every set of
+  credentials, not only the first; a `private-token` user name kept, as
+  Composer keeps it; a short `gha_` token shortened. A repository whose
+  URL holds such credentials therefore gets Composer's cache directory
+  name, and its metadata cache starts empty once.
+- **A redirect `secure-http` refuses names its target as Composer does**,
+  masked by `Url::sanitize`: an `access_token` in the target's query is no
+  longer printed, for an absolute or a relative target.
+- **Credentials are masked in vivacity's HTTP failure diagnostics, in the
+  reason its `secure-http` safety net gives when it hands a request to
+  Composer, and in the one-time unlinking report**, for the tested URL
+  forms: user information (including a username without a password) and
+  the values of `access_token`, `private_token` and `private-token`. The
+  scheme, host, port and path are preserved where possible. Other forms
+  are not covered (DECISIONS, 2026-11-01).
 - **`install` no longer fetches the `includes` of a repository without
   `metadata-url`** while verifying the lock: Composer only reads its
   `packages.json` there, so an include that failed made vivacity warn

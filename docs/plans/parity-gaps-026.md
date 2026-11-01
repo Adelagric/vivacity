@@ -995,6 +995,24 @@ la décision revient au mainteneur.
     : « Failed to download … from dist », « Now trying to download from
     source », ou « Source fallback is disabled ») : non comparé ici ; une
     archive bloquée d'un paquet qui a une source est hors des cas. M.
+61. **URL dans d'autres diagnostics : problèmes potentiels, pour 0.27**
+    (consignés le 2026-11-01 ; ni démontrés comme fuites, ni investigués) :
+    l'avertissement `secure-http` « Accessing <hôte> over http » sur une
+    URL mal formée, où le nom d'utilisateur peut tenir lieu d'hôte ; les
+    messages `POST {url}: …` de `HttpTransport` (`repository.rs`), qui
+    portent l'URL telle quelle ; le `Debug` dérivé de `Error::Http`, qui
+    garde les champs bruts (aucune sortie ne l'imprime aujourd'hui) ; les
+    raisons de passation qui reprennent le refus de Composer
+    (`into_dist_error`, `refusal_reason` dans `session.rs`), où
+    `private_token=` reste lisible ; le contexte `cannot fetch Flex index
+    <url>` (`flex.rs`), qui affiche l'URL telle quelle. Règle à appliquer :
+    DECISIONS 2026-11-01, « Identifiants dans les diagnostics de
+    vivacity ». Avant écriture : sans objet. Coût : S. Corpus : non.
+62. **Cible d'une redirection refusée, normalisée** : vivacity affiche
+    l'URL de la cible telle que reqwest la normalise, Composer le
+    `Location` tel quel ; un `:80`, un hôte en majuscules ou un chemin
+    vide donneraient un texte différent (consigné le 2026-11-01, non
+    reproduit). Avant écriture : non. Coût : S. Corpus : non.
 
 ### Résolution, `update`/`require`/`remove`
 

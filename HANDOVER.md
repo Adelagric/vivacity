@@ -129,7 +129,8 @@ un fichier par passe, jamais réécrit ; une ligne sous `VIVACITY_TRACE=1`,
 rien sinon) : fichiers liés, inode partagé, sha1 courant, déliaison faite ou
 non, comparaison à l'archive (l'entrée `v4` extraite par CE run, sinon
 l'archive du cache de fichiers de Composer extraite à part ; jamais l'ancien
-store, jamais de réseau). Observation passée : ne prouve pas l'absence de
+store, jamais de réseau ; `archive_url` masquée par
+`fetch::mask_url_secrets`). Observation passée : ne prouve pas l'absence de
 liens après un retour arrière ; perdue au vidage du cache.
 
 ## Publication sur crates.io (dernière : 0.26.0 le 2026-10-31)
