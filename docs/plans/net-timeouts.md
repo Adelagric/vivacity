@@ -668,3 +668,39 @@ du 2026-10-30 ; la clé du miroir reste le point 16.
   depuis son entrée.
 - **Consigné** : le hachage des archives à `dist.shasum` se fait en série
   dans `download_lines` (comme Composer), avant le téléchargement parallèle.
+
+### Archive refusée par sa somme (2026-11-01)
+
+Le cas qui manquait à la section 8 : `dist.shasum` posé, cache de Composer
+froid, store chaud chez vivacity, le serveur rend une autre archive.
+Composer (FileDownloader.php l. 211-213, phar 2.10.3) imprime la ligne
+`Downloading`, fait une requête, écrit l'archive dans son cache (`$accept`),
+puis lève `UnexpectedValueException` « The checksum verification of the
+file failed (downloaded from <`Url::sanitize($url['base'])`>) » — dans le
+`then` qui suit `$reject` : ni nouvelle tentative ni URL suivante —, code 1,
+vendor/ retiré par `cleanup`. vivacity faisait déjà tout cela, sauf le
+message (le sien : `dist checksum mismatch for <nom>: expected sha1 …, got
+…`). **Aligné** : `Error::ShasumMismatch` porte l'URL passée par
+`sanitize_url` et rend le message de Composer, pour une archive téléchargée
+comme pour une dist sur un chemin local (même code chez Composer).
+
+`sanitize_url` relu contre `Url::sanitize` du phar 2.10.3 (la source 2.10.1
+du store en diffère) : chaque jeu d'identifiants est masqué (le premier
+seulement avant), la liste `NON_SECRET_CREDENTIALS` est celle de Composer
+(`private-token` gardé tel quel, il était coupé), `GITHUB_TOKEN_REGEX` porte
+sur le nom entier. Tous les appelants en héritent (messages, nom du
+répertoire du cache d'un dépôt à identifiants) : vers Composer.
+
+Cas `desync-sha-bad` et `desync-sha-bad-creds` (`http://user:<mot de
+passe>@…`) : code, stdout, stderr comparée (l'encadré ramené à `Error:`, la
+ligne d'usage qui le suit retirée par `normalize`, comme ailleurs), effets
+(l'archive refusée dans le cache des deux côtés, pas de vendor/), une
+requête de chaque côté, entrée du store restée A, mot de passe absent des
+sorties des deux outils. Rouges avant ce correctif (le message), verts après.
+
+**Reste, consigné** : `Url::sanitize` ne masque ni un autre paramètre
+d'URL (`private_token=`, une signature) ni un nom court sans mot de passe
+(`http://<jeton>@hôte`) ; vivacity non plus, par parité (à arbitrer). Et
+l'échec de transport d'une archive (`Error::Http`, « HTTP failure for
+<url> », point 54) imprime l'URL sans l'assainir : le mot de passe y
+apparaît, là où Composer écrit `user:***@` — hors de ce cas, non corrigé.

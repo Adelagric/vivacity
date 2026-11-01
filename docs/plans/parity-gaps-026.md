@@ -940,7 +940,9 @@ la décision revient au mainteneur.
     l'archive, l'entrée reste intacte et la copie est consignée étrangère
     pour le dump. Lecture seule, durée non entière, `files/` ni inscriptible
     ni créable : rendus à Composer avant toute sortie ; pas de cache
-    (`cache-files-ttl` 0, `/dev/null`) : natif. DECISIONS 2026-10-31 ;
+    (`cache-files-ttl` 0, `/dev/null`) : natif. Une archive dont le sha1
+    n'est pas le `dist.shasum` est refusée dans les mots de Composer, l'URL
+    assainie (`desync-sha-bad`, 2026-11-01). DECISIONS 2026-10-31 ;
     `transport-exit.sh`, section 8 et `tls-dist-store`. Reste, consigné :
 55a. **Après une copie étrangère, l'install suivante à vendor/ vidé sert
     l'entrée du store** quand le cache de Composer a désormais l'autre
