@@ -1037,24 +1037,30 @@ fn sanitize_username(user: &str) -> String {
 ///
 /// Masked, and nothing else:
 /// - userinfo, a name and a password or a name alone, replaced by `***`:
-///   after each `://`, and at the start of the text (as `Url::sanitize`), what
+///   after each `://`, and at the start of any text (as `Url::sanitize`;
+///   a local path such as `C:\Users\a@b\x.zip` is masked too), what
 ///   precedes the last `@` before the first `/`, `?`, `#` or blank — so a
-///   password holding an `@` goes whole;
+///   password holding an `@` goes whole; after a `://`, when the URL up to
+///   the next blank does not parse and holds a later `@`, up to that last
+///   `@` (a password with a raw `/`, `?` or `#`: `http://u:pa/ss@host`);
 /// - the value of each `access_token`, `private_token` and `private-token`
 ///   parameter that follows a `?` or a `&`, name in any case, replaced by
 ///   `***`: up to the next `&`, `#` or blank (in reqwest's `for url (…)`,
 ///   the closing parenthesis goes with it).
 ///
 /// Kept, so that the failure can still be diagnosed: scheme, host, port,
-/// path, the other parameters, the fragment.
+/// path, the other parameters, the fragment (of a URL that does not parse
+/// and holds a later `@`, what follows that `@` only).
 ///
-/// Not covered: userinfo that is neither after `://` nor at the start of
-/// the text (`//user@host` inside a sentence), a `/`, `?` or `#` left raw in
-/// a password (such a URL does not parse, so it is never fetched), the part
-/// of a value after a raw blank (`Url::sanitize` masks it), a parameter
-/// name percent-encoded or after a `;`, a secret in the fragment, the path
-/// or any other parameter (a signature), and what is derived from the URL
-/// (the files cache key is its sha1, as Composer's).
+/// Not covered: userinfo neither after `://` nor at the start of the text
+/// (`//user@host` inside a sentence); a raw `/`, `?` or `#` in a userinfo
+/// whose URL still parses — a name alone (`http://to/ken@host` reads as
+/// host `to`) or a password whose first part reads as a port
+/// (`http://u:12/ab@host`); the part of a value after a raw blank
+/// (`Url::sanitize` masks it); a parameter name percent-encoded or after a
+/// `;`; a secret in the fragment, the path or any other parameter (a
+/// signature); what is derived from the URL (the files cache key is its
+/// sha1, as Composer's).
 pub fn mask_url_secrets(text: &str) -> String {
     mask_secret_params(&mask_userinfo(text))
 }
@@ -1066,17 +1072,41 @@ fn ends_authority(c: char) -> bool {
 
 /// The userinfo half of [`mask_url_secrets`].
 fn mask_userinfo(text: &str) -> String {
-    // The start of each authority: the text's own, and after each `://`.
-    let starts = std::iter::once(0).chain(text.match_indices("://").map(|(i, _)| i + 3));
+    let bytes = text.as_bytes();
+    // The start of each authority, with where its URL starts: the text's
+    // own (no scheme), and after each `://` (its scheme, ASCII, before).
+    let after_scheme = text.match_indices("://").map(|(i, _)| {
+        let mut scheme = i;
+        while scheme > 0
+            && (bytes[scheme - 1].is_ascii_alphanumeric()
+                || matches!(bytes[scheme - 1], b'+' | b'-' | b'.'))
+        {
+            scheme -= 1;
+        }
+        (Some(scheme), i + 3)
+    });
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    for start in starts {
+    for (scheme, start) in std::iter::once((None, 0)).chain(after_scheme) {
         if start < last {
             continue;
         }
         let rest = &text[start..];
         let authority = &rest[..rest.find(ends_authority).unwrap_or(rest.len())];
-        if let Some(at) = authority.rfind('@') {
+        let mut at = authority.rfind('@');
+        // An `@` beyond the authority, in a URL that does not parse: the
+        // userinfo may hold a raw `/`, `?` or `#` (`http://u:pa/ss@host`),
+        // so it runs to the last `@` before the blank. A URL that parses
+        // keeps its path, query and fragment (`https://host/a@b`).
+        if let Some(scheme) = scheme {
+            let loose = &rest[..rest.find(char::is_whitespace).unwrap_or(rest.len())];
+            let beyond = loose.rfind('@').filter(|&i| Some(i) != at);
+            if beyond.is_some() && reqwest::Url::parse(&text[scheme..start + loose.len()]).is_err()
+            {
+                at = beyond;
+            }
+        }
+        if let Some(at) = at {
             out.push_str(&text[last..start]);
             out.push_str("***");
             last = start + at;
@@ -2155,9 +2185,26 @@ mod tests {
                 "https://a:b@host/?r=https://c:d@x/y",
                 "https://***@host/?r=https://***@x/y",
             ),
-            // At the start of the text without a scheme, as `Url::sanitize`.
+            // A raw `/`, `?` or `#` in the password: the URL does not
+            // parse, the userinfo runs to the last `@`.
+            (
+                "http://u:pw?SECRET@127.0.0.1:1/x.zip",
+                "http://***@127.0.0.1:1/x.zip",
+            ),
+            ("http://u:pa/ss@host/x.zip", "http://***@host/x.zip"),
+            ("http://u:pa#ss@host/x.zip", "http://***@host/x.zip"),
+            // At the start of the text without a scheme, as `Url::sanitize`;
+            // a local path is not told apart.
             ("user:pw@host/x.zip", "***@host/x.zip"),
             ("git@github.com:a/b.git", "***@github.com:a/b.git"),
+            (
+                "C:\\Users\\a@b\\x.zip could not be read: x",
+                "***@b\\x.zip could not be read: x",
+            ),
+            // Not covered, as documented: a raw `/` in a userinfo whose URL
+            // still parses (host `to`, path `/ken@host/x`).
+            ("http://to/ken@host/x", "http://to/ken@host/x"),
+            ("http://u:12/ab@host/x", "http://u:12/ab@host/x"),
             // The three parameters, name in any case, every occurrence,
             // the others and the fragment kept.
             (
@@ -2206,7 +2253,7 @@ mod tests {
             ("ààà://é@ü/ö?access_token=ä", "ààà://***@ü/ö?access_token=***"),
         ] {
             assert_eq!(mask_url_secrets(text), want, "{text}");
-            // Masking twice changes nothing.
+            // On these texts, masking twice changes nothing.
             assert_eq!(mask_url_secrets(want), want, "{want}");
         }
     }

@@ -202,3 +202,29 @@ fn a_refused_connection_shows_no_credentials() {
         "the cause is gone\nstderr:\n{stderr}"
     );
 }
+
+/// A password with a raw `?`: the URL does not parse as meant, nothing
+/// is fetched, and the error still names it — without the credentials.
+/// (`secure-http`'s warning names what it reads as the host, the user
+/// name here: a line of Composer's, out of this test.)
+#[test]
+fn an_unparsable_url_shows_no_credentials() {
+    let port = not_found_server();
+    let url = format!("http://viv-user-0f1e:pw?raw-secret-9d0e@127.0.0.1:{port}/x.zip");
+    let (code, stdout, stderr) = install(&url);
+    assert_eq!(code, 100, "exit code\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        !stderr.contains("raw-secret-9d0e") && !stdout.contains("raw-secret-9d0e"),
+        "the password shown\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let error = stderr
+        .lines()
+        .find(|l| l.starts_with("Error: "))
+        .unwrap_or_else(|| panic!("no `Error:` line\nstderr:\n{stderr}"));
+    assert!(
+        error.starts_with(&format!(
+            "Error: HTTP failure for http://***@127.0.0.1:{port}/x.zip: "
+        )) && !error.contains("viv-user-0f1e"),
+        "{error}"
+    );
+}
