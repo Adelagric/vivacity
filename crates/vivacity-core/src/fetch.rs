@@ -1515,12 +1515,9 @@ impl Fetcher {
         }
         let verified = |bytes: Vec<u8>| -> Result<(Vec<u8>, Provenance)> {
             if let Some(exp) = expected_sha1 {
-                let actual = sha1_hex(&bytes);
-                if actual != exp {
+                if sha1_hex(&bytes) != exp {
                     return Err(Error::ShasumMismatch {
-                        name: name.to_owned(),
-                        expected: exp.to_owned(),
-                        actual,
+                        url: sanitize_url(url),
                     });
                 }
             }
@@ -2098,6 +2095,10 @@ mod tests {
             ))
             .expect_err("checksum");
         assert!(matches!(err, Error::ShasumMismatch { .. }), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("The checksum verification of the file failed (downloaded from {url})")
+        );
         assert_eq!(std::fs::read(&at).expect("cached"), b"new bytes");
     }
 

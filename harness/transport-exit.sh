@@ -911,6 +911,25 @@ for side in ref viv; do
   [ "$side" = viv ] && viv_warm "$d"
 done
 launch desync-sha-fetch 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect desync-sha-fetch 0 20 "  - Downloading probe/desync"; requests desync-sha-fetch 1
+# 8h-3. `dist.shasum` posé, mais le serveur rend une autre archive, cache
+# froid, store chaud chez vivacity : Composer refuse l'archive téléchargée
+# (FileDownloader.php l. 211-213 : `UnexpectedValueException`, code 1, sans
+# nouvelle tentative — la vérification suit `$reject`), après l'avoir écrite
+# dans son cache (`$accept`) ; vivacity doit finir pareil, mot pour mot.
+# Puis la même chose avec des identifiants dans l'URL du dist : le message
+# passe l'URL par `Url::sanitize`, le mot de passe n'apparaît nulle part.
+for c in desync-sha-bad desync-sha-bad-creds; do
+  s6_case "$c"
+  for side in ref viv; do
+    d="$WORK/s6/$c/$side"; url="http://127.0.0.1:$(cat "$d/g")/desync.zip"
+    [ "$c" = desync-sha-bad-creds ] && url="http://user:s3cr3t-dist-pw@127.0.0.1:$(cat "$d/g")/desync.zip"
+    cp "$S8/a.zip" "$d/reg/desync.zip"
+    s8_project "$d" probe/desync "$url" "$a_sha"
+    [ "$side" = viv ] && viv_warm "$d"
+    cp "$S8/b.zip" "$d/reg/desync.zip"
+  done
+  launch "$c" 30 "${INSTALL_REF[@]}" -- "${INSTALL_VIV[@]}"; expect "$c" 0 20 "The checksum verification of the file failed (downloaded from "; requests "$c" 1
+done
 # 8i. Un lot mixte : probe/cached dans les deux caches, probe/desync dans le
 # store seul. Une requête de chaque côté, celle de probe/desync.
 s6_case desync-mixed
@@ -983,6 +1002,26 @@ if [ -z "$entry_file" ] || ! grep -q 'class A {}' "$entry_file"; then
   echo "FAIL desync-other-bytes : l'entrée du store n'est plus celle de l'archive A (${entry_file:-absente})"; status=1
 else
   echo "OK   desync-other-bytes : l'entrée du store est restée celle de l'archive A"
+fi
+# 8h-3, suite : l'archive refusée n'entre pas dans le store (l'entrée reste
+# A) ; et le mot de passe de l'URL n'est écrit par aucun des deux outils.
+for c in desync-sha-bad desync-sha-bad-creds; do
+  entry_file=$(find "$WORK/s6/$c/viv/store" -path '*/probe/desync/*' -name A.php -not -path '*/.staging/*' | head -1)
+  if [ -z "$entry_file" ] || ! grep -q 'class A {}' "$entry_file"; then
+    echo "FAIL $c : l'entrée du store n'est plus celle de l'archive A (${entry_file:-absente})"; status=1
+  else
+    echo "OK   $c : l'entrée du store est restée celle de l'archive A"
+  fi
+done
+d="$WORK/s6/desync-sha-bad-creds"
+if grep -qF 's3cr3t-dist-pw' "$d/ref.out" "$d/ref.err"; then
+  echo "FAIL desync-sha-bad-creds : Composer écrit le mot de passe de l'URL (divergence à arbitrer)"; status=1
+elif grep -qF 's3cr3t-dist-pw' "$d/viv.out" "$d/viv.err" "$d/viv/warm.log"; then
+  echo "FAIL desync-sha-bad-creds : vivacity écrit le mot de passe de l'URL"; status=1
+elif ! grep -qF 'http://user:***@' "$d/viv.err"; then
+  echo "FAIL desync-sha-bad-creds : vivacity n'écrit pas l'URL masquée"; status=1
+else
+  echo "OK   desync-sha-bad-creds : le mot de passe n'apparaît dans aucune sortie, l'URL est masquée"
 fi
 # 8j. Le même projet, aussitôt réinstallé sans rien changer (vendor/ en
 # place) : aucune requête, et la classmap reste celle de B.

@@ -46,12 +46,11 @@ pub enum Error {
     #[error("HTTP failure for {url}: {message}")]
     Http { url: String, message: String },
 
-    #[error("dist checksum mismatch for {name}: expected sha1 {expected}, got {actual}")]
-    ShasumMismatch {
-        name: String,
-        expected: String,
-        actual: String,
-    },
+    /// A dist whose sha1 is not the lock's `dist.shasum`: `FileDownloader`'s
+    /// `UnexpectedValueException` (FileDownloader.php l. 211-213), exit 1;
+    /// `url` is the dist URL already through `Url::sanitize`.
+    #[error("The checksum verification of the file failed (downloaded from {url})")]
+    ShasumMismatch { url: String },
 
     #[error("cannot encode non-finite float ({0}) as JSON (PHP json_encode would fail too)")]
     NonFiniteFloat(f64),
