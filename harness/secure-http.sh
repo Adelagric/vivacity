@@ -142,9 +142,21 @@ class H(http.server.BaseHTTPRequestHandler):
         with open(log, "a") as f:
             f.write("%s %s\n" % (self.command, self.path))
         m = re.match(r"^http://redir\.test(/.*)$", self.path)
+        # `http://packagist.org/p/<sorte>%24/…` : exempté de `secure-http`
+        # au départ (CurlDownloader.php:180, `curl_exempt`), redirigé vers une
+        # cible `http://` refusée — absolue, avec un jeton ou un autre
+        # paramètre, ou relative au même hôte.
+        k = re.match(r"^http://packagist\.org/p/(tok|plain|rel)%24(/.*)$", self.path)
+        if k:
+            m = None
+            location = {"tok": "http://target.test%s?access_token=at-redir-5c1d&a=1",
+                        "plain": "http://target.test%s?page=2",
+                        "rel": "%s?access_token=at-rel-8e2f"}[k.group(1)] % k.group(2)
         if m:
+            location = "http://target.test" + m.group(1)
+        if m or k:
             self.send_response(302)
-            self.send_header("Location", "http://target.test" + m.group(1))
+            self.send_header("Location", location)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -235,6 +247,11 @@ seed local "{\"name\": \"vivacity/secure-http-local\", \"type\": \"project\", \"
 # (`array_unshift`), le dernier est essayé en premier.
 seed mirrors "{\"name\": \"vivacity/secure-http-mirrors\", \"type\": \"project\", \"repositories\": [{\"type\": \"package\", \"package\": {\"name\": \"acme/a\", \"version\": \"1.0.0\", \"dist\": {\"type\": \"zip\", \"url\": \"http://dist.test/dist/a.zip\", \"mirrors\": [{\"url\": \"http://m1.test/dist/a.zip\", \"preferred\": true}, {\"url\": \"http://m2.test/dist/a.zip\", \"preferred\": true}]}}}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\"}}"
 seed repo "{\"name\": \"vivacity/secure-http-repo\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"http://repo.test\"}, {\"packagist.org\": false}], \"require\": {\"acme/a\": \"1.0.0\", \"acme/b\": \"1.0.0\"}}"
+# Un dépôt `composer` dont le packages.json est demandé à une URL exemptée,
+# redirigée vers une cible `http://` (le mandataire) ; acme/l, dist local.
+for k in tok plain rel; do
+  seed "redir$k" "{\"name\": \"vivacity/secure-http-redir$k\", \"type\": \"project\", \"repositories\": [{\"type\": \"composer\", \"url\": \"http://packagist.org/p/$k%24/packages.json\"}, {\"packagist.org\": false}], \"require\": {\"acme/l\": \"1.0.0\"}}"
+done
 
 # case <nom> <seed> <préparations> -- <arguments de la commande>
 #   préparations : jq:<expr> (composer.json), nolock, warm (cache de fichiers
@@ -249,12 +266,15 @@ seed repo "{\"name\": \"vivacity/secure-http-repo\", \"type\": \"project\", \"re
 #   `VIVACITY_HOLD_OUTPUT=force`, marqueur de trace exigé puis retiré),
 #   installed (vendor/ posé avant par un
 #   install de Composer à `secure-http: false`, cache jetable), rm:<chemin>
-#   (retiré du projet après), noappend (ni `--no-scripts` ni `--no-ansi`)
+#   (retiré du projet après), noappend (ni `--no-scripts` ni `--no-ansi`),
+#   absent:<texte> (dans aucune sortie, d'aucun côté, ni dans les caches),
+#   samecache (mêmes fichiers dans les caches de Composer et de vivacity,
+#   `.htaccess` à part, que vivacity n'écrit pas : HANDOVER, `htaccess-protect`)
 case_() {
   local name="$1" seedname="$2"; shift 2
   local preps=() args=()
   while [ "$1" != "--" ]; do preps+=("$1"); shift; done; shift; args=("$@")
-  local d="$WORK/case/$name" delegates="" native=0 expect="" envs=() global='{}' globalauth="" warm=0 anyreq=0 offline=0 late=0 installed=0 noappend=0 hold=0 loaded=0 p
+  local d="$WORK/case/$name" delegates="" native=0 expect="" envs=() global='{}' globalauth="" warm=0 anyreq=0 offline=0 late=0 installed=0 noappend=0 hold=0 loaded=0 absent=() samecache=0 p
   rm -rf "$d"; mkdir -p "$d"
   for p in "${preps[@]}"; do
     case "$p" in
@@ -271,6 +291,8 @@ case_() {
       noappend) noappend=1 ;;
       hold) hold=1; envs+=("VIVACITY_HOLD_OUTPUT=force" "VIVACITY_TRACE=1") ;;
       loaded) loaded=1 ;;
+      absent:*) absent+=("${p#absent:}") ;;
+      samecache) samecache=1 ;;
       globalauth:*) globalauth="${p#globalauth:}" ;;
     esac
   done
@@ -409,6 +431,25 @@ case_() {
       vendor_sum "$d/nofb" | cmp -s - "$d/nofb.vendor.before" || bad="$bad --no-fallback a touché vendor/;"
     fi
   fi
+  # Le texte n'est dans aucune sortie (seuls les chemins du cas y sont
+  # ramenés au même), ni dans un nom ou un contenu de fichier des caches.
+  # (`grep` sans `-q` derrière `find` : lu jusqu'au bout, pas de SIGPIPE
+  # que `pipefail` prendrait pour un échec.)
+  local a f
+  for a in "${absent[@]+"${absent[@]}"}"; do
+    for f in ref.out ref.err viv.out viv.err nofb.out nofb.err; do
+      ! grep -qF -- "$a" "$d/$f" || bad="$bad « $a » dans $f;"
+    done
+    for f in cache-ref cache-viv cache-nofb; do
+      { find "$d/$f" | grep -F -- "$a" >/dev/null || grep -rqF -- "$a" "$d/$f"; } && bad="$bad « $a » dans $f;"
+    done
+  done
+  if [ "$samecache" = 1 ]; then
+    cache_sum() { (cd "$1" && find . -type f ! -name .htaccess -exec shasum {} + | sort -k2); }
+    cache_sum "$d/cache-ref" > "$d/cache-ref.sum"; cache_sum "$d/cache-viv" > "$d/cache-viv.sum"
+    [ -s "$d/cache-ref.sum" ] || bad="$bad cache de Composer vide, rien à comparer (retirer samecache);"
+    cmp -s "$d/cache-ref.sum" "$d/cache-viv.sum" || bad="$bad caches différents;"
+  fi
   if [ "$native" = 1 ]; then
     ! grep -q 'delegating to' "$d/viv.err" || bad="$bad vivacity a rendu la commande ($(grep -m1 'delegating' "$d/viv.err"));"
     [ "$anyreq" = 1 ] || cmp -s "$d/ref.requests" "$d/viv.requests" || bad="$bad requêtes différentes;"
@@ -525,6 +566,12 @@ want install-repo-default && case_ install-repo-default repo 'delegates:secure-h
 # … le refus rattrapé par le filtre de listes (`ignore-unreachable`), le
 # dist local installé : natif, l'avertissement de Composer mot pour mot.
 want install-repo-default-local && case_ install-repo-default-local repolocal native 'expect:^  - Your configuration does not allow connections to http://repo.test/packages.json' -- install
+# … ce refus sur la cible d'une redirection : Composer nomme la cible,
+# passée par `Url::sanitize` (Config.php:712), jeton masqué, l'autre
+# paramètre gardé ; une cible relative, résolue sur l'hôte de la requête.
+want redirect-refused-token && case_ redirect-refused-token redirtok native samecache 'absent:at-redir-5c1d' 'expect:^  - Your configuration does not allow connections to http://target\.test/packages\.json\?access_token=\*\*\*&a=1\. ' -- install
+want redirect-refused-plain && case_ redirect-refused-plain redirplain native samecache 'expect:^  - Your configuration does not allow connections to http://target\.test/packages\.json\?page=2\. ' -- install
+want redirect-refused-relative && case_ redirect-refused-relative redirrel native samecache 'absent:at-rel-8e2f' 'expect:^  - Your configuration does not allow connections to http://packagist\.org/packages\.json\?access_token=\*\*\*\. ' -- install
 # 4. Des dists `http://` dans les métadonnées d'un dépôt `file://` :
 # Composer écrirait le lock, puis s'arrêterait au premier. Lisibles sans
 # requête : rendu avant tout, comme pour `require`.

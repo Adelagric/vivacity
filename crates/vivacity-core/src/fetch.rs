@@ -1440,10 +1440,11 @@ fn redirect_verdict(target: &reqwest::Url) -> Option<InsecureRedirect> {
             crate::secure_http::note_redirect(&scheme, &host);
             None
         }
-        // A target with credentials would need `Url::sanitize` in the
-        // message: Composer's, then.
+        // Composer names the target, through `Url::sanitize`
+        // (Config.php:712, run by `initDownload` as `restartJob` follows the
+        // redirect). A target with credentials stays Composer's.
         Verdict::Refuse if target.username().is_empty() && target.password().is_none() => {
-            Some(InsecureRedirect::Refused(refusal(url)))
+            Some(InsecureRedirect::Refused(refusal(&sanitize_url(url))))
         }
         Verdict::Refuse => Some(InsecureRedirect::HandOver(
             "a redirect to an insecure URL with credentials, which secure-http refuses".to_owned(),
