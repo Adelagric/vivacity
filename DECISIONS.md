@@ -6321,3 +6321,20 @@ répertoires PSR avec `-o` ; tout le paquet pour un glob, un `..` ou un
 (`InstallOptions::placement_identities`). Ce n'est pas une optimisation de
 l'existant : le relevé est neuf, il est borné à son usage. Chiffres :
 rapport d'exécution au mainteneur, pas ici (consigne).
+
+## 2026-11-01 — Réutiliser au dump l'identité relevée à la pose : aucun gain, retiré (docs/plans/vendor-isolation.md, P1)
+
+Une optimisation expérimentale réutilisant l'identité des fichiers relevée
+lors de leur installation a été implémentée et vérifiée fonctionnellement.
+Les benchmarks comparatifs sur macOS APFS (M4 Max), exécutés dans les deux
+ordres, n'ont montré aucun gain reproductible, notamment sur l'installation
+à `vendor/` vide. Le mécanisme a été retiré pour éviter une complexité sans
+bénéfice démontré.
+
+Restent les deux cas écrits pour elle dans `harness/classmap-revalidate.sh`
+(`cm-pose-bindir`, `cm-pose-chmod`) : ils vérifient la classmap du dump
+après des écritures du code natif entre la pose et le dump, ce qui vaut sans
+l'optimisation. Le coût de P1 est accepté pour 0.26.1 ; il ne vient pas
+principalement du second `stat` que l'essai évitait. Son origine (profil par
+phase de l'install, fenêtre de deux secondes) est un sujet de 0.27 ; le
+hachage des fichiers fraîchement posés n'y est qu'une hypothèse.

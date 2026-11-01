@@ -992,3 +992,7 @@ link sur ext4 et overlayfs dans le conteneur), `plugins-round2.sh`,
 Windows (variante typecheckée, jamais lancée ; coût à mesurer) ; les bancs
 Linux et invoiceninja. Faits depuis par le mainteneur : les autres harnais
 (verts) et le corpus (inchangé).
+
+**Optimisation essayée puis retirée (2026-11-01).** Réutiliser au dump
+l'identité relevée à la pose, sans second `stat` : vérifiée, aucun gain
+reproductible, retirée ; voir DECISIONS (2026-11-01).
