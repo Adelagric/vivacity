@@ -1456,7 +1456,9 @@ fn redirect_verdict(target: &reqwest::Url) -> Option<InsecureRedirect> {
 
 /// `secure-http` once more where the request leaves: the commands decide
 /// before anything is written ([`crate::secure_http`]); a request they did
-/// not foresee is handed to Composer rather than sent.
+/// not foresee is handed to Composer rather than sent. The reason is
+/// vivacity's own text: the URL masked by [`mask_url_secrets`] (before the
+/// query is cut, so that a password holding a raw `?` or `#` goes too).
 fn refuse_insecure(url: &str) -> Result<()> {
     use crate::secure_http::{classify, Verdict};
     let why = match classify(url) {
@@ -1464,9 +1466,10 @@ fn refuse_insecure(url: &str) -> Result<()> {
         Verdict::HandOver(reason) => format!("with {reason}"),
         Verdict::Allowed | Verdict::Warn { .. } => return Ok(()),
     };
+    let shown = mask_url_secrets(url);
     Err(Error::Unsupported(format!(
         "{} would be fetched over an insecure protocol, {why}",
-        url.split(['?', '#']).next().unwrap_or(url)
+        shown.split(['?', '#']).next().unwrap_or(&shown)
     )))
 }
 
