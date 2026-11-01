@@ -73,20 +73,19 @@ things break when that assumption does:
   `~/.cache/vivacity`, `~/Library/Caches/vivacity` on macOS,
   `%LOCALAPPDATA%\vivacity` on Windows, or `VIVACITY_CACHE_DIR`) are no longer
   read by the fixed version; delete them to get their space back.
-- **The class map cache does not look at `vendor/` again.** Fixed on the
-  `classmap-revalidate` branch, not yet on main; planned for release in
-  0.26.1. In 0.26.0 and earlier it keeps one record per store entry and serves
-  it without reading `vendor/`: a class renamed, a file added or removed there
-  keeps the old class map in `dump-autoload` (and in the dump that ends
-  `install`, `update`, `require` and `remove`), and a record taken from one
-  project's edited copy is served to every other project. The project's own
-  sources are checked by modification time and size, which `touch -r` puts
-  back. With 0.26.0, after editing a file in `vendor/`, dump the autoloader
-  with `VIVACITY_NO_CLASSMAP_CACHE=1`; if a dump already ran with the cache
-  after the edit, delete `classmap/` and `classmap-files/` under vivacity's
-  cache directory. With the fix, the class map is the one Composer writes for
-  the current state of the project, `vendor/` included
-  (`harness/classmap-revalidate.sh`):
+- **The class map cache does not look at `vendor/` again.** Fixed on main;
+  planned for release in 0.26.1. In 0.26.0 and earlier it keeps one record per
+  store entry and serves it without reading `vendor/`: a class renamed, a file
+  added or removed there keeps the old class map in `dump-autoload` (and in
+  the dump that ends `install`, `update`, `require` and `remove`), and a
+  record taken from one project's edited copy is served to every other
+  project. The project's own sources are checked by modification time and
+  size, which `touch -r` puts back. With 0.26.0, after editing a file in
+  `vendor/`, dump the autoloader with `VIVACITY_NO_CLASSMAP_CACHE=1`; if a
+  dump already ran with the cache after the edit, delete `classmap/` and
+  `classmap-files/` under vivacity's cache directory. With the fix, the class
+  map is the one Composer writes for the current state of the project,
+  `vendor/` included (`harness/classmap-revalidate.sh`):
   - every scanned directory is listed on every dump, so a file added or
     removed is seen, and each project has its own record of each file;
   - a file is served from that record without being read only while its

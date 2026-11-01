@@ -1185,8 +1185,9 @@ la décision revient au mainteneur.
     non (aucun manifeste du corpus n'a `target-dir`). Sans coût : oui.
 51. **Le cache de classmap suppose vendor/ immuable** : contrat assumé
     jusqu'au 2026-10-31, rejeté depuis par le mainteneur (même comportement
-    que Composer sur l'état courant du projet) ; revalidation à faire, P1 de
-    docs/plans/vendor-isolation.md. L'autre face de la même hypothèse —
+    que Composer sur l'état courant du projet) ; corrigé sur main, prévu pour
+    0.26.1 (P1 de docs/plans/vendor-isolation.md ;
+    `harness/classmap-revalidate.sh`). L'autre face de la même hypothèse —
     vendor/ lié au store hors copie sur écriture, une écriture en place
     atteignant le store et les autres projets — est corrigée sur main,
     prévue pour 0.26.1 (P0, même plan ;
