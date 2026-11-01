@@ -6577,7 +6577,7 @@ nom de paramètre encodé en pourcentage ou après un `;` ; un secret dans le
 fragment, le chemin ou un autre paramètre (une signature) ; ce qui dérive
 de l'URL (la clé du cache de fichiers est son sha1, comme chez Composer).
 
-**Les deux chemins corrigés, et seulement eux.**
+**Les chemins corrigés, et seulement eux.**
 - `Error::Http` (« HTTP failure for <url>: <message> ») : son affichage
   passe les deux champs par la fonction, quel que soit l'endroit qui
   construit l'erreur. Ce texte n'est comparé à l'octet à Composer nulle
@@ -6590,6 +6590,23 @@ de l'URL (la clé du cache de fichiers est son sha1, comme chez Composer).
 - Le rapport de déliaison de P0 (`store/.detached-reports/v4/…`, champs
   `archive_url` des deux sortes de référence). Les rapports écrits avant ce
   correctif gardent l'URL brute : ils ne sont ni réécrits ni effacés.
+- La raison du filet de `secure-http` (`fetch::refuse_insecure`, « <url>
+  would be fetched over an insecure protocol, … », sur la ligne `  - ` de
+  la passation ou de `--no-fallback`) : l'URL passe par la fonction avant
+  que la requête et le fragment soient coupés, comme avant (couper d'abord
+  laissait le nom d'un mot de passe à `?` ou `#` brut). Verdict, moment,
+  code de sortie et passation inchangés.
+
+**Ajouté au même titre, côté contrat Composer.** Le refus d'une redirection
+par `secure-http` (`fetch::redirect_verdict`, cible sans identifiants) : le
+message de Composer, dont vivacity reprenait la cible brute (un
+`?access_token=…` en clair). Composer y nomme la cible de la redirection,
+pas l'URL de la requête de départ, passée par `Url::sanitize`
+(Config.php:712 du phar 2.10.3, que `CurlDownloader::initDownload`
+l. 181 exécute quand `restartJob` l. 651 relance la tâche sur la cible de
+`handleRedirect`) : la cible passe par `sanitize_url`, le masquage de
+Composer (règle ci-dessus), pas par la fonction. Une cible avec
+identifiants reste rendue à Composer, comme avant.
 
 **Les formes vérifiées par les tests, et seulement elles** : `user:secret@`,
 le nom seul `jeton@`, `?private_token=…`, `?private-token=…`,
@@ -6602,6 +6619,37 @@ passe avec un `?` brut ; code 100) ; pour le rapport, dans le fichier JSON
 écrit puis relu (`detach_report::tests::the_written_report_holds_no_credentials`).
 Rouges avant ce correctif, verts après ; les tests unitaires de la fonction
 fixent aussi les limites ci-dessus (`http://to/ken@hôte` laissé tel quel).
+Pour le filet, par le binaire aussi
+(`an_unforeseen_insecure_request_hands_over_without_credentials`) : le seul
+chemin réel trouvé jusqu'à lui est une dist du lock dont le schéma vient de
+la référence (`%reference%://…`, référence `http`) — le contrôle d'avant la
+commande lit l'URL telle qu'écrite, le téléchargement la développe en
+`http://…` ; `user:secret@`, le nom seul, un mot de passe à `?` brut et à
+`#` brut, un `access_token` dans la requête, sur la stderr et la stdout
+brutes : `  - http://***@127.0.0.1:<port>/x.zip would be fetched over an
+insecure protocol, which secure-http refuses`, aucune connexion au
+serveur, pas de vendor/ ; code 3 sous `--no-fallback`, et (unix) passation
+réelle à un `composer` factice en tête du PATH, dont le code 42 est rendu.
+Le binaire d'avant donne les mêmes codes, la même stdout et le même projet,
+seule la ligne de la raison change. Pour la redirection, en différentiel
+contre Composer 2.10.3 (`harness/secure-http.sh`, `redirect-refused-token`,
+`redirect-refused-plain`, `redirect-refused-relative`) : un dépôt dont le
+packages.json est demandé à une URL que les deux outils exemptent
+(`http://packagist.org/p/…%24…`, CurlDownloader.php:180), redirigée vers
+`http://target.test/packages.json?access_token=…&a=1`, vers la même cible
+à `?page=2`, ou vers une cible relative (`/packages.json?access_token=…`,
+résolue sur l'hôte de la requête) ; `install`, le refus rattrapé par le
+filtre de listes (`ignore-unreachable`) : code, stdout, stderr, projet,
+requêtes et fichiers des caches identiques (`.htaccess` à part,
+`htaccess-protect`), le jeton dans aucune sortie ni aucun cache des deux
+outils (préparation `absent:`). Rouges avant (`token` et `relative` : le
+jeton sur la stderr de vivacity), verts après ; `plain`, vert avant comme
+après, fixe que l'autre paramètre reste affiché. Enfin le nom du
+répertoire de cache d'un dépôt (`metacache::tests::repository_cache_dir_is_composers`),
+chaque valeur calculée par le PHP du phar (ComposerRepository.php:206) :
+deux jeux d'identifiants, le nom `private-token`, un nom `gha_` court —
+rouge avec le `sanitize_url` d'avant son alignement sur le phar, vert
+après.
 
 **Vu en passant, non corrigé** : l'avertissement de `secure-http`
 (« Accessing <hôte> over http… », une ligne de la forme de Composer) nomme

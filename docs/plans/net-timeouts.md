@@ -707,4 +707,9 @@ transport d'une archive (`Error::Http`, « HTTP failure for <url> », point
 propre à vivacity, comme le rapport de déliaison, passe désormais par
 `fetch::mask_url_secrets`, qui masque aussi ce que Composer laisse (règle,
 formes couvertes et limites : DECISIONS.md, 2026-11-01, « Identifiants dans
-les diagnostics de vivacity »).
+les diagnostics de vivacity »). Corrigés ensuite, même entrée : la raison
+du filet de `secure-http` (`refuse_insecure`, « … would be fetched over an
+insecure protocol »), qui gardait `user:mot de passe@`, par
+`mask_url_secrets` ; et le refus d'une redirection (`redirect_verdict`),
+qui reprenait la cible brute là où Composer la passe par `Url::sanitize`,
+par `sanitize_url` (cas `redirect-refused-*` de `harness/secure-http.sh`).
