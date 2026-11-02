@@ -133,7 +133,7 @@ store, jamais de réseau ; `archive_url` masquée par
 `fetch::mask_url_secrets`). Observation passée : ne prouve pas l'absence de
 liens après un retour arrière ; perdue au vidage du cache.
 
-## Publication sur crates.io (dernière : 0.26.0 le 2026-10-31)
+## Publication sur crates.io (dernière : 0.26.1 le 2026-11-02)
 
 Six crates (`vivacity-pcre2-sys`, `vivacity-pcre2`, `vivacity-core`,
 `vivacity-autoload`, `vivacity-resolver`, `vivacity`) s'empaquettent
@@ -153,9 +153,9 @@ cargo login                       # une fois, jeton du compte crates.io du maint
 cargo publish --workspace         # pcre2-sys → pcre2 → core → autoload → resolver → vivacity
 ```
 
-Vérifié après la 0.26.0 (comme après chaque version depuis la 0.13.0) : binaire GitHub (checksum, `--version`, aucune
+Vérifié après la 0.26.1 (comme après chaque version depuis la 0.13.0) : binaire GitHub (checksum, `--version`, aucune
 PCRE2 dynamique, symboles `vivacity_pcre2_*`), `cargo install vivacity
---version 0.26.0` depuis crates.io, install réel avec ce binaire (Laravel, 109
+--version 0.26.1` depuis crates.io, install réel avec ce binaire (Laravel, 109
 paquets, `--no-plugins`). Le job publish de release.yml
 (`softprops/action-gh-release`) a échoué une fois à mi-téléversement
 (« Error creating asset temp dir », aléa de l'action) : `gh run rerun
