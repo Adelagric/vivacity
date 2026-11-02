@@ -55,7 +55,7 @@ byte-identical-output promise are the public API.
   projects is scanned from the store entry's own directory, never from a
   project's copy, and serves only files with the entry's bytes. Under
   Windows, where no file identity is trusted, every scanned file is read
-  and hashed on each dump (not measured yet). A dist without a reference is
+  and hashed on each dump. A dist without a reference is
   now found in the store by the name the installer gives it. The cache
   formats changed (`classmap` v4, `classmap-files` r2): the first dump of
   each project scans again. README, "Editing vendor/";

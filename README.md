@@ -117,7 +117,8 @@ things break when that assumption does:
   identity is trusted (the standard library gives no ctime, and NTFS's
   change time can be set by a program): every scanned file is read and
   hashed on every dump, and the detection runs only for new content —
-  correct, slower, not measured yet. `VIVACITY_NO_CLASSMAP_CACHE=1` turns
+  correct, slower (measured on a Windows runner: figures and limits in
+  [HANDOVER.md](HANDOVER.md)). `VIVACITY_NO_CLASSMAP_CACHE=1` turns
   the cache off: every file is read and scanned, as Composer does. The
   cache grows with each project path it has seen (one record per scanned
   directory, never pruned): delete `classmap/` and `classmap-files/` under
