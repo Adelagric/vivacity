@@ -6,6 +6,14 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.26.2] — 2026-11-03
+
+### Security
+- **tokio is pinned to 1.53.3, which fixes RUSTSEC-2026-0386** (the safe
+  `AsyncFd` constructors break I/O safety). vivacity pinned `=1.53.1`, which
+  kept every project depending on it from selecting the patched release.
+  Contributed by Luther Monson (ePHPm).
+
 ## [0.26.1] — 2026-11-02
 
 ### Fixed
