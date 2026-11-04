@@ -20,8 +20,10 @@ Deux défauts sont dans la version publiée :
 2. **Classmap :** un dossier du store retiré puis réextrait dans le même tic garde son inode et son
    ctime, donc la clé de son enregistrement. Un paquet placé depuis cette entrée reçoit alors les
    classes de l'ancien contenu : le chemin « placé » ne relit aucun octet et ne contrôle ni
-   l'identité par fichier ni l'empreinte. Vu sur Linux, depuis 0.26.1 d'après le code ; une
-   collision forcée le reproduit à l'échelle unitaire.
+   l'identité par fichier ni l'empreinte. Vu sur Linux. Mesuré sur macOS (voir Résultats) : sur tous
+   les tags essayés de v0.1.0 à v0.26.0, une entrée réextraite 3 s plus tard sert déjà les anciennes
+   classes, la clé n'ayant pas d'identité ; v0.26.1 et v0.26.2 ne les servent plus que sur l'emplacement
+   forcé, seul le cas du même tic restant. Une collision forcée le reproduit à l'échelle unitaire.
 
 ### Contraintes
 
@@ -47,7 +49,7 @@ Le passage à 2.11.1, le lecteur effectif, toute autre remise à Composer, le bu
 | I1 | Aucun fichier hors du paquet n'est modifié et aucun proxy ne le vise, quelle que soit la forme de `bin` | test d'intégration : fichier témoin `0600` hors du paquet | rouge sur `v0.26.2` | phar 2.10.3 sur les mêmes formes |
 | I2a | Une forme de `bin` lisible dans le lock et qui n'est pas ordinaire part à Composer avant toute écriture ; sous `--no-fallback`, sortie 3 sans rien écrire | table de formes, `install` et `update` : Composer atteint et résultat égal au phar 2.10.3 | absolue, `.//`, `a//b`, `.`, `./`, `a/.`, `..` et `a/..`, `\\`, vide, chaîne, objet, non-chaîne ; aussi dans `installed.json` | sources `x2.10.3` lues |
 | I2b | Formes ordinaires : aucune sortie ni aucun octet ne change par rapport à 0.26.2 | suite, harnais, corpus | `bin/x`, `./bin/x`, doublon de nom | comparaison à `v0.26.2` et au phar |
-| I2c | Forme connue seulement après extraction (lien sortant, dossier) : ni `chmod` ni proxy, la commande continue et écrit la ligne de saut de 2.10.3 | test sur un paquet, comparé au phar sur cette ligne | ancien comportement : erreur d'E/S ou `chmod` | **ordre et répétition après le dump non reproduits, écart ouvert** |
+| I2c | Forme connue seulement après extraction (lien sortant, dossier) : ni `chmod` ni proxy, la commande continue et écrit la ligne de saut de 2.10.3 | test sur un paquet, comparé au phar sur cette ligne | ancien comportement : erreur d'E/S ou `chmod` | **répétition après le dump reproduite ; ordre entre plusieurs dists zip : le phar varie, écart tenu par un test** |
 | I3 | Une entrée réextraite ne sert jamais l'enregistrement de l'ancien contenu | test forçant le même emplacement, avec un fichier de même taille | rouge sur `v0.26.2` | passage Linux, seule plate-forme où la collision réelle a été vue |
 | I4 | Les enregistrements écrits par 0.26.2 ne servent plus | changement de format, test forçant le même emplacement avec un enregistrement `v4` | retirer le changement : rouge | lecture de la clé (`dev`, `ino`, ctime) |
 | I5 | Pas de perte sur les cas courants : parité et réutilisation du cache | suite complète, tous les harnais, corpus dev et no-dev | comparaison à `v0.26.2` : mêmes comptes natifs | `classmap-revalidate`, `vendor-isolation` |
@@ -117,12 +119,21 @@ les commandes ; rien n'est publié.
 
 ### Tests
 
-- `crates/vivacity/tests/bin_forms.rs`, 60 tests, comparés au phar. Sur les sources de `1147d4a` :
-  50 rouges, dont le témoin (`left: "755"`, `right: "600"`) ; 10 verts, qui sont les témoins de
+- `crates/vivacity/tests/bin_forms.rs`, comparés au phar. Version `b6d1138`, 60 tests, sur les sources de
+  `1147d4a` : 50 rouges, dont le témoin (`left: "755"`, `right: "600"`) ; 10 verts, qui sont les témoins de
   non-régression (`ordinary_*`, `name_conflict_*`, `a_dev_package_is_not_read_under_no_dev`,
-  `an_unselected_*`, `a_non_string_left_out_stops_only_the_phar`). Après le correctif : 60 verts.
-  Vus rouges par mutation : `./` retiré de l'ordinaire (`ordinary_dot_slash_form`), garde coupée
-  (`link_out_form`, `755`).
+  `an_unselected_*`, `a_non_string_left_out_stops_only_the_phar`). Vus rouges par mutation : `./` retiré de
+  l'ordinaire (`ordinary_dot_slash_form`), garde coupée (`link_out_form`, `755`).
+- Version actuelle, 69 tests, sans le filtre `expected_native_stderr` : sur les sources de `b6d1138`, 10
+  rouges sur 69, la passe après le dump. Vert ensuite. Mutation : sans le tri par dépôt local,
+  `several_packages::path_packages_…` rouge.
+- **Stabilité.** `gone_*` échouait sous charge sur `0/2` contre `0/1`. Cause : la barre du phar, pas vivacity.
+  `Loop::wait` part des tâches actives à cet instant et redessine toutes les 0,1 s. Phar seul, même entrée,
+  30 exécutions : 29 et 1 au repos ; 23 et 7 puis 25 et 5 sous 42 `yes` sur 14 cœurs. Instantané du projet et
+  des caches (contenu, mode, mtime) pris quand la remise lance Composer : aucun changement depuis la
+  réinitialisation, sur 170 exécutions sur 170. Avec `--no-progress` des deux côtés, 40 exécutions sous charge
+  donnent une seule sortie : rien n'est normalisé. Passes complètes en `--release` sous la même charge : `b6d1138`
+  échoue 5 fois sur 6 (2 à 4 tests, tous `gone_*`), `4c81068` passe 12 fois sur 12, 69 sur 69, charge jusqu'à 91,79.
 - Classmap : `the_same_slot_on_a_re_extracted_entry_serves_no_stale_classes` (`["Old"]` au lieu de
   `["New"]`) et `a_record_of_the_previous_format_is_not_read` (`["Stale"]` au lieu de `["Real"]`), rouges
   sur `1147d4a`. Après : verts. Format remis à `v4` : le second rouge. Enregistrement toujours écrit : le
@@ -137,10 +148,18 @@ dans DECISIONS 2026-11-04. `validate_package` tourne sur `install`, mais son éc
 
 ### Écarts restants avec le phar
 
-Nommés dans HANDOVER : (a) ligne de saut non répétée après le dump, et absente d'un install sans opération ;
-(b) `bin` manquant silencieux ; (c) remise tardive d'`update`, lignes écrites deux fois, ou `Updating
-dependencies` écrit seul sur une forme non-chaîne ; (d) candidat non retenu non-chaîne : `TypeError` chez le
-phar, natif ici ; (e) zip à lien sortant : refusé ici, installé par le phar.
+Chacun a un test nommé (liste et raisons dans HANDOVER) : `bin` manquant silencieux ; ordre entre plusieurs
+dists zip, sur lequel le phar varie ; alias de branche, ligne doublée chez le phar après le dump ; zip à lien
+sortant, refusé ici ; `.bat` déjà là sous `COMPOSER_BIN_COMPAT=full`, déjà ainsi sur `v0.26.2` ; remise tardive
+d'`update` ; candidat non retenu non-chaîne, `TypeError` chez le phar. Fermés : la passe après le dump d'un
+dossier ou d'un lien sortant, placé ou sans opération, et la ligne sous l'opération d'un paquet `path`.
+
+### `classmap-files/`
+
+`FILE_CACHE_FORMAT` reste `r2`, mais la clé de ces fichiers commence par `CACHE_FORMAT`. Mesuré : projet posé puis
+`dump-autoload` par v0.26.2 (`1 served`), son enregistrement réécrit avec une classe fausse, que v0.26.2 sert (`Bad`) ; le
+correctif sur le même projet : `0 served, 0 from store, 0 read, 1 scanned`, classe `Old`, l'ancien fichier toujours
+sur le disque, non lu, un second fichier écrit, puis `1 served`.
 
 ### Portée de `bin`
 

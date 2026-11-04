@@ -29,6 +29,10 @@ byte-identical-output promise are the public API.
 - **A directory named by `bin` no longer ends the run on an I/O error**: it is
   skipped with Composer's line. `vendor/bin` is created only for a binary that is
   installed, as Composer does.
+- **The skip lines of a directory or of a path outside the package fall where
+  Composer writes them**: under the operation of a `path` package, and again after
+  the autoload dump for every package of the local repository, a no-op install
+  included (`ensureBinariesPresence`).
 - **A package placed from a store entry extracted again gets its own classes.**
   Up to 0.26.0 the class map record of an entry did not depend on the entry's
   identity; in 0.26.1 and 0.26.2 it did, but an entry removed and extracted again
@@ -36,7 +40,9 @@ byte-identical-output promise are the public API.
   a placed file's classes are taken from the record without reading the file.
   A record is now kept only for an entry older than the racy window; the next
   package placed from a younger one scans it once more. The record format moves
-  to `v5`, so that nothing an earlier version wrote is read.
+  to `v5`. It is part of the name of the records in `classmap/` and in
+  `classmap-files/`, so those earlier versions wrote stay on disk, unread, and each
+  project's next dump scans its files once.
 
 ## [0.26.2] — 2026-11-03
 

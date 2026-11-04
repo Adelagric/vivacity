@@ -6685,9 +6685,20 @@ avant `validate_package` et avant l'écriture du lock, ce que seul le solveur pe
 Un candidat laissé dans le pool ne déclenche rien, ni ici ni dans `validate_package`.
 
 **Écartés.** Reprendre `bin_entries` de la branche 2.11.1 (trop de code, lié à l'ordre
-des lignes de 2.11). Reproduire la seconde passe `ensureBinariesPresence` : écart
-consigné dans HANDOVER. Tenir la sortie d'`update` jusqu'au solveur pour éviter la
-remise tardive : le déclencheur de la tenue reste étroit (décision du 2026-10-30).
+des lignes de 2.11). Tenir la sortie d'`update` jusqu'au solveur pour éviter la
+remise tardive : le déclencheur de la tenue reste étroit (décision du 2026-10-30), et
+une tenue jusqu'au solveur retirerait son flux à une exécution ordinaire, dont
+`Loading composer repositories…` sort avant le réseau (0,01 s, dépôt répondant en 3 s).
+Même sous son déclencheur, la tenue s'arrête au pool, avant le solveur. La remise est de la
+classe connue : un plugin bloqué, décidé après la résolution, fait de même sur `v0.26.2`.
+
+**La seconde passe, reproduite là où le phar est stable.** `ensureBinariesPresence` réécrit
+les lignes d'un dossier ou d'un lien sortant après le dump, sur tout le dépôt local, même sans
+opération et sans dump. `binproxy::presence_notices`, dans l'ordre du dépôt local. Sur plusieurs
+dists zip, le phar varie sur une même entrée (9 et 6 exécutions sur 15) : ses lignes et son dépôt
+local suivent la fin des extractions, écart tenu par un test. Sur des paquets `path`, placés en
+ligne, il ne varie pas (8 sur 8), et la ligne tombe sous l'opération : reproduit. Un alias de
+branche double sa ligne après le dump : ouvert, le dire demanderait les règles d'alias ici.
 
 **La forme n'est pas courante.** Sur les 126 locks de `fixtures/` : 1 230 entrées, aucune
 non ordinaire. Sur les métadonnées p2 des 4 000 paquets de la liste « popular » de Packagist
