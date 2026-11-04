@@ -1950,7 +1950,7 @@ mod path_and_zip {
     }
 
     /// Zip a, path p: p first once placed, by name on a no-op install, p first from the
-    /// lock. Does not vary on the phar (6 runs of 6, 8 of 8 on the sequences below).
+    /// lock. Does not vary on the phar: 8 runs of 8 here, as on the sequences below.
     #[test]
     fn a_path_package_comes_before_a_zip_dist() {
         let Some(case) = case_of(&["a"]) else {
