@@ -180,14 +180,23 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
         )?)
     };
     // `Installer::run`: `ensureBinariesPresence` over `$localRepo->getPackages()`, the
-    // local repository's order, dump or no dump.
-    let (order, _, _) = local_order(&tx);
+    // local repository's order, dump or no dump. A package enters it when its placement
+    // ends: a `path` package in line, an archive once its extraction ends, so the first
+    // before the second.
+    let (order, _, fresh) = local_order(&tx);
+    let in_line: std::collections::HashSet<&str> = run
+        .lock
+        .wanted_packages(run.with_dev)
+        .filter(|p| p.dist_kind() == vivacity_core::lock::DistKind::Path)
+        .map(|p| p.name())
+        .collect();
     let mut notices: Vec<&(String, String)> = installed.report.presence_notices.iter().collect();
     notices.sort_by_key(|(package, _)| {
-        order
-            .iter()
-            .position(|name| name == package)
-            .unwrap_or(usize::MAX)
+        let name = package.as_str();
+        (
+            fresh.contains(&name) && !in_line.contains(name),
+            order.iter().position(|n| *n == name).unwrap_or(usize::MAX),
+        )
     });
     for (_, line) in notices {
         vivacity_core::say!("{line}");

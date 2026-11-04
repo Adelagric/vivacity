@@ -1176,6 +1176,25 @@ mod selection {
     }
 }
 
+/// The lines of a stderr, sorted within each run of skip lines: all that several zip dists
+/// make vary.
+fn blocks_sorted(stderr: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    for l in stderr.lines() {
+        if l.starts_with("    Skipped installation of bin ") {
+            block.push(l.to_owned());
+        } else {
+            block.sort();
+            out.append(&mut block);
+            out.push(l.to_owned());
+        }
+    }
+    block.sort();
+    out.append(&mut block);
+    out
+}
+
 /// Skip lines of several packages: the operations, then the pass after the dump.
 mod several_packages {
     use super::*;
@@ -1247,23 +1266,6 @@ mod several_packages {
         let viv = case.vivacity(&args);
         let context = format!("{}\n{}", dump("phar", &phar), dump("vivacity", &viv));
         assert_eq!(viv.code, phar.code, "{context}");
-        // Sorted within each run of skip lines, which are the only lines that vary.
-        fn blocks_sorted(stderr: &str) -> Vec<String> {
-            let mut out: Vec<String> = Vec::new();
-            let mut block: Vec<String> = Vec::new();
-            for l in stderr.lines() {
-                if l.starts_with("    Skipped installation of bin ") {
-                    block.push(l.to_owned());
-                } else {
-                    block.sort();
-                    out.append(&mut block);
-                    out.push(l.to_owned());
-                }
-            }
-            block.sort();
-            out.append(&mut block);
-            out
-        }
         assert_eq!(
             blocks_sorted(&without_own_line(&viv.stderr)),
             blocks_sorted(&phar.stderr),
@@ -1425,6 +1427,126 @@ mod open {
         );
     }
 
+    /// An inline alias, the same: the phar's local repository holds the alias too, so its
+    /// pass after the dump writes the line twice, on a no-op install too.
+    #[test]
+    fn an_inline_alias_doubles_the_phars_line_after_the_dump() {
+        let Some(case) = Case::new(|port, _| Setup {
+            manifest: mixed_manifest(port),
+            repository: json!({"packages": {}}),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        let place = |case: &Case, _: usize| {
+            write_path_package(
+                case,
+                "a",
+                json!({"name": "acme/a", "version": "dev-main", "bin": ["dir"]}),
+            );
+        };
+        let notice =
+            "    Skipped installation of bin dir for package acme/a: found a directory at that path\n";
+        let steps = [
+            Step {
+                require: Some(&["a:dev-main as 1.0.x-dev"]),
+                args: line(Run::Update),
+            },
+            Step {
+                require: None,
+                args: line(Run::Install),
+            },
+        ];
+        let phar = case.sequence(case.composer, false, &place, &steps);
+        assert_eq!(
+            phar[0].stderr.matches(notice).count(),
+            3,
+            "{}",
+            phar[0].stderr
+        );
+        assert_eq!(
+            phar[1].stderr.matches(notice).count(),
+            2,
+            "{}",
+            phar[1].stderr
+        );
+        let viv = case.sequence(
+            Path::new(env!("CARGO_BIN_EXE_vivacity")),
+            true,
+            &place,
+            &steps,
+        );
+        assert_eq!(
+            viv[0].stderr.matches(notice).count(),
+            2,
+            "{}",
+            viv[0].stderr
+        );
+        assert_eq!(
+            viv[1].stderr.matches(notice).count(),
+            1,
+            "{}",
+            viv[1].stderr
+        );
+    }
+
+    /// Two `path` packages with one proxy name, placed by one run: on the phar the first
+    /// operation holds it (z, which a requires), here the first of the lock (a): another
+    /// proxy target in `vendor/bin`. As in 0.26.2. `install` knows the lock's order, not
+    /// the operations': passing them on is another change than this fix. With zip dists,
+    /// the phar varies.
+    #[test]
+    fn two_packages_placed_with_one_proxy_name_follow_the_lock_here() {
+        let Some(case) = Case::new(|port, _| Setup {
+            manifest: mixed_manifest(port),
+            repository: json!({"packages": {}}),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        let place = |case: &Case, _: usize| {
+            for (name, require) in [("a", json!({"acme/z": "*"})), ("z", json!({}))] {
+                write_path_package(
+                    case,
+                    name,
+                    json!({"name": format!("acme/{name}"), "version": "1.0.0",
+                           "bin": ["bin/x"], "require": require}),
+                );
+                let bin = case.work.join("pk").join(name).join("bin");
+                std::fs::create_dir_all(&bin).expect("bin");
+                std::fs::write(bin.join("x"), "#!/usr/bin/env php\n<?php echo 1;\n").expect("x");
+            }
+        };
+        let steps = [Step {
+            require: Some(&["a"]),
+            args: line(Run::Update),
+        }];
+        let proxy = |case: &Case| {
+            std::fs::read_to_string(case.project().join("vendor/bin/x")).expect("proxy")
+        };
+        let phar = case.sequence(case.composer, false, &place, &steps);
+        assert!(
+            proxy(&case).contains("../acme/z/bin/x"),
+            "{}",
+            phar[0].stderr
+        );
+        let viv = case.sequence(
+            Path::new(env!("CARGO_BIN_EXE_vivacity")),
+            true,
+            &place,
+            &steps,
+        );
+        assert!(
+            proxy(&case).contains("../acme/a/bin/x"),
+            "{}",
+            viv[0].stderr
+        );
+    }
+
     /// A zip dist with a link leading out: vivacity's extraction refuses the archive, the
     /// phar's keeps the link and its `bin` check skips it. Before this fix too, and it
     /// is the safe side: nothing is written.
@@ -1531,7 +1653,8 @@ mod open {
     }
 }
 
-/// One step of a sequence: what `require` becomes, if it changes, then a command line.
+/// One step of a sequence: what `require` becomes (`name` or `name:constraint`), if it
+/// changes, then a command line.
 struct Step<'a> {
     require: Option<&'a [&'a str]>,
     args: Vec<&'a str>,
@@ -1541,7 +1664,10 @@ impl Case {
     fn write_requires(&self, names: &[&str]) {
         let require: serde_json::Map<String, Value> = names
             .iter()
-            .map(|n| (format!("acme/{n}"), json!("*")))
+            .map(|n| {
+                let (name, constraint) = n.split_once(':').unwrap_or((n, "*"));
+                (format!("acme/{name}"), json!(constraint))
+            })
             .collect();
         let path = self.project().join("composer.json");
         let mut manifest: Value =
@@ -1593,6 +1719,38 @@ fn repository_of(port: u16, packages: &[(&str, Value)]) -> Value {
         })
         .collect();
     json!({"packages": by_name})
+}
+
+/// The manifest of a case whose packages come from the zip repository and from `../pk/*`.
+fn mixed_manifest(port: u16) -> String {
+    serde_json::to_string_pretty(&json!({
+        "name": "acme/root",
+        "version": "1.0.0",
+        "minimum-stability": "dev",
+        "repositories": [
+            {"type": "path", "url": "../pk/*"},
+            {"type": "composer", "url": format!("http://127.0.0.1:{port}")},
+            {"packagist.org": false}
+        ],
+        "require": {},
+        "config": {"secure-http": false}
+    }))
+    .expect("manifest")
+}
+
+/// A `path` package under ../pk/, its `bin` a directory, as `composer.json` says.
+fn write_path_package(case: &Case, name: &str, manifest: Value) {
+    let dir = case.work.join("pk").join(name);
+    std::fs::create_dir_all(dir.join("dir")).expect("package");
+    std::fs::write(dir.join("composer.json"), manifest.to_string()).expect("composer.json");
+}
+
+fn plain_path_package(case: &Case, name: &str, version: &str) {
+    write_path_package(
+        case,
+        name,
+        json!({"name": format!("acme/{name}"), "version": version, "bin": ["dir"]}),
+    );
 }
 
 const BIN_X: fn() -> Value = || json!(["bin/x"]);
@@ -1769,5 +1927,181 @@ mod shared_proxy_name {
                 },
             ],
         );
+    }
+}
+
+/// `path` packages and zip dists in one project. A package enters the phar's local
+/// repository when its placement ends: a `path` package in line, an archive when its
+/// extraction ends, so the first before the second, whatever the operations' order.
+mod path_and_zip {
+    use super::*;
+
+    fn case_of(zips: &'static [&'static str]) -> Option<Case> {
+        Case::new(move |port, _| {
+            let packages: Vec<(&str, Value)> = zips.iter().map(|n| (*n, json!(["dir"]))).collect();
+            Setup {
+                manifest: mixed_manifest(port),
+                repository: repository_of(port, &packages),
+                lock: None,
+                installed: vec![],
+                path_package: false,
+            }
+        })
+    }
+
+    /// Zip a, path p: p first once placed, by name on a no-op install, p first from the
+    /// lock. Does not vary on the phar (6 runs of 6, 8 of 8 on the sequences below).
+    #[test]
+    fn a_path_package_comes_before_a_zip_dist() {
+        let Some(case) = case_of(&["a"]) else {
+            return;
+        };
+        let prepare = |case: &Case, step: usize| {
+            if step == 0 {
+                plain_path_package(case, "p", "1.0.0");
+            }
+            if step == 2 {
+                std::fs::remove_dir_all(case.project().join("vendor")).expect("vendor");
+            }
+        };
+        assert_same_sequence(
+            &case,
+            &prepare,
+            &[
+                Step {
+                    require: Some(&["a", "p"]),
+                    args: line(Run::Update),
+                },
+                Step {
+                    require: None,
+                    args: line(Run::Install),
+                },
+                Step {
+                    require: None,
+                    args: line(Run::Install),
+                },
+            ],
+        );
+    }
+
+    /// Packages arriving next to installed ones, a `path` package upgraded.
+    #[test]
+    fn arrivals_follow_the_installed_ones() {
+        let Some(case) = case_of(&["a", "c"]) else {
+            return;
+        };
+        let prepare = |case: &Case, step: usize| match step {
+            0 => {
+                plain_path_package(case, "p", "1.0.0");
+                plain_path_package(case, "q", "1.0.0");
+            }
+            2 => plain_path_package(case, "p", "2.0.0"),
+            _ => {}
+        };
+        assert_same_sequence(
+            &case,
+            &prepare,
+            &[
+                Step {
+                    require: Some(&["a", "p"]),
+                    args: line(Run::Update),
+                },
+                Step {
+                    require: Some(&["a", "p", "c", "q"]),
+                    args: line(Run::Update),
+                },
+                Step {
+                    require: None,
+                    args: line(Run::Update),
+                },
+            ],
+        );
+    }
+
+    /// A zip dist upgraded while a `path` package arrives, then the reverse.
+    #[test]
+    fn upgrades_are_arrivals_too() {
+        let Some(case) = Case::new(|port, _| {
+            let mut c = package(port, "1.0.0", Some(&json!(["dir"])));
+            c["name"] = json!("acme/c");
+            let mut a1 = package(port, "1.0.0", Some(&json!(["dir"])));
+            a1["name"] = json!("acme/a");
+            let mut a2 = package(port, "2.0.0", Some(&json!(["dir"])));
+            a2["name"] = json!("acme/a");
+            Setup {
+                manifest: mixed_manifest(port),
+                repository: json!({"packages": {
+                    "acme/a": {"1.0.0": a1, "2.0.0": a2},
+                    "acme/c": {"1.0.0": c}
+                }}),
+                lock: None,
+                installed: vec![],
+                path_package: false,
+            }
+        }) else {
+            return;
+        };
+        let prepare = |case: &Case, step: usize| match step {
+            0 => {
+                plain_path_package(case, "p", "1.0.0");
+                plain_path_package(case, "q", "1.0.0");
+            }
+            2 => plain_path_package(case, "p", "2.0.0"),
+            _ => {}
+        };
+        assert_same_sequence(
+            &case,
+            &prepare,
+            &[
+                Step {
+                    require: Some(&["a:1.0.0", "p"]),
+                    args: line(Run::Update),
+                },
+                Step {
+                    require: Some(&["a:2.0.0", "p", "q"]),
+                    args: line(Run::Update),
+                },
+                Step {
+                    require: Some(&["a:2.0.0", "p", "q", "c"]),
+                    args: line(Run::Update),
+                },
+            ],
+        );
+    }
+
+    /// Two zip dists and a `path` package: p first, and among the zips the phar varies, so
+    /// they are compared as a set (p, a, b in 5 and p, b, a in 3 of 8 runs).
+    #[test]
+    fn several_zip_dists_stay_a_set_after_the_path_package() {
+        let Some(case) = case_of(&["a", "b"]) else {
+            return;
+        };
+        let prepare = |case: &Case, step: usize| {
+            if step == 0 {
+                plain_path_package(case, "p", "1.0.0");
+            }
+        };
+        let steps = [Step {
+            require: Some(&["a", "b", "p"]),
+            args: line(Run::Update),
+        }];
+        let phar = case.sequence(case.composer, false, &prepare, &steps);
+        let viv = case.sequence(
+            Path::new(env!("CARGO_BIN_EXE_vivacity")),
+            true,
+            &prepare,
+            &steps,
+        );
+        let viv_err = without_own_line(&viv[0].stderr);
+        for stderr in [&phar[0].stderr, &viv_err] {
+            let after_dump = stderr
+                .split_once("Generating autoload files\n")
+                .map_or("", |(_, rest)| rest);
+            assert!(
+                after_dump.starts_with("    Skipped installation of bin dir for package acme/p: "),
+                "{stderr}"
+            );
+        }
+        assert_eq!(blocks_sorted(&viv_err), blocks_sorted(&phar[0].stderr));
     }
 }
