@@ -374,7 +374,8 @@ fn find_all(todo: &[(PathBuf, PathBuf, Vec<u8>)]) -> Result<Vec<Vec<Vec<u8>>>, C
 /// v3: entries in readdir order (was sorted by name).
 /// v4: the sha1 of each file's content; a store entry's record is scanned
 /// from the entry's own directory only, never from a copy under vendor/.
-const CACHE_FORMAT: &str = "v4";
+/// v5: a record kept only for an entry older than the racy window.
+const CACHE_FORMAT: &str = "v5";
 
 /// sha1 of a file's content: what lets a record's classes be reused for a
 /// file whose identity changed but whose bytes did not. A class depends on
@@ -424,17 +425,32 @@ pub struct CacheSlot {
     file: PathBuf,
     /// The store entry's own copy of the scanned directory (or file).
     entry_dir: PathBuf,
+    /// The entry's identity when the key was made.
+    root: Option<FileIdentity>,
 }
 
 impl CacheSlot {
     pub fn new(cache_root: &Path, store_entry: &Path, rel_subdir: &Path) -> CacheSlot {
+        let root = FileIdentity::of(store_entry);
+        let key = Self::key(store_entry, rel_subdir, root.as_ref());
+        CacheSlot {
+            file: cache_root.join("classmap").join(format!("{key}.bin")),
+            entry_dir: store_entry.join(rel_subdir),
+            root,
+        }
+    }
+
+    /// The slot's name: the format, the entry's path and identity, the scanned directory.
+    /// Records of an earlier format or of a gone entry stay in `classmap/`, unread, until
+    /// the directory is deleted (it is never pruned, as the README says).
+    fn key(store_entry: &Path, rel_subdir: &Path, root: Option<&FileIdentity>) -> String {
         use sha1::{Digest as _, Sha1};
         let mut h = Sha1::new();
         h.update(CACHE_FORMAT.as_bytes());
         h.update(b"\0");
         h.update(store_entry.to_string_lossy().as_bytes());
         h.update(b"\0");
-        if let Some(root) = FileIdentity::of(store_entry) {
+        if let Some(root) = root {
             h.update(root.dev.to_le_bytes());
             h.update(root.ino.to_le_bytes());
             h.update(root.ctime.0.to_le_bytes());
@@ -442,11 +458,7 @@ impl CacheSlot {
         }
         h.update(b"\0");
         h.update(rel_subdir.to_string_lossy().as_bytes());
-        let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        CacheSlot {
-            file: cache_root.join("classmap").join(format!("{key}.bin")),
-            entry_dir: store_entry.join(rel_subdir),
-        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Records by relative path.
@@ -488,7 +500,14 @@ impl CacheSlot {
     /// yet (and written). `None` — and nothing written — when the entry
     /// cannot be scanned whole (gone, unreadable) or holds a symbolic link
     /// (its target may differ between the store and a copy).
-    fn load_or_build(&self, stats: &CacheStats) -> Option<StoreRecord> {
+    ///
+    /// The key holds the entry's identity, and an entry extracted again within one
+    /// timestamp tick can have the same one (the inode reused, the same ctime): a placed
+    /// file would then get the old entry's classes, read from no byte of its own. So a
+    /// record is written only for an entry older than the racy window: a later extraction
+    /// cannot share its ctime. A racy entry's record serves this run only.
+    fn load_or_build(&self, ctx: &CacheContext) -> Option<StoreRecord> {
+        let stats = &ctx.stats;
         if let Some(r) = self.load() {
             return Some(r);
         }
@@ -511,7 +530,9 @@ impl CacheSlot {
                 Some((rel_key(&base, file)?, (digest(contents), classes)))
             })
             .collect();
-        self.store(&record);
+        if self.root.as_ref().is_some_and(|id| !ctx.is_racy(id)) {
+            self.store(&record);
+        }
         Some(record)
     }
 
@@ -978,7 +999,7 @@ impl Scanner {
         let any_placed = how.iter().any(|h| matches!(h, How::Placed));
         let any_read = how.iter().any(|h| matches!(h, How::Read));
         let store: Option<StoreRecord> = match &slot.seed {
-            Some(seed) if any_placed => seed.record.load_or_build(stats),
+            Some(seed) if any_placed => seed.record.load_or_build(&slot.ctx),
             Some(seed) if any_read => seed.record.load(),
             _ => None,
         };
@@ -1675,23 +1696,51 @@ mod cache_tests {
         assert_eq!(counts(&ctx), [0, 0, 0, 1, 0]);
     }
 
-    /// An entry removed and extracted again under the same name (another
-    /// archive at the same URL) is another directory: its record is not the
-    /// old one's.
+    /// An entry extracted again outside one timestamp tick has another identity, so another
+    /// slot, whatever was kept in the old one. The old directory stays aside so that the
+    /// inode cannot be reused.
+    #[cfg(unix)]
     #[test]
     fn a_re_extracted_entry_does_not_reuse_the_old_record() {
         let tmp = tempfile::tempdir().expect("tmp");
         let entry = tmp.path().join("store/acme/a/1.0.0-noref");
         write(&entry.join("src/A.php"), b"<?php\nclass Old {}\n");
         let old = CacheSlot::new(tmp.path(), &entry, Path::new("src"));
-        let ctx = CacheContext::new();
-        assert!(old.load_or_build(&ctx.stats).is_some());
-        std::fs::remove_dir_all(&entry).expect("rm");
+        let record = old.load_or_build(&settled(&entry)).expect("record");
+        assert_eq!(record["A.php"].1, vec![b"Old".to_vec()]);
+        assert!(old.file.exists(), "a settled entry's record is kept");
+        std::fs::rename(&entry, tmp.path().join("aside")).expect("rename");
         write(&entry.join("src/A.php"), b"<?php\nclass New {}\n");
         let new = CacheSlot::new(tmp.path(), &entry, Path::new("src"));
         assert_ne!(old.file, new.file);
-        let record = new.load_or_build(&ctx.stats).expect("record");
+        let record = new.load_or_build(&settled(&entry)).expect("record");
         assert_eq!(record["A.php"].1, vec![b"New".to_vec()]);
+    }
+
+    /// Each part of the identity keeps a slot apart: one left out would let a re-extracted
+    /// entry find the old record.
+    #[cfg(unix)]
+    #[test]
+    fn every_part_of_the_identity_names_another_slot() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("entry");
+        std::fs::create_dir_all(&entry).expect("entry");
+        let id = FileIdentity::of(&entry).expect("identity");
+        let key = |id: &FileIdentity| CacheSlot::key(&entry, Path::new("src"), Some(id));
+        let same = key(&id);
+        let mut changed = id;
+        changed.dev += 1;
+        assert_ne!(same, key(&changed), "dev");
+        let mut changed = id;
+        changed.ino += 1;
+        assert_ne!(same, key(&changed), "ino");
+        let mut changed = id;
+        changed.ctime.0 += 1;
+        assert_ne!(same, key(&changed), "ctime, seconds");
+        let mut changed = id;
+        changed.ctime.1 += 1;
+        assert_ne!(same, key(&changed), "ctime, nanoseconds");
+        assert_eq!(same, key(&id));
     }
 
     /// A project's copy of an entry, placed from it by this run, and its slot.

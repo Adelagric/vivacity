@@ -494,7 +494,9 @@ pub fn plan(
     // system, else in vendor/composer/ (an unnamed file, nothing left).
     if let Some(cfg) = &opts.classmap_cache {
         let _ = std::fs::create_dir_all(&cfg.cache_root);
-        let roots: Vec<&Path> = jobs.iter().map(|j| j.path.as_path()).collect();
+        // The store's device too: an entry's record is kept by its identity's age.
+        let mut roots: Vec<&Path> = jobs.iter().map(|j| j.path.as_path()).collect();
+        roots.push(cfg.cache_root.as_path());
         cache_ctx.set_clock(crate::classmap::Clock::probe(
             &roots,
             &[cfg.cache_root.as_path(), target_dir.as_path()],
