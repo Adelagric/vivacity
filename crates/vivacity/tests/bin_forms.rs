@@ -725,6 +725,42 @@ each_command! { native:
     ordinary_dot_slash_form => ordinary_dot_slash,
 }
 
+/// A directory on an install with nothing to do: the phar's pass after the dump
+/// writes its line, vivacity keeps quiet (the difference HANDOVER names). The
+/// tree stays the same and the second run moves nothing.
+#[test]
+fn a_directory_on_a_no_op_install() {
+    let Some(case) = Case::of_form(Run::Install, directory) else {
+        return;
+    };
+    let line_of_phar =
+        "    Skipped installation of bin dir for package acme/tool: found a directory at that path";
+    let args = line(Run::Install);
+    case.reset(None);
+    assert_eq!(case.run(case.composer, &args).code, 0);
+    let again = case.run(case.composer, &args);
+    assert_eq!(again.code, 0, "{}", dump("phar", &again));
+    assert_eq!(
+        again.stderr.lines().filter(|l| *l == line_of_phar).count(),
+        1,
+        "{}",
+        dump("phar", &again)
+    );
+    let phar_tree = inventory(&case.work);
+
+    case.reset(None);
+    assert_eq!(case.vivacity(&args).code, 0);
+    let again = case.vivacity(&args);
+    assert_eq!(again.code, 0, "{}", dump("vivacity", &again));
+    assert!(
+        !again.stderr.contains("Skipped"),
+        "{}",
+        dump("vivacity", &again)
+    );
+    let tree = differences(&phar_tree, &inventory(&case.work));
+    assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
+}
+
 /// A `bin` the dist does not hold: the phar's `file not found` line is the one
 /// consigned difference, nothing else differs.
 mod missing_form {
