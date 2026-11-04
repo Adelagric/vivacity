@@ -941,7 +941,23 @@ pub async fn install(
             })
             .unwrap_or_default()
     };
-    for p in &wanted {
+    // Removed packages first, as `Transaction` orders them: `removeBinaries` on each
+    // (their proxies and `.bat`). A proxy they shared with a package that stays is gone
+    // when the presence check below looks at it.
+    for name in previous.keys() {
+        if !wanted_names.contains(name.as_str()) {
+            let old = previous_bins(name);
+            let old: Vec<&str> = old.iter().map(String::as_str).collect();
+            crate::binproxy::remove_binaries(&bin_dir, &old)?;
+        }
+    }
+    // The packages placed by this run, then the others: the operations come before
+    // `ensureBinariesPresence`, so a proxy name is a placed package's first.
+    let in_order = wanted
+        .iter()
+        .filter(|p| placed.contains(p.name()))
+        .chain(wanted.iter().filter(|p| !placed.contains(p.name())));
+    for p in in_order {
         let bins = p.bins();
         let Some(dir) = layout.abs(p.name()) else {
             continue;
@@ -994,14 +1010,6 @@ pub async fn install(
                 .into_iter()
                 .map(|l| (p.name().to_owned(), l)),
         );
-    }
-    // Removed packages: `removeBinaries` on each (their proxies and `.bat`).
-    for name in previous.keys() {
-        if !wanted_names.contains(name.as_str()) {
-            let old = previous_bins(name);
-            let old: Vec<&str> = old.iter().map(String::as_str).collect();
-            crate::binproxy::remove_binaries(&bin_dir, &old)?;
-        }
     }
     prune_stale_bat_proxies(&bin_dir, &wanted, bin_compat)?;
 

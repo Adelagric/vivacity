@@ -6,6 +6,9 @@
 //! `--no-fallback` it stops with exit 3 and nothing is written. A form known
 //! only after the extraction (a link leading out, a directory) stays native:
 //! neither a proxy nor a `chmod`, and the phar's skip line.
+//!
+//! Both sides run with `--no-progress`: these comparisons do not cover the phar's
+//! progress bar. vivacity prints none, a difference the CHANGELOG records.
 #![cfg(unix)]
 
 use serde_json::{json, Value};
@@ -1525,5 +1528,246 @@ mod open {
             return;
         };
         assert_handed_over(&case, &line(Run::Update), None, LATE);
+    }
+}
+
+/// One step of a sequence: what `require` becomes, if it changes, then a command line.
+struct Step<'a> {
+    require: Option<&'a [&'a str]>,
+    args: Vec<&'a str>,
+}
+
+impl Case {
+    fn write_requires(&self, names: &[&str]) {
+        let require: serde_json::Map<String, Value> = names
+            .iter()
+            .map(|n| (format!("acme/{n}"), json!("*")))
+            .collect();
+        let path = self.project().join("composer.json");
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        manifest["require"] = Value::Object(require);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&manifest).expect("json"),
+        )
+        .expect("write");
+    }
+
+    /// Runs the steps on `program` from a reset; a step other than the last may fail on
+    /// neither side. The last output, each output's lines included.
+    fn sequence(
+        &self,
+        program: &Path,
+        native: bool,
+        prepare: &dyn Fn(&Case, usize),
+        steps: &[Step<'_>],
+    ) -> Vec<Output> {
+        self.reset(None);
+        let mut outputs = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            prepare(self, i);
+            if let Some(names) = step.require {
+                self.write_requires(names);
+            }
+            let mut args = step.args.clone();
+            if native {
+                args.push("--no-fallback");
+            }
+            let out = self.run(program, &args);
+            assert_eq!(out.code, 0, "step {i} of {}", dump("run", &out));
+            outputs.push(out);
+        }
+        outputs
+    }
+}
+
+/// A repository of zip dists: name, `bin`.
+fn repository_of(port: u16, packages: &[(&str, Value)]) -> Value {
+    let by_name: serde_json::Map<String, Value> = packages
+        .iter()
+        .map(|(name, bin)| {
+            let mut p = package(port, "1.0.0", Some(bin));
+            p["name"] = json!(format!("acme/{name}"));
+            (format!("acme/{name}"), json!({"1.0.0": p}))
+        })
+        .collect();
+    json!({"packages": by_name})
+}
+
+const BIN_X: fn() -> Value = || json!(["bin/x"]);
+
+/// Every step's stderr and exit, and the tree at the end, against the phar's.
+fn assert_same_sequence(case: &Case, prepare: &dyn Fn(&Case, usize), steps: &[Step<'_>]) {
+    let phar = case.sequence(case.composer, false, prepare, steps);
+    let phar_tree = inventory(&case.work);
+    let viv = case.sequence(
+        Path::new(env!("CARGO_BIN_EXE_vivacity")),
+        true,
+        prepare,
+        steps,
+    );
+    for (i, (p, v)) in phar.iter().zip(&viv).enumerate() {
+        let context = format!("step {i}\n{}\n{}", dump("phar", p), dump("vivacity", v));
+        assert_eq!(without_own_line(&v.stderr), p.stderr, "{context}");
+        assert_eq!(v.stdout, p.stdout, "{context}");
+    }
+    let tree = differences(&phar_tree, &inventory(&case.work));
+    assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
+}
+
+/// Two packages with one proxy name, one going away. The phar removes the proxy with
+/// the package that goes, then writes it again for the one that stays, in the pass after
+/// the dump, or a package arriving takes it first. Removals come first in its operations.
+mod shared_proxy_name {
+    use super::*;
+
+    const UPDATE: [&str; 5] = [
+        "update",
+        "--no-interaction",
+        "--no-scripts",
+        "--no-audit",
+        "--no-progress",
+    ];
+
+    /// a alone first and b after it, so that a holds the name: with both at once, which
+    /// of two extractions ends first decides, on the phar.
+    fn case_of(a: Value) -> Option<Case> {
+        let a = a.clone();
+        Case::new(move |port, _| Setup {
+            manifest: manifest_text(port, "*"),
+            repository: repository_of(port, &[("a", a.clone()), ("b", BIN_X()), ("c", BIN_X())]),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        })
+    }
+
+    fn removing(a: Value) {
+        let Some(case) = case_of(a) else {
+            return;
+        };
+        assert_same_sequence(
+            &case,
+            &|_, _| {},
+            &[
+                Step {
+                    require: Some(&["a"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a", "b"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: None,
+                    args: vec![
+                        "remove",
+                        "acme/b",
+                        "--no-interaction",
+                        "--no-scripts",
+                        "--no-audit",
+                        "--no-progress",
+                    ],
+                },
+            ],
+        );
+    }
+
+    fn dropping(a: Value) {
+        let Some(case) = case_of(a) else {
+            return;
+        };
+        assert_same_sequence(
+            &case,
+            &|_, _| {},
+            &[
+                Step {
+                    require: Some(&["a"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a", "b"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a"]),
+                    args: UPDATE.to_vec(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn remove_keeps_the_proxy_for_the_package_that_stays() {
+        removing(BIN_X());
+    }
+
+    #[test]
+    fn remove_with_a_directory_too() {
+        removing(json!(["bin/x", "dir"]));
+    }
+
+    #[test]
+    fn update_keeps_the_proxy_for_the_package_that_stays() {
+        dropping(BIN_X());
+    }
+
+    #[test]
+    fn update_with_a_directory_too() {
+        dropping(json!(["bin/x", "dir"]));
+    }
+
+    /// b goes and c arrives in one run: c takes the name, without a conflict line.
+    #[test]
+    fn a_package_arriving_takes_the_name_of_the_one_going() {
+        let Some(case) = case_of(BIN_X()) else {
+            return;
+        };
+        assert_same_sequence(
+            &case,
+            &|_, _| {},
+            &[
+                Step {
+                    require: Some(&["a"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a", "b"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a", "c"]),
+                    args: UPDATE.to_vec(),
+                },
+            ],
+        );
+    }
+
+    /// vendor/bin wiped and c arriving: c is placed first, a's presence check finds the name
+    /// taken, and the pass after the dump says nothing of a conflict.
+    #[test]
+    fn a_placed_package_takes_the_name_before_the_presence_check() {
+        let Some(case) = case_of(BIN_X()) else {
+            return;
+        };
+        assert_same_sequence(
+            &case,
+            &|case: &Case, step| {
+                if step == 1 {
+                    std::fs::remove_dir_all(case.project().join("vendor/bin")).expect("wipe");
+                }
+            },
+            &[
+                Step {
+                    require: Some(&["a"]),
+                    args: UPDATE.to_vec(),
+                },
+                Step {
+                    require: Some(&["a", "c"]),
+                    args: UPDATE.to_vec(),
+                },
+            ],
+        );
     }
 }
