@@ -482,9 +482,10 @@ fn phar_run(case: &Case, args: &[&str], form: Option<Form>) -> (Output, BTreeMap
 
 /// A form that goes to Composer before any write: stopped under `--no-fallback`,
 /// otherwise the phar's own run. What vivacity prints in front of it is its
-/// narrative, and on a late hand-over the lines the phar prints again:
-/// `late_lines` of them, which must be the start of the phar's output.
-fn assert_handed_over(case: &Case, args: &[&str], form: Option<Form>, late_lines: usize) {
+/// narrative, and on a late hand-over the `late` lines, which Composer prints
+/// again (or, on a form its loader throws on, never reaches: `Updating
+/// dependencies` then has no counterpart).
+fn assert_handed_over(case: &Case, args: &[&str], form: Option<Form>, late: &[&str]) {
     let (phar, phar_tree) = phar_run(case, args, form);
 
     case.reset(form);
@@ -518,13 +519,12 @@ fn assert_handed_over(case: &Case, args: &[&str], form: Option<Form>, late_lines
     assert_eq!(handed.code, phar.code, "exit code\n{context}");
     assert_eq!(handed.stdout, phar.stdout, "stdout\n{context}");
     assert_eq!(composer_stderr, phar.stderr, "Composer's stderr\n{context}");
-    let late: Vec<&str> = printed_before
+    let printed: Vec<&str> = printed_before
         .lines()
         .filter(|l| !l.starts_with("vivacity: ") && !l.starts_with("  - "))
         .collect();
     assert_eq!(
-        late,
-        phar.stderr.lines().take(late_lines).collect::<Vec<_>>(),
+        printed, late,
         "what vivacity printed before the hand-over\n{context}"
     );
     assert_eq!(format!("{:o}", case.witness_mode()), "600", "{context}");
@@ -532,15 +532,25 @@ fn assert_handed_over(case: &Case, args: &[&str], form: Option<Form>, late_lines
     assert!(tree.is_empty(), "tree\n{}\n{context}", tree.join("\n"));
 }
 
-/// What `update` has printed when the solver's choice reveals a form: `Loading
-/// composer repositories…`, the repository's warning, `Updating dependencies`.
-const LATE_LINES: usize = 3;
+/// What `update` has printed when the solver's choice reveals a form: the late
+/// hand-over of HANDOVER.md.
+const LATE: &[&str] = &[
+    "Loading composer repositories with package information",
+    "Warning: Accessing 127.0.0.1 over http which is an insecure protocol.",
+    "Updating dependencies",
+];
+
+/// The same from a `path` repository, read without a request.
+const LATE_PATH: &[&str] = &[
+    "Loading composer repositories with package information",
+    "Updating dependencies",
+];
 
 fn handed_over(run: Run, form: Form) {
     let Some(case) = Case::of_form(run, form) else {
         return;
     };
-    let late = if run == Run::Update { LATE_LINES } else { 0 };
+    let late = if run == Run::Update { LATE } else { &[] };
     assert_handed_over(&case, &line(run), None, late);
 }
 
@@ -765,8 +775,7 @@ mod path_package_metadata {
         let Some(case) = Case::of_path_package(Run::Update, dot_slash_slash) else {
             return;
         };
-        // No repository warning here: two lines before the solve.
-        assert_handed_over(&case, &line(Run::Update), Some(dot_slash_slash), 2);
+        assert_handed_over(&case, &line(Run::Update), Some(dot_slash_slash), LATE_PATH);
     }
 }
 
@@ -800,7 +809,7 @@ mod already_installed {
         }) else {
             return;
         };
-        assert_handed_over(&case, &line(run), None, 0);
+        assert_handed_over(&case, &line(run), None, &[]);
     }
 
     fn staying(run: Run, form: Form) {
@@ -814,7 +823,7 @@ mod already_installed {
         }) else {
             return;
         };
-        assert_handed_over(&case, &line(run), None, 0);
+        assert_handed_over(&case, &line(run), None, &[]);
     }
 
     #[test]
@@ -869,6 +878,71 @@ mod selection {
         assert_native(&case, &line(Run::Update), None, false);
     }
 
+    /// `validate_package` too decides on the kept packages only: a `..` left out
+    /// in the pool stops neither side.
+    #[test]
+    fn an_unselected_dot_dot_stays_native() {
+        let Some(case) = Case::new(|port, work| Setup {
+            manifest: manifest_text(port, "*"),
+            repository: repository(vec![
+                package(port, "1.0.0", Some(&dot_dot(work))),
+                package(port, "2.0.0", Some(&ordinary(work))),
+            ]),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        assert_native(&case, &line(Run::Update), None, false);
+    }
+
+    /// The one candidate that does count before the solve: the phar's loader throws
+    /// on a non-string while it fills the pool, selected or not. vivacity reads a
+    /// selected package's form and goes on here. Consigned in HANDOVER; this holds
+    /// the two facts, so that a change on either side shows.
+    #[test]
+    fn a_non_string_left_out_stops_only_the_phar() {
+        let Some(case) = Case::new(|port, work| Setup {
+            manifest: manifest_text(port, "*"),
+            repository: repository(vec![
+                package(port, "1.0.0", Some(&non_string(work))),
+                package(port, "2.0.0", Some(&ordinary(work))),
+            ]),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        let (phar, _) = phar_run(&case, &line(Run::Update), None);
+        assert_eq!(phar.code, 1, "{}", dump("phar", &phar));
+        case.reset(None);
+        let mut args = line(Run::Update);
+        args.push("--no-fallback");
+        let viv = case.vivacity(&args);
+        assert_eq!(viv.code, 0, "{}", dump("vivacity", &viv));
+    }
+
+    /// `install` with no lock resolves through the same session.
+    #[test]
+    fn an_install_without_a_lock_hands_over_a_selected_form() {
+        let Some(case) = Case::of_form(Run::Update, dot_slash_slash) else {
+            return;
+        };
+        assert_handed_over(
+            &case,
+            &line(Run::Install),
+            None,
+            &[
+                "No composer.lock file present. Updating dependencies to latest instead of installing from lock file. See https://getcomposer.org/install for more information.",
+                LATE[0],
+                LATE[1],
+                LATE[2],
+            ],
+        );
+    }
+
     /// The same candidate, selected: hands over.
     #[test]
     fn the_same_candidate_selected_hands_over() {
@@ -884,7 +958,7 @@ mod selection {
         }) else {
             return;
         };
-        assert_handed_over(&case, &line(Run::Update), None, LATE_LINES);
+        assert_handed_over(&case, &line(Run::Update), None, LATE);
     }
 
     /// A package nothing but another package requires is selected like any other.
@@ -908,7 +982,7 @@ mod selection {
         }) else {
             return;
         };
-        assert_handed_over(&case, &line(Run::Update), None, LATE_LINES);
+        assert_handed_over(&case, &line(Run::Update), None, LATE);
     }
 
     /// `update` with a form in the lock it reads, whatever the repository now
@@ -927,7 +1001,83 @@ mod selection {
         }) else {
             return;
         };
-        assert_handed_over(&case, &line(Run::Update), None, 0);
+        assert_handed_over(&case, &line(Run::Update), None, &[]);
+    }
+
+    /// `require` reaches the same point of the session, its edit put back or held.
+    #[test]
+    fn require_hands_over_a_selected_form() {
+        let Some(case) = Case::new(|port, work| Setup {
+            manifest: manifest_text(port, "1.0.0")
+                .replace("\"require\": {\n    \"acme/tool\": \"1.0.0\"\n  },\n", ""),
+            repository: repository(vec![package(port, "1.0.0", Some(&dot_slash_slash(work)))]),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        assert_handed_over(
+            &case,
+            &[
+                "require",
+                "acme/tool:1.0.0",
+                "--no-interaction",
+                "--no-scripts",
+                "--no-audit",
+            ],
+            None,
+            &[
+                "./composer.json has been updated",
+                "Running composer update acme/tool",
+                LATE[0],
+                LATE[1],
+                LATE[2],
+            ],
+        );
+    }
+
+    /// `remove` starts from the same read of the lock and installed.json.
+    #[test]
+    fn remove_hands_over_a_form_in_the_lock() {
+        let Some(case) = Case::new(|port, work| Setup {
+            manifest: manifest_text(port, "1.0.0"),
+            repository: repository(vec![package(port, "1.0.0", Some(&dot_slash_slash(work)))]),
+            lock: Some((
+                vec![package(port, "1.0.0", Some(&dot_slash_slash(work)))],
+                vec![],
+            )),
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        assert_handed_over(
+            &case,
+            &[
+                "remove",
+                "acme/tool",
+                "--no-interaction",
+                "--no-scripts",
+                "--no-audit",
+            ],
+            None,
+            &[],
+        );
+    }
+
+    /// `--dry-run` writes nothing on either side, and goes the same way.
+    #[test]
+    fn a_dry_run_hands_over_too() {
+        let Some(case) = Case::of_form(Run::Install, dot_slash_slash) else {
+            return;
+        };
+        assert_handed_over(
+            &case,
+            &["install", "--dry-run", "--no-interaction", "--no-scripts"],
+            None,
+            &[],
+        );
     }
 
     /// `install --no-dev` does not read the dev section (`getLockedRepository`):

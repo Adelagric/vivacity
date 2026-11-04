@@ -51,6 +51,23 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
     let run = proceed!(merge_plugin(run)?);
+    // A `bin` not read natively, in what this install reads, goes to Composer
+    // before the command prints or runs anything (an install after an update
+    // was decided on its solved lock).
+    if !args.after_update() {
+        if let Some(issue) = crate::fallback::bin_form_issue(
+            &run.project,
+            &run.manifest,
+            run.lock.wanted_packages(run.with_dev).map(|p| &p.raw),
+        ) {
+            let scope = vivacity_core::scope::ScopeReport {
+                issues: vec![issue],
+                skipped_plugins: vec![],
+                layout: None,
+            };
+            return fallback_or_fail(args, &scope);
+        }
+    }
     // `secure-http` on the lock's dists, before the command prints or runs
     // anything (an install after an update was decided on its solved lock).
     // A dry run downloads nothing.
