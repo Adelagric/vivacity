@@ -124,9 +124,12 @@ les commandes ; rien n'est publié.
   non-régression (`ordinary_*`, `name_conflict_*`, `a_dev_package_is_not_read_under_no_dev`,
   `an_unselected_*`, `a_non_string_left_out_stops_only_the_phar`). Vus rouges par mutation : `./` retiré de
   l'ordinaire (`ordinary_dot_slash_form`), garde coupée (`link_out_form`, `755`).
-- Version actuelle, 69 tests, sans le filtre `expected_native_stderr` : sur les sources de `b6d1138`, 10
+- Version `4c81068`, 69 tests, sans le filtre `expected_native_stderr` : sur les sources de `b6d1138`, 10
   rouges sur 69, la passe après le dump. Vert ensuite. Mutation : sans le tri par dépôt local,
   `several_packages::path_packages_…` rouge.
+- Version actuelle, 81 tests. `shared_proxy_name::*` : 6 sur 6 rouges sur les sources de `1147d4a`, verts
+  après. `path_and_zip::*` : rouges sans le tri `path` d'abord. Les comparaisons se font sous `--no-progress` et
+  **ne couvrent pas la barre de progression**, que vivacity n'écrit pas (écart connu du CHANGELOG).
 - **Stabilité.** `gone_*` échouait sous charge sur `0/2` contre `0/1`. Cause : la barre du phar, pas vivacity.
   `Loop::wait` part des tâches actives à cet instant et redessine toutes les 0,1 s. Phar seul, même entrée,
   30 exécutions : 29 et 1 au repos ; 23 et 7 puis 25 et 5 sous 42 `yes` sur 14 cœurs. Instantané du projet et
@@ -149,10 +152,13 @@ dans DECISIONS 2026-11-04. `validate_package` tourne sur `install`, mais son éc
 ### Écarts restants avec le phar
 
 Chacun a un test nommé (liste et raisons dans HANDOVER) : `bin` manquant silencieux ; ordre entre plusieurs
-dists zip, sur lequel le phar varie ; alias de branche, ligne doublée chez le phar après le dump ; zip à lien
-sortant, refusé ici ; `.bat` déjà là sous `COMPOSER_BIN_COMPAT=full`, déjà ainsi sur `v0.26.2` ; remise tardive
-d'`update` ; candidat non retenu non-chaîne, `TypeError` chez le phar. Fermés : la passe après le dump d'un
-dossier ou d'un lien sortant, placé ou sans opération, et la ligne sous l'opération d'un paquet `path`.
+dists zip, sur lequel le phar varie ; alias de branche et alias en ligne, ligne doublée chez le phar après le dump ;
+deux paquets posés par une même exécution pour un même nom de proxy, cible différente, déjà ainsi sur `v0.26.2` ; zip à
+lien sortant, refusé ici ; `.bat` déjà là sous `COMPOSER_BIN_COMPAT=full`, déjà ainsi sur `v0.26.2` ; remise tardive
+d'`update` ; candidat non retenu non-chaîne, `TypeError` chez le phar. Fermés : la passe après le dump d'un dossier ou
+d'un lien sortant, placé ou sans opération ; la ligne sous l'opération d'un paquet `path` ; l'ordre d'un paquet `path`
+avant les archives (phar stable sur 8 exécutions sur 8 : arrivées, montées de version ; zip a, b et path p : p d'abord,
+a et b dans les deux ordres) ; un proxy partagé avec un paquet qui part (`vendor/bin` sans lui sur `v0.26.2` et `114ba0e`).
 
 ### `classmap-files/`
 

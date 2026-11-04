@@ -32,7 +32,13 @@ byte-identical-output promise are the public API.
 - **The skip lines of a directory or of a path outside the package fall where
   Composer writes them**: under the operation of a `path` package, and again after
   the autoload dump for every package of the local repository, a no-op install
-  included (`ensureBinariesPresence`).
+  included (`ensureBinariesPresence`), a `path` package placed by the run coming
+  before the archives.
+- **A proxy shared with a package going away is no longer lost.** With two packages
+  declaring one proxy name, removing one left `vendor/bin` without the proxy of the
+  other, up to 0.26.2. A package's proxies are now removed before anything is
+  written, as Composer's operations do, and a package arriving in the same run takes
+  the name, where it used to get a name-conflict line.
 - **A package placed from a store entry extracted again gets its own classes.**
   Up to 0.26.0 the class map record of an entry did not depend on the entry's
   identity; in 0.26.1 and 0.26.2 it did, but an entry removed and extracted again

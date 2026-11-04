@@ -6697,8 +6697,19 @@ les lignes d'un dossier ou d'un lien sortant après le dump, sur tout le dépôt
 opération et sans dump. `binproxy::presence_notices`, dans l'ordre du dépôt local. Sur plusieurs
 dists zip, le phar varie sur une même entrée (9 et 6 exécutions sur 15) : ses lignes et son dépôt
 local suivent la fin des extractions, écart tenu par un test. Sur des paquets `path`, placés en
-ligne, il ne varie pas (8 sur 8), et la ligne tombe sous l'opération : reproduit. Un alias de
-branche double sa ligne après le dump : ouvert, le dire demanderait les règles d'alias ici.
+ligne, il ne varie pas (8 sur 8), et la ligne tombe sous l'opération : reproduit. Mêlés à des archives,
+ils entrent avant elles dans le dépôt local : un paquet `path` arrivant passe avant, ce que le tri stable
+reproduit sur chaque cas mesuré stable (sans opération par nom ; arrivées, montées de version de l'un ou
+l'autre). Un alias, de branche ou en ligne, double sa ligne après le dump : ouvert, le dire demanderait les
+règles d'alias ici.
+
+**Les suppressions d'abord.** `Transaction` met les suppressions en tête. vivacity les faisait après son
+contrôle de présence : un proxy partagé par un paquet partant et un paquet restant disparaissait de
+`vendor/bin`, déjà sur `v0.26.2`. Déplacer la boucle, et traiter les paquets posés avant les autres (les
+opérations précèdent `ensureBinariesPresence`), rend à l'octet l'arbre et les sorties du phar sur chaque
+séquence mesurée. **Reste** l'ordre entre deux paquets posés par la même exécution pour un même nom de proxy :
+première opération chez le phar, premier du lock ici. `install` n'a pas l'ordre des opérations ; le lui passer
+est un autre changement, tenu ouvert par un test.
 
 **La forme n'est pas courante.** Sur les 126 locks de `fixtures/` : 1 230 entrées, aucune
 non ordinaire. Sur les métadonnées p2 des 4 000 paquets de la liste « popular » de Packagist
