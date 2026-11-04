@@ -16,25 +16,28 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// The Composer these tests compare with, when it is 2.10.3: any other version
-/// has other lines and another `bin` code.
+/// The Composer these tests compare with, when it is 2.10.3: any other version has
+/// other lines and another `bin` code, and drift.yml runs the suite under newer ones,
+/// so those skip with a word on stderr. No Composer at all fails, as the other oracle
+/// tests do: a green run must have compared something.
 fn composer() -> Option<&'static Path> {
     static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
     FOUND
         .get_or_init(|| {
-            let path = std::env::var_os("PATH")?;
+            let path = std::env::var_os("PATH").expect("PATH");
             let composer = std::env::split_paths(&path)
                 .map(|d| d.join("composer"))
-                .find(|c| c.is_file())?;
+                .find(|c| c.is_file())
+                .expect("composer on the PATH");
             let out = clean(Command::new(&composer))
                 .arg("--version")
                 .output()
-                .ok()?;
+                .expect("composer --version");
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
             if text.contains("Composer version 2.10.3 ") {
                 Some(composer)
             } else {
-                eprintln!("bin_forms compares with Composer 2.10.3, found: {text}");
+                eprintln!("bin_forms compares with Composer 2.10.3, skipped under: {text}");
                 None
             }
         })
