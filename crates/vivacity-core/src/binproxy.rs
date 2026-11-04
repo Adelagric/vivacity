@@ -451,8 +451,7 @@ fn is_docker() -> bool {
 /// proxy nor a `chmod`, whatever the entry looks like: this is what protects a
 /// file outside the package, not the strict read of [`non_ordinary_bin`], which
 /// decides who runs the command. A missing binary is silent, where Composer
-/// writes `file not found in package`, and the pass after the dump, which
-/// repeats these lines, is not reproduced: both are consigned in HANDOVER.
+/// writes `file not found in package`: consigned in HANDOVER.
 pub fn install_binaries(
     vendor_dir: &Path,
     bin_dir: &Path,
@@ -471,16 +470,8 @@ pub fn install_binaries(
         if !target.exists() {
             continue; // binary declared but missing from the dist: Composer skips it too
         }
-        if target.is_dir() {
-            skipped.push(format!(
-                "    Skipped installation of bin {declared} for package {package}: found a directory at that path"
-            ));
-            continue;
-        }
-        if !is_bin_path_inside_package(package_dir, &target) {
-            skipped.push(format!(
-                "    Skipped installation of bin {declared} for package {package}: the bin resolves to a path outside of the package directory"
-            ));
+        if let Some(line) = skip_line(package, package_dir, declared, &target) {
+            skipped.push(line);
             continue;
         }
         std::fs::create_dir_all(bin_dir).map_err(Error::io(bin_dir))?;
@@ -512,6 +503,35 @@ pub fn install_binaries(
         }
     }
     Ok(skipped)
+}
+
+/// What `installBinaries` writes for an existing `target` it leaves alone.
+fn skip_line(package: &str, package_dir: &Path, declared: &str, target: &Path) -> Option<String> {
+    let why = if target.is_dir() {
+        "found a directory at that path"
+    } else if !is_bin_path_inside_package(package_dir, target) {
+        "the bin resolves to a path outside of the package directory"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "    Skipped installation of bin {declared} for package {package}: {why}"
+    ))
+}
+
+/// What `ensureBinariesPresence` writes after the autoload dump, for every package
+/// of the local repository, placed by this run or not: the same check of the file,
+/// and the same line. A name conflict stays silent there (`warnOnOverwrite`).
+pub fn presence_notices(package: &str, package_dir: &Path, bins: &[&str]) -> Vec<String> {
+    bins.iter()
+        .filter_map(|declared| {
+            let target = package_dir.join(declared.trim_start_matches("./"));
+            target
+                .exists()
+                .then(|| skip_line(package, package_dir, declared, &target))
+                .flatten()
+        })
+        .collect()
 }
 
 /// `BinaryInstaller::isBinPathInsidePackage`: both paths resolved, links
@@ -881,6 +901,20 @@ mod tests {
             ["    Skipped installation of bin dir for package acme/tool: found a directory at that path"]
         );
         assert!(!place.vendor.join("bin").exists(), "nothing to install");
+    }
+
+    #[test]
+    fn the_presence_pass_says_what_the_operation_said() {
+        let place = place();
+        std::os::unix::fs::symlink(&place.witness, place.package.join("bin/out")).expect("link");
+        let bins = ["dir", "bin/out", "bin/x", "bin/nope"];
+        assert_eq!(
+            presence_notices("acme/tool", &place.package, &bins),
+            [
+                "    Skipped installation of bin dir for package acme/tool: found a directory at that path".to_owned(),
+                format!("    Skipped installation of bin bin/out for package acme/tool{OUTSIDE}"),
+            ]
+        );
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn serve(listener: std::net::TcpListener, files: BTreeMap<String, Vec<u8>>) {
 enum Entry {
     File(&'static str, &'static str),
     Dir(&'static str),
+    Link(&'static str, &'static str),
 }
 
 /// What every dist holds: files at the paths the forms name, not executable, so
@@ -105,6 +106,7 @@ const PACKAGE: &[Entry] = &[
     Entry::File("other/x", "#!/usr/bin/env php\n<?php echo 'other';\n"),
     Entry::File("x", "#!/usr/bin/env php\n<?php echo 'root';\n"),
     Entry::File("a/b", "#!/usr/bin/env php\n<?php echo 'b';\n"),
+    Entry::File("bin/x.bat", "@echo off\n"),
     Entry::Dir("dir/"),
 ];
 
@@ -122,6 +124,7 @@ fn zip_of(entries: &[Entry]) -> Vec<u8> {
             Entry::Dir(p) => w
                 .add_directory(at(p), options.unix_permissions(0o755))
                 .expect("dir"),
+            Entry::Link(p, target) => w.add_symlink(at(p), *target, options).expect("link"),
         }
     }
     w.finish().expect("zip").into_inner()
@@ -308,6 +311,14 @@ impl Case {
                     serde_json::to_vec(&setup.repository).expect("repository"),
                 ),
                 ("/tool.zip".to_owned(), zip_of(PACKAGE)),
+                (
+                    "/link.zip".to_owned(),
+                    zip_of(&[
+                        Entry::File("composer.json", "{\"name\": \"acme/tool\"}\n"),
+                        // From vendor/acme/tool/bin/, up to where the witness is.
+                        Entry::Link("bin/out", "../../../../../witness"),
+                    ]),
+                ),
             ]),
         );
         Some(Case {
@@ -439,12 +450,17 @@ impl Case {
     }
 
     fn run(&self, program: &Path, args: &[&str]) -> Output {
+        self.run_with(program, args, &[])
+    }
+
+    fn run_with(&self, program: &Path, args: &[&str], vars: &[(&str, &str)]) -> Output {
         let mut cmd = clean(Command::new(program));
         let out = cmd
             .current_dir(self.project())
             .env("COMPOSER_HOME", self.env.join("home"))
             .env("COMPOSER_CACHE_DIR", self.env.join("cache"))
             .env("VIVACITY_CACHE_DIR", self.env.join("store"))
+            .envs(vars.iter().copied())
             .args(args)
             .output()
             .expect("run");
@@ -572,34 +588,18 @@ fn handed_over(run: Run, form: Form) {
     assert_handed_over(&case, &line(run), None, late);
 }
 
-/// What the phar prints that vivacity does not reproduce on a form it keeps: the
-/// `ensureBinariesPresence` pass after the dump repeats a directory's or an
-/// outside link's line, and a missing `bin` stays silent as in 0.26.2.
-fn expected_native_stderr(phar: &str, missing_silent: bool) -> String {
-    let mut after_dump = false;
-    let mut out = String::new();
-    for l in phar.lines() {
-        if l == "Generating autoload files" {
-            after_dump = true;
-        }
-        let skip = l.starts_with("    Skipped installation of bin ");
-        let repeated = after_dump
-            && skip
-            && (l.ends_with(": found a directory at that path")
-                || l.ends_with(": the bin resolves to a path outside of the package directory")
-                || l.ends_with(": file not found in package"));
-        let missing = missing_silent && skip && l.ends_with(": file not found in package");
-        if !repeated && !missing {
-            out.push_str(l);
-            out.push('\n');
-        }
-    }
-    out
+/// vivacity's closing line, its own, out of its stderr.
+fn without_own_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|l| !l.starts_with("vivacity: "))
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 /// A form vivacity keeps: stays native under `--no-fallback`, same exit, same
 /// tree, the witness untouched, the phar's lines. Its closing line is its own.
-fn assert_native(case: &Case, args: &[&str], form: Option<Form>, missing_silent: bool) {
+fn assert_native(case: &Case, args: &[&str], form: Option<Form>) {
     let (phar, phar_tree) = phar_run(case, args, form);
     case.reset(form);
     let mut native = args.to_vec();
@@ -613,15 +613,9 @@ fn assert_native(case: &Case, args: &[&str], form: Option<Form>, missing_silent:
     );
     assert_eq!(viv.code, phar.code, "exit code\n{context}");
     assert_eq!(viv.stdout, phar.stdout, "stdout\n{context}");
-    let own: String = viv
-        .stderr
-        .lines()
-        .filter(|l| !l.starts_with("vivacity: "))
-        .map(|l| format!("{l}\n"))
-        .collect();
     assert_eq!(
-        own,
-        expected_native_stderr(&phar.stderr, missing_silent),
+        without_own_line(&viv.stderr),
+        phar.stderr,
         "stderr\n{context}"
     );
     let tree = differences(&phar_tree, &inventory(&case.work));
@@ -632,7 +626,7 @@ fn native(run: Run, form: Form) {
     let Some(case) = Case::of_form(run, form) else {
         return;
     };
-    assert_native(&case, &line(run), None, false);
+    assert_native(&case, &line(run), None);
 }
 
 /// The witness by its absolute path, without its leading `/`.
@@ -743,51 +737,62 @@ each_command! { native:
     ordinary_dot_slash_form => ordinary_dot_slash,
 }
 
-/// A directory on an install with nothing to do: the phar's pass after the dump
-/// writes its line, vivacity keeps quiet (the difference HANDOVER names). The
-/// tree stays the same and the second run moves nothing.
+/// A directory on an install with nothing to do: only the pass after the dump speaks,
+/// on both sides.
 #[test]
 fn a_directory_on_a_no_op_install() {
     let Some(case) = Case::of_form(Run::Install, directory) else {
         return;
     };
-    let line_of_phar =
-        "    Skipped installation of bin dir for package acme/tool: found a directory at that path";
     let args = line(Run::Install);
     case.reset(None);
     assert_eq!(case.run(case.composer, &args).code, 0);
-    let again = case.run(case.composer, &args);
-    assert_eq!(again.code, 0, "{}", dump("phar", &again));
-    assert_eq!(
-        again.stderr.lines().filter(|l| *l == line_of_phar).count(),
-        1,
+    let phar = case.run(case.composer, &args);
+    assert!(
+        phar.stderr.contains(": found a directory at that path"),
         "{}",
-        dump("phar", &again)
+        dump("phar", &phar)
     );
     let phar_tree = inventory(&case.work);
 
     case.reset(None);
     assert_eq!(case.vivacity(&args).code, 0);
-    let again = case.vivacity(&args);
-    assert_eq!(again.code, 0, "{}", dump("vivacity", &again));
-    assert!(
-        !again.stderr.contains("Skipped"),
-        "{}",
-        dump("vivacity", &again)
-    );
+    let viv = case.vivacity(&args);
+    let context = format!("{}\n{}", dump("phar", &phar), dump("vivacity", &viv));
+    assert_eq!(viv.code, phar.code, "{context}");
+    assert_eq!(without_own_line(&viv.stderr), phar.stderr, "{context}");
     let tree = differences(&phar_tree, &inventory(&case.work));
     assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
 }
 
-/// A `bin` the dist does not hold: the phar's `file not found` line is the one
-/// consigned difference, nothing else differs.
+/// OPEN, by the design of this fix: a `bin` the dist does not hold stays silent as in
+/// 0.26.2. The phar writes the line at the operation and after the dump. Everything else
+/// is the same.
 mod missing_form {
     use super::*;
     fn silent(run: Run) {
         let Some(case) = Case::of_form(run, missing) else {
             return;
         };
-        assert_native(&case, &line(run), None, true);
+        let (phar, phar_tree) = phar_run(&case, &line(run), None);
+        let notice = "    Skipped installation of bin bin/nope for package acme/tool: file not found in package\n";
+        assert_eq!(
+            phar.stderr.matches(notice).count(),
+            2,
+            "{}",
+            dump("phar", &phar)
+        );
+        case.reset(None);
+        let mut args = line(run);
+        args.push("--no-fallback");
+        let viv = case.vivacity(&args);
+        assert_eq!(viv.code, phar.code, "{}", dump("vivacity", &viv));
+        assert_eq!(
+            without_own_line(&viv.stderr),
+            phar.stderr.replace(notice, "")
+        );
+        let tree = differences(&phar_tree, &inventory(&case.work));
+        assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
     }
     #[test]
     fn install() {
@@ -808,7 +813,7 @@ mod link_out_form {
         let Some(case) = Case::of_path_package(run, link_out) else {
             return;
         };
-        assert_native(&case, &line(run), Some(link_out), false);
+        assert_native(&case, &line(run), Some(link_out));
     }
     #[test]
     fn install() {
@@ -929,7 +934,7 @@ mod selection {
         }) else {
             return;
         };
-        assert_native(&case, &line(Run::Update), None, false);
+        assert_native(&case, &line(Run::Update), None);
     }
 
     /// `validate_package` too decides on the kept packages only: a `..` left out
@@ -948,7 +953,7 @@ mod selection {
         }) else {
             return;
         };
-        assert_native(&case, &line(Run::Update), None, false);
+        assert_native(&case, &line(Run::Update), None);
     }
 
     /// The one candidate that does count before the solve: the phar's loader throws
@@ -1164,6 +1169,361 @@ mod selection {
         };
         let mut args = line(Run::Install);
         args.push("--no-dev");
-        assert_native(&case, &args, None, false);
+        assert_native(&case, &args, None);
+    }
+}
+
+/// Skip lines of several packages: the operations, then the pass after the dump.
+mod several_packages {
+    use super::*;
+
+    const NAMES: [&str; 3] = ["ccc", "aaa", "bbb"];
+
+    /// Three zip dists, each `bin` a directory.
+    fn zip_case() -> Option<Case> {
+        Case::new(|port, work| {
+            let mut by_name = serde_json::Map::new();
+            let mut require = serde_json::Map::new();
+            for n in NAMES {
+                let mut p = package(port, "1.0.0", Some(&directory(work)));
+                p["name"] = json!(format!("acme/{n}"));
+                by_name.insert(format!("acme/{n}"), json!({"1.0.0": p}));
+                require.insert(format!("acme/{n}"), json!("1.0.0"));
+            }
+            let mut manifest: Value =
+                serde_json::from_str(&manifest_text(port, "1.0.0")).expect("manifest");
+            manifest["require"] = Value::Object(require);
+            Setup {
+                manifest: serde_json::to_string_pretty(&manifest).expect("manifest"),
+                repository: json!({"packages": by_name}),
+                lock: None,
+                installed: vec![],
+                path_package: false,
+            }
+        })
+    }
+
+    /// Nothing to do: the local repository's order, the file's. The phar does not vary.
+    #[test]
+    fn a_no_op_install_is_the_same_byte_for_byte() {
+        let Some(case) = zip_case() else {
+            return;
+        };
+        let update = line(Run::Update);
+        let install = line(Run::Install);
+        case.reset(None);
+        assert_eq!(case.run(case.composer, &update).code, 0);
+        let phar = case.run(case.composer, &install);
+        case.reset(None);
+        let mut stopping = update.clone();
+        stopping.push("--no-fallback");
+        assert_eq!(case.vivacity(&stopping).code, 0);
+        let viv = case.vivacity(&install);
+        assert_eq!(
+            without_own_line(&viv.stderr),
+            phar.stderr,
+            "{}\n{}",
+            dump("phar", &phar),
+            dump("vivacity", &viv)
+        );
+    }
+
+    /// OPEN, the phar varies on one input: several zip dists are extracted in the
+    /// background, and both its skip lines and the local repository follow the order the
+    /// extractions end in. 15 runs on one input gave aaa, bbb, ccc in 9 and bbb, ccc, aaa
+    /// in 6. vivacity prints the operations' order, one of the phar's. So the lines are
+    /// compared as a set for each of the two blocks.
+    #[test]
+    fn placed_zip_dists_are_the_same_up_to_the_order_the_phar_varies_on() {
+        let Some(case) = zip_case() else {
+            return;
+        };
+        let args = line(Run::Update);
+        let (phar, phar_tree) = phar_run(&case, &args, None);
+        case.reset(None);
+        let viv = case.vivacity(&args);
+        let context = format!("{}\n{}", dump("phar", &phar), dump("vivacity", &viv));
+        assert_eq!(viv.code, phar.code, "{context}");
+        // Sorted within each run of skip lines, which are the only lines that vary.
+        fn blocks_sorted(stderr: &str) -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            let mut block: Vec<String> = Vec::new();
+            for l in stderr.lines() {
+                if l.starts_with("    Skipped installation of bin ") {
+                    block.push(l.to_owned());
+                } else {
+                    block.sort();
+                    out.append(&mut block);
+                    out.push(l.to_owned());
+                }
+            }
+            block.sort();
+            out.append(&mut block);
+            out
+        }
+        assert_eq!(
+            blocks_sorted(&without_own_line(&viv.stderr)),
+            blocks_sorted(&phar.stderr),
+            "{context}"
+        );
+        let tree = differences(&phar_tree, &inventory(&case.work));
+        assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
+    }
+
+    /// `path` packages are placed in line: the phar does not vary (8 runs of 8), each
+    /// line falls under its operation, and the second pass follows the operations.
+    #[test]
+    fn path_packages_are_the_same_byte_for_byte() {
+        for symlink in [true, false] {
+            let Some(case) = Case::new(|_, _| Setup {
+                manifest: serde_json::to_string_pretty(&json!({
+                    "name": "acme/root",
+                    "version": "1.0.0",
+                    "repositories": [
+                        {"type": "path", "url": "../pk/*", "options": {"symlink": symlink}},
+                        {"packagist.org": false}
+                    ],
+                    "require": {"acme/aaa": "1.0.0"}
+                }))
+                .expect("manifest"),
+                repository: json!({"packages": {}}),
+                lock: None,
+                installed: vec![],
+                path_package: false,
+            }) else {
+                return;
+            };
+            let packages = |case: &Case| {
+                for (name, require) in [
+                    ("zzz", json!({"acme/mmm": "1.0.0"})),
+                    ("mmm", json!({})),
+                    ("aaa", json!({"acme/zzz": "1.0.0"})),
+                ] {
+                    let dir = case.work.join("pk").join(name);
+                    std::fs::create_dir_all(dir.join("dir")).expect("package");
+                    std::fs::write(
+                        dir.join("composer.json"),
+                        json!({
+                            "name": format!("acme/{name}"),
+                            "version": "1.0.0",
+                            "bin": ["dir"],
+                            "require": require
+                        })
+                        .to_string(),
+                    )
+                    .expect("composer.json");
+                }
+            };
+            let update = line(Run::Update);
+            let install = line(Run::Install);
+            case.reset(None);
+            packages(&case);
+            let phar = case.run(case.composer, &update);
+            let phar_again = case.run(case.composer, &install);
+            let phar_tree = inventory(&case.work);
+            case.reset(None);
+            packages(&case);
+            let mut stopping = update.clone();
+            stopping.push("--no-fallback");
+            let viv = case.vivacity(&stopping);
+            let context = format!("{}\n{}", dump("phar", &phar), dump("vivacity", &viv));
+            assert_eq!(viv.code, phar.code, "{context}");
+            assert_eq!(without_own_line(&viv.stderr), phar.stderr, "{context}");
+            let viv_again = case.vivacity(&install);
+            let context = format!(
+                "{}\n{}",
+                dump("phar", &phar_again),
+                dump("vivacity", &viv_again)
+            );
+            assert_eq!(
+                without_own_line(&viv_again.stderr),
+                phar_again.stderr,
+                "{context}"
+            );
+            let tree = differences(&phar_tree, &inventory(&case.work));
+            assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
+        }
+    }
+
+    /// `--no-autoloader`: the pass runs without a dump (`Installer::run`).
+    #[test]
+    fn without_a_dump_the_pass_still_speaks() {
+        let Some(case) = Case::of_form(Run::Install, directory) else {
+            return;
+        };
+        let mut args = line(Run::Install);
+        args.push("--no-autoloader");
+        assert_native(&case, &args, None);
+    }
+}
+
+/// Differences that stay, each with its reason. Each test holds the phar's side and
+/// vivacity's, so that a change on either shows.
+mod open {
+    use super::*;
+
+    /// A branch alias is a second package of the phar's local repository, whose
+    /// `getBinaries` is the aliased one's: the pass after the dump writes its line twice.
+    /// vivacity has one entry per package there: telling aliases apart needs the alias
+    /// rules (`extra.branch-alias`, the lock's `aliases`), more than this pass is worth.
+    #[test]
+    fn a_branch_alias_doubles_the_phars_line_after_the_dump() {
+        let Some(case) = Case::new(|_, _| Setup {
+            manifest: serde_json::to_string_pretty(&json!({
+                "name": "acme/root",
+                "version": "1.0.0",
+                "minimum-stability": "dev",
+                "repositories": [{"type": "path", "url": "../pkg"}, {"packagist.org": false}],
+                "require": {"acme/tool": "*@dev"}
+            }))
+            .expect("manifest"),
+            repository: json!({"packages": {}}),
+            lock: None,
+            installed: vec![],
+            path_package: false,
+        }) else {
+            return;
+        };
+        let place = |case: &Case| {
+            let dir = case.work.join("pkg");
+            std::fs::create_dir_all(dir.join("dir")).expect("pkg");
+            std::fs::write(
+                dir.join("composer.json"),
+                json!({
+                    "name": "acme/tool",
+                    "version": "dev-main",
+                    "extra": {"branch-alias": {"dev-main": "1.x-dev"}},
+                    "bin": ["dir"]
+                })
+                .to_string(),
+            )
+            .expect("composer.json");
+        };
+        let notice =
+            "    Skipped installation of bin dir for package acme/tool: found a directory at that path\n";
+        let args = line(Run::Update);
+        case.reset(None);
+        place(&case);
+        let phar = case.run(case.composer, &args);
+        assert_eq!(
+            phar.stderr.matches(notice).count(),
+            3,
+            "{}",
+            dump("phar", &phar)
+        );
+        case.reset(None);
+        place(&case);
+        let viv = case.vivacity(&args);
+        assert_eq!(
+            viv.stderr.matches(notice).count(),
+            2,
+            "{}",
+            dump("vivacity", &viv)
+        );
+    }
+
+    /// A zip dist with a link leading out: vivacity's extraction refuses the archive, the
+    /// phar's keeps the link and its `bin` check skips it. Before this fix too, and it
+    /// is the safe side: nothing is written.
+    #[test]
+    fn a_link_out_of_a_zip_is_refused_where_the_phar_skips_it() {
+        let Some(case) = Case::new(|port, _| {
+            let mut p = package(port, "1.0.0", Some(&json!(["bin/out"])));
+            p["dist"]["url"] = json!(format!("http://127.0.0.1:{port}/link.zip"));
+            Setup {
+                manifest: manifest_text(port, "1.0.0"),
+                repository: repository(vec![p.clone()]),
+                lock: Some((vec![p], vec![])),
+                installed: vec![],
+                path_package: false,
+            }
+        }) else {
+            return;
+        };
+        let args = line(Run::Install);
+        let (phar, _) = phar_run(&case, &args, None);
+        assert_eq!(phar.code, 0, "{}", dump("phar", &phar));
+        assert!(phar
+            .stderr
+            .contains(": the bin resolves to a path outside of the package directory"));
+        case.reset(None);
+        let viv = case.vivacity(&args);
+        assert_eq!(viv.code, 1, "{}", dump("vivacity", &viv));
+        assert!(
+            viv.stderr.contains("hostile archive refused"),
+            "{}",
+            dump("vivacity", &viv)
+        );
+        assert_eq!(case.witness_mode(), 0o600);
+    }
+
+    /// `COMPOSER_BIN_COMPAT=full`, a `.bat` already there for a second `bin`: the phar says
+    /// so, vivacity keeps the file and says nothing. Same tree; before this fix too.
+    #[test]
+    fn a_bat_proxy_already_there_is_silent_here() {
+        let Some(case) = Case::of_form(Run::Install, |_| json!(["bin/x.bat", "bin/x"])) else {
+            return;
+        };
+        let args = line(Run::Install);
+        let vars = [("COMPOSER_BIN_COMPAT", "full")];
+        case.reset(None);
+        let phar = case.run_with(case.composer, &args, &vars);
+        let phar_tree = inventory(&case.work);
+        let bat = "a .bat proxy was already installed";
+        assert!(phar.stderr.contains(bat), "{}", dump("phar", &phar));
+        case.reset(None);
+        let viv = case.run_with(Path::new(env!("CARGO_BIN_EXE_vivacity")), &args, &vars);
+        assert_eq!(viv.code, phar.code, "{}", dump("vivacity", &viv));
+        assert!(!viv.stderr.contains(bat), "{}", dump("vivacity", &viv));
+        let tree = differences(&phar_tree, &inventory(&case.work));
+        assert!(tree.is_empty(), "tree\n{}", tree.join("\n"));
+    }
+
+    /// `update`, when only the selected metadata shows the form. The phar's lines come
+    /// after what vivacity already wrote: this is the known late hand-over, which every
+    /// hand-over after the resolution has unless `hold_trigger` holds the output, as the
+    /// next test shows on a case older than this fix. Holding until the solver would take
+    /// the streaming away from ordinary runs, whose `Loading…` comes before the network.
+    #[test]
+    fn a_selected_form_is_handed_over_late() {
+        let Some(case) = Case::of_form(Run::Update, dot_slash_slash) else {
+            return;
+        };
+        let args = line(Run::Update);
+        case.reset(None);
+        let phar = case.run(case.composer, &args);
+        case.reset(None);
+        let viv = case.vivacity(&args);
+        for l in LATE {
+            assert_eq!(phar.stderr.lines().filter(|x| x == l).count(), 1, "{l}");
+            assert_eq!(
+                viv.stderr.lines().filter(|x| x == l).count(),
+                2,
+                "{l}\n{}",
+                viv.stderr
+            );
+        }
+    }
+
+    /// The same class, on a reason that is not `bin`: a plugin the lock would install and
+    /// `allow-plugins` does not cover, decided after the resolution (`plugin_allow`).
+    #[test]
+    fn a_blocked_plugin_is_handed_over_as_late() {
+        let Some(case) = Case::new(|port, _| {
+            let mut p = package(port, "1.0.0", None);
+            p["type"] = json!("composer-plugin");
+            p["require"] = json!({"composer-plugin-api": "^2.0"});
+            p["extra"] = json!({"class": "Acme\\Plugin"});
+            Setup {
+                manifest: manifest_text(port, "1.0.0"),
+                repository: repository(vec![p]),
+                lock: None,
+                installed: vec![],
+                path_package: false,
+            }
+        }) else {
+            return;
+        };
+        assert_handed_over(&case, &line(Run::Update), None, LATE);
     }
 }

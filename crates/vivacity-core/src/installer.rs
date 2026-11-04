@@ -77,8 +77,15 @@ pub struct InstallReport {
     /// dumps them back; the autoloader is generated from them too).
     pub local_repository: Option<Lock>,
     /// Lines Composer prints on stderr during the operations and vivacity
-    /// reproduces (`Skipped installation of bin …`).
+    /// reproduces (`Skipped installation of bin …`), for packages whose extraction
+    /// Composer runs in the background: they come when it ends, after every
+    /// operation's line.
     pub messages: Vec<String>,
+    /// The same for a `path` package, placed synchronously: package, line, written
+    /// right under the package's operation.
+    pub messages_at_operation: Vec<(String, String)>,
+    /// What `ensureBinariesPresence` writes after the autoload dump: package, line.
+    pub presence_notices: Vec<(String, String)>,
     /// The packages laid out from the store by this run, with the identity
     /// of their PHP files right after the placement (Unix; the class map
     /// cache serves them from the entry's record while it holds).
@@ -955,7 +962,7 @@ pub async fn install(
             })
         };
         if placed.contains(p.name()) {
-            report.messages.extend(crate::binproxy::install_binaries(
+            let lines = crate::binproxy::install_binaries(
                 &vendor,
                 &bin_dir,
                 p.name(),
@@ -963,7 +970,14 @@ pub async fn install(
                 &bins,
                 bin_compat,
                 true,
-            )?);
+            )?;
+            if p.dist_kind() == crate::lock::DistKind::Path {
+                report
+                    .messages_at_operation
+                    .extend(lines.into_iter().map(|l| (p.name().to_owned(), l)));
+            } else {
+                report.messages.extend(lines);
+            }
         } else if missing() {
             crate::binproxy::install_binaries(
                 &vendor,
@@ -975,6 +989,11 @@ pub async fn install(
                 false,
             )?;
         }
+        report.presence_notices.extend(
+            crate::binproxy::presence_notices(p.name(), &dir, &bins)
+                .into_iter()
+                .map(|l| (p.name().to_owned(), l)),
+        );
     }
     // Removed packages: `removeBinaries` on each (their proxies and `.bat`).
     for name in previous.keys() {

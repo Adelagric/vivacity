@@ -179,6 +179,19 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             early_dump
         )?)
     };
+    // `Installer::run`: `ensureBinariesPresence` over `$localRepo->getPackages()`, the
+    // local repository's order, dump or no dump.
+    let (order, _, _) = local_order(&tx);
+    let mut notices: Vec<&(String, String)> = installed.report.presence_notices.iter().collect();
+    notices.sort_by_key(|(package, _)| {
+        order
+            .iter()
+            .position(|name| name == package)
+            .unwrap_or(usize::MAX)
+    });
+    for (_, line) in notices {
+        vivacity_core::say!("{line}");
+    }
     proceed!(post_install(
         &run,
         &layout,
@@ -1456,11 +1469,29 @@ fn execute_operations(
             c3_uninstalled = true;
         }
         vivacity_core::say!("{line}");
+        // A `path` package is placed in line: `BinaryInstaller` writes under it.
+        if let Some(package) = line.split_whitespace().nth(2) {
+            for (_, m) in report
+                .messages_at_operation
+                .iter()
+                .filter(|(p, _)| p == package)
+            {
+                vivacity_core::say!("{m}");
+            }
+        }
     }
     if c3_leaves && !c3_uninstalled {
         emulate_c3_uninstall(&run.project, &run.manifest, !args.no_plugins)?;
     }
-    // `BinaryInstaller` notices belong to the operations, before the dump.
+    // `BinaryInstaller` notices belong to the operations, before the dump. A package
+    // none of whose lines were written above closes them too.
+    for (_, m) in report.messages_at_operation.iter().filter(|(p, _)| {
+        !operation_lines
+            .iter()
+            .any(|l| l.split_whitespace().nth(2) == Some(p.as_str()))
+    }) {
+        vivacity_core::say!("{m}");
+    }
     for m in &report.messages {
         vivacity_core::say!("{m}");
     }
