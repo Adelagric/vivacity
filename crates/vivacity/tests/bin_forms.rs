@@ -461,10 +461,25 @@ impl Case {
 }
 
 /// The line of a run: what the fallback forwards as it is, on both sides.
+/// `--no-progress` because the phar's bar depends on time, not on the input: with two
+/// operations, it starts from the jobs active at that instant and redraws every 0.1 s
+/// (`Loop::wait`), and 30 runs of the phar alone on one input gave ` 0/2` in 23 and
+/// ` 0/1` in 7 under load. With the option, the same runs give one output.
 fn line(run: Run) -> Vec<&'static str> {
     match run {
-        Run::Install => vec!["install", "--no-interaction", "--no-scripts"],
-        Run::Update => vec!["update", "--no-interaction", "--no-scripts", "--no-audit"],
+        Run::Install => vec![
+            "install",
+            "--no-interaction",
+            "--no-scripts",
+            "--no-progress",
+        ],
+        Run::Update => vec![
+            "update",
+            "--no-interaction",
+            "--no-scripts",
+            "--no-audit",
+            "--no-progress",
+        ],
     }
 }
 
@@ -1064,6 +1079,7 @@ mod selection {
                 "--no-interaction",
                 "--no-scripts",
                 "--no-audit",
+                "--no-progress",
             ],
             None,
             &[
@@ -1099,6 +1115,7 @@ mod selection {
                 "--no-interaction",
                 "--no-scripts",
                 "--no-audit",
+                "--no-progress",
             ],
             None,
             &[],
@@ -1113,7 +1130,13 @@ mod selection {
         };
         assert_handed_over(
             &case,
-            &["install", "--dry-run", "--no-interaction", "--no-scripts"],
+            &[
+                "install",
+                "--dry-run",
+                "--no-interaction",
+                "--no-scripts",
+                "--no-progress",
+            ],
             None,
             &[],
         );
