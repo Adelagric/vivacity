@@ -50,6 +50,9 @@ byte-identical-output promise are the public API.
   `classmap-files/`, so those earlier versions wrote stay on disk, unread, and each
   project's next dump scans its files once.
 
+### Known differences
+- **On `update`, the same as in 0.26.2, against Composer 2.10.3:** when packages pass a proxy name to one another in one run (one gains `bin/x` as another loses it, or two exchange names), `vendor/bin` lacks a proxy Composer has, until the next `install` writes it, with a name-conflict line Composer writes only for `path` packages; and in two removal cases `vendor/bin` is absent where Composer leaves it empty, which `install` does not change.
+
 ## [0.26.2] — 2026-11-03
 
 ### Security

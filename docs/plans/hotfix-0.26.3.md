@@ -160,6 +160,8 @@ d'un lien sortant, placé ou sans opération ; la ligne sous l'opération d'un p
 avant les archives (phar stable sur 8 exécutions sur 8 : arrivées, montées de version ; zip a, b et path p : p d'abord,
 a et b dans les deux ordres) ; un proxy partagé avec un paquet qui part (`vendor/bin` sans lui sur `v0.26.2` et `114ba0e`).
 
+Ouverts aussi, identiques sur le binaire de v0.26.2 (`bin_forms.rs`, `open::`, zip et `path`) : sur `update`, un nom de proxy passé d'un paquet à l'autre ou échangé laisse `vendor/bin` sans un proxy que le phar a, jusqu'au prochain `install`, qui l'écrit, avec une ligne de conflit que le phar n'écrit que pour `path` ; `vendor/bin` absent où le phar le laisse vide (zip : a sans `bin` retiré et b perdant le dernier proxy ; `path` : a tenant le dernier proxy retiré et b mis à jour), que `install` ne change pas ; source d'un paquet `path` disparue, proxy gardé par le phar, retiré ici.
+
 ### `classmap-files/`
 
 `FILE_CACHE_FORMAT` reste `r2`, mais la clé de ces fichiers commence par `CACHE_FORMAT`. Mesuré : projet posé puis

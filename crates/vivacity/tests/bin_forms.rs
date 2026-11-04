@@ -110,6 +110,7 @@ const PACKAGE: &[Entry] = &[
     Entry::File("x", "#!/usr/bin/env php\n<?php echo 'root';\n"),
     Entry::File("a/b", "#!/usr/bin/env php\n<?php echo 'b';\n"),
     Entry::File("bin/x.bat", "@echo off\n"),
+    Entry::File("bin/y", "#!/usr/bin/env php\n<?php echo 'y';\n"),
     Entry::Dir("dir/"),
 ];
 
@@ -1545,6 +1546,324 @@ mod open {
             "{}",
             viv[0].stderr
         );
+    }
+
+    /// vendor/bin as it stands: `None` when absent, else each proxy and the path it names.
+    fn proxies(case: &Case) -> Option<Vec<(String, String)>> {
+        let dir = case.project().join("vendor/bin");
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut out: Vec<(String, String)> = entries
+            .map(|e| {
+                let path = e.expect("entry").path();
+                let text = std::fs::read_to_string(&path).expect("proxy");
+                let named = text
+                    .split_once("referenced bin path (")
+                    .and_then(|(_, rest)| rest.split_once(')'))
+                    .map_or("?", |(target, _)| target)
+                    .to_owned();
+                let name = path
+                    .file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .into_owned();
+                (name, named)
+            })
+            .collect();
+        out.sort();
+        Some(out)
+    }
+
+    fn skip_lines(out: &Output) -> Vec<String> {
+        out.stderr
+            .lines()
+            .filter(|l| l.starts_with("    Skipped installation of bin "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// What one program leaves after the update of a transition, and after an `install`.
+    struct Left {
+        update: Option<Vec<(String, String)>>,
+        lines: Vec<String>,
+        install: Option<Vec<(String, String)>>,
+    }
+
+    /// One project: package versions by name before and after, a `bin` or none. In `path`
+    /// mode the packages stay under ../pk/, rewritten for the second step.
+    struct Transition {
+        before: &'static [(&'static str, Option<&'static str>)],
+        after: &'static [(&'static str, Option<&'static str>)],
+        path: bool,
+        source_gone: bool,
+    }
+
+    impl Transition {
+        fn run(&self) -> Option<(Left, Left)> {
+            let (before, after, path) = (self.before, self.after, self.path);
+            let version_entry = move |port: u16, name: &str, version: &str, bin: Option<&str>| {
+                let bin = bin.map(|b| json!([b]));
+                let mut p = package(port, version, bin.as_ref());
+                p["name"] = json!(format!("acme/{name}"));
+                p
+            };
+            let case = Case::new(move |port, _| {
+                let mut by_name = serde_json::Map::new();
+                if !path {
+                    for (list, version) in [(before, "1.0.0"), (after, "1.1.0")] {
+                        for (name, bin) in list {
+                            let entry = by_name
+                                .entry(format!("acme/{name}"))
+                                .or_insert_with(|| json!({}));
+                            entry[version] = version_entry(port, name, version, *bin);
+                        }
+                    }
+                }
+                Setup {
+                    // A `path` repository whose directory is not there stops the phar.
+                    manifest: if path {
+                        mixed_manifest(port)
+                    } else {
+                        manifest_text(port, "*")
+                    },
+                    repository: json!({"packages": by_name}),
+                    lock: None,
+                    installed: vec![],
+                    path_package: false,
+                }
+            })?;
+            let write = |case: &Case, list: &[(&str, Option<&str>)], version: &str| {
+                for (name, bin) in list {
+                    let mut manifest = json!({"name": format!("acme/{name}"), "version": version});
+                    if let Some(bin) = bin {
+                        manifest["bin"] = json!([bin]);
+                    }
+                    write_path_package(case, name, manifest);
+                    let dir = case.work.join("pk").join(name).join("bin");
+                    std::fs::create_dir_all(&dir).expect("bin");
+                    for file in ["x", "y"] {
+                        std::fs::write(dir.join(file), "#!/usr/bin/env php\n<?php echo 1;\n")
+                            .expect("bin file");
+                    }
+                }
+            };
+            let prepare = |case: &Case, step: usize| {
+                if !path {
+                    return;
+                }
+                match step {
+                    0 => write(case, before, "1.0.0"),
+                    1 => {
+                        write(case, after, "1.1.0");
+                        if self.source_gone {
+                            for (name, _) in before {
+                                if !after.iter().any(|(n, _)| n == name) {
+                                    let dir = case.work.join("pk").join(name);
+                                    std::fs::remove_dir_all(dir).expect("source");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            };
+            let require = |list: &[(&str, Option<&str>)], version: &str| -> Vec<String> {
+                list.iter().map(|(n, _)| format!("{n}:{version}")).collect()
+            };
+            let (first, second) = (require(before, "1.0.0"), require(after, "1.1.0"));
+            let first: Vec<&str> = first.iter().map(String::as_str).collect();
+            let second: Vec<&str> = second.iter().map(String::as_str).collect();
+            let left = |program: &Path, native: bool| {
+                let run_step =
+                    |case: &Case, step: usize, names: Option<&[&str]>, args: Vec<&str>| {
+                        prepare(case, step);
+                        if let Some(names) = names {
+                            case.write_requires(names);
+                        }
+                        let mut args = args;
+                        if native {
+                            args.push("--no-fallback");
+                        }
+                        let out = case.run(program, &args);
+                        assert_eq!(out.code, 0, "step {step}: {}", dump("run", &out));
+                        out
+                    };
+                case.reset(None);
+                run_step(&case, 0, Some(&first), line(Run::Update));
+                let updated = run_step(&case, 1, Some(&second), line(Run::Update));
+                let update = proxies(&case);
+                let lines = skip_lines(&updated);
+                run_step(&case, 2, None, line(Run::Install));
+                Left {
+                    update,
+                    lines,
+                    install: proxies(&case),
+                }
+            };
+            let phar = left(case.composer, false);
+            let viv = left(Path::new(env!("CARGO_BIN_EXE_vivacity")), true);
+            Some((phar, viv))
+        }
+    }
+
+    fn proxy(name: &str, target: &str) -> (String, String) {
+        (name.to_owned(), target.to_owned())
+    }
+
+    const CONFLICT_X: &str =
+        "    Skipped installation of bin bin/x for package acme/a: name conflicts with an existing file";
+    const CONFLICT_Y: &str =
+        "    Skipped installation of bin bin/y for package acme/a: name conflicts with an existing file";
+
+    /// E2: a gains `bin/x` as b loses it, in one update. `LibraryInstaller::update` removes the
+    /// old binaries at once and installs the new ones when the code is in place: with zip
+    /// dists every removal of the batch comes first, and a takes the name. vivacity handles
+    /// a whole before b: a conflict, then the removal leaves no proxy, until the next `install`.
+    /// As in 0.26.2.
+    #[test]
+    fn a_proxy_passed_on_in_one_update_of_zip_dists() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", None), ("b", Some("bin/x"))],
+            after: &[("a", Some("bin/x")), ("b", None)],
+            path: false,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        let x_of_a = vec![proxy("x", "../acme/a/bin/x")];
+        assert_eq!(phar.update.as_ref(), Some(&x_of_a));
+        assert!(phar.lines.is_empty(), "{:?}", phar.lines);
+        assert_eq!(viv.update, None);
+        assert_eq!(viv.lines, [CONFLICT_X]);
+        assert_eq!(phar.install.as_ref(), Some(&x_of_a));
+        assert_eq!(viv.install.as_ref(), Some(&x_of_a));
+    }
+
+    /// E2 on `path` packages, placed in line: the phar has the same conflict line, and its
+    /// pass after the dump writes the proxy again, which vivacity does not do for a package
+    /// this run placed.
+    #[test]
+    fn a_proxy_passed_on_in_one_update_of_path_packages() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", None), ("b", Some("bin/x"))],
+            after: &[("a", Some("bin/x")), ("b", None)],
+            path: true,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        let x_of_a = vec![proxy("x", "../acme/a/bin/x")];
+        assert_eq!(phar.update.as_ref(), Some(&x_of_a));
+        assert_eq!(phar.lines, [CONFLICT_X]);
+        assert_eq!(viv.update, None);
+        assert_eq!(viv.lines, [CONFLICT_X]);
+        assert_eq!(phar.install.as_ref(), Some(&x_of_a));
+        assert_eq!(viv.install.as_ref(), Some(&x_of_a));
+    }
+
+    /// H: a and b exchange their proxy names, zip dists: both proxies on the phar, `y` missing
+    /// here with a conflict line, until the next `install`. As in 0.26.2.
+    #[test]
+    fn two_proxies_exchanged_in_one_update_of_zip_dists() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", Some("bin/x")), ("b", Some("bin/y"))],
+            after: &[("a", Some("bin/y")), ("b", Some("bin/x"))],
+            path: false,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        let both = vec![proxy("x", "../acme/b/bin/x"), proxy("y", "../acme/a/bin/y")];
+        assert_eq!(phar.update.as_ref(), Some(&both));
+        assert!(phar.lines.is_empty(), "{:?}", phar.lines);
+        assert_eq!(viv.update, Some(vec![proxy("x", "../acme/b/bin/x")]));
+        assert_eq!(viv.lines, [CONFLICT_Y]);
+        assert_eq!(phar.install.as_ref(), Some(&both));
+        assert_eq!(viv.install.as_ref(), Some(&both));
+    }
+
+    /// H on `path` packages: the same conflict line on both sides, the proxy written again by
+    /// the phar's pass after the dump only.
+    #[test]
+    fn two_proxies_exchanged_in_one_update_of_path_packages() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", Some("bin/x")), ("b", Some("bin/y"))],
+            after: &[("a", Some("bin/y")), ("b", Some("bin/x"))],
+            path: true,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        let both = vec![proxy("x", "../acme/b/bin/x"), proxy("y", "../acme/a/bin/y")];
+        assert_eq!(phar.update.as_ref(), Some(&both));
+        assert_eq!(phar.lines, [CONFLICT_Y]);
+        assert_eq!(viv.update, Some(vec![proxy("x", "../acme/b/bin/x")]));
+        assert_eq!(viv.lines, [CONFLICT_Y]);
+        assert_eq!(phar.install.as_ref(), Some(&both));
+        assert_eq!(viv.install.as_ref(), Some(&both));
+    }
+
+    /// K: a without a bin goes and b loses the last proxy, zip dists: the phar's removal of a
+    /// runs when its code is gone, after b's, and `removeBinaries` makes the directory before
+    /// it looks at the package: an empty `vendor/bin`, absent here. An `install` changes neither.
+    #[test]
+    fn an_empty_bin_directory_when_a_package_goes_after_the_last_proxy() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", None), ("b", Some("bin/x"))],
+            after: &[("b", None)],
+            path: false,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        assert_eq!(phar.update, Some(vec![]));
+        assert_eq!(viv.update, None);
+        assert_eq!(phar.install, Some(vec![]));
+        assert_eq!(viv.install, None);
+        assert!(phar.lines.is_empty() && viv.lines.is_empty());
+    }
+
+    /// J on `path` packages: a holding the last proxy goes, b without a bin is updated after it,
+    /// in line: an empty `vendor/bin` on the phar, absent here. An `install` changes neither.
+    #[test]
+    fn an_empty_bin_directory_when_a_path_package_follows_the_last_proxy() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", Some("bin/x")), ("b", None)],
+            after: &[("b", None)],
+            path: true,
+            source_gone: false,
+        })
+        .run() else {
+            return;
+        };
+        assert_eq!(phar.update, Some(vec![]));
+        assert_eq!(viv.update, None);
+        assert_eq!(phar.install, Some(vec![]));
+        assert_eq!(viv.install, None);
+    }
+
+    /// J again, the source of the `path` package gone from the disk as well: the phar keeps the
+    /// proxy, naming a package that is no longer there; vivacity removes it.
+    #[test]
+    fn a_proxy_kept_by_the_phar_when_a_path_source_is_gone() {
+        let Some((phar, viv)) = (Transition {
+            before: &[("a", Some("bin/x")), ("b", None)],
+            after: &[("b", None)],
+            path: true,
+            source_gone: true,
+        })
+        .run() else {
+            return;
+        };
+        let x_of_a = vec![proxy("x", "../acme/a/bin/x")];
+        assert_eq!(phar.update.as_ref(), Some(&x_of_a));
+        assert_eq!(viv.update, None);
+        assert_eq!(phar.install.as_ref(), Some(&x_of_a));
+        assert_eq!(viv.install, None);
     }
 
     /// A zip dist with a link leading out: vivacity's extraction refuses the archive, the
