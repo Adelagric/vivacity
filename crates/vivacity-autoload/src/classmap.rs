@@ -1694,6 +1694,115 @@ mod cache_tests {
         assert_eq!(record["A.php"].1, vec![b"New".to_vec()]);
     }
 
+    /// A project's copy of an entry, placed from it by this run, and its slot.
+    #[cfg(unix)]
+    fn placed_from(
+        cache: &Path,
+        entry: &Path,
+        project: &Path,
+        content: &[u8],
+        ctx: Arc<CacheContext>,
+    ) -> (PathBuf, FileCacheSlot) {
+        let src = project.join("src");
+        write(&src.join("A.php"), content);
+        let placed =
+            PlacedPackage::record("acme/a", project, entry, &[String::new()]).expect("placed");
+        let slot = FileCacheSlot::new(
+            cache,
+            &src,
+            ctx,
+            Some(StoreSeed {
+                record: CacheSlot::new(cache, entry, Path::new("src")),
+                placed: Some(Arc::new(placed)),
+                nested: Vec::new(),
+            }),
+        );
+        (src, slot)
+    }
+
+    /// The worst case of the entry's identity: an entry extracted again within one
+    /// timestamp tick keeps its inode and its ctime, so its slot, here with a file of the
+    /// same size written in place. A package placed from it gets its classes from the
+    /// record, read from no byte of its own: they must be its own.
+    #[cfg(unix)]
+    #[test]
+    fn the_same_slot_on_a_re_extracted_entry_serves_no_stale_classes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/acme/a/1.0.0-noref");
+        write(&entry.join("src/A.php"), b"<?php\nclass Old {}\n");
+        let slot_file = CacheSlot::new(tmp.path(), &entry, Path::new("src")).file;
+
+        // The entry just extracted: within the racy window of the clock.
+        let racy = CacheContext::new();
+        racy.set_clock(Clock::probe(&[entry.as_path()], &[tmp.path()]));
+        let (src, slot) = placed_from(
+            tmp.path(),
+            &entry,
+            &tmp.path().join("one"),
+            b"<?php\nclass Old {}\n",
+            Arc::new(racy),
+        );
+        assert_eq!(names(&scan(&src, Some(&slot))), ["Old"]);
+        let kept_while_racy = slot_file.exists();
+
+        // Extracted again in the same tick: same slot, same size, other content.
+        write(&entry.join("src/A.php"), b"<?php\nclass New {}\n");
+        assert_eq!(
+            CacheSlot::new(tmp.path(), &entry, Path::new("src")).file,
+            slot_file,
+            "the case needs the same slot"
+        );
+        let project = tmp.path().join("two");
+        write(&project.join("src/A.php"), b"<?php\nclass New {}\n");
+        let ctx = settled(&project.join("src"));
+        let (src, slot) = placed_from(tmp.path(), &entry, &project, b"<?php\nclass New {}\n", ctx);
+        assert_eq!(names(&scan(&src, Some(&slot))), ["New"]);
+        assert!(!kept_while_racy, "a racy entry's record is not kept");
+        assert!(slot_file.exists(), "a settled entry's record is kept");
+    }
+
+    /// Records written by 0.26.2 (format v4, kept whatever the entry's age) can hold another
+    /// content's classes under the identity they name: they stay unread.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_of_the_previous_format_is_not_read() {
+        use sha1::{Digest as _, Sha1};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let entry = tmp.path().join("store/acme/a/1.0.0-noref");
+        write(&entry.join("src/A.php"), b"<?php\nclass Real {}\n");
+
+        // The slot as 0.26.2 names it, spelled out rather than taken from the code.
+        let id = FileIdentity::of(&entry).expect("identity");
+        let mut h = Sha1::new();
+        h.update(b"v4\0");
+        h.update(entry.to_string_lossy().as_bytes());
+        h.update(b"\0");
+        h.update(id.dev.to_le_bytes());
+        h.update(id.ino.to_le_bytes());
+        h.update(id.ctime.0.to_le_bytes());
+        h.update(id.ctime.1.to_le_bytes());
+        h.update(b"\0src");
+        let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+
+        // Its encoding: one file, a digest, one class.
+        let mut record = Vec::new();
+        record.extend_from_slice(&1u32.to_le_bytes());
+        push_slice(&mut record, b"A.php");
+        record.extend_from_slice(&[0u8; 20]);
+        record.extend_from_slice(&1u32.to_le_bytes());
+        push_slice(&mut record, b"Stale");
+        write(
+            &tmp.path().join("classmap").join(format!("{key}.bin")),
+            &record,
+        );
+
+        let project = tmp.path().join("project");
+        write(&project.join("src/A.php"), b"<?php\nclass Real {}\n");
+        let ctx = settled(&project.join("src"));
+        let (src, slot) = placed_from(tmp.path(), &entry, &project, b"<?php\nclass Real {}\n", ctx);
+        assert_eq!(names(&scan(&src, Some(&slot))), ["Real"]);
+    }
+
     #[test]
     fn an_entry_that_cannot_be_scanned_falls_back_to_the_copy() {
         let tmp = tempfile::tempdir().expect("tmp");
