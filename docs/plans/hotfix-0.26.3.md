@@ -109,3 +109,87 @@ lieu de remettre (contraire au contrat) ; attendre la 2.11.1 (les défauts sont 
 - Windows : CI seulement. Le comportement du `basename` à deux séparateurs est lu et testé
   unitairement, non exécuté localement.
 - Revue indépendante du diff par un agent frais qui n'a pas écrit le code.
+
+## Résultats
+
+Mesures du 2026-11-04, macOS (APFS), Composer 2.10.3, PHP 8.5.12. Ce qui suit est ce qu'ont donné
+les commandes ; rien n'est publié.
+
+### Tests
+
+- `crates/vivacity/tests/bin_forms.rs`, 60 tests, comparés au phar. Sur les sources de `1147d4a` :
+  50 rouges, dont le témoin (`left: "755"`, `right: "600"`) ; 10 verts, qui sont les témoins de
+  non-régression (`ordinary_*`, `name_conflict_*`, `a_dev_package_is_not_read_under_no_dev`,
+  `an_unselected_*`, `a_non_string_left_out_stops_only_the_phar`). Après le correctif : 60 verts.
+  Vus rouges par mutation : `./` retiré de l'ordinaire (`ordinary_dot_slash_form`), garde coupée
+  (`link_out_form`, `755`).
+- Classmap : `the_same_slot_on_a_re_extracted_entry_serves_no_stale_classes` (`["Old"]` au lieu de
+  `["New"]`) et `a_record_of_the_previous_format_is_not_read` (`["Stale"]` au lieu de `["Real"]`), rouges
+  sur `1147d4a`. Après : verts. Format remis à `v4` : le second rouge. Enregistrement toujours écrit : le
+  premier rouge. Chaque partie de l'identité retirée de la clé : `every_part_of_the_identity…` rouge.
+
+### Point commun de la lecture stricte
+
+`binproxy::non_ordinary_bin`, lu par `fallback::bin_form_issue` (lock, installed.json, avant la première
+ligne) et par `UpdateSession::strict_bin` (`transaction.all`, avant l'écriture du lock). Raisons et preuves
+dans DECISIONS 2026-11-04. `validate_package` tourne sur `install`, mais son échec est une erreur : sur `..`,
+`1147d4a` écrit `Error: acme/tool has an invalid bin ..` et sort en 1 sans atteindre Composer.
+
+### Écarts restants avec le phar
+
+Nommés dans HANDOVER : (a) ligne de saut non répétée après le dump, et absente d'un install sans opération ;
+(b) `bin` manquant silencieux ; (c) remise tardive d'`update`, lignes écrites deux fois, ou `Updating
+dependencies` écrit seul sur une forme non-chaîne ; (d) candidat non retenu non-chaîne : `TypeError` chez le
+phar, natif ici ; (e) zip à lien sortant : refusé ici, installé par le phar.
+
+### Portée de `bin`
+
+Binaires des tags construits à part, projet témoin, dépôt `composer` local, dist zip.
+
+| Version | Effet sur un fichier extérieur |
+|---|---|
+| v0.1.0 | aucun proxy, mode inchangé |
+| v0.2.0, v0.3.0, v0.4.0, v0.5.0, v0.6.0, v0.9.0 | proxy vers le fichier, mode inchangé |
+| v0.10.0, v0.13.0, v0.17.0, v0.21.0, v0.25.0, v0.26.0, v0.26.1, v0.26.2 | proxy, et mode 600 → 755 |
+
+Non mesurés : v0.7.0, v0.8.0, v0.11.0, v0.11.1, v0.12.0, v0.14.0 à v0.16.0, v0.18.0 à v0.20.0, v0.22.0 à v0.24.0.
+`update` n'existe pas avant v0.4.0, les dépôts `path` pas avant v0.9.0. Le `chmod` vient de `efc67ed`, dont
+v0.10.0 est le premier tag.
+
+| Cas, sur v0.26.2 | v0.26.2 | phar 2.10.3 |
+|---|---|---|
+| `install`, lock, absolu | 755, proxy | 600, `file not found` |
+| `install`, lock, `.//<absolu>` | 755, proxy | 600, `file not found` |
+| `update`, métadonnée, absolu | 600, pas de proxy (`dump_package` retire le `/`) | 600, `file not found` |
+| `update`, métadonnée, `.//<absolu>` | 755, proxy | 600, `file not found` |
+| `install`, lock, paquet transitif, `.//<absolu>` | 755, proxy | 600, `file not found` |
+| `update`, paquet transitif, `.//<absolu>` | 755, proxy | 600, `file not found` |
+| `install`, `update`, dépôt `path`, lien sortant | 755, proxy | 600, `outside of the package` |
+| `update`, composer.json d'un paquet `path`, `.//<absolu>` | 755, proxy | 600, `file not found` |
+| `install`, source git, lien sortant | 755, proxy | 600, `outside of the package` |
+| `install`, dist zip, lien sortant | sortie 1, `hostile archive`, 600 | 600, `outside of the package` |
+| `install`, dist tar, lien sortant | 600, proxy | 600, proxy |
+| `install`, `.//etc/hosts` (à root) | sortie 1, `Operation not permitted`, mode inchangé, proxy `vendor/bin/hosts` laissé | `file not found` |
+| `install`, `.//<fichier du store>` | 644 → 755, proxy | sans objet |
+
+La limite est celle des droits de l'utilisateur : `chmod` échoue sur un fichier d'un autre. Le `bin` ordinaire
+d'un paquet ne touche pas sa copie du store sur APFS : `bin/x` à 755 dans `vendor/`, 644 dans l'entrée, relevé sur
+v0.26.2, v0.26.1, v0.26.0 (`store/v3`), v0.25.0, v0.21.0, v0.13.0, v0.10.0. **Non mesuré** : les liens durs des systèmes
+sans copie sur écriture jusqu'à 0.26.0, où ce `chmod` passerait par le lien d'après le code (la VM Linux est arrêtée).
+
+### Portée de la classmap
+
+Sur le même binaire, deux projets `install --optimize-autoloader`.
+
+| Version | Emplacement forcé (fichier de l'entrée réécrit en place, même taille, identité de la racine inchangée) | Entrée retirée, réextraite 3 s plus tard d'une autre archive |
+|---|---|---|
+| v0.1.0 à v0.6.0, v0.13.0, v0.17.0, v0.21.0, v0.25.0, v0.26.0 | `Old` (fichier de B : `New`) | `Old` |
+| v0.26.1, v0.26.2 | `Old` | `New` |
+| ce correctif | `New` | `New` |
+
+La collision réelle dans un même tic n'a pas été reproduite : les ctime d'APFS sont à la nanoseconde et l'inode
+n'a pas été réutilisé dans cette mesure. **Non mesuré sur Linux.**
+
+### Non vérifié ici
+
+Harnais et corpus (lancés par le mainteneur), Linux, Windows, sonde de l'horloge sur un second périphérique.

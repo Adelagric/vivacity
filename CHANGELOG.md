@@ -6,6 +6,38 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.26.3]
+
+### Security
+- **A package's `bin` no longer reaches a file outside the package.** Up to
+  0.26.2, an absolute entry in a lock, `.//<path>` in a lock or in a
+  repository's metadata, or a link of a `path` or git package leading out, named
+  that file: vivacity wrote a proxy to it and, since 0.10.0, moved its mode to
+  `0777 & ~umask` (a file of mode 600 went to 755), with the rights of the user
+  running the command. A transitive package can do it. Composer stays in the
+  package. `install_binaries` now resolves links as
+  `BinaryInstaller::isBinPathInsidePackage` does: what lands outside gets neither
+  a proxy nor a `chmod`, and Composer's line says so.
+- **A `bin` entry that is not ordinary goes to Composer, before any write**: a
+  list whose entries are a relative path, an optional leading `./`, then
+  non-empty segments none of which is `.` or `..`, with no backslash and no NUL,
+  is read natively; anything else, a `bin` that is not a list included, in the
+  lock, in a selected package's metadata or in `installed.json`, is Composer's
+  run, or exit 3 under `--no-fallback`.
+
+### Fixed
+- **A directory named by `bin` no longer ends the run on an I/O error**: it is
+  skipped with Composer's line. `vendor/bin` is created only for a binary that is
+  installed, as Composer does.
+- **A package placed from a store entry extracted again gets its own classes.**
+  Up to 0.26.0 the class map record of an entry did not depend on the entry's
+  identity; in 0.26.1 and 0.26.2 it did, but an entry removed and extracted again
+  within one timestamp tick can keep its inode and its ctime, so its record, and
+  a placed file's classes are taken from the record without reading the file.
+  A record is now kept only for an entry older than the racy window; the next
+  package placed from a younger one scans it once more. The record format moves
+  to `v5`, so that nothing an earlier version wrote is read.
+
 ## [0.26.2] — 2026-11-03
 
 ### Security

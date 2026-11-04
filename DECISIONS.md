@@ -6654,3 +6654,58 @@ après.
 (« Accessing <hôte> over http… », une ligne de la forme de Composer) nomme
 l'hôte tel que vivacity lit l'URL : le nom d'utilisateur, quand un mot de
 passe porte un `?` brut (test ci-dessus).
+
+## 2026-11-04 — `bin` : une garde et une remise à Composer, pas de portage (docs/plans/hotfix-0.26.3.md)
+
+`install_binaries` faisait `package_dir.join(bin)` : un chemin absolu, ou `.//x`
+une fois `./` retiré, remplace le dossier du paquet, et le fichier nommé passait de
+600 à 755 avec un proxy vers lui. Composer 2.10.3 fait `ltrim($bin, '/')`, concatène
+et saute ce qui se résout dehors.
+
+**Décidé.** Deux étages. La garde dans `install_binaries`, qui protège le fichier
+quel que soit le chemin d'entrée : liens résolus comme `isBinPathInsidePackage`,
+dehors ou dossier, ni proxy ni `chmod`, la ligne du phar. La lecture stricte avant
+toute écriture, qui décide qui exécute la commande : une entrée non ordinaire ou un
+`bin` qui n'est pas une liste, dans le lock, les paquets retenus ou installed.json,
+part à Composer ; `--no-fallback` : sortie 3, rien d'écrit. Ordinaire : un chemin
+relatif non vide, un `./` de tête facultatif, puis des segments non vides dont aucun
+n'est `.` ni `..`, sans barre oblique inverse ni NUL. `bins()` et `previous_bins`
+restent sur la liste de chaînes.
+
+**Le point commun, et pourquoi pas `validate_package`.** `validate_package` tourne
+bien sur `install` (`verify_install`) et sur `update`, et seulement sur les paquets
+retenus (`transaction.all`), mais son échec y est une erreur (`Error: …`, sortie 1,
+vue sur `..` à `1147d4a`), pas une remise, et sur `install` il arrive après l'en-tête :
+Composer l'aurait réécrit. Le test de `oracle_plain_repo` passe en outre un objet dans
+`bin` à la session. Le point est donc `vivacity_core::binproxy::non_ordinary_bin`, un
+prédicat, lu à deux moments : `fallback::bin_form_issue` sur le lock et installed.json,
+avant la première ligne de `install` et dans `resolution_fallback` (`update`, `require`,
+`remove`, `install` sans lock) ; `UpdateSession::strict_bin` sur `transaction.all`,
+avant `validate_package` et avant l'écriture du lock, ce que seul le solveur peut dire.
+Un candidat laissé dans le pool ne déclenche rien, ni ici ni dans `validate_package`.
+
+**Écartés.** Reprendre `bin_entries` de la branche 2.11.1 (trop de code, lié à l'ordre
+des lignes de 2.11). Reproduire la seconde passe `ensureBinariesPresence` : écart
+consigné dans HANDOVER. Tenir la sortie d'`update` jusqu'au solveur pour éviter la
+remise tardive : le déclencheur de la tenue reste étroit (décision du 2026-10-30).
+
+**La forme n'est pas courante.** Sur les 126 locks de `fixtures/` : 1 230 entrées, aucune
+non ordinaire. Sur les métadonnées p2 des 4 000 paquets de la liste « popular » de Packagist
+(lues le 2026-11-04, versions taguées et `~dev`, format minifié : une entrée par
+changement de `bin`) : 286 paquets, 1 075 entrées, une seule non ordinaire, `bin/` dans
+`rregeer/phpunit-coverage-check` 0.1.3 ; aucune chaîne, aucun objet, aucun `./`.
+
+## 2026-11-04 — Classmap : pas d'enregistrement pour une entrée qu'une extraction peut imiter
+
+Une entrée retirée puis réextraite dans le même tic garde son inode et son ctime, donc
+son emplacement, et un fichier placé prend ses classes de l'enregistrement sans lire un
+octet. Un enregistrement n'est plus écrit que pour une entrée plus vieille que la fenêtre
+racy ; l'horloge sonde aussi le périphérique du store ; le format passe à `v5`. Repris de
+`1c283ee`, `ed68a60`, `2b8b562` de la branche 2.11.1, adaptés. **À l'intégration, cette
+branche passe à `v6`** : les deux versions ne se partagent alors aucun enregistrement,
+sans avoir à prouver que leurs analyses coïncident.
+
+**Coût.** Un second projet posé depuis une entrée de moins de 2 s la rescanne.
+**Mesuré aussi** : sur tous les tags essayés de v0.1.0 à v0.26.0, une entrée réextraite
+3 s plus tard, sans collision, servait déjà les anciennes classes ; v0.26.1 et v0.26.2
+ne les servent plus que sur l'emplacement forcé (docs/plans/hotfix-0.26.3.md, Résultats).
