@@ -6,7 +6,7 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
-## [0.26.3]
+## [0.26.3] — 2026-11-05
 
 ### Security
 - **A package's `bin` no longer reaches a file outside the package.** Up to
