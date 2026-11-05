@@ -18,12 +18,15 @@ byte-identical-output promise are the public API.
   package. `install_binaries` now resolves links as
   `BinaryInstaller::isBinPathInsidePackage` does: what lands outside gets neither
   a proxy nor a `chmod`, and Composer's line says so.
-- **A `bin` entry that is not ordinary goes to Composer, before any write**: a
+- **A `bin` entry that is not ordinary goes to Composer**: a
   list whose entries are a relative path, an optional leading `./`, then
   non-empty segments none of which is `.` or `..`, with no backslash and no NUL,
   is read natively; anything else, a `bin` that is not a list included, in the
   lock, in a selected package's metadata or in `installed.json`, is Composer's
   run, or exit 3 under `--no-fallback`.
+  A null `bin` counts as absent. On `update` and `require`, the check on a
+  selected package's metadata comes after resolution: cache files may be written
+  by then, and `require` has edited `composer.json`, which it restores.
 
 ### Fixed
 - **A directory named by `bin` no longer ends the run on an I/O error**: it is
