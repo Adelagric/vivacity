@@ -1885,7 +1885,25 @@ mod open {
             return;
         };
         let args = line(Run::Install);
-        let (phar, _) = phar_run(&case, &args, None);
+        let (phar, tree) = phar_run(&case, &args, None);
+        let bins: Vec<_> = tree.iter().filter(|(p, _)| p.contains("bin/")).collect();
+        eprintln!(
+            "PROBE code={}\nPROBE stderr:\n{}\nPROBE bins: {:?}",
+            phar.code, phar.stderr, bins
+        );
+        // A second run of this same archive, from the same clean state, at -vvv: it
+        // names the engine. The assertions below read the normal run above.
+        let mut loud = args.clone();
+        loud.push("-vvv");
+        let (traced, traced_tree) = phar_run(&case, &loud, None);
+        let traced_bins: Vec<_> = traced_tree
+            .iter()
+            .filter(|(p, _)| p.contains("bin/"))
+            .collect();
+        eprintln!(
+            "PROBE -vvv code={}\nPROBE -vvv stdout:\n{}\nPROBE -vvv stderr:\n{}\nPROBE -vvv bins: {:?}",
+            traced.code, traced.stdout, traced.stderr, traced_bins
+        );
         assert_eq!(phar.code, 0, "{}", dump("phar", &phar));
         assert!(phar
             .stderr

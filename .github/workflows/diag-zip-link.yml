@@ -1,0 +1,50 @@
+name: diag-zip-link
+
+# One question: what does this runner's image do with a link in a zip? Prints
+# everything and decides nothing. Each job states the image it landed on: the
+# pool serves more than one.
+on:
+  push:
+    branches: [diag-zip-link]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer:2.10.3
+          extensions: mbstring, intl, gd, exif, bcmath, sodium, xml, curl, zip, fileinfo
+          ini-values: memory_limit=1G
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The image and its tools
+        continue-on-error: true
+        run: |
+          sw_vers
+          echo "image: $ImageOS $ImageVersion"
+          for t in unzip 7z 7zz; do type -a "$t" || echo "$t: none"; done
+          unzip -v | head -3
+          shasum -a 256 "$(command -v unzip)"
+          php -v | head -1
+          php -r 'echo "libzip ", ZipArchive::LIBZIP_VERSION, PHP_EOL;'
+          composer --version
+
+      - name: Composer on a zip with a link leading out
+        continue-on-error: true
+        run: bash .github/diag/zip-link-diag.sh "runner" "$PATH"
+
+      - name: The test that failed, its own archive, normal run then -vvv, stderr and tree
+        continue-on-error: true
+        run: cargo test -p vivacity --test bin_forms a_link_out_of_a_zip -- --nocapture
