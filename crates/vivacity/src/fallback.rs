@@ -93,6 +93,19 @@ pub(crate) fn resolution_fallback(
             }
         }
     }
+    // A `bin` in the lock this command starts from, or in installed.json: a
+    // command that resolves nothing touches neither.
+    if !start.no_resolution {
+        let lock = vivacity_core::jsonfile::read(&project.join("composer.lock"))
+            .map(|l| vivacity_core::lock::Lock::from_value(&l));
+        issues.extend(bin_form_issue(
+            project,
+            manifest,
+            lock.iter()
+                .flat_map(|l| l.wanted_packages(true))
+                .map(|p| &p.raw),
+        ));
+    }
     // `secure-http` on the `composer` repositories the resolution reads —
     // the project's and the global config.json's, merged as `Config::merge`
     // merges them: decided here, before `require` or `remove` edit
@@ -109,6 +122,30 @@ pub(crate) fn resolution_fallback(
         return Ok(None);
     }
     delegate_resolution(&issues, no_fallback).map(Some)
+}
+
+/// The strict read of `bin`, before anything is printed or written: the first
+/// package of `locked` or of installed.json whose `bin` is not read natively
+/// ([`vivacity_core::binproxy::non_ordinary_bin`]) gives the command to Composer.
+/// `install` from a lock and the resolution commands both start here; what only
+/// the solver can tell, a selected package's metadata, is judged on the same
+/// predicate by the session (`strict_bin`), before the lock is written.
+pub(crate) fn bin_form_issue<'a>(
+    project: &std::path::Path,
+    manifest: &serde_json::Value,
+    locked: impl Iterator<Item = &'a serde_json::Map<String, serde_json::Value>>,
+) -> Option<vivacity_core::scope::ScopeIssue> {
+    use serde_json::Value;
+    let of = |p: &serde_json::Map<String, Value>| {
+        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+        vivacity_core::binproxy::non_ordinary_bin(name, p.get("bin"))
+    };
+    let installed = vivacity_core::layout::installed_packages_of(project, manifest);
+    locked
+        .into_iter()
+        .find_map(of)
+        .or_else(|| installed.iter().filter_map(Value::as_object).find_map(of))
+        .map(vivacity_core::scope::ScopeIssue::Layout)
 }
 
 /// Whether the command holds its output while a `secure-http` hand-over

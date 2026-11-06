@@ -530,6 +530,11 @@ pub struct UpdateSession {
     /// printed.
     pub release_at_pool: bool,
     pub scan_pool_dists: bool,
+    /// A selected package whose `bin` is not read natively
+    /// ([`vivacity_core::binproxy::non_ordinary_bin`]) makes the update
+    /// [`SessionErrorKind::Unsupported`], whatever the solver made of it: the
+    /// command then goes to Composer, before the lock is written.
+    pub strict_bin: bool,
     /// The lock as read (when the update reads one): the command judges a
     /// partial update's fixed packages on it before anything.
     pub lock_data: Option<Value>,
@@ -841,6 +846,7 @@ impl UpdateSession {
         Ok(UpdateSession {
             release_at_pool: false,
             scan_pool_dists: false,
+            strict_bin: false,
             lock_data: lock,
             flex: None,
             arena,
@@ -1175,6 +1181,20 @@ impl UpdateSession {
         // `ValidatingArrayLoader::validatePackage` on every kept package
         // (`LockTransaction::setResultPackages`, inside `Solver::solve`): a
         // SecurityException stops the update before anything else is written.
+        // The kept packages and not the pool: a candidate left out names
+        // nothing the install will touch.
+        if self.strict_bin {
+            let unusual = report.transaction.all.iter().find_map(|&idx| {
+                let p = &self.arena[idx];
+                match p.origin {
+                    crate::package::Origin::Root => None,
+                    _ => vivacity_core::binproxy::non_ordinary_bin(&p.name, p.raw.get("bin")),
+                }
+            });
+            if let Some(reason) = unusual {
+                return Err(SessionError::unsupported(reason));
+            }
+        }
         for &idx in &report.transaction.all {
             if let Err(e) = crate::lockfile::validate_package(&self.arena[idx]) {
                 say_events(&report.events);

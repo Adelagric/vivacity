@@ -6654,3 +6654,80 @@ après.
 (« Accessing <hôte> over http… », une ligne de la forme de Composer) nomme
 l'hôte tel que vivacity lit l'URL : le nom d'utilisateur, quand un mot de
 passe porte un `?` brut (test ci-dessus).
+
+## 2026-11-04 — `bin` : une garde et une remise à Composer, pas de portage (docs/plans/hotfix-0.26.3.md)
+
+`install_binaries` faisait `package_dir.join(bin)` : un chemin absolu, ou `.//x`
+une fois `./` retiré, remplace le dossier du paquet, et le fichier nommé passait de
+600 à 755 avec un proxy vers lui. Composer 2.10.3 fait `ltrim($bin, '/')`, concatène
+et saute ce qui se résout dehors.
+
+**Décidé.** Deux étages. La garde dans `install_binaries`, qui protège le fichier
+quel que soit le chemin d'entrée : liens résolus comme `isBinPathInsidePackage`,
+dehors ou dossier, ni proxy ni `chmod`, la ligne du phar. La lecture stricte avant
+toute écriture, qui décide qui exécute la commande : une entrée non ordinaire ou un
+`bin` qui n'est pas une liste, dans le lock, les paquets retenus ou installed.json,
+part à Composer ; `--no-fallback` : sortie 3, rien d'écrit. Ordinaire : un chemin
+relatif non vide, un `./` de tête facultatif, puis des segments non vides dont aucun
+n'est `.` ni `..`, sans barre oblique inverse ni NUL. `bins()` et `previous_bins`
+restent sur la liste de chaînes.
+
+**Le point commun, et pourquoi pas `validate_package`.** `validate_package` tourne
+bien sur `install` (`verify_install`) et sur `update`, et seulement sur les paquets
+retenus (`transaction.all`), mais son échec y est une erreur (`Error: …`, sortie 1,
+vue sur `..` à `1147d4a`), pas une remise, et sur `install` il arrive après l'en-tête :
+Composer l'aurait réécrit. Le test de `oracle_plain_repo` passe en outre un objet dans
+`bin` à la session. Le point est donc `vivacity_core::binproxy::non_ordinary_bin`, un
+prédicat, lu à deux moments : `fallback::bin_form_issue` sur le lock et installed.json,
+avant la première ligne de `install` et dans `resolution_fallback` (`update`, `require`,
+`remove`, `install` sans lock) ; `UpdateSession::strict_bin` sur `transaction.all`,
+avant `validate_package` et avant l'écriture du lock, ce que seul le solveur peut dire.
+Un candidat laissé dans le pool ne déclenche rien, ni ici ni dans `validate_package`.
+
+**Écartés.** Reprendre `bin_entries` de la branche 2.11.1 (trop de code, lié à l'ordre
+des lignes de 2.11). Tenir la sortie d'`update` jusqu'au solveur pour éviter la
+remise tardive : le déclencheur de la tenue reste étroit (décision du 2026-10-30), et
+une tenue jusqu'au solveur retirerait son flux à une exécution ordinaire, dont
+`Loading composer repositories…` sort avant le réseau (0,01 s, dépôt répondant en 3 s).
+Même sous son déclencheur, la tenue s'arrête au pool, avant le solveur. La remise est de la
+classe connue : un plugin bloqué, décidé après la résolution, fait de même sur `v0.26.2`.
+
+**La seconde passe, reproduite là où le phar est stable.** `ensureBinariesPresence` réécrit
+les lignes d'un dossier ou d'un lien sortant après le dump, sur tout le dépôt local, même sans
+opération et sans dump. `binproxy::presence_notices`, dans l'ordre du dépôt local. Sur plusieurs
+dists zip, le phar varie sur une même entrée (9 et 6 exécutions sur 15) : ses lignes et son dépôt
+local suivent la fin des extractions, écart tenu par un test. Sur des paquets `path`, placés en
+ligne, il ne varie pas (8 sur 8), et la ligne tombe sous l'opération : reproduit. Mêlés à des archives,
+ils entrent avant elles dans le dépôt local : un paquet `path` arrivant passe avant, ce que le tri stable
+reproduit sur chaque cas mesuré stable (sans opération par nom ; arrivées, montées de version de l'un ou
+l'autre). Un alias, de branche ou en ligne, double sa ligne après le dump : ouvert, le dire demanderait les
+règles d'alias ici.
+
+**Les suppressions d'abord.** `Transaction` met les suppressions en tête. vivacity les faisait après son
+contrôle de présence : un proxy partagé par un paquet partant et un paquet restant disparaissait de
+`vendor/bin`, déjà sur `v0.26.2`. Déplacer la boucle, et traiter les paquets posés avant les autres (les
+opérations précèdent `ensureBinariesPresence`), rend à l'octet l'arbre et les sorties du phar sur chaque
+séquence mesurée. **Reste** l'ordre entre deux paquets posés par la même exécution pour un même nom de proxy :
+première opération chez le phar, premier du lock ici. `install` n'a pas l'ordre des opérations ; le lui passer
+est un autre changement, tenu ouvert par un test.
+
+**La forme n'est pas courante.** Sur les 126 locks de `fixtures/` : 1 230 entrées, aucune
+non ordinaire. Sur les métadonnées p2 des 4 000 paquets de la liste « popular » de Packagist
+(lues le 2026-11-04, versions taguées et `~dev`, format minifié : une entrée par
+changement de `bin`) : 286 paquets, 1 075 entrées, une seule non ordinaire, `bin/` dans
+`rregeer/phpunit-coverage-check` 0.1.3 ; aucune chaîne, aucun objet, aucun `./`.
+
+## 2026-11-04 — Classmap : pas d'enregistrement pour une entrée qu'une extraction peut imiter
+
+Une entrée retirée puis réextraite dans le même tic garde son inode et son ctime, donc
+son emplacement, et un fichier placé prend ses classes de l'enregistrement sans lire un
+octet. Un enregistrement n'est plus écrit que pour une entrée plus vieille que la fenêtre
+racy ; l'horloge sonde aussi le périphérique du store ; le format passe à `v5`. Repris de
+`1c283ee`, `ed68a60`, `2b8b562` de la branche 2.11.1, adaptés. **À l'intégration, cette
+branche passe à `v6`** : les deux versions ne se partagent alors aucun enregistrement,
+sans avoir à prouver que leurs analyses coïncident.
+
+**Coût.** Un second projet posé depuis une entrée de moins de 2 s la rescanne.
+**Mesuré aussi** : sur tous les tags essayés de v0.1.0 à v0.26.0, une entrée réextraite
+3 s plus tard, sans collision, servait déjà les anciennes classes ; v0.26.1 et v0.26.2
+ne les servent plus que sur l'emplacement forcé (docs/plans/hotfix-0.26.3.md, Résultats).
