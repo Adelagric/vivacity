@@ -299,6 +299,14 @@ type Form = fn(&Path) -> Value;
 impl Case {
     /// `None` when there is no Composer 2.10.3 to compare with.
     fn new(setup: impl Fn(u16, &Path) -> Setup) -> Option<Case> {
+        Case::serving(setup, BTreeMap::new())
+    }
+
+    /// The same, with more dists on its server.
+    fn serving(
+        setup: impl Fn(u16, &Path) -> Setup,
+        extra: BTreeMap<String, Vec<u8>>,
+    ) -> Option<Case> {
         let composer = composer()?;
         let root = tempfile::tempdir().expect("tmp");
         // `realpath` and the proxies see the path the runs see.
@@ -307,24 +315,23 @@ impl Case {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let setup = setup(port, &work);
-        serve(
-            listener,
-            BTreeMap::from([
-                (
-                    "/packages.json".to_owned(),
-                    serde_json::to_vec(&setup.repository).expect("repository"),
-                ),
-                ("/tool.zip".to_owned(), zip_of(PACKAGE)),
-                (
-                    "/link.zip".to_owned(),
-                    zip_of(&[
-                        Entry::File("composer.json", "{\"name\": \"acme/tool\"}\n"),
-                        // From vendor/acme/tool/bin/, up to where the witness is.
-                        Entry::Link("bin/out", "../../../../../witness"),
-                    ]),
-                ),
-            ]),
-        );
+        let mut files = BTreeMap::from([
+            (
+                "/packages.json".to_owned(),
+                serde_json::to_vec(&setup.repository).expect("repository"),
+            ),
+            ("/tool.zip".to_owned(), zip_of(PACKAGE)),
+            (
+                "/link.zip".to_owned(),
+                zip_of(&[
+                    Entry::File("composer.json", "{\"name\": \"acme/tool\"}\n"),
+                    // From vendor/acme/tool/bin/, up to where the witness is.
+                    Entry::Link("bin/out", "../../../../../witness"),
+                ]),
+            ),
+        ]);
+        files.extend(extra);
+        serve(listener, files);
         Some(Case {
             env: base.join("env"),
             work,
@@ -2440,5 +2447,404 @@ mod path_and_zip {
             );
         }
         assert_eq!(blocks_sorted(&viv_err), blocks_sorted(&phar[0].stderr));
+    }
+}
+
+/// Throwaway. What `unzip`, Composer and vivacity each do with a link in a zip, on
+/// this machine. The measures print and decide nothing; the test only stops on a
+/// witness that moved.
+mod probe {
+    use super::*;
+    use zip::write::SimpleFileOptions;
+
+    const MANIFEST: Entry = Entry::File("composer.json", "{\"name\": \"acme/tool\"}\n");
+
+    struct Shape {
+        name: &'static str,
+        entries: Vec<Entry>,
+        bin: Option<&'static str>,
+        link_mode: u32,
+    }
+
+    /// Up from the link: `bin/`, the package, its temporary directory, `composer/`,
+    /// `vendor/` while Composer extracts, which reaches the project; and `bin/`,
+    /// `tool/`, `acme/`, `vendor/`, the project once installed, which reaches `work/`.
+    fn shapes() -> Vec<Shape> {
+        let shape = |name, entries, bin, link_mode| Shape {
+            name,
+            entries,
+            bin,
+            link_mode,
+        };
+        let real = Entry::File("real", "real\n");
+        let up = Entry::Link("bin/link", "../real");
+        vec![
+            shape(
+                "same-dir",
+                vec![
+                    MANIFEST,
+                    Entry::File("bin/x", "x\n"),
+                    Entry::Link("bin/link", "x"),
+                ],
+                Some("bin/link"),
+                0o644,
+            ),
+            shape(
+                "up-inside",
+                vec![MANIFEST, real, up],
+                Some("bin/link"),
+                0o644,
+            ),
+            shape(
+                "up-inside-mode-777",
+                vec![
+                    MANIFEST,
+                    Entry::File("real", "real\n"),
+                    Entry::Link("bin/link", "../real"),
+                ],
+                Some("bin/link"),
+                0o777,
+            ),
+            shape(
+                "up-inside-link-first",
+                vec![
+                    MANIFEST,
+                    Entry::Link("bin/link", "../real"),
+                    Entry::File("real", "real\n"),
+                ],
+                Some("bin/link"),
+                0o644,
+            ),
+            shape(
+                "dir-link",
+                vec![
+                    MANIFEST,
+                    Entry::File("dir/f", "f\n"),
+                    Entry::Link("dirlink", "dir"),
+                ],
+                None,
+                0o644,
+            ),
+            shape(
+                "dangling-inside",
+                vec![MANIFEST, Entry::Link("bin/link", "../missing")],
+                Some("bin/link"),
+                0o644,
+            ),
+            shape(
+                "out-target-there-while-extracting",
+                vec![
+                    MANIFEST,
+                    Entry::Link("bin/link", "../../../../../composer.json"),
+                ],
+                Some("bin/link"),
+                0o644,
+            ),
+            shape(
+                "out-target-there-once-installed",
+                vec![MANIFEST, Entry::Link("bin/link", "../../../../../witness")],
+                Some("bin/link"),
+                0o644,
+            ),
+        ]
+    }
+
+    /// `zip_of`, with the link's stored mode chosen.
+    fn zip_with(entries: &[Entry], link_mode: u32) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().unix_permissions(0o644);
+        let at = |p: &str| format!("acme-tool-abc/{p}");
+        for entry in entries {
+            match entry {
+                Entry::File(p, content) => {
+                    w.start_file(at(p), options).expect("file");
+                    w.write_all(content.as_bytes()).expect("write");
+                }
+                Entry::Dir(p) => w.add_directory(at(p), options).expect("dir"),
+                Entry::Link(p, target) => w
+                    .add_symlink(at(p), *target, options.unix_permissions(link_mode))
+                    .expect("link"),
+            }
+        }
+        w.finish().expect("zip").into_inner()
+    }
+
+    /// The own mode of every link under `dir`, which `inventory` does not keep: it
+    /// differs on macOS, where a link has one and `unzip` restores it.
+    fn link_modes(dir: &Path) -> BTreeMap<String, u32> {
+        fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, u32>) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                let meta = std::fs::symlink_metadata(&path).expect("meta");
+                if meta.file_type().is_symlink() {
+                    let rel = path.strip_prefix(base).expect("under base");
+                    out.insert(rel.to_string_lossy().into_owned(), meta.mode() & 0o777);
+                } else if meta.is_dir() {
+                    walk(base, &path, out);
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// The links both sides hold whose own modes disagree, and how many they compared:
+    /// no link to compare is not an agreement.
+    fn link_mode_differences(
+        a: &BTreeMap<String, u32>,
+        b: &BTreeMap<String, u32>,
+    ) -> (Vec<String>, usize) {
+        let shared: Vec<&String> = a.keys().filter(|k| b.contains_key(*k)).collect();
+        let differ = shared
+            .iter()
+            .filter(|k| a[**k] != b[**k])
+            .map(|k| format!("{k}: {:o} / {:o}", a[*k], b[*k]))
+            .collect();
+        (differ, shared.len())
+    }
+
+    /// The modes the archive itself stores for its links, type bits included.
+    fn stored_links(bytes: &[u8]) -> String {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("zip");
+        let mut shown = Vec::new();
+        for i in 0..zip.len() {
+            let file = zip.by_index_raw(i).expect("entry");
+            if let Some(mode) = file.unix_mode().filter(|m| m & 0o170000 == 0o120000) {
+                let name = file.name();
+                let short = name.strip_prefix("acme-tool-abc/").unwrap_or(name);
+                shown.push(format!("{short}={mode:o}"));
+            }
+        }
+        shown.join(" ")
+    }
+
+    /// What is at the paths of the package and of `vendor/bin`, on one line.
+    fn nodes(tree: &BTreeMap<String, Node>, modes: &BTreeMap<String, u32>, keep: &str) -> String {
+        let shown: Vec<String> = tree
+            .iter()
+            .filter(|(p, n)| {
+                (p.contains(keep) || p.contains("vendor/bin/")) && !matches!(n, Node::Dir(_))
+            })
+            .map(|(p, n)| {
+                let short = p.rsplit(keep).next().unwrap_or(p);
+                match n {
+                    Node::Link(t) => {
+                        let mode = modes.get(p).map_or("?".to_owned(), |m| format!("{m:o}"));
+                        format!("{short}=link({},{mode})", t.display())
+                    }
+                    Node::File(m, bytes) => format!("{short}=file({m:o},{}b)", bytes.len()),
+                    Node::Dir(_) => String::new(),
+                }
+            })
+            .collect();
+        shown.join(" ")
+    }
+
+    /// `unzip` alone, with the command Composer builds, in Composer's layout.
+    fn unzip_alone(bytes: &[u8]) -> (i32, String, String) {
+        let root = tempfile::tempdir().expect("tmp");
+        let base = std::fs::canonicalize(root.path()).expect("canonical");
+        let project = base.join("work/project");
+        let dest = project.join("vendor/composer/x");
+        std::fs::create_dir_all(&dest).expect("dest");
+        std::fs::write(project.join("composer.json"), "{}\n").expect("composer.json");
+        std::fs::write(base.join("work/witness"), "x\n").expect("witness");
+        let file = base.join("dist.zip");
+        std::fs::write(&file, bytes).expect("zip");
+        let out = Command::new("unzip")
+            .arg("-qq")
+            .arg(&file)
+            .arg("-d")
+            .arg(&dest)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => return (-1, format!("not run: {e}"), String::new()),
+        };
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            nodes(&inventory(&dest), &link_modes(&dest), "acme-tool-abc/"),
+        )
+    }
+
+    /// The engine a `-vvv` run names.
+    fn engine(traced: &Output) -> &'static str {
+        let e = &traced.stderr;
+        if e.contains("As there is no 'unzip' nor '7z'") {
+            "ZipArchive-alone"
+        } else if e.contains("falling back to ZipArchive") {
+            "unzip-then-ZipArchive"
+        } else if e.contains("unzip' '-qq'") {
+            "unzip"
+        } else {
+            "not-seen"
+        }
+    }
+
+    /// One run on an emptied work directory and what it left.
+    struct Pass {
+        out: Output,
+        tree: BTreeMap<String, Node>,
+        modes: BTreeMap<String, u32>,
+        witness: u32,
+    }
+
+    fn pass(case: &Case, program: &Path, args: &[&str]) -> Pass {
+        case.reset(None);
+        let out = case.run(program, args);
+        Pass {
+            out,
+            tree: inventory(&case.work),
+            modes: link_modes(&case.work),
+            witness: case.witness_mode(),
+        }
+    }
+
+    /// The engine comes from the `-vvv` run and the rest of a row from the normal one,
+    /// which holds only if they did the same. Everything is printed before any assert,
+    /// so that a moved witness or a divergence does not cost the table.
+    #[test]
+    fn what_each_engine_does_with_a_link_in_a_zip() {
+        let args = line(Run::Install);
+        let mut loud = args.clone();
+        loud.push("-vvv");
+        let vivacity = Path::new(env!("CARGO_BIN_EXE_vivacity"));
+        let mut table = Vec::new();
+        let mut moved = Vec::new();
+        let mut diverged = Vec::new();
+        for shape in shapes() {
+            let bytes = zip_with(&shape.entries, shape.link_mode);
+            let stored = stored_links(&bytes);
+            let (unzip_code, unzip_err, unzip_nodes) = unzip_alone(&bytes);
+            let bin = shape.bin.map(|b| json!([b]));
+            let case = Case::serving(
+                |port, _| {
+                    let mut p = package(port, "1.0.0", bin.as_ref());
+                    p["dist"]["url"] = json!(format!("http://127.0.0.1:{port}/shape.zip"));
+                    Setup {
+                        manifest: manifest_text(port, "1.0.0"),
+                        repository: repository(vec![p.clone()]),
+                        lock: Some((vec![p], vec![])),
+                        installed: vec![],
+                        path_package: false,
+                    }
+                },
+                BTreeMap::from([("/shape.zip".to_owned(), bytes.clone())]),
+            )
+            .expect("this probe needs Composer 2.10.3");
+            let phar = pass(&case, case.composer, &args);
+            let traced = pass(&case, case.composer, &loud);
+            let viv = pass(&case, vivacity, &args);
+            for (who, run) in [("composer", &phar), ("-vvv", &traced), ("vivacity", &viv)] {
+                if run.witness != 0o600 {
+                    moved.push(format!("{}/{who}: {:o}", shape.name, run.witness));
+                }
+            }
+
+            let traced_tree = differences(&phar.tree, &traced.tree);
+            let (traced_modes, _) = link_mode_differences(&phar.modes, &traced.modes);
+            let vs_normal = if phar.out.code == traced.out.code
+                && traced_tree.is_empty()
+                && traced_modes.is_empty()
+            {
+                "same".to_owned()
+            } else {
+                let found = format!(
+                    "DIFFERS(rc {}/{},paths {},link-modes {})",
+                    phar.out.code,
+                    traced.out.code,
+                    traced_tree.len(),
+                    traced_modes.len()
+                );
+                diverged.push(format!("{}: {found}", shape.name));
+                found
+            };
+
+            let tree = differences(&phar.tree, &viv.tree);
+            let (viv_modes, compared) = link_mode_differences(&phar.modes, &viv.modes);
+            let modes_word = match (compared, viv_modes.is_empty()) {
+                (0, _) => "none",
+                (_, true) => "same",
+                (_, false) => "DIFFERS",
+            };
+            eprintln!(
+                "--- LINKCASE {} (stored {stored})\nunzip: exit {unzip_code}, {unzip_err}\n{}\n{}\n{}\n--- composer -vvv engine: {}\n--- composer normal (\"phar\") against -vvv (\"vivacity\"), paths: {}\n--- composer normal / -vvv, link modes: {}\n--- composer against vivacity, paths: {}\n--- composer / vivacity, link modes: {}",
+                shape.name,
+                dump("composer", &phar.out),
+                dump("composer -vvv", &traced.out),
+                dump("vivacity", &viv.out),
+                engine(&traced.out),
+                traced_tree.join("\n"),
+                traced_modes.join(", "),
+                tree.join("\n"),
+                viv_modes.join(", "),
+            );
+            table.push(format!(
+                "LINK {} stored=[{stored}] | unzip rc={unzip_code} {unzip_nodes} | composer rc={} engine={} {} | traced rc={} vs-normal={vs_normal} | vivacity rc={} delegated={} {} | tree={} link-modes={modes_word} stdout={} stderr={} witness={:o}",
+                shape.name,
+                phar.out.code,
+                engine(&traced.out),
+                nodes(&phar.tree, &phar.modes, "acme/tool/"),
+                traced.out.code,
+                viv.out.code,
+                viv.out.stderr.contains("vivacity: delegating"),
+                nodes(&viv.tree, &viv.modes, "acme/tool/"),
+                if tree.is_empty() { "same" } else { "DIFFERS" },
+                if viv.out.stdout == phar.out.stdout { "same" } else { "DIFFERS" },
+                if without_own_line(&viv.out.stderr) == phar.out.stderr { "same" } else { "DIFFERS" },
+                viv.witness,
+            ));
+        }
+        eprintln!(
+            "LINK-TABLE\n# tree= paths, kinds, file modes and bytes, link targets; link-modes= the own modes of the links both sides hold, none when there is no such link\n{}\nLINK-TABLE-END\nLINK-TRACED-DIVERGENCES {}",
+            table.join("\n"),
+            diverged.len()
+        );
+        assert!(
+            moved.is_empty() && diverged.is_empty(),
+            "the witness moved: {moved:?}; the normal and -vvv runs diverged: {diverged:?}"
+        );
+    }
+
+    /// The native half of `a_link_out_of_a_zip_is_refused_where_the_phar_skips_it`, on
+    /// the same archive, whatever Composer does on this machine.
+    #[test]
+    fn the_native_side_refuses_the_hostile_zip() {
+        let case = Case::new(|port, _| {
+            let mut p = package(port, "1.0.0", Some(&json!(["bin/out"])));
+            p["dist"]["url"] = json!(format!("http://127.0.0.1:{port}/link.zip"));
+            Setup {
+                manifest: manifest_text(port, "1.0.0"),
+                repository: repository(vec![p.clone()]),
+                lock: Some((vec![p], vec![])),
+                installed: vec![],
+                path_package: false,
+            }
+        })
+        .expect("this probe needs Composer 2.10.3");
+        case.reset(None);
+        let viv = case.vivacity(&line(Run::Install));
+        let left = nodes(
+            &inventory(&case.work),
+            &link_modes(&case.work),
+            "acme/tool/",
+        );
+        eprintln!(
+            "NATIVE code={} witness={:o} left=[{left}]\n{}",
+            viv.code,
+            case.witness_mode(),
+            dump("vivacity", &viv)
+        );
+        assert_eq!(viv.code, 1, "{}", dump("vivacity", &viv));
+        assert!(
+            viv.stderr.contains("hostile archive refused"),
+            "{}",
+            dump("vivacity", &viv)
+        );
+        assert!(!viv.stderr.contains("vivacity: delegating"));
+        assert_eq!(case.witness_mode(), 0o600);
     }
 }

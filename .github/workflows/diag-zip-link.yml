@@ -1,8 +1,9 @@
 name: diag-zip-link
 
-# One question: what does this runner's image do with a link in a zip? Prints
-# everything and decides nothing. Each job states the image it landed on: the
-# pool serves more than one.
+# Throwaway. The parity job's preparation and commands on the runner's images, past
+# the first failure, with what links in a zip do on each. Each job states the image it
+# landed on: the pool serves more than one. Read in each log: the image, LINK-TABLE,
+# NATIVE, LEDGER-END. A job without them observed nothing.
 on:
   push:
     branches: [diag-zip-link]
@@ -10,15 +11,30 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   probe:
+    name: probe (${{ matrix.attempt }})
     runs-on: macos-latest
+    env:
+      COMPOSER_AUTH: ${{ format('{{"github-oauth":{{"github.com":"{0}"}}}}', github.token) }}
     strategy:
       fail-fast: false
       matrix:
         attempt: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+
+      - name: GitHub API budget (start)
+        run: |
+          for who in anonymous token; do
+            if [ "$who" = token ]; then h=(-H "Authorization: token $GH_TOKEN"); else h=(); fi
+            printf '%s ' "$who"; curl -fsS "${h[@]}" https://api.github.com/rate_limit | jq -c '.resources.core' || echo unavailable
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: shivammathur/setup-php@v2
         with:
@@ -28,23 +44,50 @@ jobs:
           ini-values: memory_limit=1G
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Composer downloads and fixtures
+        id: fixtures-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/composer
+            ~/Library/Caches/composer
+            fixtures/work
+          key: fixtures-${{ runner.os }}-${{ hashFiles('fixtures/make.sh') }}
 
       - name: The image and its tools
         continue-on-error: true
         run: |
           sw_vers
           echo "image: $ImageOS $ImageVersion"
+          echo "umask: $(umask)"
+          echo "fixtures cache hit: ${{ steps.fixtures-cache.outputs.cache-hit }}"
           for t in unzip 7z 7zz; do type -a "$t" || echo "$t: none"; done
           unzip -v | head -3
           shasum -a 256 "$(command -v unzip)"
           php -v | head -1
           php -r 'echo "libzip ", ZipArchive::LIBZIP_VERSION, PHP_EOL;'
           composer --version
+          ruby -v
 
-      - name: Composer on a zip with a link leading out
+      - name: Links in a zip, the hostile case's native half, the test that failed
         continue-on-error: true
-        run: bash .github/diag/zip-link-diag.sh "runner" "$PATH"
+        run: |
+          cargo test -p vivacity --test bin_forms -- --nocapture --test-threads=1 probe:: a_link_out_of_a_zip
 
-      - name: The test that failed, its own archive, normal run then -vvv, stderr and tree
-        continue-on-error: true
-        run: cargo test -p vivacity --test bin_forms a_link_out_of_a_zip -- --nocapture
+      - name: The parity job's commands, each with its exit code
+        run: ruby .github/diag/parity-ledger.rb .github/workflows/ci.yml
+
+      - name: GitHub API budget (end)
+        if: always()
+        run: |
+          for who in anonymous token; do
+            if [ "$who" = token ]; then h=(-H "Authorization: token $GH_TOKEN"); else h=(); fi
+            printf '%s ' "$who"; curl -fsS "${h[@]}" https://api.github.com/rate_limit | jq -c '.resources.core' || echo unavailable
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
