@@ -6,7 +6,7 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
-## [0.26.3] — 2026-11-06
+## [0.26.3] — 2026-11-10
 
 ### Security
 - **A package's `bin` no longer reaches a file outside the package.** Up to
@@ -55,6 +55,7 @@ byte-identical-output promise are the public API.
 
 ### Known differences
 - **On `update`, the same as in 0.26.2, against Composer 2.10.3:** when packages pass a proxy name to one another in one run (one gains `bin/x` as another loses it, or two exchange names), `vendor/bin` lacks a proxy Composer has, until the next `install` writes it, with a name-conflict line Composer writes only for `path` packages; and in two removal cases `vendor/bin` is absent where Composer leaves it empty, which `install` does not change.
+- **A symbolic link in a zip dist, under macOS, the same since 0.10.0:** vivacity gives the link mode 777, where Composer's `unzip` keeps the mode the archive stores (644 in the measured archives, where the two then differ; an archive storing 777 gives the same on both sides). The link's target and the files are the same.
 
 ## [0.26.2] — 2026-11-03
 

@@ -154,13 +154,33 @@ dans DECISIONS 2026-11-04. `validate_package` tourne sur `install`, mais son éc
 Chacun a un test nommé (liste et raisons dans HANDOVER) : `bin` manquant silencieux ; ordre entre plusieurs
 dists zip, sur lequel le phar varie ; alias de branche et alias en ligne, ligne doublée chez le phar après le dump ;
 deux paquets posés par une même exécution pour un même nom de proxy, cible différente, déjà ainsi sur `v0.26.2` ; zip à
-lien sortant, refusé ici ; `.bat` déjà là sous `COMPOSER_BIN_COMPAT=full`, déjà ainsi sur `v0.26.2` ; remise tardive
+lien sortant, refusé ici (le phar l'installe de deux façons selon l'`unzip`, voir plus bas) ; `.bat` déjà là sous `COMPOSER_BIN_COMPAT=full`, déjà ainsi sur `v0.26.2` ; remise tardive
 d'`update` ; candidat non retenu non-chaîne, `TypeError` chez le phar. Fermés : la passe après le dump d'un dossier ou
 d'un lien sortant, placé ou sans opération ; la ligne sous l'opération d'un paquet `path` ; l'ordre d'un paquet `path`
 avant les archives (phar stable sur 8 exécutions sur 8 : arrivées, montées de version ; zip a, b et path p : p d'abord,
 a et b dans les deux ordres) ; un proxy partagé avec un paquet qui part (`vendor/bin` sans lui sur `v0.26.2` et `114ba0e`).
 
 Ouverts aussi, identiques sur le binaire de v0.26.2 (`bin_forms.rs`, `open::`, zip et `path`) : sur `update`, un nom de proxy passé d'un paquet à l'autre ou échangé laisse `vendor/bin` sans un proxy que le phar a, jusqu'au prochain `install`, qui l'écrit, avec une ligne de conflit que le phar n'écrit que pour `path` ; `vendor/bin` absent où le phar le laisse vide (zip : a sans `bin` retiré et b perdant le dernier proxy ; `path` : a tenant le dernier proxy retiré et b mis à jour), que `install` ne change pas ; source d'un paquet `path` disparue, proxy gardé par le phar, retiré ici.
+
+### Zip à lien, selon l'`unzip` de la machine (2026-11-09)
+
+Relevé sur l'image macOS `20261102.0473.1` des runners (macOS 26.7.2, `/usr/bin/unzip` UnZip 6.00, Composer 2.10.3,
+PHP 8.4.27, umask 022), quatre jobs sur quatre, tables identiques, et sur un Mac local (Darwin 25.6.0), par une sonde
+tenue hors de cette branche (`diag-zip-link`, `2f77592`).
+
+- **Lien sortant.** L'`unzip` de cette image sort en 2 (`symlink error: Permission denied`) ; celui de l'image
+  `20261026.0455.2` et du Mac local crée le lien. Dans le premier cas le phar se replie sur `ZipArchive` : l'entrée
+  devient un fichier ordinaire dont le contenu est la cible, mis à 755, avec un proxy dans `vendor/bin`. Dans le second
+  il garde le lien et écrit la ligne de saut. Le témoin reste à 600 des deux façons, et vivacity refuse l'archive des
+  deux façons. `open::a_link_out_of_a_zip_…` affirme ces deux façons et échoue sur toute autre.
+- **Lien restant dans le paquet** (même dossier, `../`, lien avant sa cible, lien vers un dossier, cible absente) :
+  gardé par `unzip` sur cette image et sur le Mac local, même arbre chez le phar et ici. Non mesuré sur l'image
+  `20261026.0455.2`.
+- **Mode propre du lien, écart ouvert, sans test dans cette branche.** Sous macOS, vivacity donne 777 au lien
+  (`clone::symlink_like_unzip`, depuis 0.10.0, code inchangé depuis `v0.26.2`) ; `unzip`, donc le phar, garde le mode
+  stocké dans l'archive : 644 dans les archives de la sonde, où les deux diffèrent, 777 dans celle qui le stocke, où
+  ils s'accordent. `oracle_zip.rs` ne fabrique que des liens à 777. **Non mesuré** : les archives de vrais paquets,
+  Linux, et si `diff-vendor` et le corpus lisent ce mode.
 
 ### `classmap-files/`
 
@@ -194,7 +214,7 @@ v0.10.0 est le premier tag.
 | `install`, `update`, dépôt `path`, lien sortant | 755, proxy | 600, `outside of the package` |
 | `update`, composer.json d'un paquet `path`, `.//<absolu>` | 755, proxy | 600, `file not found` |
 | `install`, source git, lien sortant | 755, proxy | 600, `outside of the package` |
-| `install`, dist zip, lien sortant | sortie 1, `hostile archive`, 600 | 600, `outside of the package` |
+| `install`, dist zip, lien sortant | sortie 1, `hostile archive`, 600 | 600, `outside of the package` ; ou, là où `unzip` refuse le lien, repli sur `ZipArchive` : fichier ordinaire et proxy, 600 |
 | `install`, dist tar, lien sortant | 600, proxy | 600, proxy |
 | `install`, `.//etc/hosts` (à root) | sortie 1, `Operation not permitted`, mode inchangé, proxy `vendor/bin/hosts` laissé | `file not found` |
 | `install`, `.//<fichier du store>` | 644 → 755, proxy | sans objet |

@@ -1866,9 +1866,14 @@ mod open {
         assert_eq!(viv.install, None);
     }
 
-    /// A zip dist with a link leading out: vivacity's extraction refuses the archive, the
-    /// phar's keeps the link and its `bin` check skips it. Before this fix too, and it
-    /// is the safe side: nothing is written.
+    /// A zip dist with a link leading out: vivacity's extraction refuses the archive,
+    /// before this fix too, and it is the safe side: nothing is written. The phar
+    /// installs the package, in one of two ways that depend on the machine's `unzip`.
+    /// Where `unzip` creates the link, the phar keeps it and its `bin` check skips it.
+    /// Where `unzip` refuses such a link (exit 2, seen on the macOS runner image
+    /// 20261102.0473.1), the phar falls back to `ZipArchive`, which writes the entry as
+    /// an ordinary file holding the target, and that file gets a proxy. Anything else
+    /// from the phar fails here. The witness stays at 600 on every side.
     #[test]
     fn a_link_out_of_a_zip_is_refused_where_the_phar_skips_it() {
         let Some(case) = Case::new(|port, _| {
@@ -1885,20 +1890,46 @@ mod open {
             return;
         };
         let args = line(Run::Install);
-        let (phar, _) = phar_run(&case, &args, None);
-        assert_eq!(phar.code, 0, "{}", dump("phar", &phar));
-        assert!(phar
-            .stderr
-            .contains(": the bin resolves to a path outside of the package directory"));
+        let (phar, phar_tree) = phar_run(&case, &args, None);
         case.reset(None);
         let viv = case.vivacity(&args);
+        let witness = case.witness_mode();
+
+        // vivacity first: what the phar did on this machine must not hide it.
         assert_eq!(viv.code, 1, "{}", dump("vivacity", &viv));
         assert!(
             viv.stderr.contains("hostile archive refused"),
             "{}",
             dump("vivacity", &viv)
         );
-        assert_eq!(case.witness_mode(), 0o600);
+        assert_eq!(witness, 0o600);
+
+        assert_eq!(phar.code, 0, "{}", dump("phar", &phar));
+        let target = "../../../../../witness";
+        let skipped = phar
+            .stderr
+            .contains(": the bin resolves to a path outside of the package directory");
+        let fell_back = phar
+            .stderr
+            .contains("Unzip with unzip command failed, falling back to ZipArchive class");
+        let entry = phar_tree.get("project/vendor/acme/tool/bin/out");
+        let proxy = phar_tree.get("project/vendor/bin/out");
+        let seen = format!("{entry:?}, proxy {proxy:?}\n{}", dump("phar", &phar));
+        match (skipped, fell_back) {
+            (true, false) => {
+                assert_eq!(entry, Some(&Node::Link(PathBuf::from(target))), "{seen}");
+                assert_eq!(proxy, None, "{seen}");
+            }
+            (false, true) => {
+                assert_eq!(
+                    entry,
+                    Some(&Node::File(0o755, target.as_bytes().to_vec())),
+                    "{seen}"
+                );
+                assert!(matches!(proxy, Some(Node::File(0o755, _))), "{seen}");
+            }
+            _ => panic!("neither of the phar's two known ways: {seen}"),
+        }
     }
 
     /// `COMPOSER_BIN_COMPAT=full`, a `.bat` already there for a second `bin`: the phar says
