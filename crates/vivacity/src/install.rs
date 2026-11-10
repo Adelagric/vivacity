@@ -51,6 +51,23 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
     // `InstallCommand` and `Factory::create`.
     let run = proceed!(read_manifests(args)?);
     let run = proceed!(merge_plugin(run)?);
+    // A `bin` not read natively, in what this install reads, goes to Composer
+    // before the command prints or runs anything (an install after an update
+    // was decided on its solved lock).
+    if !args.after_update() {
+        if let Some(issue) = crate::fallback::bin_form_issue(
+            &run.project,
+            &run.manifest,
+            run.lock.wanted_packages(run.with_dev).map(|p| &p.raw),
+        ) {
+            let scope = vivacity_core::scope::ScopeReport {
+                issues: vec![issue],
+                skipped_plugins: vec![],
+                layout: None,
+            };
+            return fallback_or_fail(args, &scope);
+        }
+    }
     // `secure-http` on the lock's dists, before the command prints or runs
     // anything (an install after an update was decided on its solved lock).
     // A dry run downloads nothing.
@@ -162,6 +179,28 @@ pub(crate) fn run_install(args: &InstallArgs) -> anyhow::Result<i32> {
             early_dump
         )?)
     };
+    // `Installer::run`: `ensureBinariesPresence` over `$localRepo->getPackages()`, the
+    // local repository's order, dump or no dump. A package enters it when its placement
+    // ends: a `path` package in line, an archive once its extraction ends, so the first
+    // before the second.
+    let (order, _, fresh) = local_order(&tx);
+    let in_line: std::collections::HashSet<&str> = run
+        .lock
+        .wanted_packages(run.with_dev)
+        .filter(|p| p.dist_kind() == vivacity_core::lock::DistKind::Path)
+        .map(|p| p.name())
+        .collect();
+    let mut notices: Vec<&(String, String)> = installed.report.presence_notices.iter().collect();
+    notices.sort_by_key(|(package, _)| {
+        let name = package.as_str();
+        (
+            fresh.contains(&name) && !in_line.contains(name),
+            order.iter().position(|n| *n == name).unwrap_or(usize::MAX),
+        )
+    });
+    for (_, line) in notices {
+        vivacity_core::say!("{line}");
+    }
     proceed!(post_install(
         &run,
         &layout,
@@ -1439,11 +1478,29 @@ fn execute_operations(
             c3_uninstalled = true;
         }
         vivacity_core::say!("{line}");
+        // A `path` package is placed in line: `BinaryInstaller` writes under it.
+        if let Some(package) = line.split_whitespace().nth(2) {
+            for (_, m) in report
+                .messages_at_operation
+                .iter()
+                .filter(|(p, _)| p == package)
+            {
+                vivacity_core::say!("{m}");
+            }
+        }
     }
     if c3_leaves && !c3_uninstalled {
         emulate_c3_uninstall(&run.project, &run.manifest, !args.no_plugins)?;
     }
-    // `BinaryInstaller` notices belong to the operations, before the dump.
+    // `BinaryInstaller` notices belong to the operations, before the dump. A package
+    // none of whose lines were written above closes them too.
+    for (_, m) in report.messages_at_operation.iter().filter(|(p, _)| {
+        !operation_lines
+            .iter()
+            .any(|l| l.split_whitespace().nth(2) == Some(p.as_str()))
+    }) {
+        vivacity_core::say!("{m}");
+    }
     for m in &report.messages {
         vivacity_core::say!("{m}");
     }

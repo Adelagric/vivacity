@@ -446,6 +446,12 @@ fn is_docker() -> bool {
 /// with an existing file` — printed on an install or update
 /// (`warnOnOverwrite`), silent on the `ensureBinariesPresence` pass. The
 /// messages are returned for the caller to print.
+///
+/// A directory, or a path that resolves outside the package, gets neither a
+/// proxy nor a `chmod`, whatever the entry looks like: this is what protects a
+/// file outside the package, not the strict read of [`non_ordinary_bin`], which
+/// decides who runs the command. A missing binary is silent, where Composer
+/// writes `file not found in package`: consigned in HANDOVER.
 pub fn install_binaries(
     vendor_dir: &Path,
     bin_dir: &Path,
@@ -455,7 +461,6 @@ pub fn install_binaries(
     compat: BinCompat,
     warn_on_overwrite: bool,
 ) -> Result<Vec<String>> {
-    std::fs::create_dir_all(bin_dir).map_err(Error::io(bin_dir))?;
     let mut skipped = Vec::new();
     for declared in bins {
         let bin = declared.trim_start_matches("./");
@@ -465,6 +470,11 @@ pub fn install_binaries(
         if !target.exists() {
             continue; // binary declared but missing from the dist: Composer skips it too
         }
+        if let Some(line) = skip_line(package, package_dir, declared, &target) {
+            skipped.push(line);
+            continue;
+        }
+        std::fs::create_dir_all(bin_dir).map_err(Error::io(bin_dir))?;
         if let Ok(meta) = std::fs::symlink_metadata(&link) {
             if !meta.file_type().is_symlink() {
                 if warn_on_overwrite {
@@ -493,6 +503,91 @@ pub fn install_binaries(
         }
     }
     Ok(skipped)
+}
+
+/// What `installBinaries` writes for an existing `target` it leaves alone.
+fn skip_line(package: &str, package_dir: &Path, declared: &str, target: &Path) -> Option<String> {
+    let why = if target.is_dir() {
+        "found a directory at that path"
+    } else if !is_bin_path_inside_package(package_dir, target) {
+        "the bin resolves to a path outside of the package directory"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "    Skipped installation of bin {declared} for package {package}: {why}"
+    ))
+}
+
+/// What `ensureBinariesPresence` writes after the autoload dump, for every package
+/// of the local repository, placed by this run or not: the same check of the file,
+/// and the same line. A name conflict stays silent there (`warnOnOverwrite`).
+pub fn presence_notices(package: &str, package_dir: &Path, bins: &[&str]) -> Vec<String> {
+    bins.iter()
+        .filter_map(|declared| {
+            let target = package_dir.join(declared.trim_start_matches("./"));
+            target
+                .exists()
+                .then(|| skip_line(package, package_dir, declared, &target))
+                .flatten()
+        })
+        .collect()
+}
+
+/// `BinaryInstaller::isBinPathInsidePackage`: both paths resolved, links
+/// followed; what cannot be resolved is not inside.
+fn is_bin_path_inside_package(package_dir: &Path, target: &Path) -> bool {
+    match (
+        crate::pathutil::canonicalize(target),
+        crate::pathutil::canonicalize(package_dir),
+    ) {
+        (Ok(target), Ok(package)) => target != package && target.starts_with(package),
+        _ => false,
+    }
+}
+
+/// Why a package's `bin` value is not read natively, if it is not. Ordinary is
+/// what `install_binaries`, `remove_binaries` and the other readers of a list of
+/// strings take at its word: a list whose entries are non-empty relative paths,
+/// an optional leading `./`, then non-empty segments none of which is `.` or
+/// `..`, with no backslash and no NUL. Anything else — an absolute path, `.//x`,
+/// `a//b`, a string, an object, a number — Composer reads through `ltrim` and
+/// string concatenation, and the command is Composer's, before any write. A
+/// `null` is no `bin` (`isset`).
+pub fn non_ordinary_bin(package: &str, bin: Option<&serde_json::Value>) -> Option<String> {
+    let reason = |value: &serde_json::Value| {
+        Some(format!(
+            "package {package} declares a bin vivacity does not read as Composer does: {value}"
+        ))
+    };
+    match bin? {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(entries) => entries
+            .iter()
+            .find(|e| !e.as_str().is_some_and(is_ordinary_bin))
+            .and_then(reason),
+        other => reason(other),
+    }
+}
+
+fn is_ordinary_bin(bin: &str) -> bool {
+    if bin.contains(['\\', '\0']) || has_root(bin) {
+        return false;
+    }
+    bin.strip_prefix("./")
+        .unwrap_or(bin)
+        .split('/')
+        .all(|segment| !matches!(segment, "" | "." | ".."))
+}
+
+/// An absolute path, or under Windows a drive (`C:/x`, `C:x`), which `Path::join`
+/// would put in place of the package's directory.
+fn has_root(bin: &str) -> bool {
+    use std::path::Component;
+    matches!(
+        Path::new(bin).components().next(),
+        Some(Component::RootDir | Component::Prefix(_))
+    )
 }
 
 /// `BinaryInstaller::removeBinaries`: the package's links (and their
@@ -596,4 +691,244 @@ fn set_executable(link: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = link;
     Ok(())
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ordinary_forms_are_lists_of_plain_relative_paths() {
+        for ok in [
+            json!(["bin/x"]),
+            json!(["./bin/x"]),
+            json!(["x", "bin/.y", "bin/..z", "bin/y..", "..."]),
+            json!([]),
+            json!(null),
+        ] {
+            assert_eq!(non_ordinary_bin("a/b", Some(&ok)), None, "{ok}");
+        }
+        assert_eq!(non_ordinary_bin("a/b", None), None);
+    }
+
+    #[test]
+    fn every_other_form_is_named() {
+        for bad in [
+            json!(["/abs"]),
+            json!([".//x"]),
+            json!(["././x"]),
+            json!(["a//b"]),
+            json!(["a/"]),
+            json!(["."]),
+            json!(["./"]),
+            json!(["a/."]),
+            json!(["a/./b"]),
+            json!([".."]),
+            json!(["a/.."]),
+            json!(["../a"]),
+            json!(["a\\b"]),
+            json!(["a\u{0}b"]),
+            json!([""]),
+            json!(["ok", ""]),
+            json!("bin/x"),
+            json!({"k": "bin/x"}),
+            json!({}),
+            json!([1]),
+            json!([null]),
+            json!(["ok", ["x"]]),
+            json!(false),
+            json!(1),
+        ] {
+            let reason = non_ordinary_bin("a/b", Some(&bad));
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains("package a/b")),
+                "{bad}: {reason:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_is_a_root_under_windows() {
+        for bad in [json!(["C:/x"]), json!(["C:x"])] {
+            assert!(non_ordinary_bin("a/b", Some(&bad)).is_some(), "{bad}");
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Place {
+        _tmp: tempfile::TempDir,
+        vendor: std::path::PathBuf,
+        package: std::path::PathBuf,
+        witness: std::path::PathBuf,
+    }
+
+    /// A package with `bin/x`, a directory and a file outside it, mode 600.
+    fn place() -> Place {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let base = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let vendor = base.join("vendor");
+        let package = vendor.join("acme/tool");
+        std::fs::create_dir_all(package.join("bin")).expect("package");
+        std::fs::create_dir_all(package.join("dir")).expect("dir");
+        std::fs::write(package.join("bin/x"), "#!/bin/sh\n").expect("bin/x");
+        std::fs::set_permissions(
+            package.join("bin/x"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        let witness = base.join("witness");
+        std::fs::write(&witness, "#!/bin/sh\n").expect("witness");
+        std::fs::set_permissions(&witness, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        Place {
+            _tmp: tmp,
+            vendor,
+            package,
+            witness,
+        }
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).expect("meta").permissions().mode() & 0o777
+    }
+
+    fn install(place: &Place, bin: &str) -> Vec<String> {
+        install_binaries(
+            &place.vendor,
+            &place.vendor.join("bin"),
+            "acme/tool",
+            &place.package,
+            &[bin],
+            BinCompat::Proxy,
+            true,
+        )
+        .expect("install_binaries")
+    }
+
+    const OUTSIDE: &str = ": the bin resolves to a path outside of the package directory";
+
+    /// Whatever reaches this function, a path outside the package gets neither a
+    /// proxy nor a `chmod`: the strict read before it is not what protects the file.
+    #[test]
+    fn an_absolute_path_is_left_alone() {
+        let place = place();
+        let bin = place.witness.to_string_lossy().into_owned();
+        let skipped = install(&place, &bin);
+        assert_eq!(mode(&place.witness), 0o600);
+        assert!(!place.vendor.join("bin/witness").exists());
+        assert_eq!(
+            skipped,
+            [format!(
+                "    Skipped installation of bin {bin} for package acme/tool{OUTSIDE}"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dot_slash_in_front_of_an_absolute_path_is_left_alone() {
+        let place = place();
+        let bin = format!(".//{}", place.witness.to_string_lossy());
+        install(&place, &bin);
+        assert_eq!(mode(&place.witness), 0o600);
+        assert!(!place.vendor.join("bin/witness").exists());
+    }
+
+    #[test]
+    fn parent_segments_leading_out_are_left_alone() {
+        let place = place();
+        let skipped = install(&place, "../../../witness");
+        assert_eq!(mode(&place.witness), 0o600);
+        assert!(!place.vendor.join("bin/witness").exists());
+        assert!(skipped[0].ends_with(OUTSIDE), "{skipped:?}");
+    }
+
+    #[test]
+    fn a_link_leading_out_is_left_alone() {
+        let place = place();
+        std::os::unix::fs::symlink(&place.witness, place.package.join("bin/out")).expect("link");
+        let skipped = install(&place, "bin/out");
+        assert_eq!(mode(&place.witness), 0o600);
+        assert!(!place.vendor.join("bin/out").exists());
+        assert_eq!(
+            skipped,
+            [format!(
+                "    Skipped installation of bin bin/out for package acme/tool{OUTSIDE}"
+            )]
+        );
+    }
+
+    /// `isBinPathInsidePackage` takes the link's target: inside, it is an ordinary bin.
+    #[test]
+    fn a_link_staying_inside_is_a_bin() {
+        let place = place();
+        std::os::unix::fs::symlink("x", place.package.join("bin/in")).expect("link");
+        assert!(install(&place, "bin/in").is_empty());
+        assert_eq!(mode(&place.package.join("bin/x")), 0o755);
+        assert!(place.vendor.join("bin/in").is_file());
+    }
+
+    /// The package itself reached through a link, as a `path` package is.
+    #[test]
+    fn a_package_reached_through_a_link_keeps_its_bins() {
+        let place = place();
+        let linked = place.vendor.join("linked");
+        std::os::unix::fs::symlink(&place.package, &linked).expect("link");
+        let skipped = install_binaries(
+            &place.vendor,
+            &place.vendor.join("bin"),
+            "acme/tool",
+            &linked,
+            &["bin/x"],
+            BinCompat::Proxy,
+            true,
+        )
+        .expect("install_binaries");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(mode(&place.package.join("bin/x")), 0o755);
+    }
+
+    #[test]
+    fn a_directory_is_skipped_and_the_run_goes_on() {
+        let place = place();
+        assert_eq!(
+            install(&place, "dir"),
+            ["    Skipped installation of bin dir for package acme/tool: found a directory at that path"]
+        );
+        assert!(!place.vendor.join("bin").exists(), "nothing to install");
+    }
+
+    #[test]
+    fn the_presence_pass_says_what_the_operation_said() {
+        let place = place();
+        std::os::unix::fs::symlink(&place.witness, place.package.join("bin/out")).expect("link");
+        let bins = ["dir", "bin/out", "bin/x", "bin/nope"];
+        assert_eq!(
+            presence_notices("acme/tool", &place.package, &bins),
+            [
+                "    Skipped installation of bin dir for package acme/tool: found a directory at that path".to_owned(),
+                format!("    Skipped installation of bin bin/out for package acme/tool{OUTSIDE}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_bin_stays_silent() {
+        let place = place();
+        assert!(install(&place, "bin/nope").is_empty());
+        assert!(!place.vendor.join("bin").exists(), "nothing to install");
+    }
+
+    #[test]
+    fn an_ordinary_bin_is_installed() {
+        let place = place();
+        assert!(install(&place, "./bin/x").is_empty());
+        assert_eq!(mode(&place.package.join("bin/x")), 0o755);
+        assert!(place.vendor.join("bin/x").is_file());
+    }
 }

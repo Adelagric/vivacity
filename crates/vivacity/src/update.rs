@@ -790,6 +790,7 @@ pub(crate) fn resolve_and_lock(
             }
         }
     }
+    session.strict_bin = true;
     session.prefer_stable = prefer_stable;
     session.prefer_lowest = prefer_lowest;
     session.installer_dev_mode = installer_dev_mode;

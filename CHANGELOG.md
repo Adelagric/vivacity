@@ -6,6 +6,57 @@ byte-identical-output promise are the public API.
 
 ## [Unreleased]
 
+## [0.26.3] — 2026-11-10
+
+### Security
+- **A package's `bin` no longer reaches a file outside the package.** Up to
+  0.26.2, an absolute entry in a lock, `.//<path>` in a lock or in a
+  repository's metadata, or a link of a `path` or git package leading out, named
+  that file: vivacity wrote a proxy to it and, since 0.10.0, moved its mode to
+  `0777 & ~umask` (a file of mode 600 went to 755), with the rights of the user
+  running the command. A transitive package can do it. Composer stays in the
+  package. `install_binaries` now resolves links as
+  `BinaryInstaller::isBinPathInsidePackage` does: what lands outside gets neither
+  a proxy nor a `chmod`, and Composer's line says so.
+- **A `bin` entry that is not ordinary goes to Composer**: a
+  list whose entries are a relative path, an optional leading `./`, then
+  non-empty segments none of which is `.` or `..`, with no backslash and no NUL,
+  is read natively; anything else, a `bin` that is not a list included, in the
+  lock, in a selected package's metadata or in `installed.json`, is Composer's
+  run, or exit 3 under `--no-fallback`.
+  A null `bin` counts as absent. On `update` and `require`, the check on a
+  selected package's metadata comes after resolution: cache files may be written
+  by then, and `require` has edited `composer.json`, which it restores.
+
+### Fixed
+- **A directory named by `bin` no longer ends the run on an I/O error**: it is
+  skipped with Composer's line. `vendor/bin` is created only for a binary that is
+  installed, as Composer does.
+- **The skip lines of a directory or of a path outside the package fall where
+  Composer writes them**: under the operation of a `path` package, and again after
+  the autoload dump for every package of the local repository, a no-op install
+  included (`ensureBinariesPresence`), a `path` package placed by the run coming
+  before the archives.
+- **A proxy shared with a package going away is no longer lost.** With two packages
+  declaring one proxy name, removing one left `vendor/bin` without the proxy of the
+  other, up to 0.26.2. A package's proxies are now removed before anything is
+  written, as Composer's operations do, and a package arriving in the same run takes
+  the name, where it used to get a name-conflict line.
+- **A package placed from a store entry extracted again gets its own classes.**
+  Up to 0.26.0 the class map record of an entry did not depend on the entry's
+  identity; in 0.26.1 and 0.26.2 it did, but an entry removed and extracted again
+  within one timestamp tick can keep its inode and its ctime, so its record, and
+  a placed file's classes are taken from the record without reading the file.
+  A record is now kept only for an entry older than the racy window; the next
+  package placed from a younger one scans it once more. The record format moves
+  to `v5`. It is part of the name of the records in `classmap/` and in
+  `classmap-files/`, so those earlier versions wrote stay on disk, unread, and each
+  project's next dump scans its files once.
+
+### Known differences
+- **On `update`, the same as in 0.26.2, against Composer 2.10.3:** when packages pass a proxy name to one another in one run (one gains `bin/x` as another loses it, or two exchange names), `vendor/bin` lacks a proxy Composer has, until the next `install` writes it, with a name-conflict line Composer writes only for `path` packages; and in two removal cases `vendor/bin` is absent where Composer leaves it empty, which `install` does not change.
+- **A symbolic link in a zip dist, under macOS, the same since 0.10.0:** vivacity gives the link mode 777, where Composer's `unzip` keeps the mode the archive stores (644 in the measured archives, where the two then differ; an archive storing 777 gives the same on both sides). The link's target and the files are the same.
+
 ## [0.26.2] — 2026-11-03
 
 ### Security
